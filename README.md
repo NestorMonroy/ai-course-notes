@@ -145,7 +145,7 @@ xelatex -interaction=nonstopmode -halt-on-error lecture01-notes.tex
 | [**Agentic RL**](agentic-rl/) | RL for LLM (PPO→GRPO→DPO, veRL) | 20 | Wudaokou Nash (五道口纳什) |
 | [**Self-Evolving Agents 2026**](self-evolving-agents-2026/) | Modelos causales del mundo, Agentic RL, inteligencia basada en la experiencia, externalización de capacidades y teoría de Agent | 1 volumen / 9 unidades | NICE Academic (NICE 学术) |
 
-### 🎤 Conferencias y entrevistas (29 notas)
+### 🎤 Conferencias y entrevistas (67 notas)
 
 | Fuente / canal | Tema | Cantidad | Directorio |
 |-------------|------|------|------|
@@ -154,6 +154,7 @@ xelatex -interaction=nonstopmode -halt-on-error lecture01-notes.tex
 | [**Comunidad Qingke (青稞社区)**](talks/qingke/) | Mesas redondas sobre LLM, Agentic, RL e Infra | 4 | talks |
 | [**WhynotTV**](interviews/whynot-tv/) | Chen Tianqi (陈天奇), Weng Jiayi (翁嘉颐), Hu Yuanming (胡渊鸣), Yang Shuo (杨硕) | 4 | interviews |
 | [**Entrevistas de negocios de Zhang Xiaojun (张小珺商业访谈录)**](interviews/zhang-xiaojun/) | Ji Yichao (季逸超), Xie Saining (谢赛宁), Yang Zhilin (杨植麟) | 3 | interviews |
+| [**Entrevistas de negocios de Zhang Xiaojun (张小珺商业访谈录), en YouTube**](youtube/) | Selección de los episodios 95 a 140 y 3 episodios especiales | 38 | youtube |
 | [**Ungrounded (不着边际)**](interviews/ungrounded/) | GUI Agent, SGLang | 2 | interviews |
 | [**Dwarkesh Patel Podcast**](talks/dwarkesh-patel/) | Ilya Sutskever: From Scaling to Research | 1 | talks |
 | [**No Priors Podcast**](talks/no-priors/) | Andrej Karpathy: Code Agents & AutoResearch | 1 | talks |
@@ -240,6 +241,7 @@ ai-course-notes/
 ├── interviews/               # Entrevistas a fondo, agrupadas por canal o fuente
 ├── talks/                    # Conferencias y cursos abiertos, agrupados por canal o fuente
 ├── articles/                 # Notas de artículos técnicos
+├── youtube/                  # Entrevistas de Zhang Xiaojun (张小珺) en YouTube
 ├── tools/web/                # Generador del sitio de lectura en línea
 └── .github/workflows/        # Despliegue automático en GitHub Pages
 ```

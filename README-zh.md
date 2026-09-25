@@ -143,7 +143,7 @@ xelatex -interaction=nonstopmode -halt-on-error lecture01-notes.tex
 | [**Agentic RL**](agentic-rl/) | RL for LLM (PPO→GRPO→DPO, veRL) | 20 | 五道口纳什 |
 | [**Self-Evolving Agents 2026**](self-evolving-agents-2026/) | 因果世界模型、Agentic RL、经验智能、能力外部化与 Agent 理论 | 1 册 / 9 单元 | NICE 学术 |
 
-### 🎤 演讲与访谈 (29 份)
+### 🎤 演讲与访谈 (67 份)
 
 | 来源 / 频道 | 主题 | 数量 | 目录 |
 |-------------|------|------|------|
@@ -152,6 +152,7 @@ xelatex -interaction=nonstopmode -halt-on-error lecture01-notes.tex
 | [**青稞社区**](talks/qingke/) | LLM、Agentic、RL、Infra 圆桌 | 4 | talks |
 | [**WhynotTV**](interviews/whynot-tv/) | 陈天奇、翁嘉颐、胡渊鸣、杨硕 | 4 | interviews |
 | [**张小珺商业访谈录**](interviews/zhang-xiaojun/) | 季逸超、谢赛宁、杨植麟 | 3 | interviews |
+| [**张小珺商业访谈录（YouTube）**](youtube/) | 第 95–140 期选集 + 3 期特别节目 | 38 | youtube |
 | [**Ungrounded 不着边际**](interviews/ungrounded/) | GUI Agent、SGLang | 2 | interviews |
 | [**Dwarkesh Patel Podcast**](talks/dwarkesh-patel/) | Ilya Sutskever: From Scaling to Research | 1 | talks |
 | [**No Priors Podcast**](talks/no-priors/) | Andrej Karpathy: Code Agents & AutoResearch | 1 | talks |
@@ -238,6 +239,7 @@ ai-course-notes/
 ├── interviews/               # 深度访谈，按频道/来源分组
 ├── talks/                    # 演讲与公开课，按频道/来源分组
 ├── articles/                 # 技术文章笔记
+├── youtube/                  # 张小珺商业访谈录 YouTube 访谈笔记
 ├── tools/web/                # 在线阅读站生成器
 └── .github/workflows/        # GitHub Pages 自动部署
 ```
