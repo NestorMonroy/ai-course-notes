@@ -1,0 +1,388 @@
+\documentclass[a4paper]{article}
+\input{../notes-shared.es-mx.tex}
+
+\newcommand{\notetitle}{Stanford CS329A: Agentes de IA con automejora\\Part 7: Automejora basada en búsqueda y el Deep Research Agent}
+\newcommand{\lecturers}{Aakanksha Chowdhery}
+\newcommand{\noteauthors}{AI Course Notes \& Codex}
+\newcommand{\notedate}{10 de agosto de 2026}
+\newcommand{\lecturedate}{2025-10-17}
+\newcommand{\videoduration}{1:12:26}
+\newcommand{\videourl}{https://www.youtube.com/watch?v=Uni9dqyuuDM}
+
+\begin{document}
+\makelecturetitle
+
+\section{Perspectiva unificada: la respuesta ya está en el espacio de búsqueda, la dificultad es encontrarla}
+
+Esta sesión aborda dos formas de automejora basada en búsqueda que parecen distintas pero comparten la misma estructura: por un lado, AlphaCode/AlphaCode 2 realiza muestreo, filtrado, clustering y ordenamiento a gran escala en el \textbf{espacio de programas candidatos}; por otro, Search-o1 identifica lagunas de conocimiento durante el \textbf{proceso de razonamiento}, inicia recuperaciones, comprime documentos y continúa razonando.
+
+Ambos amplían una sola llamada al modelo hasta convertirla en un sistema:
+
+$$
+\text{Generator}\rightarrow \text{Candidate Set}\rightarrow
+\text{Selector/Verifier}\rightarrow \text{Answer}.
+$$
+
+\begin{itemize}
+    \item Generator: produce, a partir de la distribución del modelo, múltiples programas candidatos, ramas de razonamiento o consultas;
+    \item Candidate Set: conserva trayectorias factibles y diversas, en lugar de fijarse solo en la salida de mayor probabilidad;
+    \item Selector/Verifier: usa pruebas, clustering, modelos de puntuación o evidencia recuperada para comprimir el espacio de búsqueda;
+    \item Answer: entrega un pequeño número de resultados que satisfacen el presupuesto de envío, la corrección y las restricciones de costo.
+\end{itemize}
+
+\begin{importantbox}{Lo esencial de la automejora basada en búsqueda no es «muestrear más»}
+Lo que realmente determina el beneficio es la cobertura de los candidatos, la diversidad entre ellos y si el selector logra separar al candidato correcto de una gran cantidad de errores aproximados. Sin un selector confiable, muestrear más solo produce basura más rápido.
+\end{importantbox}
+
+\begin{knowledgebox}{La búsqueda en paralelo y la corrección en serie se complementan}
+El muestreo en paralelo sirve para explorar distintos algoritmos o rutas de evidencia; la corrección en serie sirve para ubicar errores, complementar información y retroceder a lo largo de una sola ruta. Los agentes complejos suelen necesitar primero una búsqueda amplia y luego profundizar en un pequeño número de candidatos.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Tanto AlphaCode como Search-o1 tratan al LLM como una proposal distribution que se puede buscar. La capacidad del sistema depende del ciclo cerrado de «generar–filtrar–verificar–retroalimentar», y no solo de la next-token loss del modelo base.
+
+\section{AlphaCode: búsqueda a gran escala en el espacio de programas}
+
+\subsection{Por qué la programación competitiva es más difícil que el completado de código}
+
+HumanEval suele dar la firma de la función, una descripción local y una implementación corta; los problemas de Codeforces, en cambio, exigen entender un enunciado extenso, elegir un algoritmo, satisfacer restricciones de complejidad y escribir un programa completo. El error puede surgir en cualquier eslabón: comprensión del enunciado, algoritmo, casos límite, complejidad, sintaxis o el protocolo de entrada y salida.
+
+\videofigure{figures/alphacode-pipeline.jpg}{AlphaCode encadena en un solo flujo el preentrenamiento de código, el fine-tuning con problemas de competencia, el muestreo a gran escala, el filtrado y la agrupación, y el envío final.}{00:03:48--00:05:42}
+
+Los datos de entrenamiento provienen principalmente de código de GitHub y de CodeContests. El AlphaCode original todavía requiere construir su propio modelo: el preentrenamiento aprende la distribución general del código, y el fine-tuning con datos de competencia adapta el modelo a la estructura «enunciado--solución»; solo después entra en la búsqueda en tiempo de prueba.
+
+\begin{warningbox}{El loss del conjunto de validación no es un indicador confiable del solve rate}
+El loss a nivel de token mide qué tan cerca está la predicción local de la distribución de entrenamiento, pero los problemas de competencia se califican según si el programa completo pasa las pruebas ocultas. Un error de límite en un solo token puede anular todo el problema; por eso una mejora pequeña en el loss de entrenamiento no necesariamente se traduce en una mejora en la tasa de problemas resueltos.
+\end{warningbox}
+
+\subsection{Muestrear un millón de programas por problema}
+
+\videofigure{figures/large-scale-sampling.jpg}{Para cada problema, AlphaCode genera cerca de un millón de candidatos en Python/C++, y usa temperatura alta y perturbaciones del prompt para mantener la diversidad algorítmica.}{00:06:08--00:07:28}
+
+Sea $p_\theta(y\mid x)$ la distribución condicional del modelo base sobre el programa $y$. Si la probabilidad de que un solo muestreo acierte con el programa correcto es $p$, la probabilidad de acertar al menos una vez en $n$ muestreos independientes es:
+
+$$
+P(\text{hit})=1-(1-p)^n.
+$$
+
+\begin{itemize}
+    \item $x$: el enunciado, los ejemplos y las etiquetas opcionales;
+    \item $y$: el programa candidato completo;
+    \item $p$: la probabilidad de que un solo muestreo caiga en el conjunto de soluciones correctas;
+    \item $n$: el presupuesto de muestreo.
+\end{itemize}
+
+Cuando $p$ es extremadamente pequeña, el muestreo a gran escala puede aumentar significativamente la cobertura; pero la ganancia termina limitada por el selector, porque la plataforma solo permite enviar muy pocos programas.
+
+\begin{importantbox}{El objetivo de la temperatura alta es cubrir familias de algoritmos, no generar diferencias sintácticas al azar}
+La diversidad ideal proviene de enfoques de solución distintos: programación dinámica, algoritmos voraces, algoritmos de grafos, estructuras de datos, entre otros. Si los candidatos solo difieren en los nombres de variables o son reescrituras de la misma plantilla errónea, un número mayor de muestras no aumenta la cobertura efectiva.
+\end{importantbox}
+
+\subsection{Primero pasar los ejemplos, luego agrupar por semántica}
+
+\videofigure{figures/filter-cluster.jpg}{El sistema primero filtra los programas que no pasan los ejemplos públicos, y luego agrupa en un mismo clúster los programas semánticamente similares según su comportamiento sobre entradas de prueba generadas.}{00:07:28--00:09:04}
+
+AlphaCode entrena además un test-input generator. Para el mismo problema, genera un conjunto de entradas $T=\{t_j\}$ y mapea el programa $y$ a una firma de comportamiento:
+
+$$
+\phi_T(y)=\bigl(y(t_1),y(t_2),\ldots,y(t_m)\bigr).
+$$
+
+Si las firmas de comportamiento de dos programas son parecidas, es posible que implementen el mismo algoritmo o que compartan el mismo error; tras la agrupación, conservar solo unos cuantos representantes de cada clúster permite cubrir más semánticas distintas dentro de un presupuesto de envíos fijo.
+
+\begin{knowledgebox}{La agrupación es un asignador de presupuesto}
+El número de envíos en la plataforma es un recurso escaso. La agrupación no busca que los programas se vean ordenados, sino evitar que los diez envíos se desperdicien en el mismo patrón de fallo.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La clave de AlphaCode es comprimir un espacio de programas enorme en un número reducido de candidatos diversos: el modelo se encarga de la propuesta, los ejemplos públicos hacen un filtrado barato, las pruebas generadas realizan la agrupación por comportamiento, y las pruebas ocultas completan la verificación final.
+\section{Cómo evaluar: pass@k, 10@k y el ranking real}
+
+\subsection{La cobertura de la búsqueda y la selección del envío se deben ver por separado}
+
+\videofigure{figures/pass-k-metrics.jpg}{pass@$k$ mide la cobertura de candidatos, 10@$k$ mide la tasa de éxito real tras elegir diez envíos a partir de $k$ muestras.}{00:14:18--00:16:26}
+
+Si entre $n$ muestras hay $c$ programas correctos, al elegir $k$ sin reemplazo la estimación habitual es:
+
+$$
+\operatorname{pass@}k=1-\frac{\binom{n-c}{k}}{\binom{n}{k}}.
+$$
+
+\begin{itemize}
+    \item $n$: número total de candidatos;
+    \item $c$: de ellos, los candidatos que pasan las pruebas ocultas;
+    \item $k$: el presupuesto de candidatos que se permite observar o extraer;
+    \item pass@$k$: la probabilidad de que exista al menos un candidato correcto.
+\end{itemize}
+
+10@$k$ se acerca más a una competencia real: primero se generan $k$ candidatos y luego, mediante filtrado y agrupamiento (clustering), se eligen hasta diez envíos. Evalúa a la vez al generator y al selector, y no solo si «la respuesta correcta llegó a aparecer».
+
+\videofigure{figures/codecontests-results.jpg}{Los resultados de CodeContests muestran que tanto el tamaño del modelo como el agrupamiento (clustering) mejoran el solve rate con un presupuesto de envíos limitado.}{00:16:26--00:18:08}
+
+\begin{warningbox}{Un pass@$k$ alto no significa que el sistema sea desplegable}
+Si el candidato correcto está escondido entre cientos de miles de programas pero el selector no puede identificarlo, no tiene ningún valor para el usuario real. Las métricas de despliegue deben incluir explícitamente el presupuesto de envíos, el costo de ejecución, la latencia y la tasa de selección errónea.
+\end{warningbox}
+
+\subsection{Evaluación real en Codeforces}
+
+\videofigure{figures/codeforces-evaluation.jpg}{AlphaCode generó, filtró y envió programas en vivo en diez grandes competencias de Codeforces, con un ranking promedio cercano a la mediana de los participantes.}{00:09:04--00:13:58}
+
+El curso enfatiza que este tipo de evaluación es más confiable que un benchmark estático: los problemas aparecieron después de que el modelo terminó su entrenamiento, el sistema opera con las reglas reales de envío y se compara contra miles de participantes humanos. AlphaCode alcanzó en su momento un ranking aproximado del 54\% superior, lo que demostró que la generación de programas de extremo a extremo ya no es solo una tarea de juguete.
+
+\videofigure{figures/alphacode-tradeoffs.jpg}{Las fortalezas de AlphaCode son la resolución completa de problemas y la verificación reproducible; sus debilidades son el alto costo computacional, la dependencia de pruebas ocultas y el cuello de botella de la selección.}{00:22:42--00:24:34}
+
+\subsection{Resumen de la sección}
+
+Al evaluar sistemas de búsqueda hay que separar tres cosas: si el modelo puede generar un candidato correcto, si el selector puede encontrarlo con un presupuesto reducido y si el programa final puede pasar en una plataforma real con una eficiencia aceptable.
+
+\section{AlphaCode 2: un modelo base más fuerte más un selector aprendido}
+
+\subsection{Del modelo de código construido internamente a Gemini Pro}
+
+\videofigure{figures/alphacode2-overview.jpg}{AlphaCode 2 sustituye el modelo de código original por Gemini Pro, y añade más componentes aprendidos tanto en el muestreo como en el filtrado.}{00:25:14--00:26:48}
+
+AlphaCode 2 ya no preentrena un modelo de código desde cero, sino que aprovecha un foundation model general más fuerte, y luego hace fine-tuning de varias solver family específicas para programación competitiva. Esto delega el «conocimiento y la capacidad de codificar» al modelo base, y concentra la innovación del sistema en el muestreo diverso y el ordenamiento.
+
+\videofigure{figures/alphacode2-contributions.jpg}{Los principales cambios de AlphaCode 2 incluyen el fine-tuning de Gemini, varias solver family y un scoring model de corrección previo al envío.}{00:26:48--00:27:42}
+
+\begin{importantbox}{El modelo base y el buscador tienen una relación multiplicativa}
+Un modelo más fuerte eleva la tasa de acierto por muestra $p$; una mejor búsqueda y selección elevan el aprovechamiento del presupuesto. Ambos factores determinan juntos la solve rate final, así que no se puede atribuir todo el avance a «un modelo más grande» o a «muestrear más».
+\end{importantbox}
+
+\subsection{El scoring model aprende «cuál candidato es más probable que sea correcto»}
+
+\videofigure{figures/scoring-model.jpg}{Un scoring model independiente estima la corrección a partir del problema y el candidato de programa, y se usa para ordenar antes del envío.}{00:27:42--00:29:18}
+
+Sea $y_i$ un candidato, y $s_\phi(x,y_i)$ la salida del scoring model. El sistema final no ordena por la probabilidad de generación del solver, sino que combina:
+
+$$
+\operatorname{rank}(y_i)=
+\lambda s_\phi(x,y_i)+(1-\lambda)d(y_i,\mathcal S),
+$$
+
+donde $d(y_i,\mathcal S)$ representa la diversidad semántica respecto al conjunto ya seleccionado. Los candidatos con puntuación alta son más probablemente correctos, y el término de diversidad evita que todos los envíos provengan del mismo cúmulo de errores.
+
+\begin{warningbox}{La probabilidad de generación no puede tomarse directamente como probabilidad de corrección}
+Lo que el modelo prefiere suele ser código común, fluido y con patrones típicos, no código que pase todas las pruebas de casos límite. Al final del curso se señala además que los modelos de lenguaje a menudo tienen exceso de confianza en respuestas incorrectas, y que la calibración de probabilidades sigue siendo en sí misma un problema abierto.
+\end{warningbox}
+
+\videofigure{figures/alphacode2-sampling.jpg}{AlphaCode 2 agrega muestras a gran escala de varias solver family, y tras probarlas, agruparlas y puntuarlas, conserva sólo unos cuantos envíos.}{00:29:18--00:30:42}
+
+\subsection{Lograr una solve rate más alta con menos muestras}
+
+\videofigure{figures/solve-rate-scaling.jpg}{La solve rate de AlphaCode 2 crece con el presupuesto de muestreo, y alcanza resultados comparables o mejores que los del sistema anterior con muchas menos muestras.}{00:30:42--00:32:10}
+
+Una conclusión importante desde el punto de vista de la ingeniería de AlphaCode 2 es que, al mejorar la proposal quality y la selector quality, no hace falta llevar siempre el número de muestras hasta un millón. Para los problemas sencillos, un presupuesto menor ya alcanza para cubrir la solución correcta; para los problemas difíciles, el muestreo adicional resulta más valioso.
+
+\videofigure{figures/alphacode2-percentile.jpg}{En la evaluación simulada de competencia, AlphaCode 2 alcanza alrededor del percentil 85, muy por encima del AlphaCode original.}{00:37:18--00:39:02}
+
+\videofigure{figures/alphacode2-tradeoffs.jpg}{AlphaCode 2 mejora la eficiencia de muestreo y la calidad de los candidatos, pero su costo de ejecución es alto y el método sigue dependiendo en gran medida de la verificación por ejecución del código.}{00:39:02--00:40:02}
+
+\begin{knowledgebox}{El adaptive compute es el siguiente paso natural}
+Primero, un modelo ligero estima la dificultad del problema y la confianza del candidato actual, y luego decide dinámicamente el número de muestras, la temperatura, la solver family y si se entra a una corrección en serie; esto puede bajar el costo promedio de «un millón de muestras fijas por problema» a una asignación según la necesidad.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+AlphaCode 2, mediante un modelo base más fuerte, varias solver family y un scorer aprendido, mejora la proposal y la selection, lo que muestra que el valor del cómputo en tiempo de prueba no proviene sólo de la escala, sino también de la adaptación a la tarea y de un ordenamiento más preciso de los candidatos.
+\section{De muestreo paralelo hacia razonamiento con retroceso}
+
+La discusión en clase propone dos líneas de mejora: menos muestreo para los problemas sencillos y más muestreo para los difíciles; y también incorporar directamente al entrenamiento y la búsqueda el reasoning de «primero pensar el algoritmo y después escribir el código».
+
+Para tareas complejas, se puede reescribir la generación de un programa completo en una única pasada como una búsqueda jerárquica:
+
+\begin{enumerate}
+    \item generar varios borradores de algoritmo con su análisis de complejidad;
+    \item generar invariantes clave y pruebas de frontera para cada borrador;
+    \item generar código completo solo para los borradores de mayor potencial;
+    \item cuando falla la ejecución, ubicar la etapa correspondiente y permitir el retroceso en lugar de reescribir todo el bloque.
+\end{enumerate}
+
+\begin{importantbox}{La búsqueda en árbol necesita estados intermedios recuperables}
+Si cada paso solo produce un texto largo e inexplicable, el sistema difícilmente puede determinar si debe continuar, corregir o retroceder. Los planes estructurados, las hipótesis explícitas, los resultados de las pruebas y el estado de las herramientas son la interfaz básica para la búsqueda en trayectorias largas.
+\end{importantbox}
+
+\begin{warningbox}{Descomponer no resuelve automáticamente la propagación de errores}
+Un algoritmo erróneo en el primer paso puede hacer que todos los pasos siguientes sean «localmente correctos, globalmente erróneos». Cada subobjetivo necesita verificación, y el sistema también debe permitir volver a una rama superior para elegir de nuevo.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El muestreo paralelo a gran escala es bueno para la cobertura, mientras que el reasoning jerárquico con retroceso es bueno para aprovechar la retroalimentación. La próxima generación de coding agents combinará ambos: primero explorar familias de algoritmos y después ejecutar, verificar y corregir a lo largo de unas pocas rutas.
+\section{Search-o1: recuperación autónoma en pleno proceso de razonamiento}
+
+\subsection{Por qué los razonamientos largos son más propensos a tener vacíos de conocimiento}
+
+\videofigure{figures/search-o1-intro.jpg}{Search-o1 agrega capacidad de recuperación autónoma a un large reasoning model, de modo que pueda completar conocimiento según lo necesite durante el razonamiento.}{00:46:56--00:48:02}
+
+\videofigure{figures/reasoning-knowledge-gaps.jpg}{Cuanto más larga es la cadena de razonamiento, más oportunidades hay de encontrar entidades desconocidas, fórmulas, hechos experimentales o conocimiento interdisciplinario, y los vacíos tempranos siguen propagándose.}{00:48:02--00:49:28}
+
+Un large reasoning model puede tener una capacidad deductiva sólida y aun así carecer del hecho necesario para completar cierto paso. Si el modelo oculta el vacío con expresiones ambiguas como «perhaps», «might» o «likely», el razonamiento posterior seguirá desarrollándose sobre una premisa errónea.
+
+\begin{importantbox}{Un fallo de reasoning no siempre se debe a una capacidad de reasoning insuficiente}
+Algunos fallos provienen de la falta de conocimiento; otros, de la incapacidad de razonar. El valor de Search-o1 está en distinguir ambos casos: ante un vacío de conocimiento, primero recupera información y, una vez obtenida la evidencia, evalúa si el modelo aún es incapaz de completar la deducción.
+\end{importantbox}
+
+\subsection{Por qué un RAG de una sola pasada no es suficiente}
+
+\videofigure{figures/standard-rag-limitations.jpg}{Un RAG estándar normalmente solo recupera una vez al inicio, con la pregunta original, y no puede responder a las nuevas preguntas que surgen a mitad del razonamiento.}{00:49:28--00:50:24}
+
+La pregunta original suele no poder expresar directamente la necesidad real de recuperación. Por ejemplo, un problema de química de varios pasos requiere primero identificar un producto intermedio y después consultar cierta propiedad de reacción; la consulta del segundo paso solo se conoce una vez completado el razonamiento del primer paso.
+
+\begin{warningbox}{Más documentos pueden empeorar el reasoning}
+Meter todos los documentos del top-$k$ en el context introduce redundancia, contradicciones y una dilución de la atención por contexto largo. El sistema de recuperación debe resolver a la vez «cuándo buscar», «qué buscar» y «qué conservar».
+\end{warningbox}
+
+\subsection{Agentic RAG y Reason-in-Documents}
+
+\videofigure{figures/search-o1-framework.jpg}{Search-o1 añade búsqueda de múltiples rondas y razonamiento dentro de los documentos, sobre la base del vanilla reasoning y del RAG de una sola pasada.}{00:50:24--00:54:42}
+
+La ronda $t$ se puede representar como:
+
+$$
+u_t=g(r_{\le t}),\quad
+q_t=h(u_t),\quad
+D_t=\operatorname{Retrieve}(q_t),\quad
+z_t=\operatorname{Compress}(D_t,q_t),
+$$
+
+$$
+r_{t+1}\sim p_\theta(\cdot\mid x,r_{\le t},z_t).
+$$
+
+\begin{itemize}
+    \item $r_{\le t}$: el prefijo de reasoning actual;
+    \item $u_t$: el punto de incertidumbre o vacío de conocimiento que identifica el modelo;
+    \item $q_t$: la consulta de búsqueda construida para ese vacío;
+    \item $D_t$: los documentos originales recuperados;
+    \item $z_t$: la evidencia comprimida, que conserva solo lo relevante para el razonamiento actual.
+\end{itemize}
+
+\videofigure{figures/agentic-rag-mechanism.jpg}{El modelo usa marcadores de búsqueda especiales para pausar el reasoning, generar una query, invocar al recuperador e insertar de nuevo la evidencia en la cadena de razonamiento.}{00:54:42--00:56:22}
+
+\videofigure{figures/reason-in-documents.jpg}{El módulo Reason-in-Documents analiza de forma independiente los documentos recuperados y extrae la información relevante, evitando que un documento largo interrumpa directamente la reasoning chain principal.}{00:56:22--00:58:48}
+
+\begin{knowledgebox}{El compresor es, en esencia, un cuello de botella de información}
+Debe conservar los hechos suficientes para sostener el siguiente paso del razonamiento y a la vez descartar los detalles irrelevantes. Comprimir de más pierde evidencia; comprimir de menos vuelve a traer ruido al modelo principal.
+\end{knowledgebox}
+
+\subsection{Worked example: un problema de química de varios pasos}
+
+\videofigure{figures/search-o1-example.jpg}{En un problema de reacciones de varios pasos, Search-o1 primero localiza la estructura de un compuesto desconocido y después completa el conteo de átomos de carbono con la evidencia recuperada.}{00:58:48--01:00:34}
+
+El vanilla reasoning simplemente adivina ante un compuesto desconocido; un agentic RAG común sí recupera documentos, pero un texto largo puede interrumpir el razonamiento original. Search-o1 divide el proceso en «detectar el vacío, consultar la estructura, depurar los hechos, continuar el cálculo», por lo que la respuesta final resulta más estable.
+
+\subsection{Resumen de la sección}
+
+Search-o1 convierte la recuperación de un procesamiento previo al inicio en una acción interna del reasoning, y añade una capa de compresión de documentos. Resuelve el problema de que las necesidades de conocimiento en una cadena de razonamiento larga se manifiestan de manera gradual.
+\section{Resultados y límites de Search-o1, y Search-R1}
+
+\subsection{El desempeño sigue escalando conforme aumentan los documentos}
+
+\videofigure{figures/search-o1-scaling.jpg}{Search-o1 mejora de manera continua en múltiples dominios científicos conforme aumenta el número de documentos recuperados, mientras que el RAG estándar se satura rápidamente.}{01:00:34--01:01:28}
+
+\videofigure{figures/gpqa-results.jpg}{En el conjunto extendido de GPQA, Search-o1 supera al razonamiento directo y al RAG estándar, y reduce la brecha con expertos humanos.}{01:01:28--01:03:18}
+
+\videofigure{figures/retrieved-doc-scaling.jpg}{Al pasar de top-1 a top-10 documentos, Search-o1 puede aprovechar más evidencia; el RAG común se ve arrastrado más fácilmente por el ruido.}{01:03:18--01:04:38}
+
+\videofigure{figures/multihop-qa.jpg}{En preguntas y respuestas de varios saltos como HotpotQA, 2Wiki, MuSiQue y Bamboogle, la búsqueda iterativa supera a la recuperación de un solo salto.}{01:04:38--01:06:12}
+
+Estos resultados respaldan un principio de diseño de sistemas: la escala de la recuperación debe crecer junto con la capacidad de depurar evidencia. Aumentar solo el número de documentos sin mejorar el query refinement y la compression no produce ganancias estables.
+
+\subsection{Reducir la incertidumbre no equivale a que los hechos sean del todo confiables}
+
+\videofigure{figures/search-o1-insights.jpg}{El artículo analiza el origen de las ganancias de Search-o1 desde tres ángulos: palabras de incertidumbre, escala de documentos y consultas de múltiples rondas.}{01:06:12--01:06:46}
+
+\videofigure{figures/reasoning-quality.jpg}{Al incorporar la búsqueda, el lenguaje ambiguo en el razonamiento disminuye y aumentan los enunciados respaldados por evidencia.}{01:06:46--01:08:02}
+
+\begin{warningbox}{«Sonar más seguro» no es condición suficiente de corrección}
+El retriever puede devolver páginas web erróneas, el compresor puede malinterpretar la evidencia, y el modelo también puede vincular incorrectamente una cita con una conclusión. Sigue siendo necesaria la calidad de las fuentes, la claim-level citation y la verificación de la respuesta final.
+\end{warningbox}
+
+\subsection{Search-o1 y Search-R1}
+
+Search-o1 enseña principalmente al modelo cuándo buscar mediante prompting y un agent loop explícito; Search-R1, en cambio, busca aprender la estrategia de búsqueda dentro de la policy usando reinforcement learning. Las diferencias entre ambos pueden resumirse así:
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{>{\raggedright\arraybackslash}p{3cm}>{\raggedright\arraybackslash}p{4.7cm}>{\raggedright\arraybackslash}p{4.7cm}}
+\toprule
+\textbf{Dimensión} & \textbf{Search-o1} & \textbf{Search-R1} \\
+\midrule
+Forma de control & prompt, tokens especiales y un bucle escrito a mano & RL que aprende cuándo buscar y cómo usar los resultados \\
+Ventajas & fácil de depurar, se puede sustituir el componente de recuperación, no requiere entrenamiento & puede reducir reglas manuales, la policy puede ser más adaptativa \\
+Riesgos & el prompt es frágil, la estrategia de invocación no siempre es óptima & el diseño del reward es complejo, puede aprender a buscar de forma oportunista \\
+Etapa adecuada & construcción y análisis rápidos de sistemas & cuando se cuenta con un reward confiable y suficiente presupuesto de interacción en línea \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{importantbox}{El comportamiento de búsqueda en sí también necesita un reward}
+Si solo se premia la respuesta final, el agent puede buscar en exceso, no buscar en absoluto o explotar fallas del benchmark. El objetivo ideal también debería considerar la calidad de la respuesta, la cobertura de evidencia, el número de consultas, la latencia y el costo de los documentos.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Search-o1 demuestra que la recuperación de múltiples rondas, bajo demanda y comprimible puede mejorar de manera significativa el razonamiento intensivo en conocimiento; Search-R1 va más allá al tratar la estrategia de invocación como una conducta aprendible. Ambos exigen verificar la evidencia recuperada, en lugar de tratar el retrieval como una verdad natural.
+
+\section{Probabilidad del modelo, confianza y calibración}
+
+Las preguntas y respuestas en clase señalan que el promedio de log probability de los tokens de salida se correlaciona con la corrección, pero por lo general la calibración es insuficiente: una respuesta incorrecta también puede recibir una probabilidad interna muy alta, y el modelo sigue defendiendo su respuesta original incluso cuando se le corrige.
+
+Se puede medir con un reliability diagram o con el Expected Calibration Error:
+
+$$
+\operatorname{ECE}=\sum_{b=1}^{B}\frac{|S_b|}{N}
+\left|\operatorname{acc}(S_b)-\operatorname{conf}(S_b)\right|.
+$$
+
+\begin{itemize}
+    \item $S_b$: las muestras cuya confianza de predicción cae en el $b$-ésimo intervalo;
+    \item $\operatorname{acc}(S_b)$: la tasa de aciertos real de ese intervalo;
+    \item $\operatorname{conf}(S_b)$: la confianza promedio de ese intervalo;
+    \item Cuanto menor sea el ECE, más cerca está la confianza de la tasa de aciertos empírica.
+\end{itemize}
+
+\begin{knowledgebox}{Lo ideal es que el selector aprenda señales verificables, no que solo lea la confianza propia del modelo}
+En tareas de código se pueden incorporar compilación, casos de prueba, mutation testing, análisis de complejidad y clustering de comportamiento; en un agent de investigación se pueden incorporar la calidad de la fuente, la consistencia de las citas y la evidencia cruzada. Las señales externas suelen ser más confiables que la confianza autorreportada por el modelo generador.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La probabilidad de un modelo de lenguaje no es una «tasa de corrección de la respuesta» calibrada. El ordenamiento de candidatos, las condiciones de paro y si se activa o no la búsqueda deben combinarse con verificación externa y calibración especializada, y no basarse únicamente en la probabilidad cruda de los tokens.
+\section{Lecturas adicionales}
+
+\begin{itemize}
+    \item \href{https://arxiv.org/abs/2203.07814}{Li et al., \emph{Competition-Level Code Generation with AlphaCode}}
+    \item \href{https://storage.googleapis.com/deepmind-media/AlphaCode2/AlphaCode2_Tech_Report.pdf}{Google DeepMind, \emph{AlphaCode 2 Technical Report}}
+    \item \href{https://arxiv.org/search/?query=Search-o1%3A+Agentic+Search-Enhanced+Large+Reasoning+Models\&searchtype=all}{\emph{Search-o1: Agentic Search-Enhanced Large Reasoning Models}}
+    \item \href{https://arxiv.org/search/?query=Search-R1\&searchtype=all}{\emph{Search-R1: Training LLMs to Reason and Leverage Search Engines with Reinforcement Learning}}
+\end{itemize}
+
+\section{Síntesis y ampliación}
+
+Esta sesión concretó el test-time compute, que antes era «pensar un poco más», en dos sistemas ejecutables.
+
+\begin{enumerate}
+    \item \textbf{AlphaCode}: cubre el espacio de programas mediante muestreo masivo en paralelo, y comprime los candidatos usando casos de ejemplo, agrupamiento por comportamiento y pruebas ocultas;
+    \item \textbf{AlphaCode 2}: mejora la eficiencia de muestreo y la calidad de las presentaciones con un foundation model más potente, múltiples solver family y un scorer aprendido;
+    \item \textbf{Search-o1}: identifica vacíos de conocimiento dentro del reasoning, recupera y comprime documentos en varias rondas, y deja que la nueva evidencia entre al razonamiento posterior;
+    \item \textbf{Search-R1}: trata «cuándo buscar, qué buscar y cuándo detenerse» como una política que se puede aprender mediante RL.
+\end{enumerate}
+
+Al recorrer tanto la búsqueda de código como la búsqueda de conocimiento, se puede destilar el mismo conjunto de principios de diseño de agent:
+
+\begin{itemize}
+    \item el generador debe ampliar la cobertura de candidatos, pero manteniendo diversidad semántica;
+    \item el selector debe basarse en señales verificables relevantes para la tarea, no en la probabilidad de generación;
+    \item el presupuesto de cómputo debe asignarse dinámicamente según la dificultad y la incertidumbre actual;
+    \item las trayectorias largas deben conservar un estado intermedio estructurado que permita la verificación local y el retroceso;
+    \item las herramientas externas introducen nuevas superficies de error, por lo que los resultados de la búsqueda, las pruebas y el propio reward model también deben verificarse.
+\end{itemize}
+
+La siguiente sesión se dirige hacia la agentic evaluation: cómo medir la confiabilidad, el valor económico y la brecha con el trabajo real cuando la tarea requiere de decenas de minutos a varias horas y la salida es un CAD, un informe, una tabla o una revisión de literatura.
+
+\end{document}

@@ -1,0 +1,309 @@
+\documentclass[a4paper]{article}
+\input{../notes-shared.es-mx.tex}
+
+\newcommand{\notetitle}{Stanford CS329A: Agentes de IA con automejora\\Part 6: Escalamiento en tiempo de entrenamiento y Scaling RL}
+\newcommand{\lecturers}{Aakanksha Chowdhery}
+\newcommand{\noteauthors}{AI Course Notes \& Codex}
+\newcommand{\notedate}{10 de agosto de 2026}
+\newcommand{\lecturedate}{2025-10-10}
+\newcommand{\videoduration}{1:12:38}
+\newcommand{\videourl}{https://www.youtube.com/watch?v=yVnmHSAy3ck}
+
+\begin{document}
+\makelecturetitle
+
+\section{Del escalamiento en tiempo de prueba al escalamiento en tiempo de entrenamiento}
+
+Las clases anteriores mejoraron la tasa de éxito con parámetros fijos mediante muestreo, búsqueda y un verifier. Esta clase plantea una pregunta más: \textbf{¿se pueden convertir esas reasoning trajectory exitosas en una señal de entrenamiento, de modo que se modifique la distribución de la salida única del modelo?}
+
+AIME es el benchmark motivador principal. Contiene problemas recientes de matemáticas de competencia, lo que reduce el problema de que los benchmark antiguos estén contaminados por los datos de entrenamiento, y exige más de las cadenas de razonamiento largas, el retroceso y la autoverificación.
+
+\videofigure{figures/aime.jpg}{AIME 2024/2025 se usa para medir la capacidad de razonamiento matemático reciente.}{00:01:16--00:03:28}
+
+El cómputo en tiempo de entrenamiento y en tiempo de prueba son dos ejes que se pueden escalar simultáneamente: el entrenamiento hace que las trayectorias correctas sean más frecuentes en la distribución del modelo; el escalamiento en tiempo de prueba realiza una búsqueda más profunda o más amplia a partir de esa distribución.
+
+\videofigure{figures/train-test-scaling.jpg}{Aumentar el cómputo de train-time y de test-time mejora el pass@1 de AIME.}{00:05:48--00:07:20}
+
+\begin{importantbox}{El objetivo del escalamiento en tiempo de entrenamiento es remodelar la distribución de probabilidad}
+El repeated sampling aumenta principalmente la probabilidad de "obtener al menos una vez la respuesta correcta"; el RL, en cambio, busca elevar en conjunto la probabilidad de las trayectorias con recompensa alta, para que la respuesta correcta aparezca con más frecuencia y consistencia. El resultado ideal es obtener la misma precisión con menos muestreo en tiempo de prueba.
+\end{importantbox}
+
+\subsection{Por qué el reasoning RL falla con facilidad}
+
+En un CoT largo, el action space es enorme, la reward es escasa y la longitud de las trayectorias varía mucho. El entrenamiento también enfrenta problemas sistémicos como el reward hacking, el colapso de entropía, la varianza del gradiente, la presión de memoria y el throughput del muestreo en línea. Por eso el curso enfatiza que la "magia" de escalar el RL suele provenir de los detalles de implementación, no de una única función objetivo.
+
+\subsection{Resumen de la sección}
+
+El train-time scaling convierte al verifier o a la reward del entorno en actualizaciones de parámetros. Puede mejorar la estabilidad de una sola respuesta y de la votación mayoritaria, pero también puede reducir la diversidad de exploración; entender esta tensión es el hilo conductor común de STaR, GRPO y DAPO.
+\section{STaR: usar el razonamiento para autoimpulsar el razonamiento}
+
+\subsection{Cómo unos cuantos rationale se convierten en un gran conjunto de datos}
+
+STaR (Self-Taught Reasoner) parte de una pequeña cantidad de ejemplos con reasoning step y hace que el modelo genere un rationale para un gran volumen de datos que solo tienen pares de pregunta y respuesta; se conservan únicamente las trayectorias cuya respuesta final es correcta, se añaden al conjunto de entrenamiento para el fine-tuning, y se repite el proceso.
+
+\videofigure{figures/star-bootstrapping.jpg}{STaR genera, filtra y entrena de manera iterativa a partir de unos cuantos reasoning examples.}{00:17:30--00:18:42}
+
+Si el conjunto de entrenamiento es $\{(x_i,a_i)\}$, en la ronda $m$ el modelo genera el rationale $r_i$:
+
+$$
+r_i\sim p_{\theta_m}(r\mid x_i),\qquad
+\mathcal D_m=\{(x_i,r_i,a_i):\hat a(r_i)=a_i\}.
+$$
+
+Después se entrena sobre los rationale correctos acumulados:
+
+$$
+\theta_{m+1}=\arg\max_\theta
+\sum_{(x,r,a)\in\mathcal D_m}\log p_\theta(r,a\mid x).
+$$
+
+\subsection{Rationalization: explicar hacia atrás a partir de una respuesta conocida}
+
+En problemas difíciles, el modelo puede ser incapaz de generar por sí mismo la respuesta correcta, de modo que no surgen nuevos ejemplos positivos. La innovación clave de STaR es darle al modelo la respuesta correcta y pedirle que genere un rationale que la explique.
+
+\videofigure{figures/rationalization.jpg}{Rationalization usa la respuesta correcta para ayudar al modelo a construir una explicación para problemas en los que originalmente fallaba.}{00:18:42--00:20:00}
+
+\begin{knowledgebox}{Rationalization se asemeja a un answer-conditioned proposal}
+No demuestra que el modelo ya supiera resolver el problema, sino que aprovecha la respuesta como condición adicional para buscar una explicación. Si la calidad de la explicación es confiable, esto permite incorporar problemas difíciles al entrenamiento; si el modelo solo inventa a posteriori una historia que parece razonable, se introduce un razonamiento espurio.
+\end{knowledgebox}
+
+\subsection{El ciclo completo de autoimpulso}
+
+\videofigure{figures/star-contributions.jpg}{STaR amplía de manera iterativa los datos de rationale mediante generación, filtrado por corrección, rationalize y reentrenamiento.}{00:20:00--00:22:42}
+
+\videofigure{figures/star-method.jpg}{Flujo de datos de vanilla STaR frente al que incorpora rationalization.}{00:24:50--00:27:28}
+
+El algoritmo puede resumirse así:
+
+\begin{enumerate}
+    \item usar el modelo actual para generar un rationale y una respuesta para todos los problemas;
+    \item filtrar las trayectorias correctas según la respuesta final;
+    \item para los problemas fallidos, hacer rationalize condicionando en la respuesta correcta dada;
+    \item ajustar el modelo con los nuevos datos de rationale;
+    \item repetir hasta que las mejoras se saturen o la calidad de los datos se degrade.
+\end{enumerate}
+
+\subsection{Supuestos ocultos y patrones de error}
+
+\videofigure{figures/star-assumptions.jpg}{STaR supone que la corrección final puede aproximar la calidad del reasoning.}{00:22:42--00:24:50}
+
+Este supuesto produce:
+
+\begin{itemize}
+    \item \textbf{False positive rationale}: el proceso es incorrecto pero la respuesta final resulta correcta por casualidad;
+    \item \textbf{False negative rationale}: el proceso tiene valor pero comete un pequeño error final, y se descarta la trayectoria completa;
+    \item \textbf{Selection bias}: los datos de entrenamiento se concentran cada vez más en los problemas que el modelo ya puede resolver;
+    \item \textbf{Confirmation loop}: el modelo prefiere cierto tipo de explicación y en la siguiente ronda sigue reproduciendo el mismo patrón.
+\end{itemize}
+
+\subsection{Resultados y la Rationalization Gap}
+
+\videofigure{figures/star-results.jpg}{STaR supera al fine-tuning sin scratchpad o solo con la respuesta en reasoning de sentido común y matemático.}{00:27:28--00:31:22}
+
+\videofigure{figures/rationalization-challenge.jpg}{Existe una discrepancia de distribución entre el rationale generado con la respuesta dada y el razonamiento sin respuesta.}{00:31:22--00:33:34}
+
+Los datos de entrenamiento de rationalization contienen la respuesta como condición, pero en el despliegue no se dispone de la respuesta; el modelo puede aprender patrones de explicación que solo son válidos cuando la respuesta ya se conoce. Este distribution mismatch es la limitación central de STaR.
+
+\begin{warningbox}{Filtrar por la respuesta final no es process verification}
+El reward de STaR solo verifica el resultado final, por lo que no puede detectar fallas lógicas intermedias. Una extensión más robusta podría incorporar un PRM, un formal checker o varios verifiers para controlar la calidad del propio rationale.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+STaR muestra un bootstrapping de datos de reasoning de bajo costo: el modelo genera sus propios datos de entrenamiento, filtrados mediante respuestas verificables. Es eficiente en muestras y sencillo de implementar, pero está limitado por su dependencia de la etiqueta final y por el sesgo del answer-conditioned rationalization.
+\section{DeepSeekMath y GRPO}
+
+\subsection{Data Scaling: los datos matemáticos no son lo mismo que los artículos de arXiv}
+
+La primera contribución de DeepSeekMath es la ingeniería de datos: identificar contenido matemático de alta calidad a partir de páginas web a gran escala, en lugar de simplemente ampliar el texto de arXiv. El curso enfatiza que una alta densidad de fórmulas formales no necesariamente equivale a ser útil para resolver problemas; los sitios que contienen derivaciones en lenguaje natural, ejemplos resueltos y métodos de solución pueden tener más valor para el entrenamiento.
+
+\videofigure{figures/deepseekmath.jpg}{DeepSeekMath-7B obtiene un desempeño matemático sólido mediante datos y RL.}{00:41:10--00:42:06}
+
+\videofigure{figures/math-data.jpg}{Los datos web matemáticos de alta calidad y practical RL constituyen la línea principal del método.}{00:42:06--00:43:34}
+
+\videofigure{figures/data-results.jpg}{La selección del origen de los datos afecta de manera significativa el razonamiento matemático; agregar arXiv sin criterio incluso puede perjudicar el desempeño.}{00:43:34--00:44:24}
+
+\begin{importantbox}{La unidad del data scaling debe ser la señal de aprendizaje efectiva}
+Más tokens no equivale a más capacidad. Que los datos contengan la estructura problema--derivación--respuesta, cobertura de dificultad, corrección de errores y expresiones diversas suele importar más que la «proporción de palabras clave del dominio».
+\end{importantbox}
+
+\subsection{El costo del critic en PPO}
+
+El PPO estándar suele mantener la policy, la reference policy, el reward model y el value/critic model; varias copias de modelos grandes ocupan memoria de video y aumentan el costo de sincronización.
+
+\videofigure{figures/ppo-memory.jpg}{En PPO con modelos grandes, la policy, la reference, el reward y el critic generan una alta presión de memoria.}{00:44:24--00:45:12}
+
+\subsection{GRPO: sustituir el critic por una recompensa relativa dentro del grupo}
+
+Group Relative Policy Optimization muestrea un grupo de $G$ respuestas para la misma pregunta, y construye el advantage con la media y la desviación estándar del grupo:
+
+$$
+A_i=\frac{r_i-\mu_G}{\sigma_G+\epsilon},
+\qquad
+\mu_G=\frac{1}{G}\sum_{j=1}^{G}r_j.
+$$
+
+\videofigure{figures/grpo.jpg}{GRPO usa el grupo de candidatos de la misma pregunta como baseline, sin entrenar un critic independiente.}{00:45:12--00:46:02}
+
+La intuición es: la escala absoluta del reward puede variar según la dificultad de la pregunta, pero, dentro de una misma pregunta, «quién es mejor que el resto del grupo» es más estable. Los candidatos correctos obtienen advantage positivo y los incorrectos, advantage negativo.
+
+GRPO sigue usando la clipped policy update y la reference KL:
+
+$$
+J(\theta)=\mathbb E_i\left[
+\min(\rho_i A_i,\operatorname{clip}(\rho_i,1-\epsilon,1+\epsilon)A_i)
+-\beta D_{\mathrm{KL}}(\pi_\theta\|\pi_{\mathrm{ref}})
+\right].
+$$
+
+\videofigure{figures/grpo-gradient.jpg}{Diversos métodos de RL pueden entenderse como multiplicar $\nabla\log p(\text{output}\mid\text{question})$ por distintos coeficientes de gradiente.}{00:46:02--00:52:46}
+
+\subsection{Online RL es superior a las muestras fijas fuera de línea}
+
+Si el entrenamiento usa siempre datos generados por una policy anterior, conforme la policy se actualiza, la distribución de las muestras se vuelve cada vez más obsoleta. Online RL muestrea continuamente del modelo actual, de modo que el reward y el gradient se ajustan mejor a los modos de falla actuales.
+
+\videofigure{figures/online-rl.jpg}{Muestrear en línea a partir de la policy actual es superior a usar repetidamente trayectorias fuera de línea generadas por un modelo anterior.}{00:52:46--00:53:34}
+
+\begin{warningbox}{El advantage dentro del grupo puede ser cero}
+Si todas las respuestas de un mismo grupo son correctas o todas son incorrectas, la varianza del reward dentro del grupo es cero y no hay señal de ordenamiento útil. A medida que el modelo se vuelve más fuerte, es frecuente que las preguntas fáciles produzcan grupos totalmente correctos; las preguntas difíciles, en cambio, pueden salir todas incorrectas. El dynamic sampling de DAPO se propone justamente resolver este desperdicio.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+DeepSeekMath muestra que el train-time scaling depende de optimizar conjuntamente los datos y el sistema de RL. GRPO usa el reward relativo dentro del grupo para eliminar el critic, lo que reduce la memoria de video y la complejidad de ingeniería, pero el entrenamiento de reasoning largo aún puede presentar colapso de entropía, batches inválidos y sesgo de longitud.
+\section{DAPO: cómo hacer que el reasoning RL de cadenas largas escale de forma estable}
+
+\subsection{Cuatro tipos de problemas del GRPO ingenuo}
+
+\videofigure{figures/dapo-problems.jpg}{El GRPO ingenuo (naive), aplicado a reasoning largo, presenta colapso de entropía, muestras inválidas, sesgo de longitud e inestabilidad.}{00:53:34--00:54:24}
+
+DAPO (Decoupled Clip and Dynamic sAmpling Policy Optimization) usa un conjunto de técnicas que se complementan entre sí para llevar el desempeño en AIME cada vez más arriba desde el baseline ingenuo (naive).
+
+\subsection{Clip-Higher: permitir que las acciones de baja probabilidad pero de buena calidad suban más rápido}
+
+El PPO estándar usa un clipping simétrico para el aumento y la disminución de probabilidad. En CoT largos, un token o acción correcto pero poco frecuente parte de una probabilidad inicial baja, y una cota superior demasiado estrecha impide que crezca con rapidez. Clip-Higher usa un intervalo de clipping más amplio para el aumento:
+
+$$
+\operatorname{clip}(\rho,1-\epsilon_{\rm low},1+\epsilon_{\rm high}),
+\qquad \epsilon_{\rm high}>\epsilon_{\rm low}.
+$$
+
+\videofigure{figures/clip-higher.jpg}{El Clip-Higher asimétrico conserva más actualizaciones positivas para conductas de buena calidad pero poco frecuentes.}{00:54:24--00:55:46}
+
+Esto ayuda a mantener la exploración, pero una cota superior demasiado amplia también puede hacer que la policy se incline de golpe hacia unas cuantas trayectorias, por lo que aun así hay que vigilar el KL y la entropía.
+
+\subsection{Dynamic Sampling: entrenar solo con problemas que tengan señal de contraste}
+
+Para cada pregunta se muestrean 64 respuestas. Si las 64 son todas correctas o todas incorrectas, el advantage dentro del grupo es cercano a cero. Dynamic sampling descarta esos grupos y vuelve a muestrear preguntas «parcialmente correctas, parcialmente incorrectas».
+
+\videofigure{figures/dynamic-sampling.jpg}{Dynamic sampling filtra los grupos totalmente correctos y totalmente incorrectos, y conserva gradientes válidos.}{00:55:46--00:57:46}
+
+\begin{knowledgebox}{Dynamic sampling es un currículo en línea}
+Una pregunta solo tiene el mayor valor de aprendizaje cuando la policy actual puede tanto tener éxito como fallar en ella. A medida que cambia la capacidad del modelo, esta «frontera de aprendizaje» se desplaza, y el muestreador concentra automáticamente el cómputo de entrenamiento en las muestras de dificultad actualmente moderada.
+\end{knowledgebox}
+
+\subsection{Token-Level Loss: corregir el peso por longitud}
+
+El sample-level loss hace que cada respuesta contribuya con el mismo peso; por eso cada token de una respuesta larga queda diluido por el promedio. El token-level loss agrega a nivel de todos los tokens, de modo que las decisiones locales de un reasoning largo reciben un gradiente más directo.
+
+\videofigure{figures/token-loss.jpg}{El objetivo a nivel de token evita que cada token de una respuesta larga se subpondere en exceso.}{00:57:46--00:58:48}
+
+\begin{warningbox}{La ponderación a nivel de token también puede favorecer respuestas largas}
+Si el reward solo mira el resultado final, una trayectoria larga tiene más tokens que se actualizan, lo que puede inducir al modelo a alargar el reasoning sin sentido. Es necesario combinarlo con un costo por longitud, una estrategia de detención y el overlong punishment.
+\end{warningbox}
+
+\subsection{Soft Overlong Punishment}
+
+Un corte duro penaliza por igual un reasoning de buena calidad que apenas rebasa la longitud máxima y una respuesta severamente demasiado larga, lo que produce ruido de alta varianza. El soft punishment aumenta la penalización de forma gradual conforme se acerca al límite de longitud, de modo que el modelo aprenda a converger sin brusquedad.
+
+\videofigure{figures/overlong.jpg}{El soft overlong punishment evita el ruido que produce una frontera dura de longitud máxima.}{00:58:48--00:59:42}
+
+\subsection{Ganancias progresivas}
+
+\videofigure{figures/dapo-results.jpg}{Clip-Higher, soft overlong, token loss y dynamic sampling mejoran AIME de forma incremental.}{00:59:42--01:00:42}
+
+La tendencia que resume el curso es: el GRPO ingenuo (naive) llega a aproximadamente 30, y tras agregar overlong filtering, asymmetric clipping, soft punishment, token-level loss y dynamic sampling, se eleva progresivamente hasta el rango de 40 o más. Lo importante no es la cifra en sí, sino que cada técnica corrige una patología de entrenamiento específica.
+
+\subsection{Qué se debe monitorear al escalar RL}
+
+\videofigure{figures/rl-monitoring.jpg}{El reasoning RL de cadenas largas requiere monitorear la longitud de las respuestas, la entropía, la distribución del reward y la tasa de muestras válidas.}{01:00:42--01:02:26}
+
+Mirar solo la training loss lleva fácilmente a conclusiones equivocadas. Como mínimo se debe monitorear:
+
+\begin{itemize}
+    \item si la longitud de las respuestas crece y luego se estabiliza, en vez de expandirse sin límite;
+    \item si la entropía de los tokens colapsa con rapidez;
+    \item la proporción de grupos totalmente correctos o totalmente incorrectos y la proporción de batch efectivo;
+    \item el KL, la clip fraction y la norma del gradiente;
+    \item las variaciones distintas de pass@1, majority@$k$ y pass@$k$;
+    \item si el reward sigue siendo consistente con una evaluación real independiente.
+\end{itemize}
+
+\subsection{Resumen de la sección}
+
+La contribución de DAPO es tratar el reasoning RL como un sistema completo: el clip controla la exploración, dynamic sampling garantiza el gradiente, token loss corrige el peso por longitud y soft punishment suaviza la restricción sobre la salida. El éxito o el fracaso al escalar RL lo determinan estos mecanismos en conjunto.
+
+\section{Cómo elegir entre STaR, GRPO y DAPO}
+
+\videofigure{figures/method-selection.jpg}{Distintas escalas de datos, longitudes de trayectoria y presupuestos de cómputo corresponden a distintos métodos de entrenamiento.}{01:02:26--01:03:34}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{>{\raggedright\arraybackslash}p{2.2cm}>{\raggedright\arraybackslash}p{3.6cm}>{\raggedright\arraybackslash}p{3.6cm}>{\raggedright\arraybackslash}p{4.0cm}}
+\toprule
+\textbf{Método} & \textbf{Condiciones de aplicación} & \textbf{Ventaja principal} & \textbf{Riesgo principal} \\
+\midrule
+STaR & Pocos rationale examples, respuesta verificable & Simple y eficiente, datos autogenerados & Sesgo de filtrado final, rationalization mismatch \\
+GRPO & Se puede muestrear en línea un grupo de candidatos, la reward es calculable & Sin critic, sistema más ligero & Sin gradiente en grupos todo-correcto o todo-incorrecto, colapso de entropía \\
+DAPO & CoT largo, RL en línea a gran escala & Escalamiento estable, mayor tasa de cómputo efectivo & Implementación compleja, hiperparámetros acoplados, requiere monitoreo intensivo \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Por qué las tres métricas pueden diferir}
+
+\videofigure{figures/metrics.jpg}{El RL puede cambiar simultáneamente pass@1, majority@$k$ y pass@$k$.}{01:03:34--01:06:20}
+
+\begin{itemize}
+    \item \textbf{pass@1}: un único muestreo se vuelve más correcto;
+    \item \textbf{majority@$k$}: la respuesta correcta se convierte en la moda más común;
+    \item \textbf{pass@$k$}: cobertura diversa del conjunto de candidatos.
+\end{itemize}
+
+El RL suele mejorar de manera notable majority@$k$, pero no necesariamente pass@$k$. Una explicación es que la policy concentra la probabilidad en los patrones correctos ya existentes, lo que aumenta la consistencia pero reduce la exploración diversa; esta es también la tensión entre «volverse más fuerte en el entrenamiento» y «ampliar la cobertura».
+
+\subsection{Preguntas abiertas}
+
+\videofigure{figures/open-problems.jpg}{El escalamiento del RL aún carece de una teoría completa sobre la consistencia mayoritaria, la cobertura, la diversidad y la conducta de autoevaluación.}{01:06:20--01:10:46}
+
+\begin{importantbox}{La pregunta que más vale la pena seguir}
+¿Por qué el RL hace más común la respuesta correcta sin necesariamente permitir que el modelo resuelva más problemas distintos? Responder esta pregunta requiere analizar a la vez la forma de la reward, la entropía, la distribución de dificultad de los datos y los puntos ciegos del verifier, en lugar de mirar solo el puntaje promedio del benchmark.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+STaR es adecuado para el bootstrapping de bajo costo, GRPO es adecuado para la optimización relativa dentro del grupo sin critic, y DAPO es adecuado para el entrenamiento estable a gran escala con reasoning largo. La elección del método debe basarse en la verificabilidad de la retroalimentación, el costo del muestreo en línea y la longitud de la trayectoria.
+\section{Lecturas adicionales}
+
+\begin{itemize}
+    \item \href{https://arxiv.org/abs/2203.14465}{Zelikman et al., \emph{STaR: Bootstrapping Reasoning With Reasoning}}
+    \item \href{https://arxiv.org/abs/2402.03300}{Shao et al., \emph{DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models}}
+    \item \href{https://arxiv.org/abs/2503.14476}{Yu et al., \emph{DAPO: An Open-Source LLM Reinforcement Learning System at Scale}}
+\end{itemize}
+
+\section{Síntesis y ampliación}
+
+Esta sesión hizo avanzar la automejora desde inference-time selection hasta train-time distribution shift. STaR parte de un pequeño conjunto de rationales y, mediante filtrado de respuestas y rationalization, hace bootstrapping de los datos de razonamiento; DeepSeekMath muestra que los datos de dominio de alta calidad son tan importantes como el RL práctico, y usa GRPO para eliminar el critic mediante reward relativo dentro del grupo; DAPO, por su parte, se dirige a las patologías reales del RL con CoT largo, introduciendo clipping asimétrico, dynamic sampling, token-level loss y soft overlong punishment.
+
+Los tres niveles forman una relación progresiva:
+
+\begin{enumerate}
+    \item \textbf{Nivel de datos}: generar y seleccionar reasoning trajectories con valor de aprendizaje;
+    \item \textbf{Nivel del objetivo}: usar reward relativo para aumentar la probabilidad de las trayectorias correctas;
+    \item \textbf{Nivel del sistema}: mantener la entropy, el gradiente efectivo, la longitud y el throughput del muestreo en línea.
+\end{enumerate}
+
+La siguiente sesión se dirige hacia la "automejora mediante búsqueda": cómo AlphaCode resuelve la programación competitiva mediante muestreo masivo, clustering y puntuación; cómo Search-O1 activa la recuperación según la incertidumbre durante el proceso de razonamiento, y su comparación con Search-R1 basado en RL.
+
+\end{document}

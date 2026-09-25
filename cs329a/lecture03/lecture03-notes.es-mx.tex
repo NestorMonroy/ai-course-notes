@@ -1,0 +1,369 @@
+\documentclass[a4paper]{article}
+\input{../notes-shared.es-mx.tex}
+
+\newcommand{\notetitle}{Stanford CS329A: Agentes de IA autosuperables\\Part 3: Validación robusta}
+\newcommand{\lecturers}{Azalia Mirhoseini}
+\newcommand{\noteauthors}{AI Course Notes \& Codex}
+\newcommand{\notedate}{10 de agosto de 2026}
+\newcommand{\lecturedate}{2025-09-29}
+\newcommand{\videoduration}{1:12:58}
+\newcommand{\videourl}{https://www.youtube.com/watch?v=p7TdPUcPoik}
+
+\begin{document}
+\makelecturetitle
+
+\section{Por qué la verificación es el cuello de botella de la automejora}
+
+La sesión anterior mostró que un muestreo abundante puede lograr que el conjunto de candidatos incluya más respuestas correctas; pero un sistema real debe elegir un solo resultado entre los candidatos. Robust verification estudia precisamente: \textbf{cómo determinar si la respuesta final es correcta, en qué paso comienza el error, y cómo usar la señal de verificación para la selección durante la inferencia y para el entrenamiento del modelo.}
+
+Esta sesión aborda, en orden cronológico, cuatro generaciones de métodos:
+
+\begin{enumerate}
+    \item \textbf{Outcome verifier}: solo determina si la respuesta completa es correcta o incorrecta;
+    \item \textbf{Process reward model}: anota el proceso de razonamiento paso a paso;
+    \item \textbf{process supervision automática}: sustituye la costosa anotación humana por pasos mediante la tasa de éxito de rollouts;
+    \item \textbf{ensamble de verificadores débiles}: combina múltiples verifiers imperfectos para estimar una señal de corrección más confiable.
+\end{enumerate}
+
+\begin{importantbox}{Los verificadores tienen dos usos completamente distintos}
+En la \textbf{etapa de inferencia}, el verifier se usa para rerank, poda y detención; en la \textbf{etapa de entrenamiento}, el verifier funciona como reward o como filtro de datos que modifica los parámetros del modelo. El error del primero afecta a una sola respuesta, mientras que el sesgo sistemático del segundo será aprendido y amplificado por el modelo, por lo que la robustez exigida a un verifier usado en entrenamiento es mayor.
+\end{importantbox}
+
+\subsection{Propiedades de un verifier ideal}
+
+Dado un problema $x$ y una solución candidata $y$, el verifier produce $v(x,y)\in[0,1]$. En el caso ideal:
+
+$$
+v(x,y)\approx P(y\text{ correct}\mid x,y).
+$$
+
+Además de la precisión, también importan la calibration, la generalización a muestras fuera de distribución, la robustez frente al estilo de la respuesta, el costo computacional y la capacidad de resistir el reward hacking.
+
+\subsection{Resumen de la sección}
+
+La verificación no es un paso accesorio de puntuación, sino la interfaz común entre inference scaling y reinforcement learning. Determina qué trayectorias se seleccionan, qué datos se conservan y qué comportamientos reciben gradiente.
+
+\section{Outcome Verification: partiendo de GSM8K}
+
+\subsection{Training Verifiers to Solve Math Word Problems}
+
+El trabajo de Cobbe et al. aporta a la vez el conjunto de datos GSM8K y un método sistemático para entrenar un verifier. GSM8K contiene alrededor de 8.5K problemas de matemáticas de primaria en forma de texto, cada uno acompañado de un proceso de razonamiento en lenguaje natural y una respuesta numérica final.
+
+\videofigure{figures/gsm8k-contributions.jpg}{GSM8K y el outcome verifier constituyen las dos contribuciones centrales de este trabajo.}{00:02:10--00:04:26}
+
+El flujo central es: primero se entrena el generator; para cada problema de entrenamiento se muestrean numerosas completions; se asigna una etiqueta binaria según si la respuesta final coincide con el ground truth; después se entrena el verifier para predecir si toda la solución es correcta.
+
+\videofigure{figures/generator-verifier-pipeline.jpg}{El generator produce candidatos etiquetados, y el verifier aprende a puntuar la solución completa.}{00:04:26--00:06:20}
+
+\subsection{El objetivo conjunto del Verifier}
+
+El verifier puede agregar una cabeza de clasificación sobre el backbone del modelo de lenguaje, conservando al mismo tiempo el objetivo de next-token:
+
+$$
+\mathcal L(\phi)
+=\mathcal L_{\mathrm{LM}}(\phi)
++\lambda\,\mathcal L_{\mathrm{cls}}(\phi),
+$$
+
+$$
+\mathcal L_{\mathrm{cls}}
+=-z\log v_{\phi}(x,y)-(1-z)\log(1-v_{\phi}(x,y)).
+$$
+
+\begin{itemize}
+    \item $\phi$: parámetros del verifier;
+    \item $z\in\{0,1\}$: si la respuesta final es correcta;
+    \item $v_{\phi}(x,y)$: probabilidad de que el candidato sea correcto;
+    \item $\lambda$: peso entre el modelado de lenguaje y la clasificación de corrección.
+\end{itemize}
+
+\videofigure{figures/verifier-objective.jpg}{El verifier modela a la vez el texto y la corrección de la solución completa.}{00:06:20--00:08:16}
+
+\begin{knowledgebox}{Por qué conservar el objetivo de modelado de lenguaje}
+Una clasificación pura podría aprender únicamente atajos como el formato, la longitud o palabras clave de la respuesta final. El objetivo de modelado de lenguaje obliga a la representación a seguir entendiendo el texto completo del razonamiento, y además funciona como regularización cuando los datos son limitados. Sin embargo, no elimina automáticamente los shortcuts; sigue siendo necesario revisarlos mediante ejemplos adversarios y evaluación fuera de distribución.
+\end{knowledgebox}
+
+\subsection{Los datos de entrenamiento deben provenir de la propia distribución de errores del modelo}
+
+Si el verifier solo observa errores obvios construidos manualmente, no necesariamente podrá reconocer los patrones de fallo reales del generator. Este método muestrea numerosas completions del modelo para cada problema, de modo que el conjunto de entrenamiento incluya negativos difíciles que "se parecen mucho a una solución correcta".
+
+\begin{warningbox}{El Verifier no puede limitarse a obtener buen desempeño en datos estáticos}
+Actualizar el generator, cambiar el prompt o aumentar la longitud del razonamiento modifican la distribución de errores. Un verifier preciso sobre candidatos antiguos puede fallar con un modelo nuevo. Por ello, los datos del verifier deben muestrearse continuamente del generator actual, y su evaluación debe llevar control de versiones.
+\end{warningbox}
+
+\subsection{Best-of-N y cómputo en tiempo de inferencia}
+
+En el momento de la inferencia se generan $N$ candidatos y se elige aquel con la puntuación más alta del verifier:
+
+$$
+y^*=\arg\max_{y_j\sim\pi_\theta(\cdot\mid x)} v_\phi(x,y_j).
+$$
+
+A medida que $N$ aumenta, mejora la cobertura de candidatos; mientras el verifier conserve capacidad de discriminación en su ordenamiento, la precisión final también mejora. Se ha observado experimentalmente que el desempeño sigue mejorando hasta con cientos de completions.
+
+\videofigure{figures/testtime-compute.jpg}{Aumentar el número de candidatos sigue mejorando la precisión tras la selección del verifier.}{00:16:50--00:19:04}
+
+\subsection{La limitación fundamental de outcome supervision}
+
+La etiqueta de la respuesta final no puede indicar en qué paso se produjo el error del razonamiento. Una trayectoria puede estar completamente equivocada al inicio y aun así llegar por coincidencia al valor numérico correcto; o bien el proceso puede ser esencialmente correcto y fallar solo en un error aritmético al final. El ORM etiqueta ambos casos como positivo y negativo respectivamente, lo que produce una asignación de crédito muy tosca.
+
+\subsection{Resumen de la sección}
+
+El outcome verifier demostró por primera vez que learned verification puede convertir el inference sampling en una mejora real de desempeño, y constituye la base de la recompensa de RL en trabajos posteriores. Pero mirar solo la respuesta final confunde el proceso correcto, la corrección accidental y el error local, lo cual impulsó a la investigación a orientarse hacia process supervision.
+\section{Process Supervision: verificación paso a paso del razonamiento}
+
+\subsection{Diferencia entre Outcome y Process}
+
+Supongamos una cadena de razonamiento con pasos $s_{1:T}$. Outcome supervision solo asigna una etiqueta $R\in\{0,1\}$ a la trayectoria completa; process supervision proporciona $r_t\in\{0,1\}$ o una puntuación continua para cada paso.
+
+\videofigure{figures/outcome-supervision.jpg}{Outcome supervision solo entrega una etiqueta al final de todo el razonamiento.}{00:22:20--00:24:00}
+
+\videofigure{figures/process-supervision.jpg}{Process supervision localiza con precisión el paso erróneo y mejora la asignación de crédito.}{00:24:00--00:26:02}
+
+\begin{importantbox}{Dos valores de process supervision}
+Primero, permite podar en cuanto aparece un error, ahorrando tokens posteriores; segundo, reduce los falsos positivos de "un proceso erróneo que por casualidad llega a la respuesta correcta". Para el entrenamiento, el reward a nivel de paso también ofrece una señal de aprendizaje más densa que un único reward final.
+\end{importantbox}
+
+\subsection{PRM800K: etiquetas de pasos hechas por humanos}
+
+Let's Verify Step by Step recopila cerca de 800,000 etiquetas de pasos hechas por humanos. Los anotadores leen la solución generada por el modelo y, después de cada paso, juzgan si el proceso hasta ese momento sigue siendo correcto. Para mejorar la eficiencia de los datos, el método usa active learning, dando prioridad a los humanos en las muestras más discriminativas o con mayor probabilidad de revelar debilidades del modelo.
+
+\videofigure{figures/prm-labeling.jpg}{PRM800K realiza anotación humana a nivel de paso sobre razonamientos matemáticos generados por el modelo.}{00:26:02--00:29:08}
+
+Después del entrenamiento, el PRM produce la probabilidad de corrección $q_t$ de cada paso. La trayectoria completa puede agregarse mediante el paso más débil, el producto o la suma de logaritmos, por ejemplo:
+
+$$
+S(y)=\sum_{t=1}^{T}\log q_t.
+$$
+
+\begin{itemize}
+    \item $q_t=P(s_t\text{ correct}\mid x,s_{1:t})$;
+    \item $S(y)$: puntuación de proceso global de la trayectoria;
+    \item la suma de logaritmos penaliza cualquier paso erróneo de baja probabilidad, y a la vez evita el desbordamiento por defecto de multiplicar directamente.
+\end{itemize}
+
+\subsection{Ganancias del PRM frente al ORM}
+
+\videofigure{figures/prm-vs-orm.jpg}{El PRM supera al ORM y al majority voting en la selección de candidatos.}{00:29:08--00:30:44}
+
+Las ganancias del PRM son especialmente notorias en cadenas de razonamiento largas, porque cuanto más larga es la trayectoria, mayor es la probabilidad de que un error local quede oculto por la respuesta final. También permite hacer beam search: se evalúa cada segmento generado y solo se expanden los prefijos con puntuación alta.
+
+\subsection{Active Learning y anotación a gran escala}
+
+El muestreo aleatorio desperdicia gran cantidad de esfuerzo humano en pasos claramente correctos o claramente incorrectos. Active learning selecciona las muestras en las que el verifier está actualmente más incierto, donde hay mayor discrepancia entre modelos o que están más cerca de la frontera de decisión.
+
+\videofigure{figures/active-learning.jpg}{Active learning mejora el rendimiento por unidad de esfuerzo humano en la anotación de pasos.}{00:30:44--00:33:02}
+
+\subsection{Generalización fuera de distribución}
+
+\videofigure{figures/prm-ood.jpg}{El PRM entrenado conserva una ventaja relativa incluso en datos matemáticos fuera de distribución.}{00:33:02--00:35:20}
+
+Esta generalización indica que el PRM aprendió cierta razonabilidad general de los pasos matemáticos, pero no debe interpretarse como que domina la demostración rigurosa. Los supuestos implícitos, los saltos de pasos y la ambigüedad simbólica del razonamiento en lenguaje natural aún pueden engañar al verifier.
+
+\begin{warningbox}{El process reward también puede producir nuevo reward hacking}
+El modelo puede aprender a escribir trayectorias extensas en las que "cada paso parece de libro de texto" para complacer al PRM, en lugar de resolver el problema de forma más eficaz. Si el verifier favorece cierto formato, longitud o fraseo común, el RL amplificará esas preferencias. La supervisión a nivel de paso aumenta la resolución, pero no elimina el riesgo del objetivo indirecto.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La process supervision hecha por humanos proporciona una señal de verificación precisa, densa y utilizable en búsqueda, al costo de una anotación experta costosa. La siguiente pregunta natural es: ¿se puede lograr que el modelo y el entorno generen etiquetas de paso de forma automática?
+
+\section{Math-Shepherd: sin anotación humana de pasos}
+
+\subsection{Definir la calidad del paso con "el potencial de continuar hasta la respuesta correcta"}
+
+Math-Shepherd define la calidad de un prefijo de razonamiento como: la probabilidad de que, al continuar el muestreo a partir de este prefijo, se llegue finalmente a la respuesta correcta. Para el prefijo $s_{1:t}$ se muestrean $K$ rollouts subsecuentes:
+
+$$
+\hat q_t=\frac{1}{K}\sum_{k=1}^{K}
+\mathbf 1\!\left[\mathrm{Answer}(s_{1:t},\tilde s^{(k)}_{t+1:T})=a^*\right].
+$$
+
+\begin{itemize}
+    \item $\tilde s^{(k)}_{t+1:T}$: la $k$-ésima trayectoria subsecuente generada al continuar desde el prefijo actual;
+    \item $a^*$: la respuesta final ground-truth;
+    \item $\hat q_t$: la probabilidad empírica de que este prefijo de paso pueda conducir a la solución correcta.
+\end{itemize}
+
+\videofigure{figures/math-shepherd-annotation.jpg}{Math-Shepherd usa la tasa de éxito de los rollouts subsecuentes para etiquetar automáticamente la calidad del paso.}{00:38:30--00:40:42}
+
+\subsection{Hard y Soft Annotation}
+
+\begin{itemize}
+    \item \textbf{Hard label}: en cuanto exista un rollout exitoso, se etiqueta el prefijo como positivo;
+    \item \textbf{Soft label}: se usa la proporción de rollouts exitosos $\hat q_t$;
+    \item El hard label enfatiza "si todavía hay esperanza", el soft label refleja "qué tanta esperanza hay".
+\end{itemize}
+
+\videofigure{figures/step-label-example.jpg}{Ejemplo de las etiquetas de outcome y de potencial de paso para un mismo proceso de solución.}{00:40:42--00:43:36}
+
+\begin{knowledgebox}{Esto es un tipo de Monte Carlo value estimation}
+Math-Shepherd en realidad está estimando el valor del estado: dado el prefijo de razonamiento actual, con qué probabilidad continuar ejecutando la política actual llevará a la respuesta correcta. No requiere que un humano juzgue la lógica de cada paso, solo requiere que la respuesta final pueda verificarse automáticamente.
+\end{knowledgebox}
+
+\subsection{Un verifier, tres formas de uso}
+
+\videofigure{figures/math-shepherd-uses.jpg}{Un PRM entrenado automáticamente puede usarse para rerank, y también como PPO reward.}{00:43:36--00:44:36}
+
+\begin{enumerate}
+    \item \textbf{Verification}: ordenar múltiples respuestas completas;
+    \item \textbf{Search}: puntuar y podar prefijos intermedios;
+    \item \textbf{Reinforcement learning}: usar el reward por paso en PPO para mejorar directamente el generator.
+\end{enumerate}
+
+\videofigure{figures/math-shepherd-verification.jpg}{Math-Shepherd mejora la selección de candidatos en GSM8K y MATH500.}{00:44:36--00:47:02}
+
+\videofigure{figures/math-shepherd-rl.jpg}{PPO con el PRM automático como reward mejora aún más al generator.}{00:47:02--00:48:06}
+
+\subsection{Fuentes de sesgo en la anotación automática}
+
+\begin{itemize}
+    \item Cuando la rollout policy es demasiado débil, incluso un prefijo correcto puede no ser completado por nadie, y se etiqueta erróneamente como de bajo valor;
+    \item Con un número limitado de rollouts, la varianza de $\hat q_t$ es muy grande;
+    \item Que la respuesta final sea verificable no implica que el razonamiento intermedio sea realmente válido;
+    \item Cuando cambian el generator de entrenamiento y el generator de los rollouts, el valor de los pasos sufre un desplazamiento de distribución.
+\end{itemize}
+
+\begin{warningbox}{"Sin anotación humana" no equivale a sin supervisión}
+Math-Shepherd sigue dependiendo de una respuesta final verificable automáticamente, y consume una gran cantidad de compute de rollouts. Convierte el costo de mano de obra en costo de muestreo, y es aplicable a dominios verificables como matemáticas y código; para tareas abiertas, el reward final en sí mismo sigue siendo un problema difícil.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Math-Shepherd usa el resultado final verificable del entorno para inferir el valor de los pasos hacia atrás, logrando process supervision automática, y usa el verifier tanto para la inferencia como para el RL. Muestra el prototipo de un ciclo cerrado de automejora: el modelo genera trayectorias, la retroalimentación del resultado final etiqueta los pasos, y el PRM guía al modelo a generar mejores trayectorias.
+\section{Weaver: obtener una señal fuerte a partir de múltiples Verifiers débiles}
+
+\subsection{Por qué un solo verifier no basta}
+
+Distintos verifiers capturan distintos aspectos: el ORM ve el resultado final, el PRM ve los pasos, el LLM judge ve la calidad semántica, los verificadores por reglas ven el formato o las restricciones. Ninguno es perfecto, pero sus patrones de error pueden no coincidir por completo.
+
+\videofigure{figures/weak-verifiers.jpg}{Un reward model, un LM judge y funciones basadas en reglas pueden servir como verifiers débiles.}{00:51:50--00:54:26}
+
+\subsection{Score--Weight--Select}
+
+El proceso de Weaver es:
+
+\begin{enumerate}
+    \item \textbf{Score}: se recopilan los puntajes de múltiples verifiers para cada candidato y se normalizan;
+    \item \textbf{Weight}: con una pequeña cantidad de datos anotados o mediante weak supervision se estima la precisión y la correlación de cada verifier;
+    \item \textbf{Select}: se agrega con los pesos y se selecciona el candidato con el puntaje más alto.
+\end{enumerate}
+
+\videofigure{figures/weaver-pipeline.jpg}{Las tres etapas de Weaver: score, weight y select.}{00:54:26--00:57:10}
+
+La forma de agregación más simple es:
+
+$$
+S(y)=\sum_{m=1}^{M} w_m\,\tilde v_m(x,y),
+\qquad
+ y^*=\arg\max_y S(y).
+$$
+
+\begin{itemize}
+    \item $\tilde v_m$: el puntaje normalizado del $m$-ésimo verifier;
+    \item $w_m$: el peso de confiabilidad estimado;
+    \item $S(y)$: el puntaje de corrección del conjunto.
+\end{itemize}
+
+\subsection{Weak supervision y modelado de correlaciones}
+
+El promedio simple asume implícitamente que todos los verifiers son independientes e igualmente confiables. Weak supervision estima explícitamente la precisión y la correlación, evitando que varios verifiers muy similares voten de forma repetida y generen una falsa confianza.
+
+\videofigure{figures/weak-supervision.jpg}{Weak supervision infiere la verdad latente modelando la confiabilidad y la correlación de los noisy voters.}{00:57:10--00:59:36}
+
+\begin{importantbox}{El beneficio de usar múltiples verifiers viene de la complementariedad de los errores}
+Si todos los verifiers son el mismo modelo base, con el mismo prompt y los mismos datos de entrenamiento, es probable que compartan puntos ciegos, y aumentar su número no aporta evidencia independiente. Un ensamble efectivo necesita diversidad en la fuente, la granularidad o el sesgo inductivo.
+\end{importantbox}
+
+\subsection{Weaver frente a un ensemble ingenuo}
+
+\videofigure{figures/weaver-vs-naive.jpg}{Weaver, con ponderación por confiabilidad, supera al simple promedio de múltiples verifiers.}{00:59:36--01:00:18}
+
+El curso analiza además el escalamiento del cómputo de verificación en torno a tres ejes: aumentar el número de candidatos del generator, aumentar el tamaño del modelo verifier y aumentar el número de verifiers. Estos mejoran, respectivamente, el coverage, la capacidad de juicio de un solo verifier y la complementariedad de los errores.
+
+\videofigure{figures/scaling-verification.jpg}{El cómputo de verificación puede escalarse a lo largo del número de candidatos, el tamaño del modelo y el número de verifiers.}{01:00:18--01:02:12}
+
+\subsection{Reducir la brecha entre clases de modelos}
+
+\videofigure{figures/model-class-gap.jpg}{Weaver reduce la brecha de desempeño final entre 8B y 70B, y entre 70B y el frontier model.}{01:02:12--01:04:32}
+
+Lo relevante aquí no es que un generator débil se convierta en uno fuerte, sino que un mejor selector extrae más de la capacidad ya presente en su distribución de candidatos. Si el límite superior del coverage del generator es bajo, el ensamble de verifiers tampoco puede superarlo.
+
+\subsection{Distillation: comprimir un ensamble costoso en un verifier ligero}
+
+Weaver puede generar etiquetas suaves para luego entrenar un verifier pequeño que imite la salida del ensamble. En el despliegue solo se ejecuta el modelo destilado, lo que reduce considerablemente el cómputo.
+
+\videofigure{figures/weaver-distillation.jpg}{El verifier destilado conserva la mayor parte del beneficio del ensamble y a la vez reduce de forma notable el costo de inferencia.}{01:04:32--01:06:08}
+
+\videofigure{figures/accuracy-compute.jpg}{Weaver mejora la frontera de Pareto de accuracy--compute.}{01:06:08--01:06:44}
+
+\begin{warningbox}{La distillation fija los sesgos sistemáticos del ensemble}
+El modelo pequeño no solo aprende el juicio colectivo correcto, también aprende los puntos ciegos compartidos por el ensemble. Después de la distillation conviene volver a evaluar la generalización fuera de distribución, la robustez adversarial y la calibración, y no limitarse a verificar que se reproduzca la precisión promedio.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Weaver usa weak supervision para convertir múltiples verifiers ruidosos en una señal de selección más fuerte, y puede destilarse aún más para reducir el costo de despliegue. Extiende la robust verification de "entrenar un judge más grande" a "diseñar señales diversas y aprender a combinarlas".
+\section{Cómo el verifier entra en un ciclo completo de auto mejora}
+
+\subsection{Fase de inferencia}
+
+\begin{itemize}
+    \item Best-of-$N$: se genera por completo y luego se hace un rerank;
+    \item Beam / tree search: se puntúan los prefijos y se podan;
+    \item Early stopping: se detiene la generación cuando la confianza es suficiente;
+    \item Critique and revise: se retroalimenta al generator con las razones de la puntuación baja para que revise.
+\end{itemize}
+
+\subsection{Fase de entrenamiento}
+
+\begin{itemize}
+    \item Filtrado de datos: solo se conservan las synthetic trajectory de puntuación alta;
+    \item Rejection sampling fine-tuning: se hace SFT con las trayectorias elegidas por el verifier;
+    \item Reinforcement learning: la puntuación del verifier se usa como reward;
+    \item Curriculum: los ejemplos de entrenamiento se organizan según la dificultad del paso y el tipo de error.
+\end{itemize}
+
+\subsection{Verificación de la estabilidad del ciclo cerrado}
+
+\begin{enumerate}
+    \item ¿El generator y el verifier usan conjuntos de evaluación independientes?
+    \item Después de actualizar el verifier, ¿los reward antiguos siguen siendo comparables?
+    \item ¿El RL eleva la puntuación del verifier pero reduce la tasa de acierto real?
+    \item ¿El nuevo generator produce una distribución adversarial que el verifier nunca ha visto?
+    \item ¿Se conserva la auditoría humana y un ground truth externo como ancla?
+\end{enumerate}
+
+\begin{importantbox}{La coevolución Generator--Verifier debe tener un ancla externa}
+Si el generator solo optimiza para el verifier, y el verifier a su vez solo aprende de los datos del generator, ambos pueden ir derivando juntos hacia un protocolo autoconsistente pero erróneo. Las pruebas ejecutables, las reglas formalizadas, la revisión manual por muestreo y los benchmark reservados son la clave para evitar que el ciclo cerrado se distorsione.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+El verifier es a la vez un selector, una heurística de búsqueda, un filtro de datos y un reward model. Sus sesgos se amplifican a lo largo del ciclo cerrado, por lo que la tarea de ingeniería más importante en un sistema de auto mejora no es «correr más rondas», sino demostrar que la señal de retroalimentación sigue alineada con el objetivo real.
+
+\section{Lecturas adicionales}
+
+\begin{itemize}
+    \item \href{https://arxiv.org/abs/2110.14168}{Cobbe et al., \emph{Training Verifiers to Solve Math Word Problems}}
+    \item \href{https://arxiv.org/abs/2305.20050}{Lightman et al., \emph{Let's Verify Step by Step}}
+    \item \href{https://arxiv.org/abs/2312.08935}{Wang et al., \emph{Math-Shepherd: Verify and Reinforce LLMs Step-by-step without Human Annotations}}
+    \item \href{https://arxiv.org/abs/2506.18203}{\emph{Shrinking the Generation--Verification Gap with Weak Verifiers}}
+\end{itemize}
+
+\section{Síntesis y ampliación}
+
+Esta clase mostró la trayectoria evolutiva del verifier. El outcome verifier respalda el best-of-$N$ mediante la etiqueta de la respuesta final; el process reward model mejora la asignación de crédito y la búsqueda mediante supervisión a nivel de paso; Math-Shepherd estima automáticamente el valor de cada paso a partir de la tasa de éxito de los rollouts; Weaver, por su parte, combina múltiples weak verifiers, aprovechando la complementariedad de sus errores para reducir el generation--verification gap, y disminuye el costo mediante destilación.
+
+Estos cuatro métodos responden, cada uno, a una de cuatro preguntas:
+
+\begin{enumerate}
+    \item \textbf{¿Es correcto el resultado?} ORM;
+    \item \textbf{¿En qué paso comienza el error?} PRM;
+    \item \textbf{¿Pueden generarse automáticamente las etiquetas de los pasos?} rollout-based process supervision;
+    \item \textbf{¿Cómo combinar múltiples judges poco confiables?} weak supervision ensemble.
+\end{enumerate}
+
+La siguiente clase lleva la retroalimentación de «juzgar la respuesta» a «interactuar con herramientas y con el entorno»: ReAct usa los resultados de la observación para corregir el razonamiento, RLEF utiliza la ejecución de código como reward de entrenamiento, y Constitutional AI emplea principios para que el modelo se autocritique y genere AI feedback.
+
+\end{document}

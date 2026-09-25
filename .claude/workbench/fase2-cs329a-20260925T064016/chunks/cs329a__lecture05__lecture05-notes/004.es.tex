@@ -1,0 +1,87 @@
+\section{SWiRL: Synthetic Data y Multi-Step RL}
+
+\subsection{Objetivos de diseño}
+
+Las tareas de herramientas de múltiples pasos exigen que el modelo aprenda: cuándo razonar, cuándo llamar a una herramienta, cómo consumir la observation, cómo recuperarse tras un error, cuándo detenerse y dar la respuesta final.
+
+\videofigure{figures/swirl-motivation.jpg}{Las tareas reales suelen requerir razonamiento de múltiples pasos y uso de herramientas.}{00:50:30--00:53:02}
+
+\videofigure{figures/swirl-goals.jpg}{SWiRL busca aprender la selección de herramientas, el consumo de retroalimentación, la recuperación de errores y el momento de detenerse.}{00:53:02--00:54:34}
+
+La restricción clave de SWiRL es: al entrenar el RL, evitar en la medida de lo posible llamar en línea a herramientas reales, porque las herramientas son lentas, propensas a fallar y difíciles de paralelizar. Primero genera fuera de línea trayectorias completas con observation, y después realiza step-wise RL sobre esos datos fijos.
+
+\subsection{Etapa 1: síntesis fuera de línea de trayectorias de múltiples pasos}
+
+Para cada prompt, el teacher model genera una sola action a la vez: puede ser reasoning, tool call o final answer. Si se llama a una herramienta, el entorno fuera de línea la ejecuta y escribe la observation de vuelta en el contexto, y luego continúa al siguiente paso. Un LLM judge asigna un process score a cada paso.
+
+\videofigure{figures/swirl-data-generation.jpg}{SWiRL genera y filtra fuera de línea reasoning--tool trajectories de múltiples pasos.}{00:54:34--00:58:32}
+
+Dos formas principales de filtrado:
+
+\begin{itemize}
+    \item \textbf{Process filtered}: conserva las trayectorias en las que cada paso es considerado razonable por el judge;
+    \item \textbf{Outcome filtered}: conserva solo las trayectorias con respuesta final correcta, sin importar la calificación de los pasos intermedios;
+    \item También se puede exigir que pasen tanto el filtro de process como el de outcome.
+\end{itemize}
+
+\subsection{Etapa 2: Step-Wise Reinforcement Learning}
+
+Durante el entrenamiento ya no se llama a las herramientas, sino que se reproduce la tool response contenida en los datos fuera de línea. El modelo elige una action en cada estado, y se actualiza la policy usando el reward por paso.
+
+\videofigure{figures/swirl-step-rl.jpg}{SWiRL ejecuta reinforcement learning a nivel de paso sobre las trayectorias fuera de línea.}{00:58:32--01:03:54}
+
+\videofigure{figures/swirl-objective.jpg}{El objetivo de RL de múltiples pasos de SWiRL acumula el reward para cada par estado--acción.}{01:03:54--01:05:16}
+
+Se puede abstraer como:
+
+$$
+J(\theta)=\mathbb E_{(s_t,a_t)\sim\mathcal D}
+\left[w_t\log\pi_\theta(a_t\mid s_t)\right],
+$$
+
+donde $w_t$ está determinado por el reward del paso o por el advantage. Se aumenta la probabilidad de las action de alta calidad y se suprime la de las de baja calidad.
+
+\begin{knowledgebox}{Ventaja de ingeniería de las trayectorias de herramientas fuera de línea}
+La ejecución de herramientas y el etiquetado del judge pueden completarse en paralelo por adelantado; el entrenamiento de RL solo lee un contexto fijo, con lo cual el throughput es mayor, el entorno es más estable y los experimentos son más reproducibles. Pero el modelo no puede explorar acciones nuevas que no estén en el dataset, por lo que su desempeño queda limitado por la cobertura fuera de línea.
+\end{knowledgebox}
+
+\subsection{Etapa 3: razonamiento real de múltiples pasos}
+
+Durante el despliegue, el modelo vuelve a conectarse con herramientas reales y, siguiendo la policy obtenida en el entrenamiento, itera entre reasoning, tool use y final answer.
+
+\videofigure{figures/swirl-inference.jpg}{En la etapa de inferencia se reactivan las herramientas reales y se ejecuta un ciclo cerrado de múltiples pasos.}{01:05:16--01:06:16}
+
+\subsection{Por qué el Process Filtering resulta mejor}
+
+En los experimentos, los datos filtrados solo por calidad de process superan tanto a los que solo conservan la respuesta final correcta como a los que exigen que proceso y resultado sean correctos a la vez.
+
+\videofigure{figures/swirl-filtering.jpg}{Las Process-filtered synthetic trajectories aportan el mayor beneficio de entrenamiento.}{01:06:16--01:08:18}
+
+La razón es que el outcome filtering solo conserva problemas que el teacher ya sabía resolver, lo que fácilmente produce una "distribución estrecha de trayectorias exitosas"; el process filtering, en cambio, también conserva problemas difíciles cuyos pasos locales son correctos pero cuyo resultado final falla, lo que aporta al modelo nuevos componentes de razonamiento y señales de recuperación de errores.
+
+\begin{importantbox}{La corrección local puede aportar más cobertura de aprendizaje que el éxito final}
+Una trayectoria que finalmente falla aún puede contener una buena descomposición del problema, llamadas a herramientas correctas o evidencia intermedia útil. Si se descarta la trayectoria completa solo por el reward final, estas habilidades reutilizables también se eliminan. El process filtering cambia la selección de datos de "éxito o fracaso del problema completo" a "valor del paso".
+\end{importantbox}
+
+\subsection{Generalización entre tareas y entre herramientas}
+
+Tras entrenar con GSM8K + calculator, el modelo también mejora en HotpotQA + search; y a la inversa también ocurre. Esto indica que el modelo no solo memoriza una API específica, sino que está aprendiendo una política general de gestión de estado de múltiples pasos y de "cuándo recurrir a una herramienta".
+
+\videofigure{figures/swirl-generalization.jpg}{SWiRL muestra generalización entre herramientas, entre matemáticas y preguntas y respuestas de múltiples saltos.}{01:08:18--01:10:02}
+
+\videofigure{figures/swirl-data-scaling.jpg}{Aumentar la escala de los datos de entrenamiento sintéticos sigue mejorando el desempeño tanto dentro como fuera de la distribución.}{01:10:02--01:11:34}
+
+\videofigure{figures/process-correctness.jpg}{La mejora del process reward fuera de la distribución indica que el beneficio proviene de un mejor proceso de múltiples pasos.}{01:11:34--01:12:20}
+
+\subsection{Limitaciones}
+
+\begin{itemize}
+    \item El sesgo del LLM judge se traslada al process reward;
+    \item La observation fuera de línea impide que la policy experimente errores nuevos de las herramientas;
+    \item El costo de generación de trayectorias es alto, y la cobertura puede ser insuficiente;
+    \item Cuando el schema de una herramienta nueva difiere demasiado del de las herramientas de entrenamiento, la generalización sigue fallando.
+\end{itemize}
+
+\subsection{Resumen de la sección}
+
+SWiRL convierte la interacción en línea con herramientas en synthetic trajectory fuera de línea, y luego aprende una policy de múltiples pasos mediante step-wise RL. El resultado más importante es que filtrar por calidad del proceso favorece más la generalización que exigir solamente la corrección del resultado final, lo que indica que los datos de entrenamiento deben conservar capacidades locales reutilizables.

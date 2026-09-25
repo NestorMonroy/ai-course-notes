@@ -1,0 +1,343 @@
+\documentclass[a4paper]{article}
+\input{../notes-shared.es-mx.tex}
+
+\newcommand{\notetitle}{Stanford CS329A: agentes de IA que se automejoran\\Part 4: aprendizaje a partir de herramientas, código y retroalimentación de IA}
+\newcommand{\lecturers}{Aakanksha Chowdhery}
+\newcommand{\noteauthors}{AI Course Notes \& Codex}
+\newcommand{\notedate}{10 de agosto de 2026}
+\newcommand{\lecturedate}{2025-10-03}
+\newcommand{\videoduration}{1:11:13}
+\newcommand{\videourl}{https://www.youtube.com/watch?v=Lxh9RF5S-K0}
+
+\begin{document}
+\makelecturetitle
+
+\section{Una perspectiva unificada: ¿de dónde viene la retroalimentación?}
+
+Un sistema de automejora necesita una señal que le indique al modelo "qué tan bien lo acaba de hacer". Esta clase compara tres tipos de retroalimentación:
+
+\begin{enumerate}
+    \item \textbf{observación de herramienta (tool observation)}: resultados de búsqueda, contenido de páginas web o el estado del entorno;
+    \item \textbf{retroalimentación de ejecución (execution feedback)}: errores de compilación, pruebas unitarias, comportamiento en tiempo de ejecución;
+    \item \textbf{AI feedback}: el modelo critica, revisa y compara respuestas con base en principios escritos por humanos.
+\end{enumerate}
+
+\videofigure{figures/thought-action-feedback.jpg}{El pensamiento guía la acción, la acción produce retroalimentación, y la retroalimentación corrige de nuevo al pensamiento.}{00:01:32--00:03:32}
+
+Los tres tipos de métodos corresponden respectivamente a ReAct, RLEF y Constitutional AI. Comparten el mismo ciclo cerrado:
+
+$$
+\text{state}\rightarrow\text{reason / act}\rightarrow\text{feedback}
+\rightarrow\text{revision or update}.
+$$
+
+\begin{importantbox}{La retroalimentación puede modificar solo la trayectoria actual, o bien los parámetros del modelo}
+ReAct principalmente lee la observation en tiempo de inferencia y ajusta el siguiente paso; RLEF toma el resultado de la ejecución como reward de RL para actualizar el modelo de código; Constitutional AI primero usa los datos de critique--revision para SFT, y después usa la AI preference para RL. Distinguir estos dos niveles evita confundir "poder reintentar" con "ya haber aprendido".
+\end{importantbox}
+
+\subsection{Cuatro dimensiones para evaluar la calidad de la retroalimentación}
+
+\begin{itemize}
+    \item \textbf{Autenticidad}: si proviene de un entorno real y no del modelo hablando consigo mismo;
+    \item \textbf{Granularidad}: si solo indica el éxito o fracaso final, o si señala errores concretos;
+    \item \textbf{Costo}: si requiere expertos humanos, ejecución en sandbox o un modelo grande adicional;
+    \item \textbf{Escalabilidad}: si puede generar automáticamente una gran cantidad de ejemplos de entrenamiento.
+\end{itemize}
+
+\subsection{Resumen de la sección}
+
+La retroalimentación es la interfaz entre el modelo y el objetivo. Las herramientas y el código proporcionan señales externas observables, mientras que el AI feedback proporciona una señal normativa escalable pero más subjetiva; la confiabilidad del sistema depende de si estas señales corresponden realmente al objetivo final.
+
+\section{ReAct: intercalando Reasoning y Acting}
+
+\subsection{Por qué no basta con solo pensar o solo actuar}
+
+Chain-of-thought puede descomponer un problema, pero el razonamiento interno no puede corregir automáticamente conocimiento desactualizado o alucinaciones; la sola invocación de herramientas puede obtener información nueva, pero carece de planeación de largo plazo e integración entre observaciones. ReAct hace que el modelo genere de forma alternada:
+
+\begin{itemize}
+    \item \textbf{Thought}: el juicio actual, los subobjetivos y la justificación del siguiente paso;
+    \item \textbf{Action}: una búsqueda, un clic, una consulta o una operación sobre el entorno;
+    \item \textbf{Observation}: el estado externo devuelto por la herramienta.
+\end{itemize}
+
+\videofigure{figures/react-contribution.jpg}{ReAct intercala razonamiento en lenguaje y acciones sobre el entorno en una trayectoria unificada.}{00:04:40--00:06:46}
+
+\videofigure{figures/react-loop.jpg}{Reasoning se encarga de planear e integrar, Action aporta evidencia nueva y corrige el razonamiento.}{00:06:46--00:07:32}
+
+\subsection{Formalización como proceso de decisión secuencial}
+
+En el paso de tiempo $t$, el agente elige una acción con base en el contexto histórico $c_t$:
+
+$$
+a_t\sim\pi_\theta(a\mid c_t),\qquad
+c_{t+1}=c_t\oplus a_t\oplus o_{t+1},
+$$
+
+donde $o_{t+1}$ es la observation que devuelve el entorno después de ejecutar la acción. Lo particular de ReAct es que $a_t$ puede incluir tanto un thought en lenguaje como una action ejecutable, y ambos comparten el mismo contexto.
+
+\videofigure{figures/react-setup.jpg}{El agente observa el entorno, elige una acción y escribe la nueva observation de vuelta en el contexto.}{00:07:32--00:09:06}
+
+\begin{knowledgebox}{Thought también es una forma de comprimir el estado interno}
+El modelo no necesita conservar todo el historial tal cual en un estado de programa estructurado; en cambio, resume en lenguaje natural las hipótesis, evidencias y pendientes actuales. Esto es flexible, pero también puede producir deriva de estado: un resumen erróneo temprano puede tomarse como hecho en el contexto posterior.
+\end{knowledgebox}
+
+\subsection{Reason-only, Act-only y ReAct}
+
+\videofigure{figures/react-example.jpg}{En preguntas y respuestas de varios saltos, ReAct corrige el razonamiento interno mediante observations de búsqueda.}{00:09:06--00:17:18}
+
+\begin{itemize}
+    \item \textbf{Reason-only}: puede formar un plan, pero puede seguir razonando con base en una memoria errónea;
+    \item \textbf{Act-only}: puede obtener hechos, pero tiende a carecer de gestión de subobjetivos e integración entre pasos;
+    \item \textbf{ReAct}: usa el thought para decidir qué buscar, y la observation para verificar y actualizar el thought.
+\end{itemize}
+
+\subsection{Tareas intensivas en conocimiento: HotpotQA y FEVER}
+
+HotpotQA exige responder preguntas de varios saltos a través de múltiples páginas de Wikipedia; FEVER exige recuperar evidencia para determinar si una afirmación es verdadera o falsa. Estas tareas evalúan no solo la respuesta final, sino también si se logra encontrar la evidencia que la sustenta.
+
+\videofigure{figures/knowledge-tasks.jpg}{ReAct combina recuperación y razonamiento en tareas de preguntas y respuestas de varios saltos y de verificación de hechos.}{00:17:18--00:20:46}
+
+La ventaja de ReAct es que la trayectoria es interpretable: los investigadores pueden ver qué buscó el modelo, en qué paso aceptó evidencia errónea y si repitió búsquedas. Pero un «thought visible» no garantiza que refleje fielmente el proceso causal interno del modelo; es más apropiado tratarlo como memoria de trabajo depurable.
+
+\subsection{Tareas de decisión: WebShop}
+
+WebShop exige que el agente navegue, filtre y compre productos en un sitio de compras simulado siguiendo las restricciones del usuario. El éxito no depende solo del conocimiento, sino también de operaciones con estado y de flujos de página que no pueden saltarse.
+
+\videofigure{figures/webshop.jpg}{WebShop convierte restricciones en lenguaje natural en acciones web de varios pasos.}{00:20:46--00:22:10}
+
+\subsection{Ventajas y modos de fallo}
+
+\videofigure{figures/react-strengths.jpg}{La ventaja de ReAct es que es simple, interpretable y no requiere actualizar los parámetros del modelo.}{00:22:10--00:23:22}
+
+Los fallos comunes incluyen:
+
+\begin{itemize}
+    \item la consulta de búsqueda es demasiado estrecha, y la primera evidencia errónea fija el rumbo de los pasos siguientes;
+    \item la observation es demasiado larga, y la información clave queda sepultada por el ruido;
+    \item el thought describe el estado de forma repetitiva sin hacer avanzar el plan;
+    \item un error de herramienta o un cambio en la página invalida la trayectoria;
+    \item falta una condición de detención, y el agente entra en bucle sobre la misma acción.
+\end{itemize}
+
+\begin{warningbox}{El resultado de una herramienta no es ground truth confiable por naturaleza}
+Los resultados de búsqueda pueden estar desactualizados, una página web puede contener prompt injection malicioso y una base de datos puede tener permisos insuficientes. El agente debe registrar la fuente, verificar la evidencia y limitar los permisos de las herramientas, en lugar de elevar la observation a instrucción del sistema sin condiciones.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+ReAct convierte el razonamiento en lenguaje de un proceso de generación cerrado en una trayectoria que puede interactuar con el entorno. Su principal aporte es la capacidad de autocorrección dentro de la tarea actual, pero los parámetros no se actualizan; para que el modelo mejore de forma duradera a partir de una gran cantidad de experiencias de ejecución, se necesita retroalimentación durante el entrenamiento.
+\section{RLEF: aprendizaje por refuerzo a partir de la retroalimentación de la ejecución de código}
+
+\subsection{Por qué el entorno de código es especialmente adecuado para RL}
+
+La generación de código tiene acciones y observaciones bien definidas: la acción es enviar o modificar código, la observación es el resultado de la compilación, la salida de las pruebas y los registros de errores. En comparación con las preferencias humanas, la retroalimentación de la ejecución es barata, reproducible, cercana a lo objetivo y puede escalar automáticamente a una gran cantidad de problemas.
+
+\videofigure{figures/rlef-contributions.jpg}{RLEF toma el código como acción y el resultado de la ejecución como observation, construyendo un RL de extremo a extremo.}{00:28:00--00:30:08}
+
+\subsection{Marco de entrenamiento interactivo}
+
+En RLEF, la policy genera el programa; el sandbox ejecuta pruebas públicas o privadas; la retroalimentación se devuelve al modelo, que puede realizar reparaciones en varias rondas; al terminar el episode se calcula el reward según si las pruebas se superaron, y se actualiza la policy con PPO.
+
+\videofigure{figures/rlef-framework.jpg}{La exploración, la retroalimentación de la ejecución, la recolección de trayectorias y la policy update en RLEF.}{00:30:08--00:31:08}
+
+El episode se puede representar como:
+
+$$
+\tau=(c_0,o_0,c_1,o_1,\ldots,c_T,o_T),
+$$
+
+donde $c_t$ es la salida o modificación de código en la ronda $t$, y $o_t$ es la retroalimentación de la ejecución. El reward final se puede escribir como:
+
+$$
+R(\tau)=\frac{1}{M}\sum_{j=1}^{M}\mathbf 1[\mathrm{test}_j(c_T)=\mathrm{pass}].
+$$
+
+\begin{itemize}
+    \item $M$: número de casos de prueba;
+    \item $R(\tau)$: proporción de pruebas que supera el código final;
+    \item las pruebas privadas pueden reducir el riesgo de que el modelo haga hard-coding orientado a las pruebas públicas.
+\end{itemize}
+
+\subsection{Hybrid Token / Turn-Level Policy}
+
+Las acciones de un Agent de código incluyen tanto la generación a nivel de token como las decisiones de "enviar, ejecutar, modificar" a nivel de turn. RLEF combina ambas granularidades: la probabilidad a nivel de token determina el contenido del código, y el turn reward refleja el resultado completo de la ejecución.
+
+\videofigure{figures/hybrid-policy.jpg}{PPO procesa simultáneamente la generación a nivel de token y la retroalimentación de la ejecución en varias rondas.}{00:31:08--00:34:28}
+
+El objetivo abstracto de PPO es:
+
+$$
+\max_\theta\;\mathbb E_t\left[
+\min\left(r_t(\theta)A_t,
+\operatorname{clip}(r_t(\theta),1-\epsilon,1+\epsilon)A_t\right)
+\right],
+$$
+
+\begin{itemize}
+    \item $r_t(\theta)=\pi_\theta(a_t\mid s_t)/\pi_{\theta_{\rm old}}(a_t\mid s_t)$;
+    \item $A_t$: la advantage derivada de la retroalimentación de la ejecución;
+    \item $\epsilon$: el coeficiente de clipping que limita la magnitud de cada policy update.
+\end{itemize}
+
+\subsection{Rendimiento a medida que se amplía la retroalimentación de la ejecución}
+
+\videofigure{figures/rlef-scaling.jpg}{El solve rate tras el entrenamiento con RLEF mejora conforme aumenta la retroalimentación de la ejecución disponible.}{00:34:28--00:36:24}
+
+La retroalimentación no solo se usa para entrenar, sino que también cambia el comportamiento en el momento de la inferencia. El modelo aprende a hacer modificaciones dirigidas según el tipo de error, en lugar de reescribir por completo el código en cada ronda.
+
+\videofigure{figures/rlef-generalization.jpg}{El comportamiento de razonamiento y la generalización de RLEF en CodeContests, HumanEval+ y MBPP+.}{00:36:24--00:36:54}
+
+\videofigure{figures/multiturn-feedback.jpg}{La execution feedback en varias rondas repara progresivamente los errores de la ronda anterior.}{00:36:54--00:39:22}
+
+\begin{importantbox}{La execution feedback es a la vez verifier y curriculum}
+El resultado de las pruebas determina si el programa actual es correcto; los registros de errores además indican qué debe aprender el modelo en la siguiente ronda. Conforme avanza el entrenamiento, los errores fáciles disminuyen, la policy se encuentra con casos límite más difíciles, y el entorno forma de manera natural un curriculum adaptativo.
+\end{importantbox}
+
+\subsection{Reward Hacking y cobertura de pruebas}
+
+Si el reward proviene solo de pruebas limitadas, el modelo puede escribir casos especiales, aprovechar vulnerabilidades del sandbox o generar programas que agotan el tiempo pero pasan por casualidad. Se necesita:
+
+\begin{itemize}
+    \item pruebas ocultas y pruebas generadas dinámicamente;
+    \item límites de recursos, aislamiento de red y un sandbox determinista;
+    \item añadir restricciones de eficiencia, seguridad y legibilidad además de la corrección;
+    \item hacer pruebas de regresión sobre los exploits descubiertos durante el entrenamiento.
+\end{itemize}
+
+\begin{warningbox}{Pasar las pruebas solo demuestra "satisfacer las pruebas", no que el programa sea correcto}
+Los unit tests son un muestreo limitado de la especificación. Cuando la cobertura de pruebas es insuficiente, el RL buscará sistemáticamente las zonas no cubiertas. Si las pruebas de entrenamiento se filtran al contexto del modelo, además el problema degenera en memorización o hard-coding.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+RLEF convierte el entorno de ejecución de código en una reward source escalable, permitiendo que el modelo no solo repare errores en la trayectoria actual, sino que también escriba la estrategia de reparación en los parámetros mediante PPO. Su límite superior lo determinan la calidad de las pruebas, la seguridad del sandbox y el diseño del reward.
+\section{Constitutional AI: aprender a partir de AI Feedback}
+
+\subsection{Por qué sustituir una gran cantidad de etiquetas de preferencia con principios}
+
+RLHF requiere una gran cantidad de comparaciones humanas. Constitutional AI intenta comprimir el juicio de valores humano en un pequeño número de principios explícitos, para que el modelo, con base en esos principios, critique, revise y compare respuestas, ampliando así los datos de post-entrenamiento mediante AI feedback.
+
+\videofigure{figures/ai-feedback-scaling.jpg}{Un pequeño número de principios humanos impulsa una gran cantidad de AI critique y preference labels.}{00:46:32--00:48:42}
+
+\begin{knowledgebox}{Una constitution es una norma ejecutable, no una lista de consignas}
+Los principios eficaces deben poder aplicarse a una respuesta concreta: señalar qué párrafo viola qué requisito y proponer cómo revisarlo. Los principios demasiado abstractos, que se contradicen entre sí o que carecen de prioridad hacen que el modelo produzca juicios inestables.
+\end{knowledgebox}
+
+\subsection{Etapa uno: Critique--Revision Supervised Learning}
+
+El proceso es el siguiente:
+
+\begin{enumerate}
+    \item Se usa un red-team prompt para inducir al asistente base a producir una respuesta problemática;
+    \item se elige una constitutional principle y se le pide al modelo que critique la respuesta;
+    \item se le pide al modelo que reescriba la respuesta con base en la crítica;
+    \item se usa la respuesta revisada para hacer supervised fine-tuning.
+\end{enumerate}
+
+\videofigure{figures/constitutional-pipeline.jpg}{Constitutional AI usa principios para impulsar la autocrítica y la revisión.}{00:48:42--00:49:38}
+
+\videofigure{figures/constitution-example.jpg}{Ejemplos de critique / revision principle para daño, sesgo y adecuación infantil.}{00:49:38--00:50:48}
+
+\videofigure{figures/constitutional-sft.jpg}{En la primera etapa se usan para SFT las respuestas seguras revisadas por el modelo.}{00:50:48--00:51:24}
+
+\subsection{Beneficios y costos de las revisiones en varias rondas}
+
+A medida que aumenta el número de revisions, la harmlessness mejora, pero la helpfulness puede disminuir: el modelo se vuelve excesivamente reacio a responder por evitar riesgos. El objetivo general no es maximizar la seguridad de forma aislada, sino encontrar una mejora de Pareto entre helpfulness y harmlessness.
+
+\videofigure{figures/revision-results.jpg}{Varias rondas de revision mejoran la harmlessness, pero pueden reducir al mismo tiempo la helpfulness.}{00:51:24--00:52:20}
+
+\begin{warningbox}{Más principios no siempre son mejores}
+Varios principios pueden entrar en conflicto entre sí, por ejemplo «intentar responder siempre al usuario» frente a «evitar cualquier riesgo potencial». Si no hay condiciones de aplicación ni prioridades, el modelo optará por la estrategia de rechazo más conservadora, aparentemente segura pero sin utilidad práctica.
+\end{warningbox}
+
+\subsection{Etapa dos: RLAIF}
+
+En la etapa de RL, el modelo compara varias respuestas candidatas con base en la constitution y genera AI preference labels; después se entrena un preference model y se optimiza la policy del asistente igual que en RLHF.
+
+\videofigure{figures/rlaif.jpg}{RLAIF usa una AI que, con base en principios, genera preferencias, para después entrenar el reward model y la policy.}{00:52:20--00:56:36}
+
+Si los candidatos son $y_a,y_b$, el AI judge da la siguiente probabilidad de preferencia:
+
+$$
+P(y_a\succ y_b\mid x,\mathcal C)
+=\sigma\!\left(r_\phi(x,y_a,\mathcal C)-r_\phi(x,y_b,\mathcal C)\right),
+$$
+
+\begin{itemize}
+    \item $\mathcal C$: constitution;
+    \item $r_\phi$: preference model que evalúa con base en los principios;
+    \item $\sigma$: función logistic.
+\end{itemize}
+
+\subsection{Resultado: llevar los principios a escala como señal de entrenamiento}
+
+\videofigure{figures/constitutional-results.jpg}{Constitutional SFT y RL forman una mejora de Pareto en helpfulness--harmlessness.}{00:56:36--01:00:02}
+
+El valor de Constitutional AI es convertir a los humanos de anotadores muestra por muestra en diseñadores de reglas; pero el AI judge todavía puede malinterpretar los principios, compartir el sesgo del generator o ser sensible a la redacción del prompt.
+
+\begin{importantbox}{El AI feedback debe calibrarse con una evaluación externa}
+La autoevaluación del modelo puede ampliar los datos, pero no puede demostrar por sí misma que es correcta. Debe usarse un red-team independiente, muestreo humano, behavior benchmarks y retroalimentación del despliegue real para calibrar continuamente la constitution y el judge, y evitar un ciclo cerrado autoconsistente pero desviado de los objetivos humanos.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Constitutional AI convierte los principios en critique, revision y preference labels, que se usan respectivamente para SFT y RL. Reduce de manera notable el costo de anotación humana muestra por muestra, pero traslada la dificultad al diseño de principios, el manejo de conflictos y la calibración del AI judge.
+
+\section{Comparación sistemática de tres métodos de retroalimentación}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{>{\raggedright\arraybackslash}p{2.3cm}>{\raggedright\arraybackslash}p{3.4cm}>{\raggedright\arraybackslash}p{3.2cm}>{\raggedright\arraybackslash}p{4.2cm}}
+\toprule
+\textbf{Método} & \textbf{Fuente de retroalimentación} & \textbf{Uso principal} & \textbf{Riesgo clave} \\
+\midrule
+ReAct & Observation de búsqueda, páginas web, herramientas & Planeación y corrección de la trayectoria actual & Contenido no confiable, ciclos, desviación de estado \\
+RLEF & Compilador, pruebas, registros de ejecución & Corrección de múltiples rondas y actualización con RL & Especulación en las pruebas, exploit del sandbox, cobertura insuficiente \\
+Constitutional AI & Critique / preference de IA guiada por principios & SFT y RLAIF & Conflicto de principios, sesgo del judge, negativas excesivas a responder \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Arquitectura común}
+
+Los tres se pueden descomponer en:
+
+$$
+\text{proposal}\rightarrow\text{feedback function}
+\rightarrow\text{revised proposal}\rightarrow\text{selection / update}.
+$$
+
+La diferencia está en la objetividad y el costo de la feedback function. La retroalimentación de ejecución es la más cercana al ground truth, pero solo aplica a tareas ejecutables; la AI feedback tiene una cobertura amplia, pero requiere una calibración externa más fuerte.
+
+\subsection{Principios de diseño}
+
+\begin{enumerate}
+    \item Cuando se pueda verificar con un entorno real, priorizar la señal del entorno;
+    \item Descomponer la retroalimentación en granularidad de error accionable;
+    \item Colocar las acciones irreversibles fuera del límite de permisos;
+    \item Mantener el reward de entrenamiento independiente de la métrica de evaluación final;
+    \item Registrar todas las fuentes de retroalimentación y las versiones del modelo, para permitir la reproducción.
+\end{enumerate}
+
+\subsection{Resumen de la sección}
+
+Mientras más automatizada sea la retroalimentación, más fácil escala el sistema; mientras más cercana esté la retroalimentación al resultado real, menos propenso es el sistema a desviarse. Los sistemas de autosuperación de alta calidad suelen combinar múltiples señales: la ejecución externa como ancla, el critique del modelo aporta explicaciones densas, y los humanos se encargan de los principios y los límites de alto riesgo.
+
+\section{Lecturas adicionales}
+
+\begin{itemize}
+    \item \href{https://arxiv.org/abs/2210.03629}{Yao et al., \emph{ReAct: Synergizing Reasoning and Acting in Language Models}}
+    \item \href{https://arxiv.org/abs/2410.02089}{\emph{RLEF: Grounding Code LLMs in Execution Feedback with Reinforcement Learning}}
+    \item \href{https://arxiv.org/abs/2212.08073}{Bai et al., \emph{Constitutional AI: Harmlessness from AI Feedback}}
+\end{itemize}
+
+\section{Síntesis y ampliación}
+
+Esta sesión explica cómo mejora un Agent a partir de tres fuentes de retroalimentación. ReAct intercala thought, action y observation en el momento de la inferencia, y usa la retroalimentación de las herramientas para corregir la trayectoria actual; RLEF toma el resultado de la ejecución del código como reward escalable y aprende una estrategia de reparación mediante interacciones de múltiples rondas y PPO; Constitutional AI amplía los principios humanos a critique, revision y preference labels de la IA, que se usan para el fine-tuning supervisado y para RLAIF.
+
+La conclusión unificadora más importante es: \textbf{el valor de la retroalimentación no depende de si la produce un humano o una IA, sino de su correspondencia con el objetivo real, de la granularidad del error, de la escalabilidad y de la resistencia a la especulación.} La retroalimentación del entorno suele ser más objetiva pero está limitada a un dominio, mientras que el AI feedback es más general pero necesita un ancla externa.
+
+La siguiente sesión aborda planning y multi-step reasoning: cuando una tarea requiere una cadena de acciones muy larga, cómo debe el sistema buscar en el árbol de planes, cómo convertir un plan secuencial en ejecución paralela, y cómo usar synthetic trajectories para entrenar la capacidad de uso de herramientas en múltiples pasos.
+
+\end{document}

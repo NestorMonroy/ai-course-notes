@@ -1,0 +1,393 @@
+\documentclass[a4paper]{article}
+\input{../notes-shared.es-mx.tex}
+
+\newcommand{\notetitle}{Stanford CS329A: agentes de IA que se automejoran\\Part 2: escalamiento de cómputo en tiempo de prueba}
+\newcommand{\lecturers}{Azalia Mirhoseini}
+\newcommand{\noteauthors}{AI Course Notes \& Codex}
+\newcommand{\notedate}{10 de agosto de 2026}
+\newcommand{\lecturedate}{2025-09-26}
+\newcommand{\videoduration}{1:03:20}
+\newcommand{\videourl}{https://www.youtube.com/watch?v=-Ggc37xLj_Y}
+
+\begin{document}
+\makelecturetitle
+
+\section{Planteamiento del problema: el modelo no cambia, el presupuesto de cómputo aumenta}
+
+Las scaling laws tradicionales concentran la mayor parte del cómputo en la etapa de entrenamiento; el test-time compute scaling plantea otra pregunta: \textbf{una vez fijados los parámetros del modelo, ¿es posible, mediante más muestreo, búsqueda, revisión y verificación, elevar la tasa final de éxito de ese mismo modelo?} Esta clase se organiza en torno a tres líneas de trabajo:
+
+\begin{enumerate}
+    \item Large Language Monkeys: por qué el muestreo repetido presenta una scaling law predecible;
+    \item Compute-optimal test-time scaling: cómo debe distribuirse el presupuesto entre el muestreo paralelo y la revisión secuencial;
+    \item Archon: cómo buscar automáticamente una arquitectura de razonamiento compuesta por generator, critic, ranker, fuser y verifier.
+\end{enumerate}
+
+\begin{importantbox}{La descomposición central de esta clase}
+El test-time scaling no es un solo algoritmo, sino tres preguntas: si la \textbf{generación} puede cubrir el candidato correcto, si la \textbf{verificación} puede identificar el candidato correcto y si el \textbf{control del presupuesto} puede destinar el cómputo limitado a las operaciones de mayor valor. Optimizar solo uno de estos aspectos puede hacer que los otros dos absorban toda la ganancia de extremo a extremo.
+\end{importantbox}
+
+\subsection{Cuatro métricas de evaluación}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{3.1cm}p{10.5cm}}
+\toprule
+\textbf{Métrica} & \textbf{Significado} \\
+\midrule
+pass@1 & precisión final cuando el sistema entrega una sola respuesta \\
+pass@$k$ / coverage & probabilidad de que exista al menos una respuesta correcta entre $k$ candidatos \\
+best-of-$N$ & se generan $N$ candidatos y un verifier selecciona una respuesta \\
+majority@$N$ & se vota según la frecuencia de las respuestas, bajo el supuesto implícito de que \enquote{la respuesta correcta es la que aparece con más frecuencia} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Resumen de la sección}
+
+Aumentar el cómputo de inferencia primero amplía el conjunto de candidatos, pero el sistema final solo entrega un resultado, por lo que el coverage y el pass@1 deben medirse por separado. Todos los métodos posteriores pueden entenderse como una forma de equilibrar la calidad de los candidatos, la calidad de la selección y el costo de cómputo.
+
+\section{Large Language Monkeys: Scaling Law del muestreo repetido}
+
+\subsection{El sistema de dos etapas: generación y verificación}
+
+Repeated sampling primero muestrea de manera independiente múltiples candidatos a partir del mismo modelo, y después los entrega a un verifier para que elija. El código y las demostraciones formales se adaptan especialmente bien a este método, porque las pruebas unitarias, los compiladores y el proof checker pueden ofrecer retroalimentación automática casi determinista.
+
+\videofigure{figures/generate-verify.jpg}{La generación de múltiples candidatos y su verificación constituyen el flujo básico del inference scaling.}{00:01:18--00:02:22}
+
+Supongamos que la probabilidad de éxito de un solo muestreo para el problema $i$ es $p_i$; la oracle coverage al muestrear $k$ veces de forma independiente es:
+
+$$
+C_i(k)=1-(1-p_i)^k.
+$$
+
+\begin{itemize}
+    \item $p_i$: la probabilidad de éxito de un solo intento del modelo en el problema $i$;
+    \item $k$: el número de muestreos;
+    \item $C_i(k)$: la probabilidad de que el conjunto de candidatos contenga al menos una solución correcta.
+\end{itemize}
+
+Esto muestra que cada problema en sí mismo presenta una saturación exponencial: el muestreo inicial aporta el mayor beneficio, y después la ganancia marginal disminuye gradualmente.
+
+\subsection{Por qué un modelo pequeño puede alcanzar a un modelo fuerte mediante el muestreo}
+
+Mientras $p_i>0$, aumentar $k$ puede elevar la coverage. En los experimentos, un modelo más pequeño reduce de manera notable, mediante un gran número de muestreos, la brecha respecto de un modelo fuerte con inferencia única en matemáticas, código y demostraciones formales.
+
+\videofigure{figures/repeated-sampling.jpg}{El muestreo repetido amplifica de manera notable la capacidad del modelo en múltiples reasoning benchmarks.}{00:02:22--00:04:06}
+
+\begin{knowledgebox}{¿La capacidad se "amplifica" o se "descubre"?}
+Repeated sampling no modifica los parámetros ni hace que el modelo aprenda un algoritmo nuevo. Lo que hace es aumentar, dentro de la distribución de salidas que el modelo ya posee, la probabilidad de obtener una trayectoria correcta de baja probabilidad. Por eso es más preciso decir que \textbf{descubre y aprovecha una capacidad latente}, y no que crea una capacidad totalmente nueva.
+\end{knowledgebox}
+
+\subsection{De la curva exponencial de un solo problema a la ley de potencias promedio del dataset}
+
+El ajuste empírico que ofrece el curso es la exponentiated power law:
+
+$$
+\bar C(k)\approx 1-\exp(-a k^b),\qquad a>0,\;0<b<1.
+$$
+
+\begin{itemize}
+    \item $\bar C(k)$: la coverage promedio sobre el dataset;
+    \item $a$: un parámetro de escala relacionado con el modelo y la dificultad general de la tarea;
+    \item $b$: el exponente que controla la velocidad del scaling;
+    \item $k$: el presupuesto de muestreo en inferencia.
+\end{itemize}
+
+\videofigure{figures/inference-scaling-law.jpg}{La coverage promedio sigue una exponentiated power law predecible conforme aumenta el número de muestreos.}{00:05:18--00:07:06}
+
+Un solo problema es $1-(1-p_i)^k$; ¿por qué al promediar sobre los problemas surge una ley de potencias? La clave está en la distribución de $p_i$: en el dataset existe una gran cantidad de problemas difíciles que el modelo solo resuelve ocasionalmente, lo que forma una cola larga cercana a cero.
+
+\videofigure{figures/scaling-across-models.jpg}{El inference scaling se observa tanto en modelos pequeños como en modelos grandes.}{00:07:07--00:09:40}
+
+\subsection{La cola larga es una condición suficiente para la ley de potencias promedio}
+
+Si la probabilidad de éxito de los problemas tiene, cerca de $p\rightarrow0$, una densidad
+
+$$
+f(p)\propto p^{\alpha-1},
+$$
+
+entonces la tasa de fallo promedio del dataset se aproxima a:
+
+$$
+1-\bar C(k)=\mathbb{E}_{p}[(1-p)^k]
+\approx\int_{0}^{\infty} e^{-kp}p^{\alpha-1}\,dp
+\propto k^{-\alpha}.
+$$
+
+\begin{itemize}
+    \item $f(p)$: la distribución de la probabilidad de éxito de un solo intento para los distintos problemas;
+    \item $\alpha$: el exponente de la cola larga cercana a cero;
+    \item $k^{-\alpha}$: la tasa de fallo promedio, que decae conforme crece el presupuesto de muestreo.
+\end{itemize}
+
+\videofigure{figures/long-tail-theorem.jpg}{La gran cantidad de problemas con baja probabilidad de éxito hace que el pass@$k$ promedio del dataset siga una ley de potencias.}{00:09:40--00:11:42}
+
+\begin{importantbox}{La cola larga determina la duración del inference scaling}
+Si el $p_i$ de todos los problemas es alto, la saturación llega después de pocos muestreos; si una gran cantidad de problemas tiene un $p_i$ extremadamente bajo pero distinto de cero, el beneficio se extiende hasta valores de $k$ muy grandes. Por eso la forma del inference scaling no la determina únicamente el modelo, sino también la distribución de dificultad del benchmark.
+\end{importantbox}
+
+\subsection{El cambio en el paradigma de asignación de cómputo}
+
+Cuando el cómputo de inferencia puede intercambiarse de manera predecible por tasa de éxito, el sistema ya no tiene que fijar todo su presupuesto en el pre-training. Para un número reducido de solicitudes de alto valor, invertir una gran cantidad de test-time compute puede resultar más económico que entrenar y desplegar un modelo más grande.
+
+\videofigure{figures/compute-allocation.jpg}{El cambio de "entrenar un modelo grande, inferencia única" hacia "un modelo de tamaño moderado, invirtiendo cómputo de inferencia según la solicitud".}{00:11:42--00:12:38}
+
+\subsection{Resumen de la sección}
+
+El beneficio de Repeated sampling proviene de la cola larga en la probabilidad de éxito de los problemas. Tiene una aplicabilidad amplia respecto de la escala del modelo, pero lo que demuestra es que la oracle coverage es escalable; sin un verifier confiable, un candidato correcto todavía puede no llegar a convertirse en la salida final.
+
+\section{Generation--Verification Gap}
+
+\subsection{Oracle coverage es el límite superior de la capacidad, no el desempeño entregable}
+
+El Oracle verifier conoce el ground truth, por lo que siempre puede elegir la respuesta correcta entre los candidatos. Los sistemas reales por lo general solo pueden usar votación mayoritaria, un reward model o un LLM judge, y estos métodos pueden tener una brecha enorme respecto al oracle.
+
+\videofigure{figures/verification-gap.jpg}{Los métodos de selección comunes quedan muy por debajo de la oracle coverage del conjunto de candidatos.}{00:15:32--00:18:44}
+
+Definición:
+
+$$
+G(k)=C_{\mathrm{oracle}}(k)-A_{\mathrm{selector}}(k),
+$$
+
+\begin{itemize}
+    \item $C_{\mathrm{oracle}}(k)$: proporción del conjunto de candidatos en la que existe una respuesta correcta;
+    \item $A_{\mathrm{selector}}(k)$: proporción en la que el selector real entrega la respuesta correcta;
+    \item $G(k)$: generation--verification gap.
+\end{itemize}
+
+\subsection{Por qué falla la majority vote}
+
+La votación mayoritaria supone que la respuesta correcta es la moda principal de la distribución. Pero en problemas difíciles, el modelo puede producir muchos errores similares mientras que la trayectoria correcta aparece muy pocas veces. En ese caso, aumentar el muestreo solo hace más estable la estimación de frecuencia del modo erróneo.
+
+\videofigure{figures/rare-correct.jpg}{El candidato correcto puede ubicarse en la cola rara de la distribución de salidas.}{00:18:44--00:19:44}
+
+\begin{warningbox}{Self-consistency depende de un supuesto oculto}
+La votación mayoritaria solo es confiable cuando "la ruta de razonamiento correcta está más concentrada que cualquier patrón erróneo". Si el modelo tiene un sesgo sistemático hacia el mismo tipo de error, self-consistency elegirá la respuesta incorrecta con confianza. La coincidencia entre candidatos no es evidencia suficiente de corrección.
+\end{warningbox}
+
+\subsection{Qué propiedades debe tener un verificador}
+
+\begin{itemize}
+    \item \textbf{Soundness}: no calificar como correcto un error evidente;
+    \item \textbf{Recall}: no pasar por alto las soluciones correctas raras entre los candidatos;
+    \item \textbf{Calibration}: la diferencia de puntajes debe reflejar la probabilidad real de éxito;
+    \item \textbf{Robustness}: no ser excesivamente sensible al estilo, la longitud o la confianza superficial;
+    \item \textbf{Cost}: el costo de verificación debe ser considerablemente menor que volver a generar o que la revisión humana.
+\end{itemize}
+
+\begin{knowledgebox}{Ventaja estructural de los dominios verificables}
+La demostración formal matemática y la ejecución de código permiten externalizar el verifier a un sistema simbólico o a un entorno real. La escritura abierta, la toma de decisiones estratégicas y las hipótesis científicas, en cambio, carecen de un ground truth barato y solo pueden recurrir a un learned reward model o a retroalimentación tardía, por lo que resulta mucho más fácil que aparezca un cuello de botella de verificación.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El límite superior de extremo a extremo del inference scaling lo determina el verifier. Mientras más fuerte sea el generador y más muestreo se haga, más compleja será la distribución de candidatos, y el selector puede enfrentar un problema de identificación aún más difícil; por eso robust verification es el tema central de la siguiente clase.
+\section{Compute-Optimal Test-Time Scaling}
+
+\subsection{Muestreo paralelo y revisión secuencial}
+
+Aumentar el test-time compute tiene dos formas básicas:
+
+\begin{itemize}
+    \item \textbf{Parallel sampling}: genera varios candidatos de manera independiente a partir del mismo prompt, con énfasis en la diversidad;
+    \item \textbf{Sequential revision}: hace que el modelo lea los resultados intermedios y los revise, con énfasis en la profundidad de una sola trayectoria.
+\end{itemize}
+
+\videofigure{figures/parallel-sampling.jpg}{El muestreo paralelo usa varios candidatos independientes para ampliar el ancho de búsqueda.}{00:27:00--00:29:06}
+
+Los métodos paralelos son fáciles de escalar y los errores no se propagan entre candidatos; los métodos secuenciales pueden aprovechar la retroalimentación para mejorar de forma progresiva, pero si la dirección inicial es errónea, los pasos posteriores pueden seguir optimizando alrededor de una premisa equivocada.
+
+\subsection{Outcome Reward Model y Process Reward Model}
+
+\videofigure{figures/reward-model-types.jpg}{Outcome reward y process reward ofrecen señales de búsqueda con distinta granularidad.}{00:29:06--00:30:08}
+
+\begin{itemize}
+    \item \textbf{ORM}（Outcome Reward Model）: solo evalúa la respuesta final; es adecuado para best-of-$N$, con asignación de crédito burda;
+    \item \textbf{PRM}（Process Reward Model）: evalúa el proceso de razonamiento paso a paso; puede usarse en beam search y para podar de forma anticipada.
+\end{itemize}
+
+Si una trayectoria contiene los pasos $z_{1:T}$, el PRM puede ofrecer una puntuación local $r_t=r(z_t\mid z_{<t},x)$, con la cual el buscador conserva las ramas de mayor potencial, sin necesidad de esperar a que se genere la respuesta completa para descubrir el error.
+
+\subsection{Combinar ancho y profundidad}
+
+Una estrategia compute-optimal no consiste en elegir de forma fija entre paralelo o secuencial, sino en combinar ambos dentro de un presupuesto total: primero explorar varios candidatos iniciales y luego someter a los candidatos de mayor puntuación a varias rondas de revisión.
+
+\videofigure{figures/hybrid-search.jpg}{El muestreo paralelo amplía el ancho, y el revision model aumenta la profundidad de la búsqueda.}{00:31:10--00:35:28}
+
+Puede escribirse como una restricción de presupuesto:
+
+$$
+B=n_{\mathrm{parallel}}\cdot c_{\mathrm{sample}}
++n_{\mathrm{revise}}\cdot c_{\mathrm{revise}}
++c_{\mathrm{verify}}.
+$$
+
+\begin{itemize}
+    \item $B$: presupuesto total de inferencia para un problema;
+    \item $n_{\mathrm{parallel}}$: número de candidatos paralelos;
+    \item $n_{\mathrm{revise}}$: número de rondas de revisión secuencial;
+    \item $c_{\mathrm{sample}},c_{\mathrm{revise}},c_{\mathrm{verify}}$: el costo de cada operación.
+\end{itemize}
+
+\subsection{Conclusiones experimentales: la mejor estrategia varía según la dificultad}
+
+\videofigure{figures/compute-optimal-results.jpg}{Guiado por el PRM, el compute-optimal search ofrece un beneficio inicial mayor que el best-of-$N$ puro.}{00:35:28--00:37:28}
+
+\videofigure{figures/parallel-sequential-ratio.jpg}{Los problemas sencillos se inclinan hacia la revisión secuencial, mientras que los difíciles requieren cierta exploración paralela.}{00:37:28--00:40:12}
+
+La intuición es la siguiente:
+
+\begin{itemize}
+    \item los problemas sencillos suelen tener ya una solución inicial cercana a la correcta, y la revision puede corregirla rápidamente;
+    \item la solución inicial de los problemas difíciles puede caer en un planteamiento totalmente equivocado, por lo que se necesita explorar en paralelo distintas direcciones;
+    \item un exceso de secuencialidad desperdicia el presupuesto en reparar trayectorias irrecuperables;
+    \item un exceso de paralelismo produce una gran cantidad de candidatos superficiales, sin aprovechar suficientemente la retroalimentación.
+\end{itemize}
+
+\subsection{Cuándo los FLOPs de test-time superan a los FLOPs de pre-training}
+
+\videofigure{figures/testtime-vs-pretraining.jpg}{Los problemas de dificultad media suelen beneficiarse del test-time compute, mientras que los problemas más difíciles siguen limitados por la capacidad de base.}{00:40:12--00:42:32}
+
+\begin{importantbox}{El test-time scaling no sustituye por completo al pre-training scaling}
+Cuando el modelo base casi no tiene trayectorias correctas para cierto tipo de problema, la búsqueda no puede amplificar una señal que no existe. Los experimentos muestran que, para los problemas más difíciles, el beneficio de aumentar el cómputo de inferencia es muy pequeño, y ampliar el preentrenamiento o mejorar los datos de entrenamiento sigue siendo más eficaz.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La estrategia de inferencia óptima depende de la dificultad del problema, la capacidad del modelo y la calidad del verifier. Un sistema verdaderamente compute-optimal necesita estimar en línea el beneficio marginal y decidir de forma dinámica si continúa muestreando, revisando, verificando o se detiene.
+\section{Archon: búsqueda de Inference-Time Architecture}
+
+\subsection{La arquitectura de inferencia vista como algo que se puede buscar}
+
+Archon ya no elige a mano una sola técnica, sino que trata las inference-time operations como capas de una red neuronal y busca su combinación, orden, procedencia de modelos y número de invocaciones.
+
+\videofigure{figures/archon-framework.jpg}{Archon busca una arquitectura de inferencia optimizada según el benchmark objetivo y los modelos disponibles.}{00:45:47--00:48:36}
+
+Su entrada incluye la tarea objetivo, los modelos candidatos, las operaciones disponibles y las restricciones de costo; su salida es un grafo de ejecución. Por ejemplo, varios generator muestrean en paralelo, un critic identifica defectos, un ranker selecciona candidatos, un fuser sintetiza la respuesta, y luego se realiza otra ronda de crítica y fusión.
+
+\subsection{Operaciones componibles}
+
+\videofigure{figures/archon-operations.jpg}{Definición, entradas, salidas y costo de las inference-time operation más comunes en Archon.}{00:48:36--00:51:20}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{2.8cm}p{5.1cm}p{5.7cm}}
+\toprule
+\textbf{Operación} & \textbf{Función} & \textbf{Riesgo principal} \\
+\midrule
+Generator & Produce uno o más candidatos & Falta de diversidad, errores repetidos \\
+Critic & Señala defectos y omisiones de los candidatos & Crítica imprecisa o centrada solo en la forma superficial \\
+Ranker & Ordena los candidatos & Sesgo de posición, sesgo de longitud, sesgo del judge \\
+Fuser & Sintetiza las partes complementarias de varios candidatos & Fusionar también los errores \\
+Verifier / Tests & Verifica restricciones y corrección & Cobertura de pruebas insuficiente, reward hacking \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Por qué la fusion puede superar a la oracle selection}
+
+La oracle selection solo puede elegir una respuesta completa entre los candidatos existentes; el fuser puede extraer información complementaria de varios candidatos incompletos y generar una respuesta nueva que no existía en el conjunto original de candidatos.
+
+\videofigure{figures/fusion-results.jpg}{Rank-then-fuse supera, en algunas tareas, a la simple selección de un solo candidato.}{00:51:20--00:54:58}
+
+\begin{warningbox}{"Superar al oracle" no contradice la definición}
+Aquí el oracle solo selecciona la respuesta correcta entre los candidatos originales; la fusion ejecuta nuevas invocaciones al modelo y genera nuevos candidatos, por lo que cambia el espacio de candidatos. No es un selector más potente, sino un paso de generación adicional.
+\end{warningbox}
+
+\subsection{Pruebas unitarias en lenguaje natural}
+
+Para las tareas que carecen de un ground truth ejecutable, Archon hace que el modelo genere pruebas o restricciones en lenguaje natural, y luego las usa para verificar las respuestas candidatas. Esto equivale a descomponer primero un objetivo ambiguo en especificaciones verificables localmente.
+
+\videofigure{figures/natural-language-tests.jpg}{Los unit tests en lenguaje natural convierten los requisitos de la tarea en condiciones verificables.}{00:55:30--00:56:24}
+
+Esta práctica mejora la capacidad de verificación estructurada, pero, como las pruebas las genera el modelo, aún pueden omitirse requisitos clave. La forma más segura de usarla es combinar los requisitos explícitos del usuario, las reglas del dominio y las pruebas generadas por el modelo, en lugar de depender por completo de especificaciones autogeneradas.
+
+\subsection{Arquitecturas de razonamiento profundo y búsqueda de arquitectura}
+
+\videofigure{figures/archon-architectures.jpg}{Estructura multicapa generator--critic--ranker--fuser encontrada por Archon.}{00:56:24--00:59:32}
+
+El espacio de arquitecturas crece de forma explosiva con el número de capas, el tipo de operación, la elección de modelos y las combinaciones de hiperparámetros. Archon usa optimización bayesiana para predecir, con menos ensayos, qué configuraciones tienen más probabilidad de mejorar la métrica objetivo.
+
+\videofigure{figures/bayesian-search.jpg}{La optimización bayesiana descubre arquitecturas de alto rendimiento con más eficiencia que la búsqueda aleatoria o voraz.}{00:59:32--01:01:20}
+
+Si la configuración es $a$, la función objetivo puede escribirse como una utilidad multiobjetivo:
+
+$$
+J(a)=\mathrm{Quality}(a)-\lambda_c\mathrm{Cost}(a)-\lambda_l\mathrm{Latency}(a).
+$$
+
+\begin{itemize}
+    \item $\mathrm{Quality}(a)$: precisión o puntaje de preferencia en el benchmark objetivo;
+    \item $\mathrm{Cost}(a)$: costo de invocaciones al modelo y de tokens;
+    \item $\mathrm{Latency}(a)$: latencia de la ruta crítica;
+    \item $\lambda_c,\lambda_l$: pesos que el escenario de despliegue asigna al costo y a la latencia.
+\end{itemize}
+
+\videofigure{figures/archon-results.jpg}{Archon logra mejoras consistentes en pools de modelos de código abierto, cerrados y mixtos.}{01:01:20--01:03:02}
+
+\subsection{Resumen de la sección}
+
+Archon eleva el "prompt engineering" a una búsqueda de arquitectura de sistema: no solo optimiza un prompt, sino el flujo de datos, el flujo de control y el costo entre varias invocaciones al modelo. Su limitación es que el resultado de la búsqueda puede sobreajustarse al benchmark, y que la latencia, la interpretabilidad y el costo de mantenimiento de las arquitecturas complejas aumentan de forma considerable.
+\section{Práctica de ingeniería: cómo diseñar un sistema de test-time scaling}
+
+\subsection{Primero hay que determinar si la tarea se presta a la expansión}
+
+\begin{enumerate}
+    \item ¿El modelo base es capaz de producir una respuesta correcta al menos de forma ocasional, es decir, $p>0$?
+    \item ¿Existe un verifier más barato y más confiable que la generación?
+    \item ¿El valor de la solicitud es suficiente para cubrir los tokens, la latencia y la energía adicionales?
+    \item ¿Los candidatos pueden generarse en paralelo, o es necesario leer el estado del entorno de forma secuencial?
+    \item ¿Las acciones fallidas son reversibles y se pueden reintentar de forma segura?
+\end{enumerate}
+
+\subsection{La regla de paro es más importante que el presupuesto máximo}
+
+El sistema puede detenerse anticipadamente bajo las siguientes condiciones:
+
+\begin{itemize}
+    \item la puntuación del verifier supera un umbral confiable;
+    \item varios verifiers independientes llegan a un consenso;
+    \item la mejora marginal de calidad de un nuevo candidato es menor que su costo;
+    \item revisiones sucesivas no corrigen el error clave;
+    \item se alcanza el límite de latencia, costo o seguridad.
+\end{itemize}
+
+\begin{importantbox}{Controlador de presupuesto en línea}
+Un sistema ideal no usa un best-of-64 fijo, sino que primero utiliza un presupuesto pequeño para estimar la dificultad del problema y la distribución de los candidatos, y después decide si conviene expandir. Los problemas sencillos se resuelven rápido, los problemas difíciles pero verificables reciben más cómputo, y los problemas que el modelo simplemente no puede resolver se escalan a tiempo hacia un modelo más fuerte o hacia intervención humana.
+\end{importantbox}
+
+\subsection{Requisitos de observabilidad}
+
+Se debe registrar, para cada candidato, el modelo que lo generó, la semilla aleatoria, el número de tokens, la puntuación de verificación, la justificación de la selección, los resultados de las herramientas y el motivo del paro. De lo contrario, solo se observa la respuesta final, sin poder distinguir entre fallas de generación, fallas de verificación, fallas de la estrategia de búsqueda y presupuesto insuficiente.
+
+\subsection{Resumen de la sección}
+
+Test-time scaling es un problema de sistemas de control. Una implementación entregable requiere definir con claridad el espacio de candidatos, la señal de verificación, la función de presupuesto y la regla de paro, y evaluarse en conjunto mediante pass@1 de extremo a extremo, costo y latencia.
+\section{Lecturas adicionales}
+
+\begin{itemize}
+    \item \href{https://arxiv.org/abs/2407.21787}{Brown et al., \emph{Large Language Monkeys: Scaling Inference Compute with Repeated Sampling}}
+    \item \href{https://arxiv.org/abs/2502.17578}{\emph{How Do Large Language Monkeys Get Their Power (Laws)?}}
+    \item \href{https://arxiv.org/abs/2408.03314}{Snell et al., \emph{Scaling LLM Test-Time Compute Optimally can be More Effective than Scaling Model Parameters}}
+    \item \href{https://arxiv.org/abs/2409.15254}{Saad-Falcon et al., \emph{Archon: An Architecture Search Framework for Inference-Time Techniques}}
+\end{itemize}
+
+\section{Síntesis y ampliación}
+
+Esta clase construyó el panorama completo de la escalación de cómputo en tiempo de prueba. Repeated sampling obtiene una escalación de coverage predecible mediante la probabilidad de éxito de cola larga; el generation--verification gap muestra que la cobertura de candidatos no se convierte automáticamente en precisión final; compute-optimal scaling mejora el rendimiento por unidad de cómputo mediante una proporción dinámica entre exploración paralela y revisión secuencial; Archon, por su parte, eleva la combinación de generator, critic, ranker, fuser y verifier a una arquitectura de sistema que puede buscarse.
+
+Se puede entender de forma aproximada el desempeño final como:
+
+$$
+\mathrm{Delivered\ Quality}
+=\mathrm{Generation\ Coverage}
+\times\mathrm{Selection\ Reliability}
+\times\mathrm{Budget\ Efficiency}.
+$$
+
+Si cualquiera de los tres factores se acerca a cero, el cómputo de inferencia adicional pierde su efecto. La siguiente clase se centra, por ello, en robust verification: cómo entrenar el outcome verifier y el process verifier, cómo construir automáticamente supervisión a nivel de paso, y cómo usar múltiples verifiers débiles para reducir la brecha de selección.
+
+\end{document}

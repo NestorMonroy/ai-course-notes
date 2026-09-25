@@ -1,0 +1,336 @@
+\documentclass[a4paper]{article}
+\input{../notes-shared.es-mx.tex}
+
+\newcommand{\notetitle}{Stanford CS329A: Agentes de IA que se autoperfeccionan\\Part 5: Planeación y razonamiento de varios pasos}
+\newcommand{\lecturers}{Azalia Mirhoseini}
+\newcommand{\noteauthors}{AI Course Notes \& Codex}
+\newcommand{\notedate}{10 de agosto de 2026}
+\newcommand{\lecturedate}{2025-10-06}
+\newcommand{\videoduration}{1:14:55}
+\newcommand{\videourl}{https://www.youtube.com/watch?v=Ml_fp9XkB8Y}
+
+\begin{document}
+\makelecturetitle
+
+\section{Por qué las tareas de varios pasos son más difíciles que las preguntas de una sola ronda}
+
+La planificación de viajes, las compras en la web, la búsqueda científica y la depuración de código requieren una serie de decisiones interdependientes. El agente no solo debe generar el siguiente paso, sino también mantener el objetivo, juzgar las dependencias, manejar los fallos y decidir cuándo detenerse.
+
+\videofigure{figures/planning-motivation.jpg}{Las tareas complejas exigen al mismo tiempo razonamiento, planificación, acción y retroalimentación del entorno.}{00:01:10--00:03:18}
+
+Esta sesión se desarrolla a partir de tres líneas complementarias:
+
+\begin{enumerate}
+    \item \textbf{LATS}: unifica reasoning, acting y planning mediante búsqueda en árbol durante la inferencia;
+    \item \textbf{SPRINT}: identifica subpasos independientes y transforma una larga cadena de razonamiento secuencial en un plan de ejecución paralelizable;
+    \item \textbf{SWiRL}: genera fuera de línea trayectorias de herramientas de varios pasos y aprende, mediante RL a nivel de paso, una política de uso de herramientas generalizable.
+\end{enumerate}
+
+\begin{importantbox}{El ancho, la profundidad y el paralelismo son tres dimensiones distintas}
+La búsqueda en árbol amplía el ancho de candidatos y permite retroceder; la cadena de razonamiento larga aumenta la profundidad; el plan paralelo reduce los pasos secuenciales en la ruta crítica. Un sistema puede tener al mismo tiempo una gran cantidad de ramas, trayectorias muy profundas y un alto paralelismo, pero el costo y el beneficio de los tres son distintos.
+\end{importantbox}
+
+\subsection{Dimensiones para evaluar la calidad de un plan}
+
+\begin{itemize}
+    \item Corrección: si al final se cumple el objetivo;
+    \item Ejecutabilidad: si cada paso satisface sus condiciones previas;
+    \item Robustez: si puede recuperarse o cambiar de ruta después de un fallo;
+    \item Eficiencia: tokens, llamadas a herramientas, wall-clock y consumo de recursos;
+    \item Seguridad: si incluye acciones irreversibles o que exceden los permisos.
+\end{itemize}
+
+\subsection{Resumen de la sección}
+
+El núcleo del razonamiento de varios pasos no es «escribir más largo», sino gestionar de manera explícita el espacio de búsqueda, las dependencias y la retroalimentación. LATS, SPRINT y SWiRL resuelven este problema desde tres niveles distintos: la búsqueda en línea, la programación de la ejecución y los datos de entrenamiento, respectivamente.
+\section{LATS: Language Agent Tree Search}
+
+\subsection{De una sola trayectoria a un árbol de búsqueda}
+
+Una vez que un ReAct común elige una acción incorrecta, por lo general continúa con esa misma trayectoria. LATS mantiene múltiples estados candidatos, tomando como referencia Monte Carlo Tree Search (MCTS) para realizar selección, expansión, evaluación, simulación, retropropagación y reflexión.
+
+\videofigure{figures/lats-intuition.jpg}{LATS combina CoT, pensamiento rápido y lento, ReAct y búsqueda en árbol.}{00:06:54--00:08:02}
+
+\videofigure{figures/lats-operations.jpg}{Las seis operaciones de LATS: selection, expansion, evaluation, simulation, backpropagation, reflection.}{00:08:02--00:08:46}
+
+Cada nodo $s$ representa el estado actual del entorno y la trayectoria histórica; las aristas representan una acción del lenguaje o una acción con una herramienta. El objetivo de la búsqueda es encontrar un nodo terminal con un reward alto.
+
+\subsection{Selection y UCB}
+
+LATS selecciona nodos que equilibran el valor actual y el grado de exploración pendiente. La forma típica de UCB es:
+
+$$
+\mathrm{UCB}(s)=\bar V(s)+c\sqrt{\frac{\log N(\mathrm{parent}(s))}{N(s)+1}}.
+$$
+
+\begin{itemize}
+    \item $\bar V(s)$: valor promedio histórico del nodo;
+    \item $N(s)$: número de visitas del nodo;
+    \item $c$: exploration coefficient;
+    \item el segundo término fomenta la exploración de las ramas menos visitadas.
+\end{itemize}
+
+\subsection{Expansion y acciones candidatas}
+
+El nodo seleccionado hace que el LLM genere múltiples acciones siguientes. Distintas temperaturas, prompts o modelos pueden aumentar la diversidad de las ramas. Si todos los candidatos son solo variaciones de redacción de la misma idea, la amplitud del árbol no aporta una exploración real.
+
+\subsection{Evaluation: LM Judge y Self-Consistency}
+
+LATS usa dos tipos de heurísticas para evaluar los nodos nuevos: un modelo judge que determina si el estado es prometedor, y la self-consistency, que determina si múltiples rollouts convergen hacia el mismo resultado.
+
+\videofigure{figures/lats-evaluation.jpg}{LATS combina LLM-as-a-judge con self-consistency para obtener el valor del nodo.}{00:10:42--00:12:58}
+
+La forma combinada que presenta el curso es:
+
+$$
+V(s)=\lambda\,V_{\mathrm{LM}}(s)+(1-\lambda)V_{\mathrm{SC}}(s).
+$$
+
+\begin{itemize}
+    \item $V_{\mathrm{LM}}$: la puntuación que asigna el judge al potencial del estado actual;
+    \item $V_{\mathrm{SC}}$: la consistencia de los resultados obtenidos al muestrear desde ese estado;
+    \item $\lambda$: el peso relativo entre ambas señales.
+\end{itemize}
+
+\begin{warningbox}{La consistencia puede apuntar de manera estable hacia un error}
+Self-consistency mide qué tan concentrada está la distribución de las salidas, no su corrección. Si el modelo tiene un sesgo sistemático, múltiples rollouts cometerán el mismo error de manera consistente. Por eso LATS sigue necesitando el reward del entorno o un verifier independiente como ancla.
+\end{warningbox}
+
+\subsection{Simulation, Backpropagation y Reflection}
+
+A partir del nodo candidato se continúa el rollout hasta llegar a un estado terminal o agotar el presupuesto, obteniendo un reward; después el reward se retropropaga a lo largo de la ruta, actualizando las estadísticas de los nodos ancestros.
+
+\videofigure{figures/lats-backprop.jpg}{El reward del estado terminal se retropropaga a lo largo de la ruta de búsqueda.}{00:12:58--00:15:42}
+
+\videofigure{figures/lats-value.jpg}{El valor del nodo, la selection y la backpropagation controlan la búsqueda en conjunto.}{00:15:42--00:17:26}
+
+Las trayectorias fallidas también generan una reflection en lenguaje natural, que registra por qué se falló e influye en las expansiones posteriores. Esto hace que el árbol de búsqueda no solo acumule estadísticas numéricas, sino también experiencia explícita de los errores.
+
+\begin{knowledgebox}{La reflection es memoria local, no una actualización de parámetros}
+El texto de la reflexión solo ayuda a evitar errores repetidos dentro del contexto actual de búsqueda. Si se desea conservarla entre tareas, es necesario escribir la reflexión en una memoria de largo plazo, en datos de entrenamiento o en los parámetros; de lo contrario, las nuevas solicitudes volverán a cometer el mismo error.
+\end{knowledgebox}
+
+\subsection{HotpotQA y WebShop}
+
+\videofigure{figures/lats-hotpotqa.jpg}{HotpotQA usa un entorno de recuperación con oracle correctness feedback.}{00:17:26--00:18:16}
+
+\videofigure{figures/lats-webshop.jpg}{Las pruebas de WebShop incluyen trayectorias de acción largas que abarcan búsqueda, selección y compra.}{00:18:16--00:20:02}
+
+LATS unifica reasoning, acting y planning en ambos tipos de tareas, pero su costo computacional es alto: cada nodo puede desencadenar múltiples llamadas al LLM y a herramientas, y el árbol de búsqueda también enfrenta problemas de acciones irreversibles en el entorno y de duplicación de estados.
+
+\subsection{Resumen de la sección}
+
+LATS convierte a un agente de una sola trayectoria en un buscador capaz de retroceder. Distribuye el presupuesto entre múltiples planes mediante la estimación de valor y el reward del entorno, lo cual es adecuado para tareas de alto valor, simulables y verificables; para entornos irreversibles, es necesario limitar la exploración o usar un modelo del mundo para hacer ensayos previos.
+\section{SPRINT: planificar y luego ejecutar en paralelo}
+
+\subsection{El cuello de botella serial del CoT largo}
+
+Los reasoning models suelen mejorar la exactitud mediante una chain-of-thought más larga, pero la decodificación autorregresiva es estrictamente serial: el token $t+1$ debe esperar al token $t$. Muchos pasos de razonamiento en realidad no dependen entre sí, por ejemplo calcular varias subexpresiones por separado o consultar varios hechos.
+
+\videofigure{figures/parallel-reasoning.jpg}{Muchos pasos de razonamiento son independientes entre sí y no tienen por qué formar una sola cadena serial larga.}{00:24:42--00:27:18}
+
+Si el grafo de dependencias de la tarea es un DAG, la cota inferior del wall-clock la determina el critical path, no el número total de pasos:
+
+$$
+T_{\mathrm{parallel}}\ge \max_{p\in\mathcal P}\sum_{i\in p} t_i.
+$$
+
+\begin{itemize}
+    \item $\mathcal P$: todas las rutas de dependencia desde el inicio hasta el final;
+    \item $t_i$: tiempo de ejecución del paso $i$;
+    \item la ruta de dependencia más larga determina el tiempo que no se puede eliminar mediante paralelización.
+\end{itemize}
+
+\subsection{Synthetic Data Creation}
+
+SPRINT parte de trayectorias largas de un reasoning model potente, usa otro LLM para dividir la trayectoria en pasos, identifica las relaciones de dependencia y las reescribe como ejemplos de entrenamiento de "primero planificar, luego ejecutar en paralelo y después agregar".
+
+\videofigure{figures/sprint-data.jpg}{Construcción de un plan explícito y sus relaciones de dependencia a partir de una reasoning trajectory serial.}{00:27:18--00:30:20}
+
+Este tipo de datos no solo enseña la respuesta final, sino que también enseña al modelo a producir una estructura planificable: qué tareas son independientes, cuáles deben esperar y qué resultados intermedios se necesitan al agregar.
+
+\subsection{Planning y Parallel Execution}
+
+\videofigure{figures/sprint-plan-execute.jpg}{SPRINT primero genera un plan y después ejecuta en paralelo las ramas independientes.}{00:30:20--00:33:56}
+
+El plan se puede representar como un conjunto de tareas $\{u_i\}$ y aristas de dependencia $E$. El scheduler inicia $u_i$ una vez que todas las tareas previas han terminado:
+
+$$
+\mathrm{ready}(u_i)\iff \forall (u_j,u_i)\in E,\;u_j\text{ completed}.
+$$
+
+\videofigure{figures/overlap-execution.jpg}{Solapar pasos de ejecución independientes reduce la decodificación secuencial en la ruta crítica.}{00:33:56--00:36:06}
+
+\subsection{Exactitud, velocidad y costo de coordinación}
+
+La paralelización no es gratuita:
+
+\begin{itemize}
+    \item el plan en sí requiere tokens adicionales;
+    \item las ramas pueden duplicar trabajo o producir resultados intermedios en conflicto;
+    \item el agregador necesita determinar qué resultado es confiable;
+    \item los recursos de las herramientas pueden convertirse en un cuello de botella de concurrencia;
+    \item paralelizar demasiado pronto hace perder la posibilidad de que un paso posterior se adapte a la retroalimentación del paso anterior.
+\end{itemize}
+
+\begin{importantbox}{Solo los pasos independientes se pueden paralelizar de forma segura}
+La clave de la paralelización no es cortar el texto en varios bloques, sino identificar las dependencias reales. Si un paso necesita leer nueva evidencia producida por otro paso, forzar la concurrencia genera un estado obsoleto o conclusiones inconsistentes.
+\end{importantbox}
+
+\subsection{Generalización entre dominios y adaptación a la dificultad}
+
+\videofigure{figures/sprint-generalization.jpg}{SPRINT se pone a prueba en MATH500, Countdown y GPQA-Diamond para evaluar la generalización entre dominios.}{00:36:06--00:41:28}
+
+\videofigure{figures/parallel-patterns.jpg}{Los problemas difíciles requieren más rondas de planning--execution, en lugar de una paralelización completa de una sola vez.}{00:41:28--00:45:02}
+
+Los problemas simples se pueden resolver planificando una vez y ejecutando en paralelo; los problemas difíciles se adaptan mejor a un ciclo intercalado: ejecutar un lote de ramas y, según los resultados, planificar el siguiente lote. Esto equilibra la velocidad con la capacidad de adaptación a la retroalimentación.
+
+\videofigure{figures/long-sequence-saving.jpg}{Cuanto más larga es la secuencia, mayor es el ahorro relativo de tiempo que aportan los pasos paralelizables.}{00:45:02--00:47:06}
+
+\subsection{Resumen de la sección}
+
+SPRINT vuelve a representar la reasoning trajectory como un grafo de dependencias entre tareas y, mediante fine-tuning supervisado, enseña al modelo a planificar la ejecución en paralelo. Lo que optimiza es el critical path del wall-clock, no solo el número de tokens; el beneficio real depende de la identificación de dependencias, de los recursos de ejecución y de la calidad de la agregación.
+\section{SWiRL: Synthetic Data y Multi-Step RL}
+
+\subsection{Objetivos de diseño}
+
+Las tareas de herramientas de múltiples pasos exigen que el modelo aprenda: cuándo razonar, cuándo llamar a una herramienta, cómo consumir la observation, cómo recuperarse tras un error, cuándo detenerse y dar la respuesta final.
+
+\videofigure{figures/swirl-motivation.jpg}{Las tareas reales suelen requerir razonamiento de múltiples pasos y uso de herramientas.}{00:50:30--00:53:02}
+
+\videofigure{figures/swirl-goals.jpg}{SWiRL busca aprender la selección de herramientas, el consumo de retroalimentación, la recuperación de errores y el momento de detenerse.}{00:53:02--00:54:34}
+
+La restricción clave de SWiRL es: al entrenar el RL, evitar en la medida de lo posible llamar en línea a herramientas reales, porque las herramientas son lentas, propensas a fallar y difíciles de paralelizar. Primero genera fuera de línea trayectorias completas con observation, y después realiza step-wise RL sobre esos datos fijos.
+
+\subsection{Etapa 1: síntesis fuera de línea de trayectorias de múltiples pasos}
+
+Para cada prompt, el teacher model genera una sola action a la vez: puede ser reasoning, tool call o final answer. Si se llama a una herramienta, el entorno fuera de línea la ejecuta y escribe la observation de vuelta en el contexto, y luego continúa al siguiente paso. Un LLM judge asigna un process score a cada paso.
+
+\videofigure{figures/swirl-data-generation.jpg}{SWiRL genera y filtra fuera de línea reasoning--tool trajectories de múltiples pasos.}{00:54:34--00:58:32}
+
+Dos formas principales de filtrado:
+
+\begin{itemize}
+    \item \textbf{Process filtered}: conserva las trayectorias en las que cada paso es considerado razonable por el judge;
+    \item \textbf{Outcome filtered}: conserva solo las trayectorias con respuesta final correcta, sin importar la calificación de los pasos intermedios;
+    \item También se puede exigir que pasen tanto el filtro de process como el de outcome.
+\end{itemize}
+
+\subsection{Etapa 2: Step-Wise Reinforcement Learning}
+
+Durante el entrenamiento ya no se llama a las herramientas, sino que se reproduce la tool response contenida en los datos fuera de línea. El modelo elige una action en cada estado, y se actualiza la policy usando el reward por paso.
+
+\videofigure{figures/swirl-step-rl.jpg}{SWiRL ejecuta reinforcement learning a nivel de paso sobre las trayectorias fuera de línea.}{00:58:32--01:03:54}
+
+\videofigure{figures/swirl-objective.jpg}{El objetivo de RL de múltiples pasos de SWiRL acumula el reward para cada par estado--acción.}{01:03:54--01:05:16}
+
+Se puede abstraer como:
+
+$$
+J(\theta)=\mathbb E_{(s_t,a_t)\sim\mathcal D}
+\left[w_t\log\pi_\theta(a_t\mid s_t)\right],
+$$
+
+donde $w_t$ está determinado por el reward del paso o por el advantage. Se aumenta la probabilidad de las action de alta calidad y se suprime la de las de baja calidad.
+
+\begin{knowledgebox}{Ventaja de ingeniería de las trayectorias de herramientas fuera de línea}
+La ejecución de herramientas y el etiquetado del judge pueden completarse en paralelo por adelantado; el entrenamiento de RL solo lee un contexto fijo, con lo cual el throughput es mayor, el entorno es más estable y los experimentos son más reproducibles. Pero el modelo no puede explorar acciones nuevas que no estén en el dataset, por lo que su desempeño queda limitado por la cobertura fuera de línea.
+\end{knowledgebox}
+
+\subsection{Etapa 3: razonamiento real de múltiples pasos}
+
+Durante el despliegue, el modelo vuelve a conectarse con herramientas reales y, siguiendo la policy obtenida en el entrenamiento, itera entre reasoning, tool use y final answer.
+
+\videofigure{figures/swirl-inference.jpg}{En la etapa de inferencia se reactivan las herramientas reales y se ejecuta un ciclo cerrado de múltiples pasos.}{01:05:16--01:06:16}
+
+\subsection{Por qué el Process Filtering resulta mejor}
+
+En los experimentos, los datos filtrados solo por calidad de process superan tanto a los que solo conservan la respuesta final correcta como a los que exigen que proceso y resultado sean correctos a la vez.
+
+\videofigure{figures/swirl-filtering.jpg}{Las Process-filtered synthetic trajectories aportan el mayor beneficio de entrenamiento.}{01:06:16--01:08:18}
+
+La razón es que el outcome filtering solo conserva problemas que el teacher ya sabía resolver, lo que fácilmente produce una "distribución estrecha de trayectorias exitosas"; el process filtering, en cambio, también conserva problemas difíciles cuyos pasos locales son correctos pero cuyo resultado final falla, lo que aporta al modelo nuevos componentes de razonamiento y señales de recuperación de errores.
+
+\begin{importantbox}{La corrección local puede aportar más cobertura de aprendizaje que el éxito final}
+Una trayectoria que finalmente falla aún puede contener una buena descomposición del problema, llamadas a herramientas correctas o evidencia intermedia útil. Si se descarta la trayectoria completa solo por el reward final, estas habilidades reutilizables también se eliminan. El process filtering cambia la selección de datos de "éxito o fracaso del problema completo" a "valor del paso".
+\end{importantbox}
+
+\subsection{Generalización entre tareas y entre herramientas}
+
+Tras entrenar con GSM8K + calculator, el modelo también mejora en HotpotQA + search; y a la inversa también ocurre. Esto indica que el modelo no solo memoriza una API específica, sino que está aprendiendo una política general de gestión de estado de múltiples pasos y de "cuándo recurrir a una herramienta".
+
+\videofigure{figures/swirl-generalization.jpg}{SWiRL muestra generalización entre herramientas, entre matemáticas y preguntas y respuestas de múltiples saltos.}{01:08:18--01:10:02}
+
+\videofigure{figures/swirl-data-scaling.jpg}{Aumentar la escala de los datos de entrenamiento sintéticos sigue mejorando el desempeño tanto dentro como fuera de la distribución.}{01:10:02--01:11:34}
+
+\videofigure{figures/process-correctness.jpg}{La mejora del process reward fuera de la distribución indica que el beneficio proviene de un mejor proceso de múltiples pasos.}{01:11:34--01:12:20}
+
+\subsection{Limitaciones}
+
+\begin{itemize}
+    \item El sesgo del LLM judge se traslada al process reward;
+    \item La observation fuera de línea impide que la policy experimente errores nuevos de las herramientas;
+    \item El costo de generación de trayectorias es alto, y la cobertura puede ser insuficiente;
+    \item Cuando el schema de una herramienta nueva difiere demasiado del de las herramientas de entrenamiento, la generalización sigue fallando.
+\end{itemize}
+
+\subsection{Resumen de la sección}
+
+SWiRL convierte la interacción en línea con herramientas en synthetic trajectory fuera de línea, y luego aprende una policy de múltiples pasos mediante step-wise RL. El resultado más importante es que filtrar por calidad del proceso favorece más la generalización que exigir solamente la corrección del resultado final, lo que indica que los datos de entrenamiento deben conservar capacidades locales reutilizables.
+\section{Comparación unificada de los tres métodos}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{>{\raggedright\arraybackslash}p{2.2cm}>{\raggedright\arraybackslash}p{3.4cm}>{\raggedright\arraybackslash}p{3.4cm}>{\raggedright\arraybackslash}p{4.2cm}}
+\toprule
+\textbf{Método} & \textbf{Etapa principal} & \textbf{Representación central} & \textbf{Beneficio / costo principal} \\
+\midrule
+LATS & Búsqueda en tiempo de inferencia & Árbol de estados y acciones & Permite retroceder y explorar varios planes; costo de llamadas alto \\
+SPRINT & Inferencia paralela posentrenamiento & DAG de dependencias de tareas & Reduce la ruta crítica; identificar dependencias y agregar resultados es complejo \\
+SWiRL & Datos fuera de línea + RL & Trayectorias multipaso con herramientas & Aprende un procedimiento general; limitado por el teacher, el judge y la cobertura fuera de línea \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Formas de combinación}
+
+Los tres métodos no se excluyen entre sí. Un sistema completo puede usar SPRINT para generar el grafo de tareas paralelas, ejecutar una búsqueda LATS dentro de cada subtarea difícil y luego usar la policy entrenada con SWiRL para elegir herramientas y procesar la observation.
+
+\subsection{Elección de ingeniería}
+
+\begin{itemize}
+    \item Si el valor de la tarea es alto, es simulable y requiere retroceder: priorizar la búsqueda en árbol;
+    \item si las subtareas son independientes y la latencia de las herramientas es alta: priorizar la ejecución paralela;
+    \item si hay muchos entornos verificables y se busca una mejora a largo plazo: construir synthetic trajectories para hacer RL;
+    \item si las acciones son irreversibles o el entorno es costoso: limitar la exploración en línea y aumentar el ensayo fuera de línea y la aprobación humana.
+\end{itemize}
+
+\subsection{Resumen de la sección}
+
+El problema de la planeación puede resolverse en tres niveles: búsqueda, programación y aprendizaje. La búsqueda en árbol mejora la calidad de las decisiones, la programación paralela reduce el tiempo y el entrenamiento a nivel de proceso consolida la experiencia en la policy. El objetivo común de los tres es reducir la acumulación de errores y el cómputo inútil en trayectorias largas.
+\section{Lecturas adicionales}
+
+\begin{itemize}
+    \item \href{https://arxiv.org/abs/2310.04406}{Zhou et al., \emph{Language Agent Tree Search Unifies Reasoning Acting and Planning in Language Models}}
+    \item \href{https://arxiv.org/abs/2506.05745}{\emph{SPRINT: Enabling Interleaved Planning and Parallelized Execution in Reasoning Models}}
+    \item \href{https://arxiv.org/abs/2504.04736}{\emph{SWiRL: Synthetic Data Generation \& Multi-Step RL for Reasoning \& Tool Use}}
+    \item \href{https://arxiv.org/abs/2311.05772}{Prasad et al., \emph{ADaPT: As-Needed Decomposition and Planning with Language Models}}
+    \item \href{https://arxiv.org/abs/2503.04412}{\emph{Wider or Deeper? Scaling LLM Inference-Time Compute with Adaptive Branching Tree Search}}
+\end{itemize}
+
+\section{Síntesis y ampliación}
+
+Esta sesión explica el multi-step reasoning desde tres niveles. LATS usa MCTS para expandir la trayectoria de un solo Agent en un árbol de búsqueda que permite seleccionar, retroceder y reflexionar; SPRINT reescribe el chain-of-thought secuencial como un grafo de tareas con dependencias, y superpone los pasos independientes para reducir el wall-clock; SWiRL genera fuera de línea synthetic trajectories con observation de herramientas y reward por paso, y luego aprende, mediante step-wise RL, una política de múltiples pasos que abarca distintas tareas y herramientas.
+
+Los tres principios que más vale conservar son:
+
+\begin{enumerate}
+    \item \textbf{La búsqueda resuelve "no saber qué camino elegir"}, pero requiere una función de valor confiable;
+    \item \textbf{El paralelismo resuelve "que trabajos independientes se esperen entre sí"}, pero solo si el grafo de dependencias es correcto;
+    \item \textbf{El entrenamiento resuelve "volver a tantear desde cero cada vez"}, pero los datos de entrenamiento deben conservar el proceso parcialmente correcto, no solo el éxito final.
+\end{enumerate}
+
+La próxima sesión entra en train-time scaling y scaling RL: cómo STaR se autoalimenta (bootstrap) para generar datos de reasoning, cómo DeepSeekMath usa GRPO para reducir el costo de PPO, y cómo DAPO aborda el colapso de entropía, las muestras inválidas y la inestabilidad de entrenamiento en RL con CoT largo.
+
+\end{document}
