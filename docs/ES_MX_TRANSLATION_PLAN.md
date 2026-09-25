@@ -209,11 +209,21 @@ clave, no quien lee la cola.
 **El efecto neto de cada decisión se mide, no se supone.** `translation_loop.py
 measure --decision D` verifica **todo** el corpus traducido (una fila del
 glosario puede introducir señales en notas que estaban limpias) y compara, por
-(nota, causa), con la medición anterior o, si no la hay, con la última
-iteración de cada lote. Agrega una fila a `translation/decisions.tsv` (solo se
-agrega: decisión, antes, después, resueltas, introducidas, neto) y guarda la
-medición en `translation/measures/NNN-<ISO>.jsonl`. Con neto negativo sale con 4:
-la decisión se revierte antes de tomar la siguiente.
+(nota, causa), con la medición anterior, que tiene el mismo alcance. Agrega
+una fila a `translation/decisions.tsv` (solo se agrega: decisión, antes,
+después, resueltas, introducidas, neto) y guarda la medición en
+`translation/measures/NNN-<ISO>.jsonl`. Con neto negativo sale con 4: la
+decisión se revierte antes de tomar la siguiente.
+
+**La primera medición es la línea base y no lleva neto**, así que se toma
+**antes** de la primera decisión: `measure --decision "línea base"`. La 2.1
+comparaba, si no había medición anterior, contra la última iteración de cada
+lote, y eso mezcla alcances. En su primer uso (`self-evolving-agents-2026`,
+«internalize → interiorizar») dio **−6** a una decisión que resolvió su señal.
+La iteración 06 había quedado sin ensamblar, con 0 señales, y los 5 preámbulos
+compartidos no están en ninguna iteración, así que sus `variant` contaron como
+introducidos. Esa fila de `decisions.tsv` se conserva tal cual (es de solo
+agregar); la corrección está en el banco `linea-base-de-measure-*`.
 
 **Límites de estas cifras, declarados.**
 

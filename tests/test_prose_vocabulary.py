@@ -262,3 +262,20 @@ def test_a_form_adopted_by_the_glossary_is_not_spanglish(tmp_path: Path) -> None
     result = run(str(note(tmp_path, "La señal tokenizada y el código deployeado.")), glossary=glossary)
     assert "spanglish:tokenizada" not in result.stdout, result.stdout
     assert "spanglish:deployeado" in result.stdout
+
+
+def test_package_and_language_names_are_preamble_code_not_prose(tmp_path: Path) -> None:
+    # Un preámbulo compartido no tiene `\begin{document}` y se lee entero:
+    # `\setdefaultlanguage[variant=mexican]{spanish}` salía como inglés en los
+    # cinco preámbulos es-MX (medición del 2026-09-25). El nombre de un paquete,
+    # una clase o un idioma, con su opción, es código; un `\caption[…]` es prosa.
+    preamble = tmp_path / "curso-preamble.es-mx.tex"
+    preamble.write_text("% Español de México, con su división silábica.\n"
+                        "\\setdefaultlanguage[variant=mexican]{spanish}\n"
+                        "\\usepackage[margin=2cm,headheight=14pt]{geometry}\n"
+                        "\\caption[El deployment del año]{Figura}\n", encoding="utf-8")
+    result = run(str(preamble))
+    assert "english:variant" not in result.stdout, result.stdout
+    assert "english:mexican" not in result.stdout and "english:margin" not in result.stdout
+    assert "english:geometry" not in result.stdout
+    assert "deployment" in result.stdout

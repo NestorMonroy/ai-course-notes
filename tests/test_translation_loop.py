@@ -973,12 +973,21 @@ def test_measure_records_the_net_effect_of_each_decision(tmp_path: Path) -> None
     repo, note, runner = setup(tmp_path, dictionary)
     loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note), runner=runner, cache=tmp_path / "c")
     es = note.with_name("lecture01-notes.es-mx.tex")
+    table = repo / ".claude/workbench/translation/decisions.tsv"
+    # Sin medición anterior no hay neto: la primera es la línea base. Comparar
+    # contra la última iteración de cada lote mezclaba alcances (una iteración
+    # «sin-ensamblar» deja 0 señales; los preámbulos compartidos no están en
+    # ninguna) y en self-evolving-agents-2026 dio −6 a una decisión que resolvió 1.
+    baseline = loop(repo, "measure", "--decision", "línea base", cache=tmp_path / "c")
+    assert baseline.returncode == 0 and "introducida" not in baseline.stderr, baseline.stderr
+    header, *rows = table.read_text(encoding="utf-8").splitlines()
+    row = dict(zip(header.split("\t"), rows[-1].split("\t")))
+    assert (row["before"], row["after"], row["net"]) == ("", "1", ""), row
     # La decisión resuelve «throughput» e introduce «pools» sin querer.
     es.write_text(es.read_text(encoding="utf-8").replace("El throughput usa", "Los pools del rendimiento usan"),
                   encoding="utf-8")
     result = loop(repo, "measure", "--decision", "throughput → rendimiento", cache=tmp_path / "c")
     assert result.returncode == 0, result.stdout + result.stderr
-    table = repo / ".claude/workbench/translation/decisions.tsv"
     header, *rows = table.read_text(encoding="utf-8").splitlines()
     row = dict(zip(header.split("\t"), rows[-1].split("\t")))
     assert row["decision"] == "throughput → rendimiento"
@@ -996,4 +1005,4 @@ def test_measure_records_the_net_effect_of_each_decision(tmp_path: Path) -> None
     result = loop(repo, "measure", "--decision", "rendimiento → throughput", cache=tmp_path / "c")
     assert result.returncode == 4, result.stdout + result.stderr
     assert "se revierte" in result.stderr
-    assert len(list((repo / ".claude/workbench/translation/measures").glob("*.jsonl"))) == 3
+    assert len(list((repo / ".claude/workbench/translation/measures").glob("*.jsonl"))) == 4

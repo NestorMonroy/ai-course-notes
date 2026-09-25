@@ -872,8 +872,11 @@ def cmd_measure(args) -> int:
 
     Plan v3, paso 3: una causa compartida a la vez. Se verifica todo el corpus
     traducido —una regla del glosario puede introducir señales en notas que
-    estaban limpias— y se compara, por (nota, causa), con la medición anterior
-    o, si no la hay, con la última iteración de cada lote. `decisions.tsv` es
+    estaban limpias— y se compara, por (nota, causa), con la medición anterior,
+    que tiene el mismo alcance. Sin medición anterior no hay neto: la primera es
+    la línea base. (Contra la última iteración de cada lote se mezclaban
+    alcances: una iteración sin ensamblar deja 0 señales y los preámbulos
+    compartidos no están en ninguna.) `decisions.tsv` es
     de solo agregar; cada medición queda en `measures/NNN-<ISO>.jsonl`. Sale
     con 4 si el neto es negativo y con 2 si la verificación quedó incompleta.
     """
@@ -882,18 +885,24 @@ def cmd_measure(args) -> int:
     measures = translation / "measures"
     measures.mkdir(parents=True, exist_ok=True)
     previous = sorted(measures.glob("*.jsonl"))
-    before_rows = read_jsonl(previous[-1]) if previous else latest_signals(root)
     started = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     rows, _hits = run_verify(translated_notes(root), args.compile, args.jobs, root)
     snapshot = measures / f"{len(previous) + 1:03d}-{started}.jsonl"
     snapshot.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
-    before = {(r["note"], cause_key(r)) for r in before_rows}
-    after = {(r["note"], cause_key(r)) for r in rows}
-    resolved, introduced = before - after, after - before
-    incomplete = sum(1 for r in rows if r["signal"] == "verify:incomplete")
     table = translation / "decisions.tsv"
     if not table.is_file():
         table.write_text("\t".join(DECISIONS_HEADER) + "\n", encoding="utf-8")
+    incomplete = sum(1 for r in rows if r["signal"] == "verify:incomplete")
+    if not previous:
+        with table.open("a", encoding="utf-8") as handle:
+            handle.write("\t".join(str(v) for v in (args.decision, started, "", len(rows), "", "", "", incomplete)) + "\n")
+        print(f"measure: línea base registrada con {len(rows)} señal(es); la siguiente decisión se mide contra ella "
+              f"-> {table}", file=sys.stderr)
+        return 2 if incomplete else 0
+    before_rows = read_jsonl(previous[-1])
+    before = {(r["note"], cause_key(r)) for r in before_rows}
+    after = {(r["note"], cause_key(r)) for r in rows}
+    resolved, introduced = before - after, after - before
     values = (args.decision, started, len(before), len(after), len(resolved), len(introduced),
               len(resolved) - len(introduced), incomplete)
     with table.open("a", encoding="utf-8") as handle:

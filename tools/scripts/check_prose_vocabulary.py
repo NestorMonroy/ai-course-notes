@@ -90,7 +90,10 @@ INLINE_SPANS = [
     re.compile(r"\\verb(.).*?\1"),
     re.compile(r"\\lstinline(.).*?\1"),
     re.compile(r"\\(?:texttt|url|nolinkurl|includegraphics|input|label|ref|eqref|cite|citep|citet|"
-               r"lstinputlisting|href|videofigure|lecturefigure)(?:\[[^\]]*\])?\{[^{}]*\}"),
+               r"lstinputlisting|href|videofigure|lecturefigure|"
+               # Nombres de paquete, clase e idioma: código del preámbulo.
+               r"usepackage|RequirePackage|documentclass|setdefaultlanguage|setotherlanguages?)"
+               r"(?:\[[^\]]*\])?\{[^{}]*\}"),
     re.compile(r"\\\[.*?\\\]", re.S),
     re.compile(r"\$\$.*?\$\$", re.S),
     re.compile(r"\$[^$]*\$"),
