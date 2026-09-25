@@ -58,6 +58,26 @@ publicación o el periodo del curso (`Primavera de 2025` o `2025-03-15`), nunca
   primera aparición, por ejemplo `Yao Shunyu (姚顺雨)`.
 - **Cifras:** punto decimal y coma de millares, como en México (`2,021`, `0.5`).
 
+## Glosario
+
+`tools/lang/es-mx/glossary.tsv` decide, por término técnico, si se queda en
+inglés (`keep`) o se traduce (`translate`), con su significado en el curso y las
+formas rechazadas. El revisor de prosa lo lee: un término `keep` no se reporta
+como inglés sin declarar, y una forma rechazada se reporta como prohibida.
+
+Para un término nuevo:
+
+```bash
+uv run python tools/scripts/suggest_term.py <término>
+```
+
+Imprime una fila **candidata** a partir de IATE (filtrada a informática) y del
+léxico, y nunca escribe en el glosario. IATE compara la forma escrita, no el
+significado: la fila propone `keep`, rechaza las formas de otros dominios y
+muestra las de informática como comentario. Antes de copiarla se revisa: una
+forma rechazada que también es una palabra española de uso legítimo en las
+notas (`señal`, `ficha`) produciría falsos positivos y no se copia.
+
 ## Cuando la fuente es la nota en chino
 
 La nota es-MX traduce el contenido de la nota zh; no la resume ni le agrega

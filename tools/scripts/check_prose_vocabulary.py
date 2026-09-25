@@ -167,7 +167,9 @@ def load_glossary(path: pathlib.Path) -> tuple[set[str], list[tuple[str, str | N
             if not term:
                 continue
             if (row.get("decision") or "").strip() == "keep":
-                keep.update(term.split())
+                # El texto se parte en palabras por el guion, asi que `fine-tuning`
+                # tiene que cubrir tambien `fine` y `tuning`.
+                keep.update(re.split(r"[\s-]+", term))
             target = term if (row.get("decision") or "").strip() == "keep" else (row.get("es_mx") or "").strip()
             for form in (row.get("rejected") or "").split("|"):
                 if form.strip():
