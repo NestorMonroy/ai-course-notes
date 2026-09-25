@@ -9,9 +9,9 @@ Hubo 9 fragmentos al modelo y 1 copiado (la portada no tiene chino). Anchura
 
 | | input | cache_creation | cache_read | output |
 |---|---:|---:|---:|---:|
-| total, 9 items | 36 | 47,677 | 125,110 | 16,077 |
+| total, 9 ítems | 36 | 47,677 | 125,110 | 16,077 |
 
-El piso por item bajó de ~24,000 a ~13,400 `cache_read`, porque leer y
+El piso por ítem bajó de ~24,000 a ~13,400 `cache_read`, porque leer y
 responder toma 2 turnos en lugar de 3 a 8. Letras del es-MX por carácter Han:
 **5.49** sobre los fragmentos. *Ciega a:* las letras de los comandos de LaTeX,
 que también cuentan, así que no es todavía el factor de prosa (4.38) del perfil.

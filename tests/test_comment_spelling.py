@@ -32,7 +32,7 @@ def test_comments_and_docstrings_are_checked_but_code_is_not(tmp_path: Path) -> 
     assert "module.py:2: funcion → función" in result.stdout
     assert "module.py:4: codigo → código" in result.stdout
     # El identificador `senal_value` y el parámetro `traduccion` son código;
-    # la cadena "codigo" de la línea 4 no es un comentario.
+    # la cadena `"codigo"` de la línea 4 no es un comentario.
     assert result.stdout.count("module.py:3:") == 0
     assert result.stdout.count("module.py:4:") == 1
 
@@ -60,3 +60,65 @@ def test_shell_comments_and_markdown_prose(tmp_path: Path) -> None:
     assert "tool.sh:3:" not in result.stdout
     assert "NOTES.md:3: traduccion → traducción" in result.stdout
     assert "NOTES.md:6:" not in result.stdout  # bloque de código
+
+
+def test_prohibited_forms_in_comments_are_reported(tmp_path: Path) -> None:
+    # «corrida» está en `prohibited_forms.txt` (→ ejecución) y se escribió 11
+    # veces en comentarios y bancos: el gate de prosa solo mira las notas.
+    src = tmp_path / "module.py"
+    src.write_text('"""Mide la primera corrida."""\n# Cada corrida escribe su carpeta.\n'
+                   'RUNS = "corrida"  # cadena de código, no comentario\n', encoding="utf-8")
+    md = tmp_path / "README.md"
+    md.write_text("| primera corrida | resultado |\n\n```\ncorrida\n```\n", encoding="utf-8")
+    result = run(str(src), str(md))
+    assert result.returncode == 1
+    assert "module.py:1: corrida (prohibida)" in result.stdout
+    assert "module.py:2: corrida (prohibida)" in result.stdout
+    assert "README.md:1: corrida (prohibida)" in result.stdout
+    assert "module.py:3:" not in result.stdout and "README.md:4:" not in result.stdout
+
+
+def test_a_quoted_form_is_a_citation_not_a_use(tmp_path: Path) -> None:
+    # La plantilla del traductor y el glosario citan las formas prohibidas para
+    # prohibirlas: entre `…` o «…» es una cita; sin comillas, un uso.
+    src = tmp_path / "rules.py"
+    src.write_text("# No escribas «corrida» ni `chamba`; tampoco la traduccion `espanol`.\n"
+                   "# La corrida de hoy.\n", encoding="utf-8")
+    result = run(str(src))
+    assert "rules.py:1: corrida" not in result.stdout and "rules.py:1: chamba" not in result.stdout
+    assert "rules.py:1: espanol" not in result.stdout
+    assert "rules.py:1: traduccion → traducción" in result.stdout
+    assert "rules.py:2: corrida (prohibida)" in result.stdout
+
+
+def test_only_spanish_spans_are_judged_and_proper_names_are_kept(tmp_path: Path) -> None:
+    # Medido en el barrido de la rama: `AGENTS.md` está en inglés y el gate le
+    # proponía `names → ñames`, `multiple → múltiple`, `version → versión`.
+    src = tmp_path / "mixed.py"
+    src.write_text("# Keep the names and continue with multiple versions via the table.\n"
+                   "# Se construye desde el paquete de Debian con LaTeX, y la traduccion.\n"
+                   "# Traduccion de la seccion.\n", encoding="utf-8")
+    result = run(str(src))
+    assert "mixed.py:1:" not in result.stdout, result.stdout
+    assert "mixed.py:2: Debian" not in result.stdout and "LaTeX" not in result.stdout
+    assert "mixed.py:2: traduccion → traducción" in result.stdout
+    # Al inicio de oración la mayúscula no es un nombre propio.
+    assert "mixed.py:3: Traduccion → Traducción" in result.stdout
+
+
+def test_english_lines_and_documents_measured_in_the_branch_are_not_judged(tmp_path: Path) -> None:
+    # Casos reales del barrido: un comentario inglés del archivo original y una
+    # fila de tabla de `AGENTS.md`, que está en inglés.
+    src = tmp_path / "coverage.py"
+    src.write_text("# narrative prose. Count them elsewhere via boxes/term digestion.\n"
+                   "# La version del traductor usa THYROX via headless-pool.\n", encoding="utf-8")
+    guide = tmp_path / "GUIDE.md"
+    guide.write_text("# Agent Guide\n\nThe notes are compiled with XeLaTeX and the site is built from them.\n"
+                     "Use the scripts in this repository when you generate a note.\n\n"
+                     "| Directory | What goes there |\n|---|---|\n| `.claude/jobs/` | background job records |\n",
+                     encoding="utf-8")
+    result = run(str(src), str(guide))
+    assert "coverage.py:1:" not in result.stdout, result.stdout
+    assert "coverage.py:2: version → versión" in result.stdout
+    assert "coverage.py:2: via → vía" in result.stdout
+    assert "GUIDE.md" not in result.stdout

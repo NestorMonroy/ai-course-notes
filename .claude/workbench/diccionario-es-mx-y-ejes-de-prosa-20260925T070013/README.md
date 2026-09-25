@@ -32,3 +32,29 @@ entre comillas; ahora lo tiene y cae.
 `thyrox_toolchain_require_hunspell` con los ejes de GNU parallel. Las pruebas
 derivadas son 17: 14 en verde, y 3 que fallan igual en `HEAD` sin el cambio
 (`thyrox-derivadas.txt`, `thyrox-run/`).
+
+## Barrido de comentarios: tildes, eñe y formas prohibidas
+
+Detonante: el ejecutor encontró «primera corrida» en un banco. `corrida`
+está en `prohibited_forms.txt`, y la misma línea 54 de ese archivo documenta
+el mismo episodio. Pasó porque ningún gate miraba los comentarios ni los
+bancos: el de prosa solo revisa las notas `.tex`.
+
+| Paso | Resultado |
+|---|---|
+| `check_comment_spelling.py` también reporta formas prohibidas | 12 usos reales de `corrida`, reescritos por su sentido (ejecución, iteración) |
+| una forma entre `…` o «…» es cita, no uso | la plantilla y el glosario citan las formas prohibidas para prohibirlas |
+| el idioma se decide por tramo y por documento | `AGENTS.md` (145 tramos en inglés contra 1) y `check_note_coverage.py` quedan fuera; antes el gate les proponía `names → ñames` |
+| nombre propio: mayúscula que no abre oración | `Debian`, `LaTeX` |
+| `--fix` sobre 57 archivos de la rama | 441 hallazgos → 0; las copias textuales de evidencia (`annul/orig/`, `zh-equiv/`) y los `prompt.md` enviados al modelo no se tocan |
+
+Una heurística se descartó por la medición: tomar por inglesa una palabra que
+el léxico inglés prefiere, en un tramo sin palabras funcionales. `fusion` tiene
+frecuencia parecida en los dos léxicos, así que no discrimina. El comentario
+inglés que la motivaba se tradujo, porque la convención del repositorio es
+comentar en español.
+
+**Pendiente en THYROX:** la convención ASCII sin tildes es del proveedor. Hay
+`*Metrica:*` en 73 archivos, y `src/session/job_runs.py:221` lo escribe en los
+registros de trabajos de cada consumer. Corregirla es un cambio de convención
+del proveedor y queda a decisión del ejecutor.

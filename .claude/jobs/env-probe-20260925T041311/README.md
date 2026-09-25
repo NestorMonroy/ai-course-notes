@@ -1,4 +1,4 @@
-# env-probe
+# `env-probe`
 
 ## Qué se lanzó
 
@@ -12,5 +12,5 @@ bash -c echo hola-consumer
 
 ## Qué se recogió
 
-*Metrica:*
+*Métrica:*
 *Ciega a:*

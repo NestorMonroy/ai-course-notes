@@ -5,10 +5,10 @@ The generated podcast notes intentionally avoid repeated fixed-camera speaker
 frames. These compact teaching diagrams are the visual spine for episodes with
 no slides or screen-share content.
 
-Con `--lang es-mx` cada cadena con chino se sustituye por su traduccion de
+Con `--lang es-mx` cada cadena con chino se sustituye por su traducción de
 `tools/lang/es-mx/figure_text.tsv` y la figura se escribe como
 `<nombre>.es-mx.png` junto al original, que no se toca. Una cadena sin
-traduccion hace que el renderer rehuse (exit 3) antes de escribir nada;
+traducción hace que el renderer rehúse (exit 3) antes de escribir nada;
 `--extract` lista las que faltan, una por linea, para completar la tabla.
 """
 
@@ -43,7 +43,7 @@ FLOW_FOOTER = "读图：从左到右看依赖关系；正文负责展开细节�
 LANG = "zh"
 OUT_ROOT = ROOT
 # En zh las palabras latinas se unen sin espacio (conducta con la que se
-# generaron los PNG publicados); en es-MX eso fundiria las palabras.
+# generaron los PNG publicados); en es-MX eso fundiría las palabras.
 LATIN_SPACING = False
 
 
@@ -153,10 +153,10 @@ def draw_text(
 
 
 def fit_size(text: str, size: int, max_width: int, floor: int = 12) -> int:
-    """El mayor tamano, hasta `size`, con el que `text` cabe en `max_width`.
+    """El mayor tamaño, hasta `size`, con el que `text` cabe en `max_width`.
 
-    Un texto que ya cabe conserva su tamano, asi que las figuras zh no cambian;
-    la traduccion al espanol es mas larga y es la que lo necesita.
+    Un texto que ya cabe conserva su tamaño, así que las figuras zh no cambian;
+    la traducción al español es mas larga y es la que lo necesita.
     """
     while size > floor and text_width(text, font(size)) > max_width:
         size -= 1
@@ -290,7 +290,7 @@ SPECS: list[tuple[str, str, str, str, object]] = [
     ("youtube/zhangxiaojun/ep104-qW-kgogQwJc/figures/china-us-glasses-definition.png", "split", "中美定义智能眼镜的差异", "产品定义、渠道和用户场景不同", (("中国", "硬件供应链、价格带、线下渠道和快速迭代。"), ("美国", "平台生态、开发者、隐私监管和品牌入口。"))),
     ("youtube/zhangxiaojun/ep104-qW-kgogQwJc/figures/startup-vs-giants-four-no.png", "grid", "创业公司对巨头的四个不", "马云提醒：创业公司要找巨头不愿、不敢、不能、不屑做的机会", [("不愿", "小市场"), ("不敢", "高风险"), ("不能", "组织限制"), ("不屑", "低端/长尾"), ("速度", "小团队"), ("专注", "单点突破")]),
     ("youtube/zhangxiaojun/ep104-qW-kgogQwJc/figures/playfulness-culture.png", "radial", "玩心文化", "硬件创业需要 trouble maker 式的问题意识", "Play", [("好奇", "发现问题"), ("动手", "做样机"), ("冒险", "试错"), ("审美", "体验"), ("团队", "价值观")]),
-    # Nuclear fusion special pVuE4J5cn98
+    # Especial de fusión nuclear, pVuE4J5cn98
     ("youtube/zhangxiaojun/special-pVuE4J5cn98/figures/fusion-energy-chain.png", "flow", "可控核聚变能量链", "从燃料、等离子体到电网输出的核心路径", [("Fuel", "氘/氚"), ("Plasma", "高温等离子体"), ("Confinement", "磁约束"), ("Heat", "能量交换"), ("Grid", "发电并网")]),
     ("youtube/zhangxiaojun/special-pVuE4J5cn98/figures/tokamak-stack.png", "stack", "托卡马克系统栈", "磁体、真空室、等离子体控制和能量转换层层耦合", [("超导磁体", "产生约束磁场"), ("真空室", "承载等离子体"), ("加热系统", "达到反应温度"), ("控制系统", "稳定运行"), ("热工系统", "取热发电")]),
     ("youtube/zhangxiaojun/special-pVuE4J5cn98/figures/fusion-bottlenecks.png", "grid", "核聚变关键瓶颈", "科学、工程、材料、资金和监管同时过线", [("等离子体", "稳定约束"), ("材料", "中子辐照"), ("磁体", "高场超导"), ("热工", "取热转换"), ("资金", "长周期消耗"), ("监管", "安全许可")]),

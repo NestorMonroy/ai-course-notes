@@ -1,7 +1,7 @@
-"""Conversion automatica al es-MX de preambulos y plantillas.
+"""Conversion automática al es-MX de preámbulos y plantillas.
 
-Lo que depende del idioma en un preambulo es fijo y se repite: `ctex`, la
-opcion `extendedchars` de listings y las etiquetas de la portada. Se convierte
+Lo que depende del idioma en un preámbulo es fijo y se repite: `ctex`, la
+opción `extendedchars` de listings y las etiquetas de la portada. Se convierte
 con una tabla; el chino que la tabla no reconoce se reporta, no se adivina.
 El cuerpo de una nota no se toca: es trabajo del traductor.
 """
@@ -83,7 +83,7 @@ def test_localized_template_compiles(tmp_path: Path) -> None:
 
 
 def test_residual_lines_are_reported_once(tmp_path: Path) -> None:
-    """Un archivo incluido no tiene `\\begin{document}`: su titlepage cae dentro del preambulo."""
+    """Un archivo incluido no tiene `\\begin{document}`: su titlepage cae dentro del preámbulo."""
     src = tmp_path / "notes-shared.tex"
     src.write_text("\\newcommand{\\x}{y}\n\\begin{titlepage}\n\\textbf{未知标签}：z\n\\end{titlepage}\n", encoding="utf-8")
     result = run(src, tmp_path / "out.tex")
@@ -102,7 +102,7 @@ def test_front_matter_punctuation_and_cs329a_labels(tmp_path: Path) -> None:
 
 
 def test_box_titles_are_braced_so_a_spanish_comma_does_not_split_the_key(tmp_path: Path) -> None:
-    # En chino la coma del titulo es `，` y no separa claves; en espanol es `,` y
+    # En chino la coma del titulo es `，` y no separa claves; en español es `,` y
     # parte `title=#1` en dos claves de pgfkeys (piloto cs329a/lecture01, L441).
     src = tmp_path / "note.tex"
     src.write_text("\\documentclass{article}\n\\usepackage[fontset=fandol]{ctex}\n"

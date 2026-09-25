@@ -128,7 +128,7 @@ def figure_local_explanation_counts(lines: list[str], lang: NoteLanguage = ZH) -
     return counts
 
 
-# Las palabras de transicion viven en el perfil de idioma; el nombre se
+# Las palabras de transición viven en el perfil de idioma; el nombre se
 # conserva porque es la forma en que se citaban.
 BRIDGE_WORDS = ZH.bridge_words
 

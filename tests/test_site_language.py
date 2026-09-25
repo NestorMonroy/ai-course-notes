@@ -1,8 +1,8 @@
 """El sitio de lectura por idioma: zh (el existente) y es-mx.
 
-`generate_site.py` tenia la interfaz en chino escrita en el codigo, buscaba solo
+`generate_site.py` tenia la interfaz en chino escrita en el código, buscaba solo
 `*-notes.tex` y tomaba el catalogo de `README.md`. Desde que `README.md` es la
-version es-MX, el sitio zh habria publicado categorias en espanol: el catalogo
+versión es-MX, el sitio zh habría publicado categorías en español: el catalogo
 de cada idioma sale de su propio README.
 """
 import importlib.util
@@ -63,7 +63,7 @@ def test_each_language_discovers_only_its_notes(site_root: Path) -> None:
 
 
 def test_zh_catalog_comes_from_the_chinese_readme(site_root: Path) -> None:
-    """La regresion: con README.md en espanol, el sitio zh no debe tomar sus categorias."""
+    """La regresión: con README.md en español, el sitio zh no debe tomar sus categorías."""
     gen = load_generator()
     entries = gen.parse_readme_catalog(site_root)
     assert entries and entries[0].category == "🏫 Stanford 课程 (1 份)"

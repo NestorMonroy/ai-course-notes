@@ -5,25 +5,25 @@ instrumento no cubre.
 Procedencia: adaptado de THYROX `src/verify/check_vocabulario_prosa.py`
 (commit 792af5f29), que aporta los dos primeros ejes, la frontera de palabra y
 el rechazo sin cifra; ver `tools/lang/es-mx/PROVENANCE.md`. Lo que cambia: el
-corpus son notas LaTeX, no RST, asi que las exenciones de cita son las de
-LaTeX; y se agregan dos ejes que el pedido de traduccion exige.
+corpus son notas LaTeX, no RST, así que las exenciones de cita son las de
+LaTeX; y se agregan dos ejes que el pedido de traducción exige.
 
 =============  =================================  ==========================
 Eje            Que busca                          Instrumento
 =============  =================================  ==========================
-`inventado`    sustantivo con sufijo nominal      lexico es: AUSENTE
-               que ningun corpus atestigua
-`prohibido`    cliche, coloquialismo, falso       lista cerrada + formas
+`inventado`    sustantivo con sufijo nominal      léxico es: AUSENTE
+               que ningún corpus atestigua
+`prohibido`    cliché, coloquialismo, falso       lista cerrada + formas
                amigo, spanglish enumerado         rechazadas del glosario
-`spanglish`    terminacion espanola sobre raiz    lexicos es y en
+`spanglish`    terminación española sobre raíz    léxicos es y en
                inglesa (`deployear`)
-`english`      palabra inglesa que el glosario    lexicos es y en + glosario
-               no declara como termino tecnico
+`english`      palabra inglesa que el glosario    léxicos es y en + glosario
+               no declara como termino técnico
 =============  =================================  ==========================
 
 Lo que NO puede ver: el significado. Los cuatro ejes miden la forma. Una
-palabra espanola correcta usada con otro sentido, un calco de sintaxis o un
-termino traducido cuando debia quedarse en ingles (y que no este en el
+palabra española correcta usada con otro sentido, un calco de sintaxis o un
+termino traducido cuando debía quedarse en ingles (y que no este en el
 glosario como forma rechazada) pasan. Un cero es una cota inferior.
 """
 from __future__ import annotations
@@ -49,7 +49,7 @@ DEFAULT_FORBIDDEN = LANG_DIR / "prohibited_forms.txt"
 DEFAULT_GLOSSARY = LANG_DIR / "glossary.tsv"
 NOTES_GLOB = "*-notes.es-mx.tex"
 
-# Sufijos que convierten una raiz en sustantivo abstracto (de THYROX).
+# Sufijos que convierten una raíz en sustantivo abstracto (de THYROX).
 NOMINAL_SUFFIX = re.compile(
     r"^[a-záéíóúñü]+"
     r"(ción|ciones|sión|siones|dad|dades|miento|mientos|anza|anzas|encia|encias)$"
@@ -57,7 +57,7 @@ NOMINAL_SUFFIX = re.compile(
 WORD = re.compile(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+")
 ACCENTED = re.compile(r"[áéíóúñü]")
 
-# Eje spanglish. Umbrales medidos sobre los lexicos al escribir el eje: entran
+# Eje spanglish. Umbrales medidos sobre los léxicos al escribir el eje: entran
 # deployear, commitear, pushear, trainear, promptear, customizar y testear
 # (-14.39); quedan fuera plantear, organizar, formatear, sortear, planear y
 # moldear (-13.87). El margen de testear contra moldear es estrecho.
@@ -68,8 +68,8 @@ SPANGLISH_STEM_EN_MIN = -13.0
 SPANGLISH_STEM_MARGIN = 1.5
 SPANGLISH_WORD_ES_MAX = -14.0
 
-# Eje english: la palabra es inglesa si el lexico ingles la atestigua con
-# margen sobre el espanol. Es el inverso de `spanish_by_corpus` de THYROX
+# Eje english: la palabra es inglesa si el léxico ingles la atestigua con
+# margen sobre el español. Es el inverso de `spanish_by_corpus` de THYROX
 # (`check_identifier_language.py`), con su mismo margen de 3.0.
 ENGLISH_MARGIN = 3.0
 ENGLISH_MIN_LENGTH = 4
@@ -77,8 +77,8 @@ CORPUS_ABSENT = -20.0
 
 LEXICON_PKG = "spacy-lookups-data"
 
-# Tramos de LaTeX que no son prosa: codigo, URLs, rutas, matematicas,
-# referencias y los propios comandos. Una palabra ahi esta transcrita, no
+# Tramos de LaTeX que no son prosa: código, URLs, rutas, matemáticas,
+# referencias y los propios comandos. Una palabra ahí esta transcrita, no
 # escrita (el mismo argumento que THYROX aplica a los literales de RST).
 ENVIRONMENT_SPANS = re.compile(
     r"\\begin\{(lstlisting|verbatim|minted|equation\*?|align\*?|tikzpicture)\}.*?\\end\{\1\}", re.S
@@ -106,7 +106,7 @@ def refuse(message: str) -> None:
 
 
 def load_lexicons() -> tuple[dict, dict]:
-    """Los lexicos es y en de spacy-lookups-data (1 000 000 de formas cada uno)."""
+    """Los léxicos es y en de spacy-lookups-data (1 000 000 de formas cada uno)."""
     try:
         import spacy_lookups_data
     except ModuleNotFoundError:
@@ -122,10 +122,10 @@ def load_lexicons() -> tuple[dict, dict]:
 
 
 def load_lemmas() -> dict:
-    """La tabla de lemas del espanol de spacy-lookups-data (forma -> lema).
+    """La tabla de lemas del español de spacy-lookups-data (forma -> lema).
 
-    Una forma que la tabla conoce es una conjugacion o flexion de una palabra
-    espanola, aunque sea rara en el corpus de frecuencias.
+    Una forma que la tabla conoce es una conjugación o flexión de una palabra
+    española, aunque sea rara en el corpus de frecuencias.
     """
     import spacy_lookups_data
     data = pathlib.Path(spacy_lookups_data.__file__).parent / "data"
@@ -142,10 +142,10 @@ def attested(word: str, lexicon: dict) -> bool:
     return word.endswith("s") and word[:-1] in lexicon
 
 
-# Prefijos cultos del espanol que se unen a una palabra atestiguada sin volverla
+# Prefijos cultos del español que se unen a una palabra atestiguada sin volverla
 # inventada: `autoverificación`, `posentrenamiento`, `subexpresiones`,
 # `retropropagación` (fase 2, cs329a). Lista cerrada: `re-`, `de-`, `des-` e
-# `in-` quedan fuera porque casarian con demasiadas palabras inventadas.
+# `in-` quedan fuera porque casarían con demasiadas palabras inventadas.
 PREFIXES = ("anti", "auto", "co", "contra", "hiper", "inter", "intra", "macro", "meta", "micro",
             "multi", "pos", "post", "pre", "retro", "semi", "sobre", "sub", "super")
 PREFIX_BASE_MIN = 5
@@ -215,9 +215,9 @@ def is_spanglish(word: str, es: dict, en: dict, lemmas: dict | None = None) -> b
     match = SPANGLISH_SUFFIX.match(word)
     if not match:
         return False
-    # Si spaCy le conoce lema, es una forma de un verbo espanol: `horneado`
+    # Si spaCy le conoce lema, es una forma de un verbo español: `horneado`
     # (hornear), `formateado` (formatear), `sorteado` (sortear). Su rareza en el
-    # corpus de frecuencias y su raiz inglesa las hacian pasar por spanglish.
+    # corpus de frecuencias y su raíz inglesa las hacían pasar por spanglish.
     if lemmas is not None and word in lemmas:
         return False
     stem = match.group(1)
@@ -240,7 +240,7 @@ def is_english(word: str, es: dict, en: dict) -> bool:
 
 
 def load_glossary(path: pathlib.Path) -> tuple[set[str], list[tuple[str, str | None]]]:
-    """Los terminos que se quedan en ingles y las formas rechazadas.
+    """Los términos que se quedan en ingles y las formas rechazadas.
 
     Cada forma rechazada entra al eje `prohibido` con el termino como
     sustituto: `imbibición` por `embedding` es un falso amigo de este corpus.
@@ -255,12 +255,12 @@ def load_glossary(path: pathlib.Path) -> tuple[set[str], list[tuple[str, str | N
             if not term:
                 continue
             if (row.get("decision") or "").strip() == "keep":
-                # El texto se parte en palabras por el guion, asi que `fine-tuning`
-                # tiene que cubrir tambien `fine` y `tuning`.
+                # El texto se parte en palabras por el guion, así que `fine-tuning`
+                # tiene que cubrir también `fine` y `tuning`.
                 keep.update(re.split(r"[\s-]+", term))
             target = term if (row.get("decision") or "").strip() == "keep" else (row.get("es_mx") or "").strip()
             if (row.get("decision") or "").strip() == "translate" and target:
-                # La forma en espanol que el glosario adopta esta atestiguada por
+                # La forma en español que el glosario adopta esta atestiguada por
                 # su fuente (IATE, FundeuRAE); no es una palabra inventada.
                 keep.update(re.split(r"[\s-]+", target.lower()))
             for form in (row.get("rejected") or "").split("|"):

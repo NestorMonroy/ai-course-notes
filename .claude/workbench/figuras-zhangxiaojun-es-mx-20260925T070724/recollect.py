@@ -1,4 +1,4 @@
-"""Relee los resultados ya pagados de la corrida con el parser tolerante."""
+"""Relee los resultados ya pagados de la ejecución con el parser tolerante."""
 import json, sys
 from pathlib import Path
 sys.path.insert(0, "tools/scripts")

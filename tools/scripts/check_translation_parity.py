@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Paridad estructural entre una nota zh y su traduccion es-MX (V1-V3 del plan).
+"""Paridad estructural entre una nota zh y su traducción es-MX (V1-V3 del plan).
 
     check_translation_parity.py <nota.tex> <nota.es-mx.tex> [--glossary TSV]
 
-Imprime una senal por linea, `parity:<clave>\\t<detalle>`, y sale 1 si hay
-alguna, 0 si no. La senal es estable: es la que registra la memoria de
+Imprime una señal por linea, `parity:<clave>\\t<detalle>`, y sale 1 si hay
+alguna, 0 si no. La señal es estable: es la que registra la memoria de
 patrones y la que busca el barrido (`docs/ES_MX_TRANSLATION_PLAN.md`).
 
-Mide la forma. Una traduccion con la misma estructura y otro sentido pasa.
+Mide la forma. Una traducción con la misma estructura y otro sentido pasa.
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_GLOSSARY = REPO_ROOT / "tools" / "lang" / "es-mx" / "glossary.tsv"
 HAN = re.compile(r"[\u4e00-\u9fff]")
-# Un original chino entre parentesis es legitimo: `Yao Shunyu (姚顺雨)`.
+# Un original chino entre paréntesis es legitimo: `Yao Shunyu (姚顺雨)`.
 PARENTHESIZED = re.compile(r"[(（][^()（）\n]*[)）]")
 COMMENT = re.compile(r"(?<!\\)%.*$", re.M)
 
@@ -101,7 +101,7 @@ def compare(zh_text: str, es_text: str, glossary: Path) -> list[tuple[str, str]]
     if re.search(r"\\usepackage(?:\[[^\]]*\])?\{ctex\}", es_src):
         out.append(("parity:ctex", "la traduccion sigue cargando ctex"))
 
-    # Todo el documento, preambulo incluido: `\notetitle` se imprime en la portada.
+    # Todo el documento, preámbulo incluido: `\notetitle` se imprime en la portada.
     residual = [(n, line.strip()) for n, line in enumerate(es_src.splitlines(), 1)
                 if HAN.search(PARENTHESIZED.sub("", line))]
     if residual:

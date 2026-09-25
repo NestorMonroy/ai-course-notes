@@ -86,7 +86,7 @@ def test_setup_uses_no_emoji() -> None:
 
 
 def test_check_mode_writes_nothing_outside_the_repository(tmp_path: Path) -> None:
-    # Una corrida para comprobar no instala skills: en la sesión que lo destapó,
+    # Una ejecución para comprobar no instala skills: en la sesión que lo destapó,
     # `setup.sh` sin opciones copió cuatro skills a ~/.claude/skills.
     skills = tmp_path / "skills"
     result = subprocess.run(["bash", str(SETUP), "--check"], capture_output=True, text=True,

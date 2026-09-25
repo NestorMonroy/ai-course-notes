@@ -27,4 +27,4 @@ fuentes externas. Se dejó fuera, a propósito:
 | `siteq/compare.sh`, `siteq/diff.txt` | la comparación del sitio zh antes y después de `--lang`: `diff.txt` vacío, idéntico byte a byte |
 | `zh-equiv/` | la equivalencia byte a byte de los guiones de QA en las 370 notas zh |
 | `tpl/` | la compilación de la plantilla es-MX |
-| `test-*.log`, `red*.log`, `derived*`, `tc-*` | corridas de pruebas de THYROX y de este consumer, con sus mitades rojas |
+| `test-*.log`, `red*.log`, `derived*`, `tc-*` | ejecuciones de pruebas de THYROX y de este consumer, con sus mitades rojas |

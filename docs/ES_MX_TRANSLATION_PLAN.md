@@ -56,7 +56,7 @@ original.
 `translate` pasa `--memfree 3G` a `headless-pool` (THYROX `bfb4eb15`), que tiene
 dos efectos:
 
-- **Admisión:** no se lanza un item si la memoria libre está por debajo de la cota.
+- **Admisión:** no se lanza un ítem si la memoria libre está por debajo de la cota.
 - **Aplicación:** si la memoria baja de la mitad de la cota, se mata el trabajo
   más joven y se vuelve a encolar.
 
@@ -72,14 +72,14 @@ registra en el banco.
 La anchura **no** se deriva de la carga. Una primera versión lo hacía y tenía
 tres defectos, que señaló el ejecutor:
 
-1. **Contaba procesos, no items.** Usaba 116 MB, que es la cifra por proceso.
-   Cada item son dos procesos: 232 MB por item, medido con 33 procesos y 17 items.
+1. **Contaba procesos, no ítems.** Usaba 116 MB, que es la cifra por proceso.
+   Cada ítem son dos procesos: 232 MB por ítem, medido con 33 procesos y 17 ítems.
 2. **La carga a un minuto mide a los otros procesos, no al pool.** Un `tsc` en
    paralelo la sube a 3.82 en 4 núcleos, y la fórmula daba anchura 1 durante toda
-   la corrida.
+   la ejecución.
 3. **Se decidía una sola vez, al lanzar.**
 
-Si hace falta una anchura automática, se mide la memoria **por item** (la suma
+Si hace falta una anchura automática, se mide la memoria **por ítem** (la suma
 del árbol de procesos) y los núcleos libres **al arrancar el pool**, nunca a
 partir de la carga que producen otros.
 
@@ -216,7 +216,7 @@ caracteres por idea. La extrapolación sale de la fase 1, con la distribución d
 tamaños de la sección 1, no con un promedio supuesto.
 
 **Primera medición: el intento fallido del piloto** (10 fragmentos de
-`cs329a/lecture01`). Cada item pagó un piso de **~24,000 `cache_read` y ~6,000
+`cs329a/lecture01`). Cada ítem pagó un piso de **~24,000 `cache_read` y ~6,000
 `cache_creation`**, que son el prompt de sistema y la plantilla, antes de
 traducir nada. En los fragmentos de 3.4 a 5.3 KB, la traducción que el modelo
 devolvió en su respuesta midió **~7,000 `output`**. Totales: 80 `input`, 90,414
@@ -226,7 +226,7 @@ Ese intento destapó dos defectos del contrato y se corrigieron:
 
 1. `claude -p` bloquea `Write` bajo `.claude/`. Por eso ahora el modelo solo lee
    y devuelve la traducción entre `<<<ES` y `ES>>>`, y el ciclo la escribe.
-2. El item llevaba dos rutas separadas por un tabulador, y `headless-pool` parte
+2. El ítem llevaba dos rutas separadas por un tabulador, y `headless-pool` parte
    el índice con `--colsep '\t'`, así que la segunda ruta se perdía.
 
 ## 10. Riesgos

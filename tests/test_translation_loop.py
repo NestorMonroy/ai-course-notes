@@ -1,8 +1,8 @@
-"""El motor del ciclo de traduccion: preparar, traducir, ensamblar, verificar
-y barrer (`docs/ES_MX_TRANSLATION_PLAN.md`, seccion 6).
+"""El motor del ciclo de traducción: preparar, traducir, ensamblar, verificar
+y barrer (`docs/ES_MX_TRANSLATION_PLAN.md`, sección 6).
 
 El traductor real es `headless-pool` de THYROX (un `claude -p` por fragmento).
-Aqui lo sustituye un runner falso que hace el mismo contrato de forma
+Aquí lo sustituye un runner falso que hace el mismo contrato de forma
 determinista, para probar el ciclo entero sin gastar tokens.
 """
 import json
@@ -30,8 +30,8 @@ NOTE = r"""\documentclass{article}
 \end{document}
 """
 
-# Traduccion que el runner falso aplica por linea. Un fragmento sin entrada
-# aqui se deja con su chino, para ejercitar las senales.
+# Traducción que el runner falso aplica por linea. Un fragmento sin entrada
+# aquí se deja con su chino, para ejercitar las señales.
 DICTIONARY = {
     "\\section{分词}\\label{sec:a}": "\\section{Tokenización}\\label{sec:a}",
     "每个 token 都有 embedding。": "Cada token tiene su embedding.",
@@ -100,7 +100,7 @@ def test_prepare_splits_the_body_into_section_chunks(tmp_path: Path) -> None:
     result = loop(repo, "prepare", "--bench", str(bench), str(note))
     assert result.returncode == 0, result.stderr
     units = (bench / "units.tsv").read_text(encoding="utf-8").splitlines()
-    assert len(units) == 3, units  # portada vacia + 2 secciones
+    assert len(units) == 3, units  # portada vacía + 2 secciones
     head = (bench / "chunks" / "cs000__lecture01__lecture01-notes" / "head.tex").read_text(encoding="utf-8")
     assert "polyglossia" in head and "ctex" not in head
 
@@ -141,8 +141,8 @@ def test_verify_reports_untranslated_chunks_and_uses_the_cache(tmp_path: Path) -
 
 def test_coverage_reports_only_what_the_translation_broke(tmp_path: Path) -> None:
     # El original ya tiene pocas cajas y le falta el resumen: esa deuda es del
-    # original y no de la traduccion. Perder el caption del listado, en cambio,
-    # lo rompe la traduccion y tiene que salir.
+    # original y no de la traducción. Perder el caption del listado, en cambio,
+    # lo rompe la traducción y tiene que salir.
     listing_zh = "\\begin{lstlisting}[caption=训练循环]"
     source = NOTE.replace("\\[ x = y \\]", listing_zh + "\nx = 1\n\\end{lstlisting}")
     dictionary = dict(DICTIONARY, **{listing_zh: "\\begin{lstlisting}"})
@@ -299,8 +299,8 @@ def test_usage_sums_tokens_by_component_and_measures_letters_per_han(tmp_path: P
 
 
 def test_english_the_original_already_uses_is_not_a_translation_defect(tmp_path: Path) -> None:
-    # La nota zh ya escribe `reward model` en ingles: es termino tecnico que se
-    # queda. `weights` no esta en el original: lo introdujo la traduccion.
+    # La nota zh ya escribe `reward model` en ingles: es termino técnico que se
+    # queda. `weights` no esta en el original: lo introdujo la traducción.
     source = NOTE.replace("小结。", "小结：reward model 和 worker 追求 precision。")
     dictionary = dict(DICTIONARY, **{"小结：reward model 和 worker 追求 precision。":
                                      "Resumen: el reward model y los workers buscan precision, igual que los weights."})
@@ -375,7 +375,7 @@ def test_cycle_stops_before_assembling_when_a_chunk_is_missing(tmp_path: Path) -
                   runner=runner, cache=tmp_path / "cache")
     assert result.returncode == 1
     assert "sin marcadores" in result.stderr
-    # La negativa es declarada, no un traceback: un choque tambien dejaria sin nota.
+    # La negativa es declarada, no un traceback: un choque también dejaría sin nota.
     assert "falta el fragmento traducido" in result.stderr and "Traceback" not in result.stderr
     assert not note.with_name("lecture01-notes.es-mx.tex").exists()
 
@@ -404,7 +404,7 @@ def test_assemble_points_to_the_es_mx_figure_when_it_exists(tmp_path: Path) -> N
 def test_each_cycle_run_is_a_new_iteration_and_nothing_is_overwritten(tmp_path: Path) -> None:
     # El plan (secciones 6 y 7) pide el registro de CADA iteración en el banco
     # del lote, versionado: un lote se audita iteración por iteración. Un
-    # `signals.jsonl` único por banco se sobrescribía en cada corrida.
+    # `signals.jsonl` único por banco se sobrescribía en cada ejecución.
     partial = {k: v for k, v in DICTIONARY.items() if "训练" not in k}
     repo, note, runner = setup(tmp_path, partial)
     workbench = repo / ".claude" / "workbench"
@@ -431,3 +431,23 @@ def test_each_cycle_run_is_a_new_iteration_and_nothing_is_overwritten(tmp_path: 
     # El puntero al lote en curso lo escribe el ciclo y se versiona: dice dónde
     # estamos; `batches.tsv` dice cómo se llegó.
     assert (workbench / ".last-bank").read_text(encoding="utf-8").strip() == ".claude/workbench/translation/cs000"
+
+
+def test_retranslate_marks_only_the_chunks_that_carry_the_signal(tmp_path: Path) -> None:
+    # Paso 3 del plan: corregida la causa raíz (la plantilla), se retraducen
+    # los fragmentos que llevan la señal y ningún otro.
+    dictionary = dict(DICTIONARY, **{"训练用 checkpoint。": "El training usa checkpoint."})
+    repo, note, runner = setup(tmp_path, dictionary)
+    first = loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note),
+                 runner=runner, cache=tmp_path / "cache")
+    assert first.returncode == 1
+    bench = repo / ".claude" / "workbench" / "translation" / "cs000"
+    chunks = sorted(bench.rglob("*.es.tex"))
+    carrying = [c for c in chunks if "training" in c.read_text(encoding="utf-8")]
+    assert len(carrying) == 1 and len(chunks) > 1
+    result = loop(repo, "retranslate", "--batch", "cs000")
+    assert result.returncode == 0, result.stderr
+    assert not carrying[0].exists()
+    assert all(c.exists() for c in chunks if c != carrying[0])
+    listed = (bench / "iterations" / "01" / "retranslate.tsv").read_text(encoding="utf-8")
+    assert "prose:english:training" in listed and carrying[0].name in listed

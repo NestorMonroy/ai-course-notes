@@ -1,4 +1,4 @@
-"""Los gates del ciclo de traduccion (seccion 6 del plan).
+"""Los gates del ciclo de traducción (sección 6 del plan).
 
 Un paso que se puede saltar, eventualmente se salta. Escribir la memoria y
 barrer el corpus con ella no son pasos de una secuencia: son gates que salen 2
@@ -86,7 +86,7 @@ def test_gate_b_accepts_a_sweep_covering_every_pattern(tmp_path: Path) -> None:
         {"iteration": 2, "senal_del_verificador": "parity:keep-term:checkpoint", "notas_revisadas": 9, "instancias": 0},
     ])
     assert gate("sweep", "--memory", str(memory), "--sweep-log", str(sweep), "--iteration", "2").returncode == 0
-    # Un barrido de OTRA iteracion no cuenta para esta.
+    # Un barrido de OTRA iteración no cuenta para esta.
     assert gate("sweep", "--memory", str(memory), "--sweep-log", str(sweep), "--iteration", "3").returncode == 2
 
 
@@ -118,7 +118,7 @@ def test_gate_c_closes_a_clean_reviewed_batch(tmp_path: Path) -> None:
 # --- report ---------------------------------------------------------------
 
 def test_report_flags_a_reactive_loop(tmp_path: Path) -> None:
-    """Tantas iteraciones como notas con senal: el ciclo corrio una nota a la vez."""
+    """Tantas iteraciones como notas con señal: el ciclo corrió una nota a la vez."""
     log = jsonl(tmp_path / "iterations.jsonl", [
         {"iteration": i, "notes_with_signals": 1, "memory_entries_written": 0, "sweep_notes": 1} for i in range(1, 9)
     ])

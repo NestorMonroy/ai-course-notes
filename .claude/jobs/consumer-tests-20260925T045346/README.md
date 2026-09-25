@@ -12,5 +12,5 @@ pytest -q -p no:cacheprovider tests/test_thyrox_tools.py
 
 ## Qué se recogió
 
-*Metrica:*
+*Métrica:*
 *Ciega a:*

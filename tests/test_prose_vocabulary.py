@@ -1,8 +1,8 @@
 """Vocabulario de la prosa es-MX: los cuatro ejes del gate de idioma.
 
 Adaptado del gate de THYROX (`check_vocabulario_prosa.py`, palabra inventada y
-forma prohibida) y ampliado con dos ejes que el pedido exige: spanglish (raiz
-inglesa con terminacion espanola) e ingles no declarado en el glosario.
+forma prohibida) y ampliado con dos ejes que el pedido exige: spanglish (raíz
+inglesa con terminación española) e ingles no declarado en el glosario.
 """
 import subprocess
 import sys
@@ -63,7 +63,7 @@ def test_undeclared_english_is_reported_unless_in_glossary(tmp_path: Path) -> No
     assert "english:weights" in result.stdout, result.stdout
     assert "english:pipeline" not in result.stdout
     assert "english:stanford" not in result.stdout
-    # Un titulo o nombre propio en ingles va con mayuscula y no es prosa a traducir.
+    # Un titulo o nombre propio en ingles va con mayúscula y no es prosa a traducir.
     assert "english:attention" not in result.stdout
     assert "english:año" not in result.stdout
 
@@ -141,7 +141,7 @@ def test_scope_is_the_changed_spanish_notes(tmp_path: Path) -> None:
 
 
 def test_missing_lexicon_refuses_without_a_count(tmp_path: Path) -> None:
-    """Sin el lexico no se emite cifra: un cero no distinguiria «limpio» de «no medi»."""
+    """Sin el léxico no se emite cifra: un cero no distinguiría «limpio» de «no medi»."""
     result = run(str(note(tmp_path, "Texto.")), python="/usr/bin/python3")
     assert result.returncode == 2
     assert "uv sync" in result.stderr
@@ -149,11 +149,11 @@ def test_missing_lexicon_refuses_without_a_count(tmp_path: Path) -> None:
 
 
 def test_spanish_verb_forms_known_to_the_lemma_table_are_not_spanglish(tmp_path: Path) -> None:
-    """La conjugacion rara de un verbo espanol no es spanglish si spaCy le conoce lema.
+    """La conjugación rara de un verbo español no es spanglish si spaCy le conoce lema.
 
     Medido: `horneado`, `formateado` y `sorteado` son formas de hornear, formatear
     y sortear, y el eje las marcaba porque la forma conjugada es rara en el
-    corpus y su raiz (`horn`, `format`, `sort`) es inglesa. La tabla de lemas de
+    corpus y su raíz (`horn`, `format`, `sort`) es inglesa. La tabla de lemas de
     spacy-lookups-data las conoce; a `testeado` o `pusheado` no.
     """
     body = "El pan horneado, el texto formateado y el premio sorteado. Lo testeado y lo pusheado."

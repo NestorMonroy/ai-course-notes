@@ -1,8 +1,8 @@
-"""Paridad estructural entre la nota zh y su traduccion es-MX (V1-V3 del plan).
+"""Paridad estructural entre la nota zh y su traducción es-MX (V1-V3 del plan).
 
 Traducir no puede perder ni inventar estructura: secciones, cajas, figuras,
 formulas, listings, tablas, etiquetas, referencias, enlaces. Tampoco puede
-dejar chino fuera de los originales entre parentesis, ni traducir un termino
+dejar chino fuera de los originales entre paréntesis, ni traducir un termino
 que el glosario manda dejar en ingles.
 """
 import subprocess
@@ -121,7 +121,7 @@ def test_ctex_left_in_the_translation_is_reported(tmp_path: Path) -> None:
 
 
 def test_chinese_left_in_the_preamble_is_residual(tmp_path: Path) -> None:
-    # `\notetitle` vive en el preambulo y se imprime en la portada; la fuente
+    # `\notetitle` vive en el preámbulo y se imprime en la portada; la fuente
     # latina no tiene esos glifos y XeLaTeX los omite en silencio.
     title_zh = ZH.replace("\\begin{document}", "\\newcommand{\\notetitle}{自我改进}\n\\begin{document}", 1)
     left = ES.replace("\\begin{document}", "\\newcommand{\\notetitle}{自我改进}\n\\begin{document}", 1)

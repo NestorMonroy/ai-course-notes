@@ -12,5 +12,5 @@ bash /tmp/claude-0/-home-user/81a17524-87b5-5e9d-997b-0732e892d302/scratchpad/si
 
 ## Qué se recogió
 
-*Metrica:*
+*Métrica:*
 *Ciega a:*

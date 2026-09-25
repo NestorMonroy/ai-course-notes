@@ -1,7 +1,7 @@
-"""El perfil de idioma de las notas: zh (el existente) y es-mx (la traduccion).
+"""El perfil de idioma de las notas: zh (el existente) y es-mx (la traducción).
 
-Los scripts de QA median rasgos didacticos contando etiquetas en chino
-(`读图`, `本章小结`, ...). Una nota en espanol con esos mismos rasgos habria
+Los scripts de QA median rasgos didácticos contando etiquetas en chino
+(`读图`, `本章小结`, ...). Una nota en español con esos mismos rasgos habría
 salido como si no los tuviera: se media el significante, no el significado.
 El perfil declara, por idioma, las etiquetas que marcan cada rasgo.
 """
@@ -65,7 +65,7 @@ def test_es_profile_counts_spanish_markers() -> None:
     assert es.count("readfig", ES_NOTE) == 1
     assert es.count("term_digest", ES_NOTE) >= 1
     assert es.count("teacher_voice", ES_NOTE) >= 1
-    # Las letras acentuadas cuentan como prosa; el patron heredado las omitia.
+    # Las letras acentuadas cuentan como prosa; el patrón heredado las omitía.
     assert es.prose_chars("tokenización") == len("tokenización")
 
 
@@ -109,7 +109,7 @@ def test_structural_audit_accepts_spanish_closing_sections() -> None:
 
 
 def test_writing_rules_table_matches_the_profile() -> None:
-    """La tabla de etiquetas de las reglas de redaccion y el perfil no divergen."""
+    """La tabla de etiquetas de las reglas de redacción y el perfil no divergen."""
     lang = load("note_language")
     doc = (REPO_ROOT / "tools/skills/video-render-common/writing-es-mx.md").read_text(encoding="utf-8")
     rows = {}

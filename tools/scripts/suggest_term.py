@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""Propone una fila del glosario es-MX para un termino tecnico en ingles.
+"""Propone una fila del glosario es-MX para un termino técnico en ingles.
 
-Consulta IATE (la base terminologica de la Union Europea) y los lexicos de
+Consulta IATE (la base terminologica de la Union Europea) y los léxicos de
 spacy-lookups-data, e imprime una fila CANDIDATA para revisar. Nunca escribe en
-`tools/lang/es-mx/glossary.tsv`: la decision es de quien revisa.
+`tools/lang/es-mx/glossary.tsv`: la decisión es de quien revisa.
 
 Por que no decide sola: IATE compara la forma escrita, no el significado.
 Medido al escribir este script, sin filtro de dominio `embedding` da
-`imbibición` (quimica), `checkpoint` da `puesto fronterizo` y `transformer` da
-`transformador de potencia`. El filtro de informatica retira esos, pero no
-basta: `transformer` sigue dando `transformador` dentro de informatica, y en
+`imbibición` (química), `checkpoint` da `puesto fronterizo` y `transformer` da
+`transformador de potencia`. El filtro de informática retira esos, pero no
+basta: `transformer` sigue dando `transformador` dentro de informática, y en
 estas notas Transformer es el nombre de una arquitectura.
 
-Por eso la propuesta por defecto es `keep` (la regla de redaccion: los terminos
-tecnicos se quedan en ingles), las formas de dominios ajenos a la informatica
-van a `rejected`, y las de informatica se muestran como comentario para que
-quien revisa decida si alguna es la traduccion correcta.
+Por eso la propuesta por defecto es `keep` (la regla de redacción: los términos
+técnicos se quedan en ingles), las formas de dominios ajenos a la informática
+van a `rejected`, y las de informática se muestran como comentario para que
+quien revisa decida si alguna es la traducción correcta.
 
     uv run python tools/scripts/suggest_term.py embedding checkpoint
     uv run python tools/scripts/suggest_term.py embedding --iate-response respuesta.json
@@ -32,7 +32,7 @@ from pathlib import Path
 
 IATE_SEARCH = "https://iate.europa.eu/em-api/entries/_search?expand=true&limit=20"
 
-# Dominios de IATE que cuentan como informatica. El segundo entra porque ahi
+# Dominios de IATE que cuentan como informática. El segundo entra porque ahí
 # vive `overfitting` -> `sobreajuste`, medido al escribir el filtro.
 COMPUTING_DOMAINS = (
     "information technology and data processing",
@@ -90,7 +90,7 @@ def suggest_row(term: str, candidates: list[Candidate]) -> dict[str, str]:
             continue
         for form in candidate.es_terms:
             # IATE marca prestamos con HTML (`<i>token</i>`) y a veces da el
-            # propio termino como forma espanola: rechazarlo vetaria el termino.
+            # propio termino como forma española: rechazarlo vetaría el termino.
             plain = re.sub(r"<[^>]+>", "", form).strip()
             if plain and plain.lower() != term.strip().lower() and plain not in rejected:
                 rejected.append(plain)

@@ -1,7 +1,7 @@
 """Figuras conceptuales de Zhang Xiaojun: el mismo renderer en zh y en es-MX.
 
-Los 338 PNG llevan el texto chino horneado, asi que la nota traducida no puede
-reusarlos. El renderer toma la traduccion de cada cadena de una tabla
+Los 338 PNG llevan el texto chino horneado, así que la nota traducida no puede
+reusarlos. El renderer toma la traducción de cada cadena de una tabla
 (`tools/lang/es-mx/figure_text.tsv`) y escribe `<nombre>.es-mx.png` junto al
 original, sin tocarlo.
 """
@@ -72,7 +72,7 @@ def test_extract_lists_only_the_missing_strings(tmp_path: Path) -> None:
 
 
 def test_zh_keeps_its_paths_and_its_wrapping() -> None:
-    # Byte a byte no se puede comparar aqui: el contenedor no tiene ninguna de
+    # Byte a byte no se puede comparar aquí: el contenedor no tiene ninguna de
     # las fuentes CJK del renderer. Se fija la conducta zh que el cambio toca.
     mod = module()
     mod.configure("zh")

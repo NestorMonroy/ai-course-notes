@@ -1,15 +1,15 @@
-"""Perfil de idioma de las notas: las etiquetas que marcan cada rasgo didactico.
+"""Perfil de idioma de las notas: las etiquetas que marcan cada rasgo didáctico.
 
 Los scripts de QA (`check_quality.sh`, `check_note_coverage.py`,
-`full_quality_audit.py`) miden rasgos didacticos contando etiquetas: `读图`
-marca la explicacion de una figura, `本章小结` el cierre de una seccion. Esas
-etiquetas son el significante; el rasgo es el significado. Una nota en espanol
+`full_quality_audit.py`) miden rasgos didácticos contando etiquetas: `读图`
+marca la explicación de una figura, `本章小结` el cierre de una sección. Esas
+etiquetas son el significante; el rasgo es el significado. Una nota en español
 con los mismos rasgos no contiene ninguna etiqueta en chino, y sin este perfil
-habria salido como si no los tuviera.
+habría salido como si no los tuviera.
 
 El idioma se decide por el nombre del archivo: `*-notes.es-mx.tex` es es-mx y
 cualquier otro `*-notes.tex` es zh. El perfil zh reproduce exactamente las
-etiquetas y umbrales que los scripts tenian escritos.
+etiquetas y umbrales que los scripts tenían escritos.
 """
 from __future__ import annotations
 
@@ -17,11 +17,11 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Letras por caracter chino en texto equivalente, medido sobre README-zh.md y
-# su traduccion README.md: 6 320 letras latinas agregadas por 1 444 caracteres
-# Han traducidos, razon 4.38. Ciega a: la prosa didactica (el README es sobre
-# todo listas y tablas) y a la variacion entre notas; es una sola muestra, y la
-# calibracion se revisa cuando existan notas es-mx reales.
+# Letras por carácter chino en texto equivalente, medido sobre README-zh.md y
+# su traducción README.md: 6 320 letras latinas agregadas por 1 444 caracteres
+# Han traducidos, razón 4.38. Ciega a: la prosa didáctica (el README es sobre
+# todo listas y tablas) y a la variación entre notas; es una sola muestra, y la
+# calibración se revisa cuando existan notas es-mx reales.
 ES_MX_CHARS_PER_HAN = 4.38
 
 
@@ -33,17 +33,17 @@ class NoteLanguage:
     prose_class: str
     # Factor que convierte un umbral calibrado en caracteres chinos.
     char_scale: float
-    # Expresiones regulares por rasgo didactico.
+    # Expresiones regulares por rasgo didáctico.
     markers: dict[str, str] = field(default_factory=dict)
-    # Palabras de transicion al abrir una seccion.
+    # Palabras de transición al abrir una sección.
     bridge_words: tuple[str, ...] = ()
-    # Titulos de cierre que no se evaluan como apertura de seccion.
+    # Títulos de cierre que no se evalúan como apertura de sección.
     closing_titles: tuple[str, ...] = ()
     section_summary_title: str = ""
     final_section_title: str = ""
     date_placeholder: str = ""
     missing_link_markers: tuple[str, ...] = ()
-    # Terminos que exigen una explicacion en su primer uso, con sus pistas.
+    # Términos que exigen una explicación en su primer uso, con sus pistas.
     first_use_terms: dict[str, list[str]] = field(default_factory=dict)
     # Sitio de lectura: el README del que sale el catalogo, el idioma de
     # MkDocs y las etiquetas de la interfaz. Las claves `dir:<nombre>` son los
@@ -158,9 +158,9 @@ ZH = NoteLanguage(
     },
 )
 
-# Cada etiqueta se eligio por la funcion que cumple en la nota, no por la
+# Cada etiqueta se eligió por la función que cumple en la nota, no por la
 # palabra: `本章小结` dice «resumen de este capitulo», pero cierra cada \section,
-# asi que su equivalente es «Resumen de la sección».
+# así que su equivalente es «Resumen de la sección».
 ES_MX = NoteLanguage(
     code="es-mx",
     notes_glob="*-notes.es-mx.tex",

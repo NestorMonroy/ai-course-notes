@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Convierte al es-MX el preambulo de una nota, un preambulo compartido o una
+"""Convierte al es-MX el preámbulo de una nota, un preámbulo compartido o una
 plantilla.
 
     localize_preamble.py <entrada.tex> <salida.es-mx.tex>
 
-Lo que depende del idioma en un preambulo es fijo y se repite en los cuatro
-preambulos compartidos y en las plantillas: `ctex`, `extendedchars=false` de
+Lo que depende del idioma en un preámbulo es fijo y se repite en los cuatro
+preámbulos compartidos y en las plantillas: `ctex`, `extendedchars=false` de
 listings, el nombre «Listing» y las etiquetas de la portada. Se convierte con
 una tabla; el cuerpo de una nota no se toca, porque su prosa es trabajo del
 traductor.
 
-Salida: 0 si no queda chino en el preambulo ni en la portada (`titlepage`);
+Salida: 0 si no queda chino en el preámbulo ni en la portada (`titlepage`);
 3 si queda, con cada linea en stderr: la tabla no lo reconoce y no se adivina.
 """
 from __future__ import annotations
@@ -68,7 +68,7 @@ EXACT = [
     ("%% --- 正文内容结束 --- %%", "%% --- Fin del contenido --- %%"),
 ]
 
-# Sustituciones con patron: las que llevan un nombre de curso o un anio.
+# Sustituciones con patrón: las que llevan un nombre de curso o un anio.
 PATTERNS = [
     (re.compile(r"基于\s*(.+?)\s*公开课程资料整理"), r"Elaboradas a partir de los materiales públicos de \1"),
     (re.compile(r"基于\s*(.+?)\s*授课内容整理"), r"Elaboradas a partir de la clase de \1"),
@@ -88,11 +88,11 @@ PUNCTUATION = [
 
 
 def front_matter_spans(text: str) -> list[tuple[int, int]]:
-    """El preambulo (antes de `\\begin{document}`) y cada `titlepage`."""
+    """El preámbulo (antes de `\\begin{document}`) y cada `titlepage`."""
     begin = text.find("\\begin{document}")
     spans = [(0, begin if begin >= 0 else len(text))]
     spans += [m.span() for m in re.finditer(r"\\begin\{titlepage\}.*?\\end\{titlepage\}", text, re.S)]
-    # Un archivo incluido no tiene `\\begin{document}`: su preambulo es todo el
+    # Un archivo incluido no tiene `\\begin{document}`: su preámbulo es todo el
     # archivo y contiene a su titlepage. Los tramos se funden para no contar
     # dos veces la misma linea.
     merged: list[tuple[int, int]] = []
@@ -111,7 +111,7 @@ def localize(text: str) -> str:
     text = CTEX.sub(lambda _m: SPANISH, text)
     text = text.replace("extendedchars=false", "extendedchars=true")
     # `title=#1` sin llaves: en chino la coma del titulo es `，` y no separa
-    # claves; en espanol una `,` parte la clave de pgfkeys en dos.
+    # claves; en español una `,` parte la clave de pgfkeys en dos.
     text = UNBRACED_TITLE.sub(r"title={\1}", text)
     for old, new in EXACT:
         text = text.replace(old, new)
@@ -122,7 +122,7 @@ def localize(text: str) -> str:
         chunk = text[start:end]
         for pattern, repl in PATTERNS:
             chunk = pattern.sub(repl, chunk)
-        # La puntuacion de ancho completo de los metadatos, a la del espanol.
+        # La puntuación de ancho completo de los metadatos, a la del español.
         for pattern, repl in PUNCTUATION:
             chunk = pattern.sub(repl, chunk)
         out.append(chunk)

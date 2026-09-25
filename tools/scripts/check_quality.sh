@@ -10,7 +10,7 @@
 set -euo pipefail
 
 # El perfil de idioma (zh o es-mx) decide que etiquetas marcan cada rasgo;
-# vive en note_language.py, que tambien leen los otros scripts de QA.
+# vive en note_language.py, que también leen los otros scripts de QA.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 pdf_pages() {

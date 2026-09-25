@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Sonda de los hallazgos H-THYROX-176 a 178: un consumidor cuyo nombre de clon NO lleva el
-# prefijo `kaupamex-` (aqui, ai-course-notes). Solo lectura salvo el `mkdir`
+# prefijo `kaupamex-` (aquí, ai-course-notes). Solo lectura salvo el `mkdir`
 # del hogar por defecto de `workbench_dir()`, que se ejercita en un directorio
-# temporal. Vive en el banco del CONSUMER (ai-course-notes); la raiz de thyrox
-# sale de su `.env` por `tools/thyrox/lib.sh`, no de la ubicacion del guion.
+# temporal. Vive en el banco del CONSUMER (ai-course-notes); la raíz de thyrox
+# sale de su `.env` por `tools/thyrox/lib.sh`, no de la ubicación del guion.
 set -uo pipefail
 CONSUMER="$(cd "$(dirname "$0")/../../../.." && pwd)"
 source "$CONSUMER/tools/thyrox/lib.sh"
@@ -27,8 +27,8 @@ print('clone_suffix_of      ->', r.clone_suffix_of(c))
 print('workbench_home_name  ->', w.workbench_home_name('ai-course-notes'))"
 
 echo "## 2 — la raiz se compone con un prefijo que el clon no lleva"
-# El arbol se redirige a TMP con THYROX_REACH_ROOT: declarations.py CREA los
-# hogares que compone, y fuera de TMP dejaria directorios fantasma en el host.
+# El árbol se redirige a TMP con THYROX_REACH_ROOT: declarations.py CREA los
+# hogares que compone, y fuera de TMP dejaría directorios fantasma en el host.
 R="$TMP/reach"; mkdir -p "$R"
 d() { (cd "$T" && THYROX_REACH_ROOT="$R" timeout 60 "$P" src/paths/declarations.py "$@" 2>&1); }
 echo "a) sin THYROX_REACH_ROOTS -> $(d | tail -1)"

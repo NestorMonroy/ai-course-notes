@@ -8,7 +8,7 @@ pared, 75 de 75 con marcadores.**
 
 | | input | cache_creation | cache_read | output |
 |---|---:|---:|---:|---:|
-| 75 items | 300 | 341,960 | 1,100,100 | 102,675 |
+| 75 ítems | 300 | 341,960 | 1,100,100 | 102,675 |
 
 Letras del es-MX por carácter Han sobre los fragmentos: 5.95.
 

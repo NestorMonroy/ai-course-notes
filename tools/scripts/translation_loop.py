@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-"""El motor del ciclo de traduccion es-MX (`docs/ES_MX_TRANSLATION_PLAN.md`).
+"""El motor del ciclo de traducción es-MX (`docs/ES_MX_TRANSLATION_PLAN.md`).
 
     translation_loop.py prepare  --bench B <nota.tex>...
     translation_loop.py prompt   [--memory M] --out P.md
     translation_loop.py translate --bench B --model <id completo> [--width N] [--memfree TAM] [--timeout S]
     translation_loop.py usage    --bench B
+    translation_loop.py retranslate --batch L
     translation_loop.py cycle    --batch L --model <id> [--compile] <nota.tex>...
     translation_loop.py assemble --bench B
     translation_loop.py verify   --out S.jsonl [--compile] [--jobs N] <nota.es-mx.tex>...
     translation_loop.py sweep    --bench B --iteration N [--memory M] [--jobs N]
 
 La unidad del traductor es el FRAGMENTO: el cuerpo de la nota partido por
-`\\section` (y por `\\subsection` si una seccion es larga). Asi una nota grande
-no depende de lo que una conversacion alcanza a escribir de una vez, y solo se
+`\\section` (y por `\\subsection` si una sección es larga). Así una nota grande
+no depende de lo que una conversación alcanza a escribir de una vez, y solo se
 retraduce el fragmento que falla.
 
-El traductor es `headless-pool` de THYROX via `tools/thyrox/run` (un `claude -p`
+El traductor es `headless-pool` de THYROX vía `tools/thyrox/run` (un `claude -p`
 por fragmento, repartidos con GNU Parallel); `TRANSLATION_RUNNER` lo sustituye
-en las pruebas. La verificacion reparte las notas con GNU Parallel y guarda
+en las pruebas. La verificación reparte las notas con GNU Parallel y guarda
 cada veredicto en `$THYROX_CACHE_DIR/translation/`, con clave en el contenido
 de la nota zh, la es-MX y los verificadores.
 """
@@ -43,7 +44,7 @@ sys.path.insert(0, str(HERE))
 LANG_DIR = REPO_ROOT / "tools" / "lang" / "es-mx"
 DEFAULT_MEMORY = LANG_DIR / "translation_memory.jsonl"
 PROMPT_TEMPLATE = LANG_DIR / "translator_prompt.md"
-CHUNK_LIMIT = 12000  # caracteres; una seccion mas larga se parte por \subsection
+CHUNK_LIMIT = 12000  # caracteres; una sección mas larga se parte por \subsection
 HAN = re.compile(r"[\u4e00-\u9fff]")
 COMMENT_LINE = re.compile(r"(?<!\\)%.*$", re.M)
 PARENTHESIZED = re.compile(r"[(（][^()（）\n]*[)）]")
@@ -79,7 +80,7 @@ def map_inputs(text: str) -> str:
 
 
 def split_body(body: str) -> list[str]:
-    """Fragmentos: lo anterior a la primera seccion, y una por seccion."""
+    """Fragmentos: lo anterior a la primera sección, y una por sección."""
     parts = re.split(r"(?m)^(?=\\section\*?\{)", body)
     chunks: list[str] = []
     for part in parts:
@@ -113,7 +114,7 @@ def cmd_prepare(args) -> int:
         out.mkdir(parents=True, exist_ok=True)
         (out / "head.tex").write_text(head, encoding="utf-8")
         if HAN.search(COMMENT_LINE.sub("", head)):
-            # Lo que el script no localiza del preambulo (`\notetitle`, que es
+            # Lo que el script no localiza del preámbulo (`\notetitle`, que es
             # prosa y va en la portada) se traduce como una unidad mas: la
             # fuente latina no tiene esos glifos y XeLaTeX los omitiria en silencio.
             (out / "head.zh.tex").write_text(head, encoding="utf-8")
@@ -137,6 +138,12 @@ def read_jsonl(path: Path) -> list[dict]:
     return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
 
 
+def cited(forms: str | None) -> str:
+    """Las formas rechazadas como citas (`a`, `b`): se nombran para prohibirlas."""
+    items = [f.strip() for f in (forms or "").split("|") if f.strip()]
+    return ", ".join(f"`{f}`" for f in items) or "—"
+
+
 def build_prompt(memory: Path) -> str:
     import csv
     from note_language import ES_MX, ZH
@@ -145,7 +152,7 @@ def build_prompt(memory: Path) -> str:
     with (LANG_DIR / "glossary.tsv").open(encoding="utf-8", newline="") as handle:
         for row in csv.DictReader(handle, delimiter="\t"):
             parts.append(f"| {row['term_en']} | {row['decision']} | {row.get('es_mx') or '—'} | "
-                         f"{row.get('meaning') or ''} | {row.get('rejected') or '—'} |")
+                         f"{row.get('meaning') or ''} | {cited(row.get('rejected'))} |")
     parts += ["", "## Etiquetas de estructura (se traducen siempre así)", ""]
     parts += [f"- `{zh}` → `{es}`" for zh, es in [
         (ZH.section_summary_title, ES_MX.section_summary_title),
@@ -180,12 +187,12 @@ def pending_units(bench: Path) -> list[list[str]]:
 
 
 # La memoria del pool la hace cumplir GNU Parallel mientras corre (`--memfree`
-# de headless-pool, THYROX bfb4eb15): no lanza un item bajo la cota y reencola
+# de headless-pool, THYROX bfb4eb15): no lanza un ítem bajo la cota y reencola
 # el mas joven si la memoria baja de la mitad. 3G deja lugar a un `tsc` de 2 GB
 # en paralelo. La anchura NO se deriva de la carga —la carga a un minuto mide a
 # los otros procesos, no al pool—: solo acota la concurrencia contra la API,
 # cuyos limites de tasa no se ven desde el contenedor. 10 es lo que el piloto
-# corrio sin un 429; si aparece uno, se baja con `--width`.
+# corrió sin un 429; si aparece uno, se baja con `--width`.
 DEFAULT_MEMFREE = "3G"
 DEFAULT_WIDTH = 10
 BEGIN_MARK, END_MARK = "<<<ES", "ES>>>"
@@ -198,7 +205,7 @@ def extract_translation(result: str) -> str | None:
 
 
 def collect_results(out_dir: Path, targets: dict[str, str]) -> list[str]:
-    """Escribe cada fragmento traducido; devuelve los items sin marcadores."""
+    """Escribe cada fragmento traducido; devuelve los ítems sin marcadores."""
     missing = []
     index = out_dir / "index.tsv"
     rows = [l.split("\t", 1) for l in index.read_text(encoding="utf-8").splitlines() if l.strip()] if index.is_file() else []
@@ -223,7 +230,7 @@ def cmd_translate(args) -> int:
         return 2
     pending = pending_units(args.bench)
     # Un fragmento sin chino (la portada ya localizada por script) se copia: el
-    # piloto pago una conversacion entera para oir que no habia nada que traducir.
+    # piloto pago una conversación entera para oír que no había nada que traducir.
     plain = [row for row in pending if not HAN.search(Path(row[3]).read_text(encoding="utf-8"))]
     for row in plain:
         shutil.copyfile(row[3], row[4])
@@ -348,7 +355,7 @@ def compile_signal(es: Path) -> list[tuple[str, str]]:
             subprocess.run(["xelatex", "-interaction=nonstopmode", "-halt-on-error", "-output-directory", tmp, es.name],
                            cwd=es.parent, capture_output=True, text=True, timeout=600)
         # El PDF solo no basta: con `-halt-on-error` las paginas ya enviadas
-        # llegan al PDF aunque despues haya un error (piloto cs329a/lecture01).
+        # llegan al PDF aunque después haya un error (piloto cs329a/lecture01).
         pdf = Path(tmp) / (es.name[:-len(".tex")] + ".pdf")
         log = Path(tmp) / (es.name[:-len(".tex")] + ".log")
         lines = log.read_text(errors="ignore").splitlines() if log.is_file() else []
@@ -377,9 +384,9 @@ def verify_notes(notes: list[Path], compile_: bool, root: Path, lexicons) -> tup
             continue
         zh_text = zh.read_text(encoding="utf-8")
         found = compare(zh_text, es.read_text(encoding="utf-8"), DEFAULT_GLOSSARY)
-        # El ingles que la nota zh ya escribe es termino tecnico que se queda
+        # El ingles que la nota zh ya escribe es termino técnico que se queda
         # (`reward model`, opciones de tcolorbox); solo es defecto el que
-        # introdujo la traduccion.
+        # introdujo la traducción.
         inherited_english = {w.lower() for w in re.findall(r"[A-Za-z]+", zh_text)}
         for k in prose.scan([es], es_lex, en_lex, forbidden, keep, root, lemmas):
             if k in baseline:
@@ -401,7 +408,7 @@ def verify_notes(notes: list[Path], compile_: bool, root: Path, lexicons) -> tup
             else:
                 found.append((f"prose:invented:{k}", ""))
         # Un error de cobertura que el original ya tiene es deuda del original,
-        # no un defecto de la traduccion: solo sale lo que la traduccion rompio.
+        # no un defecto de la traducción: solo sale lo que la traducción rompió.
         inherited = coverage_errors(zh)
         found += [(key, line) for key, line in coverage_errors(es).items() if key not in inherited]
         if compile_:
@@ -471,7 +478,7 @@ REGISTRY_HEADER = ["batch", "iteration", "started", "notes", "units", "translate
 
 
 def batch_bench(batch: str) -> Path:
-    """El banco estable de un lote: el mismo en cada iteración, nunca uno por corrida."""
+    """El banco estable de un lote: el mismo en cada iteración, nunca uno por ejecución."""
     return Path.cwd() / ".claude" / "workbench" / "translation" / batch
 
 
@@ -489,7 +496,7 @@ def cmd_cycle(args) -> int:
 
     El plan (secciones 6 y 7) pide el registro de cada iteración en el banco del
     lote, versionado. El banco es estable por lote
-    (`.claude/workbench/translation/<lote>/`), cada corrida escribe en
+    (`.claude/workbench/translation/<lote>/`), cada ejecución escribe en
     `iterations/NN/` sin tocar las anteriores y agrega una fila a
     `translation/batches.tsv`.
 
@@ -529,6 +536,55 @@ def cmd_cycle(args) -> int:
         "batch": batch, "iteration": number, "started": started, "notes": len(notes), "units": units,
         "translated": pending, "signals": count, "exit": code})
     return code
+
+
+# --- retranslate ------------------------------------------------------------
+
+# Las señales que llevan el texto que las produjo, y cómo buscarlo en un fragmento.
+LOCATABLE = ("prose:english:", "prose:spanglish:", "prose:unaccented:", "prose:invented:", "prose:forbidden:")
+
+
+def cmd_retranslate(args) -> int:
+    """Devuelve a pendientes los fragmentos que llevan una señal de la última iteración.
+
+    Paso 3 del plan: corregida la causa raíz (plantilla, glosario), se
+    retraducen los fragmentos afectados y ningún otro. Una señal sin texto que
+    buscar (cobertura, compilación, paridad) se lista como `manual`. La lista
+    queda en `iterations/NN/retranslate.tsv` de la iteración que la produjo.
+    """
+    bench = args.bench or batch_bench(args.batch)
+    iterations = sorted(d for d in (bench / "iterations").glob("[0-9][0-9]") if d.is_dir())
+    if not iterations:
+        print(f"retranslate: {bench} no tiene iteraciones", file=sys.stderr)
+        return 2
+    here = iterations[-1]
+    rows = [json.loads(l) for l in (here / "signals.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+    units = [l.split("\t") for l in (bench / "units.tsv").read_text(encoding="utf-8").splitlines() if l.strip()]
+    notes = [l.split("\t") for l in (bench / "notes.tsv").read_text(encoding="utf-8").splitlines() if l.strip()]
+    root = Path.cwd()
+    note_ids = {rel(Path(target), root): note_id for _zh, note_id, target in notes}
+    out, marked = [], set()
+    for row in rows:
+        signal, note_id = row["signal"], note_ids.get(row["note"])
+        prefix = next((p for p in LOCATABLE if signal.startswith(p)), None)
+        if prefix is None or note_id is None:
+            out.append((signal, row["note"], "", "manual"))
+            continue
+        text = signal[len(prefix):]
+        pattern = re.compile(rf"(?<![\w-]){re.escape(text)}(?![\w-])", re.I)
+        for unit in (u for u in units if u[1] == note_id):
+            es = Path(unit[4])
+            if es.is_file() and pattern.search(es.read_text(encoding="utf-8")):
+                out.append((signal, row["note"], es.name, "retranslate"))
+                marked.add(es)
+    for es in marked:
+        es.unlink()
+    (here / "retranslate.tsv").write_text(
+        "signal\tnote\tchunk\taction\n" + "".join("\t".join(r) + "\n" for r in out), encoding="utf-8")
+    manual = sum(1 for r in out if r[3] == "manual")
+    print(f"retranslate: {len(marked)} fragmento(s) a pendientes; {manual} señal(es) para juicio -> {here / 'retranslate.tsv'}",
+          file=sys.stderr)
+    return 0
 
 
 # --- sweep ----------------------------------------------------------------
@@ -583,6 +639,8 @@ def main(argv=None) -> int:
     p.set_defaults(func=cmd_translate)
     p = sub.add_parser("usage"); p.add_argument("--bench", type=Path, required=True); p.set_defaults(func=cmd_usage)
     p = sub.add_parser("assemble"); p.add_argument("--bench", type=Path, required=True); p.set_defaults(func=cmd_assemble)
+    p = sub.add_parser("retranslate"); p.add_argument("--batch", default=None)
+    p.add_argument("--bench", type=Path, default=None); p.set_defaults(func=cmd_retranslate)
     p = sub.add_parser("cycle"); p.add_argument("--batch", default=None)
     p.add_argument("--bench", type=Path, default=None, help="por defecto .claude/workbench/translation/<lote>")
     p.add_argument("--model", required=True); p.add_argument("--width", type=int, default=DEFAULT_WIDTH)

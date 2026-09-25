@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from note_language import BY_CODE, ZH, NoteLanguage  # noqa: E402
 
 # El idioma del sitio. Por defecto zh, el sitio que ya se publica; `--lang
-# es-mx` cambia la busqueda de notas, el README del catalogo, el idioma de
+# es-mx` cambia la búsqueda de notas, el README del catalogo, el idioma de
 # MkDocs y las etiquetas de la interfaz, todo desde `note_language.py`.
 SITE: NoteLanguage = ZH
 
@@ -1970,7 +1970,7 @@ def sidebar_script() -> str:
 })();
 """.strip()
     # Las etiquetas de los botones van como marcadores dentro del JavaScript:
-    # sus llaves harian fragil una f-string.
+    # sus llaves harían frágil una f-string.
     for marker, key in (
         ("__NAV_COLLAPSE_LEFT__", "nav_collapse_left"),
         ("__NAV_RESTORE_LEFT__", "nav_restore_left"),

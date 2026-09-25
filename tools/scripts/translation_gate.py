@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Los gates del ciclo de traduccion es-MX (`docs/ES_MX_TRANSLATION_PLAN.md`).
+"""Los gates del ciclo de traducción es-MX (`docs/ES_MX_TRANSLATION_PLAN.md`).
 
     translation_gate.py memory --signals S.jsonl [--memory M.jsonl]
     translation_gate.py sweep  --iteration N --sweep-log W.jsonl [--memory M.jsonl]
@@ -9,7 +9,7 @@
 Un paso que se puede saltar, eventualmente se salta. Por eso escribir la
 memoria (GATE A), barrer el corpus con ella (GATE B) y cerrar un lote limpio y
 revisado (GATE C) no son pasos de una secuencia: salen 2 y detienen el ciclo.
-`report` publica iteraciones contra notas con senal y marca el modo reactivo.
+`report` publica iteraciones contra notas con señal y marca el modo reactivo.
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MEMORY = REPO_ROOT / "tools" / "lang" / "es-mx" / "translation_memory.jsonl"
 REQUIRED = ("patron", "senal_del_verificador", "fix_generico", "archivos_donde_ya_se_aplico")
 FIX_TYPES = {"glossary", "prohibited", "prompt", "mechanical", "manual"}
-# El ciclo es reactivo si da casi una iteracion por nota con senal.
+# El ciclo es reactivo si da casi una iteración por nota con señal.
 REACTIVE_RATIO = 0.75
 
 

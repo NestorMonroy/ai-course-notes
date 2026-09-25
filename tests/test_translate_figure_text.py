@@ -73,7 +73,7 @@ def test_a_string_the_model_skipped_is_reported_and_the_rest_is_kept(tmp_path: P
 
 
 def test_a_leading_line_number_column_is_tolerated_but_the_original_must_match(tmp_path: Path) -> None:
-    # Medido en la primera corrida: un lote volvió como `16<TAB>能力风险<TAB>…`.
+    # Medido en la primera ejecución: un lote volvió como `16<TAB>能力风险<TAB>…`.
     mod_rows = "1\t调用工具\tLlamar herramientas\n2\t记 忆\tMemoria\n"
     parsed = load().parse_result("<<<TSV\n" + mod_rows + "TSV>>>\n", {"调用工具", "记忆"})
     assert parsed == {"调用工具": "Llamar herramientas"}  # `记 忆` no es la cadena pedida

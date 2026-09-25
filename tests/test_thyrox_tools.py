@@ -1,7 +1,7 @@
 """Pruebas de los wrappers de tools/thyrox/: ai-course-notes como CONSUMER de THYROX.
 
 Cada prueba copia tools/thyrox/ a un consumer temporal, porque los wrappers
-derivan la raiz del consumer de su propia ubicacion. Asi ninguna prueba escribe
+derivan la raíz del consumer de su propia ubicación. Así ninguna prueba escribe
 en el repositorio real ni en el store de THYROX.
 """
 import hashlib
@@ -24,7 +24,7 @@ requires_thyrox = pytest.mark.skipif(
 
 
 def make_consumer(tmp_path: Path, env_lines: list[str] | None) -> Path:
-    """Un consumer minimo: git init, tools/thyrox/ copiado y un .env opcional."""
+    """Un consumer mínimo: git init, tools/thyrox/ copiado y un .env opcional."""
     consumer = tmp_path / "consumer"
     consumer.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", "-b", "es-mx"], cwd=consumer, check=True)
@@ -58,7 +58,7 @@ def digest(path: Path) -> str | None:
 
 @requires_thyrox
 def test_run_refuses_without_consumer_env_file(tmp_path: Path) -> None:
-    """THYROX_ROOT exportada no basta: sin el .env del consumer, THYROX usaria sus hogares."""
+    """THYROX_ROOT exportada no basta: sin el .env del consumer, THYROX usaría sus hogares."""
     consumer = make_consumer(tmp_path, env_lines=None)
     result = run_tool(consumer, "run", "--print-env",
                       extra_env={"THYROX_ROOT": str(THYROX_ROOT)})
@@ -87,7 +87,7 @@ STORE_COMMANDS = ("agent_store", "task_ids", "hallazgo_ids")
 @requires_thyrox
 @pytest.mark.parametrize("command", STORE_COMMANDS)
 def test_store_commands_refused_without_consumer_store(tmp_path: Path, command: str) -> None:
-    """Sin store declarado, estos comandos caerian al store de THYROX (H-THYROX-178)."""
+    """Sin store declarado, estos comandos caerían al store de THYROX (H-THYROX-178)."""
     consumer = make_consumer(tmp_path, env_lines=[f"THYROX_ROOT={THYROX_ROOT}"])
     before = digest(PROVIDER_STORE)
     result = run_tool(consumer, "run", command, "--help")

@@ -48,7 +48,7 @@ def parse_result(result: str, requested: set[str]) -> dict[str, str]:
     rows = {}
     for line in (match.group(1).splitlines() if match else []):
         fields = line.split("\t")
-        # Medido en la primera corrida: un lote volvió con una columna de número
+        # Medido en la primera ejecución: un lote volvió con una columna de número
         # de línea delante. Se tolera esa sola desviación; el original sigue
         # teniendo que ser exactamente una cadena pedida.
         if len(fields) == 3 and fields[0].isdigit():

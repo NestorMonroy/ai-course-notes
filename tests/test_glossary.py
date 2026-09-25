@@ -1,10 +1,10 @@
-"""El glosario es-MX y su sugeridor de terminos.
+"""El glosario es-MX y su sugeridor de términos.
 
-El glosario decide, por termino tecnico, si se queda en ingles (`keep`) o se
+El glosario decide, por termino técnico, si se queda en ingles (`keep`) o se
 traduce (`translate`), con su significado y las formas rechazadas. IATE propone
 candidatos, pero compara la forma escrita, no el significado: `embedding` da
-`imbibición` (quimica) y `transformer` da un transformador electrico. Por eso
-el sugeridor filtra por dominio de informatica, propone y nunca escribe.
+`imbibición` (química) y `transformer` da «transformador eléctrico». Por eso
+el sugeridor filtra por dominio de informática, propone y nunca escribe.
 
 Las respuestas de IATE de `tests/fixtures/iate/` son reales, recortadas a los
 campos que se leen.
@@ -84,7 +84,7 @@ def test_glossary_is_well_formed() -> None:
         assert r["meaning"].strip(), f"{r['term_en']}: falta el significado"
         if r["decision"] == "translate":
             assert r["es_mx"].strip(), f"{r['term_en']}: translate sin forma es-MX"
-        # La ultima columna vacia puede omitirse: un tabulador final lo rechaza
+        # La ultima columna vacía puede omitirse: un tabulador final lo rechaza
         # `git diff --check`, y el lector del revisor de prosa ya lo acepta.
         rejected = [f for f in (r["rejected"] or "").split("|") if f]
         assert r["es_mx"] not in rejected, r
@@ -105,7 +105,7 @@ def test_prose_check_rejects_the_glossary_forms_in_a_note(tmp_path: Path) -> Non
 
 
 def test_suggestion_never_rejects_the_term_itself() -> None:
-    """IATE registra `token` como forma espanola de `token`: rechazarla vetaria el termino."""
+    """IATE registra `token` como forma española de `token`: rechazarla vetaría el termino."""
     st = load()
     candidates = [
         st.Candidate("x", ("token",), ("token", "<i>token</i>", "testigo"), ("TRANSPORT",), False),
