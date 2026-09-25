@@ -234,6 +234,9 @@ def pending_units(bench: Path) -> list[list[str]]:
 # cuyos limites de tasa no se ven desde el contenedor. 10 es lo que el piloto
 # corrió sin un 429; si aparece uno, se baja con `--width`.
 DEFAULT_MEMFREE = "3G"
+# Con `Grep` sobre `source.srt`, la ola 1 midió 46 ítems en 2 turnos, 19 en 3,
+# 10 en 4 y 18 que agotaron el tope de 4 (`error_max_turns`): el doble cubre esa cola.
+MAX_TURNS = 8
 DEFAULT_WIDTH = 10
 BEGIN_MARK, END_MARK = "<<<ES", "ES>>>"
 
@@ -276,11 +279,15 @@ def collect_results(out_dir: Path, targets: dict[str, str]) -> list[str]:
     for n, zh in rows:
         result_file = out_dir / f"{n}.json"
         try:
-            result = json.loads(result_file.read_text(encoding="utf-8")).get("result", "")
+            data = json.loads(result_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            result = ""
+            data = {}
+        result = data.get("result", "") or ""
         text = extract_translation(result)
         if text is None:
+            # La causa, si `claude -p` la da (`error_max_turns` en la ola 1).
+            reason = data.get("subtype") or ("sin salida" if not data else "respuesta sin marcadores")
+            print(f"translate: rechazado ({reason}): {zh}", file=sys.stderr)
             missing.append(zh)
             continue
         problem = structure_problem(Path(zh).read_text(encoding="utf-8"), text)
@@ -314,7 +321,7 @@ def cmd_translate(args) -> int:
     runner = os.environ.get("TRANSLATION_RUNNER", str(REPO_ROOT / "tools" / "thyrox" / "run"))
     cmd = [runner, "headless-pool", "--prompt", str(prompt), "--out", str(out_dir),
            "--model", args.model, "--tools", "Read,Grep", "--width", str(args.width), "--memfree", args.memfree,
-           "--timeout", str(args.timeout), "--max-turns", "4", "--cwd", str(Path.cwd())]
+           "--timeout", str(args.timeout), "--max-turns", str(MAX_TURNS), "--cwd", str(Path.cwd())]
     print(f"translate: width={args.width} memfree={args.memfree}", file=sys.stderr)
     code = subprocess.run(cmd, input="".join(f"{row[3]}\n" for row in pending), text=True).returncode
     missing = collect_results(out_dir, {row[3]: row[4] for row in pending})
@@ -892,6 +899,10 @@ def cmd_advance(args) -> int:
         if code in (0, 2):
             return code
         last = sorted(d for d in (bench / "iterations").glob("[0-9][0-9]") if d.is_dir())[-1]
+        if pending_units(bench):
+            # Fragmentos rechazados al recibirlos (sin marcadores, estructura rota):
+            # son la siguiente vuelta, no un juicio (ola 1: siete lotes paraban aquí).
+            continue
         signals = {json.loads(l)["signal"] for l in (last / "signals.jsonl").read_text(encoding="utf-8").splitlines()
                    if l.strip()}
         routes = classify(root, args.memory)

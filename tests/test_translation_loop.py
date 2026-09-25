@@ -861,3 +861,48 @@ def test_included_chapters_are_translated_and_verified_as_units(tmp_path: Path) 
     loop(repo, "verify", "--out", str(out), str(note.with_name("lecture01-notes.es-mx.tex")), str(es_chapter),
          cache=tmp_path / "c2")
     assert "parity:residual-han" in out.read_text(encoding="utf-8")
+
+
+def test_translate_allows_the_measured_turn_tail_and_names_the_rejection(tmp_path: Path) -> None:
+    # Ola 1: con `Grep` sobre la fuente, 18 de 93 ítems agotaron 4 turnos
+    # (`error_max_turns`) y el mensaje solo decía «sin marcadores».
+    repo, note, runner = setup(tmp_path)
+    runner.write_text(FAKE_RUNNER.replace('result = "SIN MARCADORES" if "OMITIR" in body else',
+                                          'result = "" if "OMITIR" in body else'), encoding="utf-8")
+    bench = tmp_path / "bench"
+    loop(repo, "prepare", "--bench", str(bench), str(note))
+    result = loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    args = json.loads(runner.with_suffix(".args").read_text())
+    assert args[args.index("--max-turns") + 1] == "8"
+    # Un ítem sin marcadores nombra su causa si la salida de `claude -p` la trae.
+    out = next(bench.glob("translate/*"))
+    first = out / "1.json"
+    data = json.loads(first.read_text())
+    data.update({"result": "", "subtype": "error_max_turns"})
+    first.write_text(json.dumps(data))
+    mod = load_loop()
+    targets = {l.split("\t")[3]: l.split("\t")[4] for l in (bench / "units.tsv").read_text(encoding="utf-8").splitlines()}
+    import contextlib, io
+    buffer = io.StringIO()
+    with contextlib.redirect_stderr(buffer):
+        mod.collect_results(out, targets)
+    assert "error_max_turns" in buffer.getvalue()
+
+
+def test_advance_retries_chunks_that_were_rejected(tmp_path: Path) -> None:
+    # Ola 1: un lote que no se ensambló por fragmentos rechazados pedía juicio
+    # tras un solo intento; esos fragmentos son la siguiente vuelta, no un juicio.
+    repo, note, runner = setup(tmp_path)
+    flaky = FAKE_RUNNER.replace("for n, zh in enumerate(items, 1):",
+                                "state = Path(__file__).with_suffix('.calls')\n"
+                                "calls = int(state.read_text()) if state.exists() else 0\n"
+                                "state.write_text(str(calls + 1))\n"
+                                "for n, zh in enumerate(items, 1):")
+    flaky = flaky.replace('result = "SIN MARCADORES" if "OMITIR" in body else',
+                          'result = "" if (calls == 0 and n == 1) else "SIN MARCADORES" if "OMITIR" in body else')
+    runner.write_text(flaky, encoding="utf-8")
+    write_plan(repo, "cs000", [note])
+    result = loop(repo, "advance", "--batch", "cs000", "--model", "claude-sonnet-5", runner=runner, cache=tmp_path / "c")
+    assert result.returncode == 0, result.stdout + result.stderr
+    rows = (repo / ".claude/workbench/translation/batches.tsv").read_text(encoding="utf-8").splitlines()[1:]
+    assert [r.split("\t")[6] for r in rows] == ["sin-ensamblar", "0"]
