@@ -11,6 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOOP = REPO_ROOT / "tools" / "scripts" / "translation_loop.py"
 
@@ -822,3 +824,40 @@ def test_a_wave_runs_batches_with_gnu_parallel_then_one_sweep_and_triage(tmp_pat
     assert (wave / "sweep.jsonl").is_file() and (wave / "triage.tsv").is_file()
     for batch in ("cs000", "cs001"):
         assert (repo / f".claude/workbench/translation/{batch}/iterations/01/signals.jsonl").is_file()
+
+
+def test_a_note_one_level_deep_is_its_own_course(tmp_path: Path) -> None:
+    # `self-evolving-agents-2026/…-notes.tex` salía como el curso «.» (lote `raiz`).
+    repo = tmp_path / "repo"
+    note = repo / "solo-course" / "solo-course-notes.tex"
+    note.parent.mkdir(parents=True)
+    note.write_text("x", encoding="utf-8")
+    assert loop(repo, "plan", "--out", "plan.tsv").returncode == 0
+    row = (repo / "plan.tsv").read_text(encoding="utf-8").splitlines()[1].split("\t")
+    assert row[1] == "solo-course", row
+
+
+@pytest.mark.xfail(strict=True, reason="mitad roja persistida: prepare aún no traduce capítulos incluidos")
+def test_included_chapters_are_translated_and_verified_as_units(tmp_path: Path) -> None:
+    # `self-evolving-agents-2026` incluye 9 capítulos con chino; `prepare` solo
+    # traducía la nota, y `\IfFileExists{x.tex}` seguía mirando el capítulo zh.
+    chapter_zh = "\\section{训练}\n训练用 checkpoint。\n"
+    source = NOTE.replace("\\end{document}",
+                          "\\IfFileExists{ch01/ch01-chapter.tex}{\\input{ch01/ch01-chapter.tex}}{}\n\\end{document}")
+    repo, note, runner = setup(tmp_path, source=source)
+    chapter = note.parent / "ch01" / "ch01-chapter.tex"
+    chapter.parent.mkdir()
+    chapter.write_text(chapter_zh, encoding="utf-8")
+    result = loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note),
+                  runner=runner, cache=tmp_path / "c")
+    es_note = note.with_name("lecture01-notes.es-mx.tex").read_text(encoding="utf-8")
+    assert "\\IfFileExists{ch01/ch01-chapter.es-mx.tex}{\\input{ch01/ch01-chapter.es-mx.tex}}{}" in es_note
+    es_chapter = chapter.with_name("ch01-chapter.es-mx.tex")
+    assert es_chapter.is_file() and "El entrenamiento usa checkpoint." in es_chapter.read_text(encoding="utf-8")
+    assert result.returncode == 0, result.stdout + result.stderr
+    # Un capítulo con chino sin traducir sale en la verificación.
+    es_chapter.write_text(chapter_zh, encoding="utf-8")
+    out = tmp_path / "s.jsonl"
+    loop(repo, "verify", "--out", str(out), str(note.with_name("lecture01-notes.es-mx.tex")), str(es_chapter),
+         cache=tmp_path / "c2")
+    assert "parity:residual-han" in out.read_text(encoding="utf-8")

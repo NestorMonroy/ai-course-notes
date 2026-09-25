@@ -698,7 +698,10 @@ def cmd_plan(args) -> int:
         parts = path.relative_to(root).parts
         if path.name.endswith(".es-mx.tex") or SKIPPED_DIRS & set(parts):
             continue
-        courses.setdefault(str(Path(*parts[:-2])) if len(parts) > 2 else ".", []).append(path)
+        # El curso es el directorio que contiene al de la nota; una nota a un solo
+        # nivel (`self-evolving-agents-2026/…`) es su propio curso, no «.».
+        course = str(Path(*parts[:-2])) if len(parts) > 2 else (parts[0] if len(parts) == 2 else ".")
+        courses.setdefault(course, []).append(path)
     sized = sorted(((sum(p.stat().st_size for p in ps), c, ps) for c, ps in courses.items()), key=lambda t: (t[0], t[1]))
     lines = ["\t".join(["order", "batch", "bytes", "notes", "paths"])]
     for order, (size, course, paths) in enumerate(sized, 1):
