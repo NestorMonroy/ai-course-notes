@@ -352,3 +352,27 @@ def test_compile_reports_glyphs_the_font_does_not_have(tmp_path: Path) -> None:
     tex.write_text("\\documentclass{article}\n\\begin{document}\nTitulo 自我\n\\end{document}\n", encoding="utf-8")
     signals = mod.compile_signal(tex)
     assert [s for s, _ in signals] == ["compile:missing-glyph"], signals
+
+
+def test_cycle_chains_prepare_translate_assemble_and_verify(tmp_path: Path) -> None:
+    repo, note, runner = setup(tmp_path)
+    bench = tmp_path / "bench"
+    result = loop(repo, "cycle", "--bench", str(bench), "--model", "claude-sonnet-5", str(note),
+                  runner=runner, cache=tmp_path / "cache")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert note.with_name("lecture01-notes.es-mx.tex").is_file()
+    assert (bench / "signals.jsonl").read_text(encoding="utf-8").strip() == ""
+    assert (bench / "usage.tsv").is_file()
+
+
+def test_cycle_stops_before_assembling_when_a_chunk_is_missing(tmp_path: Path) -> None:
+    dictionary = dict(DICTIONARY, **{"训练用 checkpoint。": "OMITIR"})
+    repo, note, runner = setup(tmp_path, dictionary)
+    bench = tmp_path / "bench"
+    result = loop(repo, "cycle", "--bench", str(bench), "--model", "claude-sonnet-5", str(note),
+                  runner=runner, cache=tmp_path / "cache")
+    assert result.returncode == 1
+    assert "sin marcadores" in result.stderr
+    # La negativa es declarada, no un traceback: un choque tambien dejaria sin nota.
+    assert "falta el fragmento traducido" in result.stderr and "Traceback" not in result.stderr
+    assert not note.with_name("lecture01-notes.es-mx.tex").exists()

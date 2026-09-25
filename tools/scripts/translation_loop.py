@@ -5,6 +5,7 @@
     translation_loop.py prompt   [--memory M] --out P.md
     translation_loop.py translate --bench B --model <id completo> [--width N] [--memfree TAM] [--timeout S]
     translation_loop.py usage    --bench B
+    translation_loop.py cycle    --bench B --model <id> [--compile] <nota.tex>...
     translation_loop.py assemble --bench B
     translation_loop.py verify   --out S.jsonl [--compile] [--jobs N] <nota.es-mx.tex>...
     translation_loop.py sweep    --bench B --iteration N [--memory M] [--jobs N]
@@ -446,6 +447,27 @@ def cmd_verify(args) -> int:
     return 1 if rows else 0
 
 
+# --- cycle ----------------------------------------------------------------
+
+def cmd_cycle(args) -> int:
+    """prepare → translate → assemble → verify (+ usage) sobre un lote.
+
+    Si un fragmento no vuelve con marcadores, `assemble` no escribe esa nota:
+    una nota a medias nunca queda junto al original. Esa es la guarda; el
+    codigo de salida de `translate` no agrega nada (anulado, nada cambia).
+    """
+    ns = argparse.Namespace
+    if cmd_prepare(ns(bench=args.bench, notes=args.notes)):
+        return 1
+    code = cmd_translate(ns(bench=args.bench, model=args.model, width=args.width, memfree=args.memfree,
+                            timeout=args.timeout, memory=args.memory))
+    cmd_usage(ns(bench=args.bench))
+    if cmd_assemble(ns(bench=args.bench)):
+        return 1
+    notes = [l.split("\t")[2] for l in (args.bench / "notes.tsv").read_text(encoding="utf-8").splitlines() if l.strip()]
+    return cmd_verify(ns(out=args.bench / "signals.jsonl", compile=args.compile, jobs=args.jobs, notes=notes))
+
+
 # --- sweep ----------------------------------------------------------------
 
 def cmd_sweep(args) -> int:
@@ -498,6 +520,12 @@ def main(argv=None) -> int:
     p.set_defaults(func=cmd_translate)
     p = sub.add_parser("usage"); p.add_argument("--bench", type=Path, required=True); p.set_defaults(func=cmd_usage)
     p = sub.add_parser("assemble"); p.add_argument("--bench", type=Path, required=True); p.set_defaults(func=cmd_assemble)
+    p = sub.add_parser("cycle"); p.add_argument("--bench", type=Path, required=True)
+    p.add_argument("--model", required=True); p.add_argument("--width", type=int, default=DEFAULT_WIDTH)
+    p.add_argument("--memfree", default=DEFAULT_MEMFREE); p.add_argument("--timeout", type=int, default=900)
+    p.add_argument("--memory", type=Path, default=DEFAULT_MEMORY); p.add_argument("--compile", action="store_true")
+    p.add_argument("--jobs", type=int, default=os.cpu_count() or 2)
+    p.add_argument("notes", nargs="+"); p.set_defaults(func=cmd_cycle)
     p = sub.add_parser("verify"); p.add_argument("--out", type=Path, required=True)
     p.add_argument("--compile", action="store_true"); p.add_argument("--jobs", type=int, default=os.cpu_count() or 2)
     p.add_argument("notes", nargs="+"); p.set_defaults(func=cmd_verify)
