@@ -9,8 +9,6 @@
 #                       propia ubicacion dentro de THYROX y no desde el
 #                       consumer: `agent_store` escribiria en el store del
 #                       PROVIDER (H-THYROX-178).
-#   VOCAB_GATE_*        el gate de vocabulario lee sus parametros solo del
-#                       entorno del proceso, nunca del `.env`.
 #
 # Precedencia de THYROX_ROOT: el proceso, despues el `.env` del consumer. No
 # hay una tercera fuente: suponer la ubicacion de THYROX compondria una ruta
@@ -64,8 +62,6 @@ thyrox_prepare_env() {
 
     export THYROX_ROOT="$root"
     export THYROX_ENV_FILE="$env_file"
-    export VOCAB_GATE_ROOT="$consumer"
-    export VOCAB_GATE_BASELINE="$consumer/tools/thyrox/prose_vocabulary_baseline.txt"
 
     # `src/lib/toolchain.sh` de THYROX lee sus parametros solo del entorno del
     # proceso, no de un `.env`: sin exportarlas, las claves de la cadena de

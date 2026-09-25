@@ -79,7 +79,6 @@ def test_print_env_exports_consumer_env_file(tmp_path: Path) -> None:
     result = run_tool(consumer, "run", "--print-env")
     assert result.returncode == 0, result.stderr
     assert f"THYROX_ENV_FILE={consumer}/.env" in result.stdout
-    assert f"VOCAB_GATE_ROOT={consumer}" in result.stdout
 
 
 STORE_COMMANDS = ("agent_store", "task_ids", "hallazgo_ids")
@@ -110,38 +109,6 @@ def test_store_command_allowed_when_consumer_declares_store(tmp_path: Path) -> N
     assert result.returncode == 0, result.stderr
     assert consumer_store.is_file()
     assert digest(PROVIDER_STORE) == before
-
-
-@requires_thyrox
-def test_prose_vocabulary_reports_invented_and_forbidden(tmp_path: Path) -> None:
-    consumer = make_consumer(tmp_path, env_lines=[f"THYROX_ROOT={THYROX_ROOT}"])
-    sample = consumer / "sample-notes.tex"
-    sample.write_text("La democión del modelo es la regla de oro.\n", encoding="utf-8")
-    result = run_tool(consumer, "check-prose-vocabulary", "sample-notes.tex")
-    assert result.returncode == 1, result.stderr
-    assert "democión" in result.stdout
-    assert "regla de oro" in result.stdout
-
-
-@requires_thyrox
-def test_prose_vocabulary_derives_scope_from_git(tmp_path: Path) -> None:
-    """Sin argumentos, el alcance son los .tex nuevos o modificados contra la base."""
-    consumer = make_consumer(tmp_path, env_lines=[f"THYROX_ROOT={THYROX_ROOT}"])
-    git = ["git", "-c", "user.name=t", "-c", "user.email=t@t"]
-    (consumer / "old-notes.tex").write_text("La democión antigua.\n", encoding="utf-8")
-    subprocess.run([*git, "add", "-A"], cwd=consumer, check=True)
-    subprocess.run([*git, "commit", "-qm", "base"], cwd=consumer, check=True)
-    subprocess.run(["git", "checkout", "-qb", "feature/x"], cwd=consumer, check=True)
-
-    empty = run_tool(consumer, "check-prose-vocabulary")
-    assert empty.returncode == 0, empty.stderr
-    assert "0 archivo(s)" in empty.stdout
-
-    (consumer / "new-notes.tex").write_text("Una chamba nueva.\n", encoding="utf-8")
-    scoped = run_tool(consumer, "check-prose-vocabulary")
-    assert scoped.returncode == 1, scoped.stderr
-    assert "chamba" in scoped.stdout
-    assert "democión" not in scoped.stdout
 
 
 @requires_thyrox

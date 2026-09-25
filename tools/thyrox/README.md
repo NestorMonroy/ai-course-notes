@@ -47,7 +47,6 @@ tools/thyrox/run thyrox-bg start <n> -- <comando>
 tools/thyrox/run check-toolchain-ready    # incluye poppler y TeX Live (compila la plantilla es-MX)
 THYROX_INSTALL_TEXLIVE=1 THYROX_INSTALL_POPPLER=1 tools/thyrox/run check-toolchain-ready   # y los instala si faltan
 eval "$(tools/thyrox/run commit_identity env)"   # identidad antes de commitear
-tools/thyrox/check-prose-vocabulary       # la prosa en espanol nueva o modificada
 ```
 
 ## Por que existe cada pieza
@@ -59,35 +58,13 @@ tools/thyrox/check-prose-vocabulary       # la prosa en espanol nueva o modifica
 | `THYROX_WORKBENCH_DIR` global en el `.env` | la clave por clon `THYROX_WORKBENCH_AI_COURSE_NOTES` se ignora sin aviso (H-THYROX-176). |
 | `THYROX_JOBS_LEDGER_DIR` en el `.env` | el ledger de `wait-jobs`, `run-task-pool` y `thyrox-bg register` cae en `<thyrox>/.claude/jobs-ledger/`. `THYROX_JOBS_DIR` no sirve para eso: en `job_runs.py` nombra el hogar de los runs (H-THYROX-179). |
 | claves `THYROX_TOOLCHAIN_*` y `THYROX_INSTALL_*` del `.env` exportadas | `src/lib/toolchain.sh` las lee solo del entorno del proceso: sin exportarlas, el preflight omitiria la sonda de TeX aunque el consumer la declare. |
-| `VOCAB_GATE_*` exportadas | el gate de vocabulario solo lee sus parametros del proceso, no del `.env`. |
 
-## El gate de vocabulario: que mide y que no
+## El gate de vocabulario ya no pasa por aquí
 
-`check-prose-vocabulary` invoca `check_vocabulario_prosa` de THYROX con
-`--strict` y con `prose_vocabulary_baseline.txt`, vacio porque la prosa en
-espanol de este consumer empieza sin deuda. Mide dos ejes:
-
-- **palabra inventada**: una palabra con sufijo nominal del espanol (`-cion`,
-  `-dad`, `-miento`, `-anza`, `-encia`) ausente del lexico
-  `spacy-lookups-data` (1 000 000 de formas);
-- **forma prohibida**: la lista de THYROX `vocabulario_prohibido.txt`
-  (clichés, coloquialismos y falsos amigos, como traducir *library* por su
-  parecido gráfico en vez de por su significado).
-
-Opera sobre el **significante** —la forma escrita— y no alcanza el
-**significado**. Por eso no ve, y un resultado sin hallazgos no lo descarta:
-
-| No detecta | Ejemplo |
-|---|---|
-| spanglish sin sufijo nominal | `deployeo`, `testear` |
-| el registro regional: el lexico es panhispanico | `ordenador` pasa igual que `computadora` |
-| si un termino tecnico debio quedarse en ingles | `andamiaje` por `scaffolding` |
-| un falso amigo que no este en la lista | `eventualmente` por *eventually* |
-
-Esos casos quedan a la revision de quien escribe y a un glosario de
-terminos del consumer. Ampliar la lista prohibida desde aqui hoy no es
-posible sin copiarla entera: `VOCAB_GATE_FORBIDDEN` la reemplaza, no la
-extiende.
+La revisión de la prosa en español es propia de este repositorio:
+`tools/scripts/check_prose_vocabulary.py`, con sus datos en
+`tools/lang/es-mx/`. Se copió y adaptó de THYROX para no depender de él; la
+procedencia está en `tools/lang/es-mx/PROVENANCE.md`.
 
 ## Pruebas
 

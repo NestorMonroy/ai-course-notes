@@ -69,4 +69,15 @@ código no se traduce; sus comentarios sí.
 
 Además del QA de la base (`check_quality.sh`, `check_note_coverage.py`,
 compilación doble con XeLaTeX y QA visual del PDF), que ya reconocen las notas
-es-MX por su nombre.
+es-MX por su nombre:
+
+```bash
+uv run python tools/scripts/check_prose_vocabulary.py            # notas es-MX nuevas o modificadas
+uv run python tools/scripts/check_prose_vocabulary.py <nota>     # una nota concreta
+uv run python tools/web/generate_site.py --lang es-mx --strict   # el sitio de lectura en español
+```
+
+`check_prose_vocabulary.py` mide cuatro ejes: palabra inventada, forma
+prohibida (incluidas las rechazadas en el glosario), spanglish y palabra en
+inglés que el glosario no declara. Mide la forma, no el significado: un
+resultado sin hallazgos no sustituye a la revisión de quien escribe.
