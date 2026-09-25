@@ -21,7 +21,6 @@ wrappers que preparan el entorno del consumer y delegan en
    | `THYROX_BACKGROUND_LOG_DIR` | `<consumer>/.claude/build-logs` |
    | `THYROX_JOBS_DIR` | `<consumer>/.claude/jobs` |
    | `THYROX_JOBS_LEDGER_DIR` | `<consumer>/.claude/jobs-ledger` (cada sesion recibe su subdirectorio) |
-   | `THYROX_AGENT_STORE` | `<consumer>/agent-results/agent_store.sqlite3` |
    | `THYROX_TOOLCHAIN_AWK_BIN` | `gawk` |
    | `THYROX_COMMIT_AUTHOR` / `THYROX_COMMIT_COMMITTER` | la identidad de los commits |
 
@@ -29,19 +28,19 @@ Sin el `.env`, los wrappers se niegan con codigo 2 en vez de continuar: THYROX
 resolveria cada clave desde su propio `.env` y el store, los logs y el
 workbench serian los del PROVIDER.
 
-## El store es el de este consumer
+## Sin store de agentes
 
-Todo lo que este trabajo registra —hallazgos, tareas, sesiones— va a
-`agent-results/agent_store.sqlite3` de este repositorio. El store de THYROX es
-un ejemplo del mecanismo y no se escribe desde aqui: `tools/thyrox/run
-agent_store ...` lo garantiza porque exporta `THYROX_ENV_FILE`.
+Este consumer no tiene store de agentes. `tools/thyrox/run` niega
+`agent_store`, `task_ids` y `hallazgo_ids` mientras el `.env` no declare
+`THYROX_AGENT_STORE`: sin esa clave, esos comandos leerian o escribirian el
+store de THYROX (H-THYROX-178), que es un ejemplo del mecanismo y no se llena
+desde aqui. Declararla los habilita contra el store que nombre.
 
 ## Comandos
 
 ```bash
 tools/thyrox/run --print-env              # el entorno que se exporta
 tools/thyrox/run --list                   # los comandos de $THYROX_ROOT/bin
-tools/thyrox/run agent_store init         # el store de ESTE consumer
 tools/thyrox/run thyrox-bg start <n> -- <comando>
 tools/thyrox/run check-toolchain-ready
 eval "$(tools/thyrox/run commit_identity env)"   # identidad antes de commitear
@@ -53,7 +52,7 @@ tools/thyrox/check-prose-vocabulary       # la prosa en espanol nueva o modifica
 | Pieza | Sin ella |
 |---|---|
 | `THYROX_ENV_FILE` exportada | un comando de `bin/` busca el `.env` desde su ubicacion dentro de THYROX y no desde el consumer: `agent_store` escribe en el store del PROVIDER (H-THYROX-178). |
-| rechazo de `agent_store --repo` | `--repo` compone `<prefijo><repo>/.claude/agent-results`, y este clon no lleva el prefijo `kaupamex-` (H-THYROX-177). |
+| rechazo de `agent_store`, `task_ids` y `hallazgo_ids` sin `THYROX_AGENT_STORE` | caerian al store de THYROX (H-THYROX-178); `--repo` tampoco sirve, porque compone `<prefijo><repo>` y este clon no lleva el prefijo `kaupamex-` (H-THYROX-177). |
 | `THYROX_WORKBENCH_DIR` global en el `.env` | la clave por clon `THYROX_WORKBENCH_AI_COURSE_NOTES` se ignora sin aviso (H-THYROX-176). |
 | `THYROX_JOBS_LEDGER_DIR` en el `.env` | el ledger de `wait-jobs`, `run-task-pool` y `thyrox-bg register` cae en `<thyrox>/.claude/jobs-ledger/`. `THYROX_JOBS_DIR` no sirve para eso: en `job_runs.py` nombra el hogar de los runs (H-THYROX-179). |
 | `VOCAB_GATE_*` exportadas | el gate de vocabulario solo lee sus parametros del proceso, no del `.env`. |

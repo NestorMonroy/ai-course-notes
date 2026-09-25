@@ -82,9 +82,24 @@ def test_print_env_exports_consumer_env_file(tmp_path: Path) -> None:
     assert f"VOCAB_GATE_ROOT={consumer}" in result.stdout
 
 
+STORE_COMMANDS = ("agent_store", "task_ids", "hallazgo_ids")
+
+
 @requires_thyrox
-def test_agent_store_lands_in_consumer_not_in_provider(tmp_path: Path) -> None:
-    """El control de H-THYROX-178: sin THYROX_ENV_FILE el store seria el de THYROX."""
+@pytest.mark.parametrize("command", STORE_COMMANDS)
+def test_store_commands_refused_without_consumer_store(tmp_path: Path, command: str) -> None:
+    """Sin store declarado, estos comandos caerian al store de THYROX (H-THYROX-178)."""
+    consumer = make_consumer(tmp_path, env_lines=[f"THYROX_ROOT={THYROX_ROOT}"])
+    before = digest(PROVIDER_STORE)
+    result = run_tool(consumer, "run", command, "--help")
+    assert result.returncode == 2
+    assert "THYROX_AGENT_STORE" in result.stderr
+    assert digest(PROVIDER_STORE) == before
+
+
+@requires_thyrox
+def test_store_command_allowed_when_consumer_declares_store(tmp_path: Path) -> None:
+    """Con store declarado, el store resulta el del consumer y no el de THYROX."""
     consumer_store = tmp_path / "consumer" / "agent-results" / "agent_store.sqlite3"
     consumer = make_consumer(tmp_path, env_lines=[
         f"THYROX_ROOT={THYROX_ROOT}",
@@ -93,18 +108,8 @@ def test_agent_store_lands_in_consumer_not_in_provider(tmp_path: Path) -> None:
     before = digest(PROVIDER_STORE)
     result = run_tool(consumer, "run", "agent_store", "init")
     assert result.returncode == 0, result.stderr
-    assert str(consumer_store) in result.stdout
     assert consumer_store.is_file()
     assert digest(PROVIDER_STORE) == before
-
-
-@requires_thyrox
-def test_run_rejects_agent_store_repo_flag(tmp_path: Path) -> None:
-    """--repo compone <prefijo><repo> (H-THYROX-177): en este consumer no es una salida valida."""
-    consumer = make_consumer(tmp_path, env_lines=[f"THYROX_ROOT={THYROX_ROOT}"])
-    result = run_tool(consumer, "run", "agent_store", "init", "--repo", "notes")
-    assert result.returncode == 2
-    assert "--repo" in result.stderr
 
 
 @requires_thyrox

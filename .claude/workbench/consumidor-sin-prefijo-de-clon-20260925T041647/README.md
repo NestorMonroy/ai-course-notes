@@ -26,13 +26,14 @@ Salida registrada: `outputs/probe.out`.
 | H-THYROX-178 — sin `start`, el `.env` se busca desde `src/paths/` de thyrox y no desde el cwd: `agent_store` invocado en un consumidor escribe en el store del proveedor | `## 3` |
 | H-THYROX-179 — `THYROX_JOBS_DIR` nombra el ledger en `wait-jobs.sh` y el hogar de runs en `job_runs.py`; un consumer no podia llevar su ledger a su arbol. Corregido con `THYROX_JOBS_LEDGER_DIR` | `tests/session/test-wait-jobs-ledger-home.sh` |
 
-## Donde viven las filas
+## Donde viven los hallazgos
 
-Las cuatro filas de hallazgo viven en el store del CONSUMER
-(`ai-course-notes/agent-results/agent_store.sqlite3`), no en el de THYROX, que
-es un ejemplo del mecanismo y no se llena desde este trabajo. Se registraron
-primero aqui por error y se retiraron restaurando el store a
-`feature/thyrox-l6@bacdb771`.
+En este banco. Las cuatro filas se registraron primero en el store de THYROX
+—un ejemplo del mecanismo, que no se llena desde este trabajo—, se retiraron
+de ahi restaurandolo a `feature/thyrox-l6@bacdb771`, pasaron al store del
+consumer y ese store se retiro despues por decision del ejecutor: este
+consumer no tiene store de agentes. La tabla de arriba y `outputs/probe.out`
+son el registro.
 
 ## Como se destapo el 177
 
