@@ -269,7 +269,7 @@ def load_glossary(path: pathlib.Path) -> tuple[set[str], list[tuple[str, str | N
                 keep.update(re.split(r"[\s-]+", term))
             target = term if (row.get("decision") or "").strip() == "keep" else (row.get("es_mx") or "").strip()
             if (row.get("decision") or "").strip() == "translate" and target:
-                # La forma en español que el glosario adopta esta atestiguada por
+                # La forma en español que el glosario adopta está atestiguada por
                 # su fuente (IATE, FundeuRAE); no es una palabra inventada.
                 keep.update(re.split(r"[\s-]+", target.lower()))
             for form in (row.get("rejected") or "").split("|"):
@@ -354,7 +354,7 @@ def scan(files, es, en, forbidden, keep, root, lemmas=None):
             elif (len(word) >= 6 and NOMINAL_SUFFIX.match(word) and word not in keep and not attested(word, es)
                     and not prefixed_attested(word, es) and not dictionary.accepts(word)):
                 hits[word] += 1
-            elif not dictionary.accepts(word) and is_spanglish(word, es, en, lemmas):
+            elif word not in keep and not dictionary.accepts(word) and is_spanglish(word, es, en, lemmas):
                 hits[f"spanglish:{word}"] += 1
             elif (raw[0].islower() and not (singulars(word) & keep) and word not in keep
                   and not dictionary.accepts(word) and is_english(word, es, en)):

@@ -251,3 +251,14 @@ def test_the_english_es_plural_counts_as_its_singular() -> None:
                            ("classes", "class"), ("caches", "cache")]:
         assert single in mod.singulars(plural), (plural, mod.singulars(plural))
     assert mod.singulars("class") == set()
+
+
+def test_a_form_adopted_by_the_glossary_is_not_spanglish(tmp_path: Path) -> None:
+    # Ola 1: `tokenizada` siguió saliendo como spanglish aunque el glosario
+    # adoptó las formas de tokenizar; el eje spanglish no consultaba el glosario.
+    glossary = tmp_path / "glossary.tsv"
+    glossary.write_text("term_en\tdecision\tes_mx\tmeaning\tsource\trejected\n"
+                        "tokenize\ttranslate\ttokenizar tokenizada\tdividir en tokens\tIATE\t\n", encoding="utf-8")
+    result = run(str(note(tmp_path, "La señal tokenizada y el código deployeado.")), glossary=glossary)
+    assert "spanglish:tokenizada" not in result.stdout, result.stdout
+    assert "spanglish:deployeado" in result.stdout
