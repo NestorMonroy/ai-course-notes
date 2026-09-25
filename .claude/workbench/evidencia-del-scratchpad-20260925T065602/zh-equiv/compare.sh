@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Equivalencia zh: HEAD contra la version con perfil, sobre las 370 notas reales.
+set -uo pipefail
+cd /home/user/ai-course-notes
+PY=/home/user/ai-course-notes/.venv/bin/python
+find . -path ./.web-build -prune -o -path ./.venv -prune -o -name '*-notes.tex' -print | sort > /tmp/claude-0/-home-user/81a17524-87b5-5e9d-997b-0732e892d302/scratchpad/zh-equiv/notes.txt
+echo "notas: $(wc -l < /tmp/claude-0/-home-user/81a17524-87b5-5e9d-997b-0732e892d302/scratchpad/zh-equiv/notes.txt)"
+while read -r n; do echo "== $n"; $PY /tmp/claude-0/-home-user/81a17524-87b5-5e9d-997b-0732e892d302/scratchpad/zh-equiv/old/check_note_coverage.py "$n" 2>&1; echo "rc=$?"; done < /tmp/claude-0/-home-user/81a17524-87b5-5e9d-997b-0732e892d302/scratchpad/zh-equiv/notes.txt > /tmp/claude-0/-home-user/81a17524-87b5-5e9d-997b-0732e892d302/scratchpad/zh-equiv/cov.old
+while read -r n; do echo "== $n"; $PY tools/scripts/check_note_coverage.py "$n" 2>&1; echo "rc=$?"; done < /tmp/claude-0/-home-user/81a17524-87b5-5e9d-997b-0732e892d302/scratchpad/zh-equiv/notes.txt > /tmp/claude-0/-home-user/81a17524-87b5-5e9d-997b-0732e892d302/scratchpad/zh-equiv/cov.new
+bash /tmp/claude-0/-home-user/81a17524-87b5-5e9d-997b-0732e892d302/scratchpad/zh-equiv/old/check_quality.sh . > /tmp/claude-0/-home-user/81a17524-87b5-5e9d-997b-0732e892d302/scratchpad/zh-equiv/q.old 2>&1; bash tools/scripts/check_quality.sh . > /tmp/claude-0/-home-user/81a17524-87b5-5e9d-997b-0732e892d302/scratchpad/zh-equiv/q.new 2>&1
+$PY /tmp/claude-0/-home-user/81a17524-87b5-5e9d-997b-0732e892d302/scratchpad/zh-equiv/old/full_quality_audit.py --format csv > /tmp/claude-0/-home-user/81a17524-87b5-5e9d-997b-0732e892d302/scratchpad/zh-equiv/a.old 2>&1; $PY tools/scripts/full_quality_audit.py --format csv > /tmp/claude-0/-home-user/81a17524-87b5-5e9d-997b-0732e892d302/scratchpad/zh-equiv/a.new 2>&1
+for k in cov q a; do if cmp -s /tmp/claude-0/-home-user/81a17524-87b5-5e9d-997b-0732e892d302/scratchpad/zh-equiv/$k.old /tmp/claude-0/-home-user/81a17524-87b5-5e9d-997b-0732e892d302/scratchpad/zh-equiv/$k.new; then echo "$k: IDENTICO ($(wc -l < /tmp/claude-0/-home-user/81a17524-87b5-5e9d-997b-0732e892d302/scratchpad/zh-equiv/$k.new) lineas)"; else echo "$k: DIFIERE"; diff /tmp/claude-0/-home-user/81a17524-87b5-5e9d-997b-0732e892d302/scratchpad/zh-equiv/$k.old /tmp/claude-0/-home-user/81a17524-87b5-5e9d-997b-0732e892d302/scratchpad/zh-equiv/$k.new | head -10; fi; done
