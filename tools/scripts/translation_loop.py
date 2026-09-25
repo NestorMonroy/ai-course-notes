@@ -345,11 +345,18 @@ def verify_notes(notes: list[Path], compile_: bool, root: Path, lexicons) -> tup
             rows += json.loads(cached.read_text(encoding="utf-8"))
             hits += 1
             continue
-        found = compare(zh.read_text(encoding="utf-8"), es.read_text(encoding="utf-8"), DEFAULT_GLOSSARY)
+        zh_text = zh.read_text(encoding="utf-8")
+        found = compare(zh_text, es.read_text(encoding="utf-8"), DEFAULT_GLOSSARY)
+        # El ingles que la nota zh ya escribe es termino tecnico que se queda
+        # (`reward model`, opciones de tcolorbox); solo es defecto el que
+        # introdujo la traduccion.
+        inherited_english = {w.lower() for w in re.findall(r"[A-Za-z]+", zh_text)}
         for k in prose.scan([es], es_lex, en_lex, forbidden, keep, root, lemmas):
             if k in baseline:
                 continue
             if k.startswith("english:"):
+                if k.split(":", 1)[1] in inherited_english:
+                    continue
                 found.append((f"prose:{k}", ""))
             elif k.startswith("spanglish:"):
                 found.append((f"prose:{k}", ""))

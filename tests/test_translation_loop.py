@@ -296,3 +296,20 @@ def test_usage_sums_tokens_by_component_and_measures_letters_per_han(tmp_path: P
     rows = (bench / "usage.tsv").read_text(encoding="utf-8").splitlines()
     assert rows[0].split("\t") == ["chunk", "han", "letters", "input", "cache_creation", "cache_read", "output"]
     assert len(rows) == items + 1
+
+
+def test_english_the_original_already_uses_is_not_a_translation_defect(tmp_path: Path) -> None:
+    # La nota zh ya escribe `reward model` en ingles: es termino tecnico que se
+    # queda. `weights` no esta en el original: lo introdujo la traduccion.
+    source = NOTE.replace("小结。", "小结：reward model 很重要。")
+    dictionary = dict(DICTIONARY, **{"小结：reward model 很重要。": "Resumen: el reward model importa, igual que los weights."})
+    repo, note, runner = setup(tmp_path, dictionary, source)
+    bench = tmp_path / "bench"
+    loop(repo, "prepare", "--bench", str(bench), str(note))
+    loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    loop(repo, "assemble", "--bench", str(bench))
+    out = bench / "signals.jsonl"
+    loop(repo, "verify", "--out", str(out), str(note.with_name("lecture01-notes.es-mx.tex")), cache=tmp_path / "cache")
+    signals = {json.loads(l)["signal"] for l in out.read_text(encoding="utf-8").splitlines()}
+    assert "prose:english:weights" in signals, signals
+    assert "prose:english:reward" not in signals and "prose:english:model" not in signals
