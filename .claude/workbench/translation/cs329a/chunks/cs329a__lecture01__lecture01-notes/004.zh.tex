@@ -1,0 +1,95 @@
+\section{第三条扩展路径：Inference-Time Scaling}
+
+\subsection{参数固定后，仍可用更多计算换成功率}
+
+Large Language Monkeys 的出发点非常直接：对同一道题独立采样很多次，只要模型对该题存在非零成功概率，就可能在某次采样中命中正确解。系统分成两步：
+
+\begin{enumerate}
+    \item \textbf{Generation}：生成大量候选解，追求 coverage；
+    \item \textbf{Verification}：从候选中识别正确解，追求 precision。
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.96\textwidth]{figures/language-monkeys.jpg}
+\caption{Large Language Monkeys：多样化生成与验证选择。\protect\footnotemark}
+\end{figure}
+\footnotetext{视频讲解区间：00:20:03--00:22:43。}
+
+假设一次采样独立成功的概率为 $p$，采样 $k$ 次至少成功一次的概率是：
+
+$$
+P_{\mathrm{solve}}(k)=1-(1-p)^k.
+$$
+
+\begin{itemize}
+    \item $p$：单次采样得到正确候选的概率；
+    \item $k$：推理时采样预算；
+    \item $(1-p)^k$：$k$ 次都失败的概率；
+    \item $P_{\mathrm{solve}}(k)$：候选集合中至少存在一个正确解的概率。
+\end{itemize}
+
+当 $p$ 很小时，需要很大的 $k$ 才能看到明显收益；当 $p=0$ 时，再多采样也无济于事。这解释了 test-time scaling 的边界：它能挖掘模型\textbf{低概率但已经存在}的能力，却不能凭空创造模型完全不会的算法。
+
+\begin{importantbox}{Coverage 与最终准确率不是一回事}
+Oracle pass@$k$ 假设我们能知道候选中哪个答案正确，衡量生成覆盖；真实系统还要面对选择问题。若 verifier 无法识别正确答案，候选集合再好也无法转化为最终 pass@1。这一差值就是 generation--verification gap。
+\end{importantbox}
+
+\subsection{为什么小模型也能被大量采样“放大”}
+
+实验显示，不同模型对不同题目往往存在长尾成功概率：某个 8B 模型可能大多数时候做错一道题，但在极少数轨迹中会走对。增加采样数会逐步收集这些稀有成功轨迹，使小模型在 oracle 评价下接近甚至超过强模型的单次表现。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.97\textwidth]{figures/repeated-sampling-results.jpg}
+\caption{重复采样在数学、代码和形式化证明任务上扩大候选覆盖。\protect\footnotemark}
+\end{figure}
+\footnotetext{视频讲解区间：00:23:49--00:27:12。}
+
+但计算收益存在递减：当容易题已被覆盖，新增采样主要消耗在极难题上。系统设计不能只问“再采样是否提升”，还要问“每单位 token、延迟和能耗带来多少边际成功率”。
+
+\subsection{训练计算与测试时计算是两种不同预算}
+
+Reasoning model 把更长的思维链、搜索与自我修正纳入推理过程。课程用 o1 的训练曲线和测试时曲线说明：能力既可随训练计算增长，也可在模型固定后随 test-time compute 增长。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/o1-scaling.jpg}
+\caption{训练阶段与测试阶段都存在可扩展的计算轴。\protect\footnotemark}
+\end{figure}
+\footnotetext{视频讲解区间：00:29:40--00:32:07。}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{figures/reasoning-models.jpg}
+\caption{Reasoning model 通过分解、评估、修正和替代方案消耗更多中间计算。\protect\footnotemark}
+\end{figure}
+\footnotetext{视频讲解区间：00:32:08--00:33:55。}
+
+\begin{knowledgebox}{并行扩展与串行扩展}
+\textbf{并行扩展}独立生成多个候选，易于并行但候选之间不共享经验；\textbf{串行扩展}让后续步骤读取前面的结果并进行修订、搜索或回溯，可能更高效，但一旦早期状态错误也会把偏差传播到后续。实际系统通常混合两者。
+\end{knowledgebox}
+
+\subsection{推理预算应按问题难度自适应}
+
+固定给每道题相同 token 预算会浪费计算：简单题一次即可解决，困难题需要更多探索。更合理的控制器应根据不确定性、验证分数、候选一致性或中间失败信号决定是否继续计算。
+
+可把预算分配写成约束优化：
+
+$$
+\max_{k_1,\ldots,k_n}\sum_{i=1}^{n} U_i(k_i)
+\quad\text{s.t.}\quad
+\sum_{i=1}^{n} c_i k_i\le B.
+$$
+
+\begin{itemize}
+    \item $k_i$：问题 $i$ 获得的推理步骤或采样数；
+    \item $U_i(k_i)$：额外计算带来的期望效用；
+    \item $c_i$：每一步的成本；
+    \item $B$：总 token、延迟或金钱预算。
+\end{itemize}
+
+\subsection{本章小结}
+
+Inference-time scaling 把“更多计算”从训练集群迁移到每次请求。Repeated sampling 提升 coverage，reasoning/search 提升单条轨迹质量，而 verifier 决定这些额外候选能否转化为最终准确率。整门课后续大量方法都可以看作对这三部分的改进。
+
