@@ -44,11 +44,36 @@ prosa:
 | Lematización (**existe desde `b9b4209`**) | el eje de spanglish de V4 consulta la tabla de lemas del español de spacy-lookups-data: una forma con lema es un verbo español (`horneado`, `formateado`), sin umbral ajustado a mano | `es_lemma_lookup`, 491,547 formas |
 | Léxicos es/en (existen) | los ejes de palabra inventada, inglés sin glosario y spanglish de V4 | `es_lexeme_prob`, `en_lexeme_prob` |
 | `suggest_term.py` (existe) | fila candidata del glosario desde IATE filtrado a informática y los léxicos | glosario |
-| Figuras con texto (**nuevo**) | `render_zhangxiaojun_concept_figures.py` parametrizado por idioma regenera las 338 imágenes como `*.es-mx.png` | sus cadenas se traducen una vez, como un glosario |
+| Figuras con texto (**existe desde `cc36a64`**) | `render_zhangxiaojun_concept_figures.py --lang es-mx` regenera las 338 imágenes como `*.es-mx.png` desde `tools/lang/es-mx/figure_text.tsv`; rehúsa (exit 3) si falta una cadena y `--extract` lista las que faltan: **2,531 cadenas, 56,747 caracteres**, medido | sus cadenas se traducen una vez, como un glosario |
 
 Lo que no se automatiza es la prosa: la tabla de lemas y los léxicos dicen si
 una palabra existe y de qué idioma es, no si la traducción dice lo mismo que el
 original.
+
+### 2.1 La anchura del pool se deriva de los recursos medidos
+
+La anchura de `headless-pool` no es una constante: `translation_loop.py
+translate --width auto` (el default) la calcula antes de cada lanzamiento y la
+imprime junto con lo que midió.
+
+```text
+anchura = max(1, min(16, (MemAvailable − 2048 MB) // 116 MB, ⌊núcleos × 4 × (1 − carga₁ / núcleos)⌋))
+```
+
+- **116 MB por `claude -p`**: medido por el ejecutor el 2026-09-25, 26 procesos
+  con 3,017 MB de RSS en total, con carga 0.86 en 4 núcleos y 13,528 MB
+  disponibles. Con esas cifras la fórmula da 12.
+- **4 por núcleo**: un `claude -p` pasa casi todo el tiempo esperando la API,
+  así que no ocupa un núcleo entero. Es una estimación que la fase 1 corrige.
+- **2,048 MB de reserva**: para XeLaTeX y el verificador, que corren en paralelo
+  con la traducción.
+
+*Métrica:* memoria disponible, carga a un minuto y núcleos del contenedor en el
+momento de lanzar. *Ciega a:* los límites de tasa de la API, que no se ven desde
+el contenedor. Si la API responde 429, se fija `--width N` a mano y se registra
+en el banco. `headless-pool` de THYROX no acepta `--memfree` como
+`run-task-pool`, así que la cota por memoria vive en el consumer. Si el provider
+lo agrega, esta fórmula pasa a ser su valor inicial.
 
 ## 3. Los tres papeles, adaptados
 
@@ -164,7 +189,7 @@ Antes de aceptar un lote, en su banco y no en el conteo de señales:
 | 0. Herramientas | con TDD y control de anulación: `localize_preamble.py` (y con él las plantillas es-MX que faltan, `cs336-2026-notes-template.es-mx.tex` entre ellas, y los 4 preámbulos compartidos), `check_translation_parity.py` (V1–V3), `translation_memory.jsonl` y `translation_gate.py` (gates A, B, C y `report`), la plantilla del traductor y el script de figuras parametrizado por idioma | pruebas en verde; cada gate rehúsa en su caso negativo |
 | 1. Piloto de una nota | una nota corta y representativa, con figura, caja, fórmula y listing | V1–V6 en verde; **se miden** tokens de entrada y salida, tiempo y dinero por unidad (la salida JSON de `claude -p` trae el uso); se recalibra el factor 4.38 letras/Han del perfil con prosa real |
 | 2. Piloto de curso | `cs329a` (9 notas, 34,785 Han): el lote más pequeño con estructura de curso completa | gates A y B ejercidos al menos una vez; reporte de iteraciones contra unidades |
-| 3. Escalado | un curso por lote, en el orden que se decida; la anchura del pool según el costo medido en la fase 1 | gate C por lote |
+| 3. Escalado | un curso por lote, en el orden que se decida; la anchura del pool derivada de los recursos (sección 2.1), con el factor por núcleo corregido en la fase 1 | gate C por lote |
 | 4. Cierre | sitio es-MX (`generate_site.py --lang es-mx`), conteos del README, `TRACKING.md` | sitio compila en `--strict` |
 
 ## 9. Costo: se mide, no se estima
@@ -189,7 +214,7 @@ cifra de costo sería inventada.
 ## 11. Decisiones pendientes
 
 1. **Modelo** del traductor (identificador completo; `headless-pool` rehúsa alias).
-2. **Techo de costo** y anchura del pool, después de la fase 1.
+2. **Techo de costo**, después de la fase 1. La anchura ya no es una decisión: se deriva (sección 2.1).
 3. **Orden de los cursos** en la fase 3.
 4. **Fracción de revisión humana** por lote.
 5. **Publicar** el sitio es-MX en GitHub Pages o solo construirlo.
