@@ -330,7 +330,7 @@ consumer's `.claude/` directories instead:
 | `.claude/workbench/<bench>/` | evidence: measurements, logs, annulment-control scripts, QA contact sheets, with a `README.md` index | yes |
 | `.claude/workbench/translation/<batch>/` | one stable bench per translation batch; each `cycle` run writes `iterations/NN/`, never overwriting | yes |
 | `.claude/workbench/translation/batches.tsv`, `.claude/workbench/.last-bank` | the append-only registry of batch iterations and the pointer to the batch in progress, both written by `translation_loop.py cycle` | yes |
-| `.claude/cache/` | verifier verdict cache and intermediate files; delete an annulment backup once its file is restored, so no stale copy of source is committed | yes |
+| `.claude/cache/<name>/<stem>-<YYYYMMDDTHHMMSSZ>.<ext>` | intermediate files and logs, one directory per job with a UTC timestamp in each name, like THYROX's `.claude/build-logs/` (`tests/test_cache_layout.py` enforces it); `translation/` is the verifier's verdict store, named by content hash; delete an annulment backup once its file is restored | yes |
 | `.claude/jobs/` | background job records (`tools/thyrox/run thyrox-bg`) | yes |
 | `.claude/jobs-ledger/` | the `wait-jobs` barrier ledger | no |
 
