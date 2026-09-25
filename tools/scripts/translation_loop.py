@@ -928,6 +928,18 @@ def cmd_advance(args) -> int:
 
 # --- sweep ----------------------------------------------------------------
 
+def needs_fix(text: str, fix: dict) -> bool:
+    """¿Aplica el arreglo mecánico a este texto, sin aplicarlo dos veces?
+
+    Un reemplazo que contiene lo buscado (llevar xeCJK a las notas ya
+    traducidas: «…{spanish}» → «…{spanish}\\n\\usepackage{xeCJK}») se aplicaría
+    de nuevo en cada ola; si el texto ya trae el reemplazo, no se toca.
+    """
+    if fix["buscar"] not in text:
+        return False
+    return not (fix["buscar"] in fix["reemplazar"] and fix["reemplazar"] in text)
+
+
 def cmd_sweep(args) -> int:
     root = Path.cwd()
     # Las notas del producto, nunca las copias de evidencia bajo `.claude/`: el
@@ -948,10 +960,10 @@ def cmd_sweep(args) -> int:
                 # Ruta 1 (determinista, plan v3): por texto y no por señal (la del
                 # glifo solo sale compilando), en la nota y en sus fragmentos, que
                 # son la fuente de verdad: el siguiente ensamblado no la deshace.
-                hit = sorted(rel(n, root) for n in notes if fix["buscar"] in n.read_text(encoding="utf-8"))
+                hit = sorted(rel(n, root) for n in notes if needs_fix(n.read_text(encoding="utf-8"), fix))
                 for path in [root / n for n in hit] + chunks:
                     text = path.read_text(encoding="utf-8")
-                    if fix["buscar"] in text:
+                    if needs_fix(text, fix):
                         path.write_text(text.replace(fix["buscar"], fix["reemplazar"]), encoding="utf-8")
                 applied = len(hit)
             else:

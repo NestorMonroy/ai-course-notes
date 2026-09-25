@@ -23,11 +23,15 @@ HAN = re.compile(r"[\u4e00-\u9fff]")
 
 CTEX = re.compile(r"^\\usepackage(?:\[[^\]]*\])?\{ctex\}[^\n]*$", re.M)
 SPANISH = (
-    "% Espanol (Mexico) con XeLaTeX: fontspec para fuentes Unicode, polyglossia\n"
-    "% para la division silabica y los nombres del documento en la variante mexicana.\n"
+    "% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia\n"
+    "% para la división silábica y los nombres del documento en la variante mexicana.\n"
     "\\usepackage{fontspec}\n"
     "\\usepackage{polyglossia}\n"
     "\\setdefaultlanguage[variant=mexican]{spanish}\n"
+    "% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres\n"
+    "% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.\n"
+    "\\usepackage{xeCJK}\n"
+    "\\setCJKmainfont{FandolSong-Regular.otf}\n"
     "% polyglossia no traduce los nombres de listings.\n"
     "\\AtBeginDocument{\\providecommand{\\lstlistingname}{}\\renewcommand{\\lstlistingname}{Listado}%\n"
     "  \\providecommand{\\lstlistlistingname}{}\\renewcommand{\\lstlistlistingname}{Índice de listados}}"

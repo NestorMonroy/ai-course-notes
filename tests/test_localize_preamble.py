@@ -114,3 +114,16 @@ def test_box_titles_are_braced_so_a_spanish_comma_does_not_split_the_key(tmp_pat
     out = dst.read_text(encoding="utf-8")
     assert "title={#1}}" in out and "title=#1" not in out
     assert "title={#2},#1}" in out  # ya iba entre llaves: no se duplican
+
+
+def test_the_spanish_preamble_can_render_the_chinese_names_in_parentheses(tmp_path: Path) -> None:
+    # La plantilla del traductor pide «Zhang Peng (张鹏)»; con solo la fuente
+    # latina, XeLaTeX omitía esos glifos en 4 notas de la ola 1.
+    src = tmp_path / "note.tex"
+    src.write_text("\\documentclass{article}\n\\usepackage[fontset=fandol]{ctex}\n\\begin{document}\nx\n\\end{document}\n",
+                   encoding="utf-8")
+    dst = tmp_path / "note.es-mx.tex"
+    assert run(src, dst).returncode == 0
+    out = dst.read_text(encoding="utf-8")
+    assert "\\usepackage{xeCJK}" in out and "\\setCJKmainfont{FandolSong-Regular.otf}" in out
+    assert out.index("\\usepackage{polyglossia}") < out.index("\\usepackage{xeCJK}")

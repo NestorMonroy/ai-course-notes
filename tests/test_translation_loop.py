@@ -906,3 +906,22 @@ def test_advance_retries_chunks_that_were_rejected(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     rows = (repo / ".claude/workbench/translation/batches.tsv").read_text(encoding="utf-8").splitlines()[1:]
     assert [r.split("\t")[6] for r in rows] == ["sin-ensamblar", "0"]
+
+
+def test_a_mechanical_fix_that_extends_its_own_text_is_idempotent(tmp_path: Path) -> None:
+    # Llevar xeCJK a las notas ya traducidas es «…{spanish}» → «…{spanish}\n\usepackage{xeCJK}»:
+    # el reemplazo contiene lo buscado y cada ola lo volvería a duplicar.
+    repo, note, runner = setup(tmp_path)
+    loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note), runner=runner, cache=tmp_path / "c")
+    # Ancla propia: el preámbulo localizado ya trae xeCJK con sus comentarios.
+    anchor = "\\begin{document}\n"
+    memory = tmp_path / "memory.jsonl"
+    memory.write_text(json.dumps({"patron": "p", "senal_del_verificador": "compile:missing-glyph",
+                                  "fix_generico": {"tipo": "mechanical", "buscar": anchor,
+                                                   "reemplazar": anchor + "% marca-idempotente\n"},
+                                  "archivos_donde_ya_se_aplico": []}) + "\n", encoding="utf-8")
+    bench = repo / ".claude" / "workbench" / "translation" / "cs000"
+    for iteration in ("1", "2"):
+        loop(repo, "sweep", "--bench", str(bench), "--iteration", iteration, "--memory", str(memory), cache=tmp_path / "c")
+    text = note.with_name("lecture01-notes.es-mx.tex").read_text(encoding="utf-8")
+    assert text.count("% marca-idempotente") == 1, text.count("% marca-idempotente")
