@@ -316,3 +316,16 @@ def test_english_the_original_already_uses_is_not_a_translation_defect(tmp_path:
     assert "prose:english:reward" not in signals and "prose:english:model" not in signals
     # El plural ingles de un termino del original sigue siendo ese termino.
     assert "prose:english:workers" not in signals
+
+
+def test_compile_reports_an_error_even_when_a_pdf_comes_out(tmp_path: Path) -> None:
+    # En nonstopmode XeLaTeX se recupera de un error y aun escribe el PDF; el
+    # veredicto sale del error, no de que exista el archivo.
+    mod = load_loop()
+    broken = tmp_path / "broken.es-mx.tex"
+    broken.write_text("\\documentclass{article}\n\\begin{document}\nhola\\newpage\nadios\\newpage\n\\undefinedcmd hola\n\\end{document}\n")
+    signals = mod.compile_signal(broken)
+    assert signals and signals[0][0] == "compile:error" and "Undefined control sequence" in signals[0][1]
+    clean = tmp_path / "clean.es-mx.tex"
+    clean.write_text("\\documentclass{article}\n\\begin{document}\nhola\n\\end{document}\n")
+    assert mod.compile_signal(clean) == []

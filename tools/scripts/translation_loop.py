@@ -323,12 +323,15 @@ def compile_signal(es: Path) -> list[tuple[str, str]]:
         for _ in range(2):
             subprocess.run(["xelatex", "-interaction=nonstopmode", "-halt-on-error", "-output-directory", tmp, es.name],
                            cwd=es.parent, capture_output=True, text=True, timeout=600)
+        # El PDF solo no basta: con `-halt-on-error` las paginas ya enviadas
+        # llegan al PDF aunque despues haya un error (piloto cs329a/lecture01).
         pdf = Path(tmp) / (es.name[:-len(".tex")] + ".pdf")
-        if pdf.is_file() and pdf.stat().st_size > 0:
-            return []
         log = Path(tmp) / (es.name[:-len(".tex")] + ".log")
-        first = next((l for l in log.read_text(errors="ignore").splitlines() if l.startswith("! ")), "sin PDF") if log.is_file() else "sin PDF"
-        return [("compile:error", first[:160])]
+        lines = log.read_text(errors="ignore").splitlines() if log.is_file() else []
+        first = next((l for l in lines if l.startswith("! ")), None)
+        if first is None and pdf.is_file() and pdf.stat().st_size > 0:
+            return []
+        return [("compile:error", (first or "sin PDF")[:160])]
 
 
 def verify_notes(notes: list[Path], compile_: bool, root: Path, lexicons) -> tuple[list[dict], int]:

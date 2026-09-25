@@ -104,9 +104,15 @@ def front_matter_spans(text: str) -> list[tuple[int, int]]:
     return merged
 
 
+UNBRACED_TITLE = re.compile(r"title=(#\d)")
+
+
 def localize(text: str) -> str:
     text = CTEX.sub(lambda _m: SPANISH, text)
     text = text.replace("extendedchars=false", "extendedchars=true")
+    # `title=#1` sin llaves: en chino la coma del titulo es `，` y no separa
+    # claves; en espanol una `,` parte la clave de pgfkeys en dos.
+    text = UNBRACED_TITLE.sub(r"title={\1}", text)
     for old, new in EXACT:
         text = text.replace(old, new)
     # Los patrones solo se aplican donde viven los metadatos, nunca a la prosa.

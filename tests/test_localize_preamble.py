@@ -99,3 +99,18 @@ def test_front_matter_punctuation_and_cs329a_labels(tmp_path: Path) -> None:
     assert not HAN.search(text), [l for l in text.splitlines() if HAN.search(l)]
     assert "\\textbf{Curso}: Stanford CS329A Self-Improving AI Agents (Autumn 2025)" in text
     assert not re.search(r"[（）：。，]", text), [l for l in text.splitlines() if re.search(r"[（）：。，]", l)]
+
+
+def test_box_titles_are_braced_so_a_spanish_comma_does_not_split_the_key(tmp_path: Path) -> None:
+    # En chino la coma del titulo es `，` y no separa claves; en espanol es `,` y
+    # parte `title=#1` en dos claves de pgfkeys (piloto cs329a/lecture01, L441).
+    src = tmp_path / "note.tex"
+    src.write_text("\\documentclass{article}\n\\usepackage[fontset=fandol]{ctex}\n"
+                   "\\newtcolorbox{warningbox}[1]{softbox,colback=wbBack,title=#1}\n"
+                   "\\newtcolorbox{plainbox}[2][]{title={#2},#1}\n"
+                   "\\begin{document}\nx\n\\end{document}\n", encoding="utf-8")
+    dst = tmp_path / "note.es-mx.tex"
+    assert run(src, dst).returncode == 0
+    out = dst.read_text(encoding="utf-8")
+    assert "title={#1}}" in out and "title=#1" not in out
+    assert "title={#2},#1}" in out  # ya iba entre llaves: no se duplican
