@@ -308,6 +308,14 @@ Use the canonical PDF count command above; raw `find . -name '*-notes.pdf'` can 
   poppler, TeX Live compiling the es-MX template, hunspell); `--install`
   installs what is missing. Status marks are `[OK]`, `[..]`, `[!!]`, `[EE]`
   in colour on a terminal; no emoji.
+- Shell edits use gawk, never bare `awk` (Debian alternatives cann  point it at mawk, which has neither).
+  Use `gawk -i inplace` instead of `awk f > tmp && mv tmp f`, and `gensub`
+  instead of `gsub` whenever the replacement reuses a captured group:
+  `gsub` prints `\\1` literally and still exits 0. A `read_text` → `re.sub`
+  → `write_text` heredoc over one file is a line substitution, so it is
+  `gawk -i inplace` with `gensub` unless the pattern spans lines. The
+  measured forms and their gate (`detect_gawk_opportunity`) live in
+  THYROX `.claude/rules/operaciones-de-archivo-con-bash.md`.
 - The es-MX prose gate uses hunspell with the es_MX dictionary built from
   RLA-ES sources (`tools/lang/build_hunspell_dictionary.sh`) plus the
   glossary's adopted Spanish forms. Comments, docstrings and messages in
