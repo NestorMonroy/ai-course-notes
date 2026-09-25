@@ -451,3 +451,86 @@ def test_retranslate_marks_only_the_chunks_that_carry_the_signal(tmp_path: Path)
     assert all(c.exists() for c in chunks if c != carrying[0])
     listed = (bench / "iterations" / "01" / "retranslate.tsv").read_text(encoding="utf-8")
     assert "prose:english:training" in listed and carrying[0].name in listed
+
+
+def test_plan_groups_notes_by_course_in_ascending_size(tmp_path: Path) -> None:
+    # Fase 3 del plan: un curso por lote, del más pequeño al más grande (`zz1`
+    # va primero aunque el alfabeto diga lo contrario). El
+    # plan se deriva del repositorio y queda versionado; no se arma a mano.
+    repo = tmp_path / "repo"
+    small = [repo / "zz1" / f"lecture0{i}" / f"lecture0{i}-notes.tex" for i in (1, 2)]
+    big = [repo / "talks" / "lab" / "sp25" / "lecture01" / "lecture01-notes.tex"]
+    for path, size in [(small[0], 10), (small[1], 10), (big[0], 500)]:
+        path.parent.mkdir(parents=True)
+        path.write_text("x" * size, encoding="utf-8")
+    (small[0].with_name("lecture01-notes.es-mx.tex")).write_text("ya traducida", encoding="utf-8")
+    result = loop(repo, "plan", "--out", ".claude/workbench/translation/plan.tsv")
+    assert result.returncode == 0, result.stderr
+    rows = (repo / ".claude/workbench/translation/plan.tsv").read_text(encoding="utf-8").splitlines()
+    assert rows[0].split("\t") == ["order", "batch", "bytes", "notes", "paths"]
+    first, second = (r.split("\t") for r in rows[1:])
+    assert first[:4] == ["1", "zz1", "20", "2"]
+    assert first[4].split(" ") == ["zz1/lecture01/lecture01-notes.tex", "zz1/lecture02/lecture02-notes.tex"]
+    assert second[:4] == ["2", "talks__lab__sp25", "500", "1"]
+
+
+def test_an_undefined_command_is_located_in_its_chunk(tmp_path: Path) -> None:
+    # Fase 2: `\enquote` sin cargar csquotes. La señal de compilación solo
+    # guardaba «! Undefined control sequence.»; el comando está en la línea
+    # `l.NN` siguiente del log, y sin él no se sabe qué fragmento retraducir.
+    mod = load_loop()
+    broken = tmp_path / "broken.es-mx.tex"
+    broken.write_text("\\documentclass{article}\n\\begin{document}\nhola\\newpage\n"
+                      "la respuesta \\enquote{correcta}\n\\end{document}\n", encoding="utf-8")
+    (signal, detail), = mod.compile_signal(broken)
+    assert signal == "compile:error" and "\\enquote" in detail, detail
+    repo, note, runner = setup(tmp_path / "loop")
+    loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note),
+         runner=runner, cache=tmp_path / "cache")
+    bench = repo / ".claude" / "workbench" / "translation" / "cs000"
+    chunks = sorted(bench.rglob("*.es.tex"))
+    chunks[-1].write_text(chunks[-1].read_text(encoding="utf-8") + "\\enquote{x}\n", encoding="utf-8")
+    es_note = note.with_name("lecture01-notes.es-mx.tex")
+    (bench / "iterations" / "01" / "signals.jsonl").write_text(json.dumps(
+        {"note": "cs000/lecture01/lecture01-notes.es-mx.tex", "signal": "compile:error", "detail": detail}) + "\n",
+        encoding="utf-8")
+    assert loop(repo, "retranslate", "--batch", "cs000").returncode == 0
+    assert not chunks[-1].exists() and all(c.exists() for c in chunks[:-1])
+
+
+def test_a_readfig_error_is_inherited_when_the_original_has_no_strict_marker(tmp_path: Path) -> None:
+    # cs329a/lecture02: el original pasa `readfig` por una coincidencia
+    # («完整图景……说明»), no por explicar sus figuras. Con el marcador estricto,
+    # que tiene equivalente exacto (读图 ↔ «Lectura de la figura»), el defecto
+    # es del original y no de la traducción.
+    figures = "".join(f"\\begin{{figure}}\\includegraphics{{f{i}.png}}\\caption{{图{i}}}\\end{{figure}}\n" for i in range(3))
+    source = NOTE.replace("\\begin{knowledgebox}{读图：曲线}\n曲线。\n\\end{knowledgebox}\n",
+                          figures + "本讲建立了完整图景，说明了方法。\n")
+    dictionary = dict(DICTIONARY, **{f"\\begin{{figure}}\\includegraphics{{f{i}.png}}\\caption{{图{i}}}\\end{{figure}}":
+                                     f"\\begin{{figure}}\\includegraphics{{f{i}.png}}\\caption{{Figura {i}}}\\end{{figure}}"
+                                     for i in range(3)},
+                      **{"本讲建立了完整图景，说明了方法。": "La clase construyó el panorama completo y explicó el método."})
+    repo, note, runner = setup(tmp_path, dictionary, source)
+    loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note),
+         runner=runner, cache=tmp_path / "cache")
+    signals = (repo / ".claude/workbench/translation/cs000/iterations/01/signals.jsonl").read_text(encoding="utf-8")
+    assert "figures-present-but-no-readfig-explanation" not in signals, signals
+
+
+def test_a_verifier_that_dies_is_an_incomplete_verdict_not_a_clean_one(tmp_path: Path) -> None:
+    # cs329a, iteración 02: un `verify-one` murió y `run_verify` leyó «sin
+    # filas» como «sin señales». Una nota sin veredicto nunca cuenta como limpia.
+    repo, note, runner = setup(tmp_path)
+    loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note),
+         runner=runner, cache=tmp_path / "cache")
+    es = note.with_name("lecture01-notes.es-mx.tex")
+    orphan = repo / "cs001" / "lecture01" / "lecture01-notes.es-mx.tex"
+    orphan.parent.mkdir(parents=True)
+    orphan.write_text(es.read_text(encoding="utf-8"), encoding="utf-8")  # sin original zh: el verificador muere
+    out = tmp_path / "signals.jsonl"
+    result = loop(repo, "verify", "--out", str(out), str(es), str(orphan), cache=tmp_path / "cache2")
+    assert result.returncode == 2, result.stdout + result.stderr
+    rows = [json.loads(l) for l in out.read_text(encoding="utf-8").splitlines()]
+    incomplete = {r["note"] for r in rows if r["signal"] == "verify:incomplete"}
+    assert "cs001/lecture01/lecture01-notes.es-mx.tex" in incomplete
+    assert "incompleta" in result.stderr

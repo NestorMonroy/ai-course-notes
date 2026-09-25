@@ -1,0 +1,69 @@
+\section{SPRINT: planificar y luego ejecutar en paralelo}
+
+\subsection{El cuello de botella serial del CoT largo}
+
+Los reasoning models suelen mejorar la exactitud mediante una chain-of-thought más larga, pero la decodificación autorregresiva es estrictamente serial: el token $t+1$ debe esperar al token $t$. Muchos pasos de razonamiento en realidad no dependen entre sí, por ejemplo calcular varias subexpresiones por separado o consultar varios hechos.
+
+\videofigure{figures/parallel-reasoning.jpg}{Muchos pasos de razonamiento son independientes entre sí y no tienen por qué formar una sola cadena serial larga.}{00:24:42--00:27:18}
+
+Si el grafo de dependencias de la tarea es un DAG, la cota inferior del wall-clock la determina el critical path, no el número total de pasos:
+
+$$
+T_{\mathrm{parallel}}\ge \max_{p\in\mathcal P}\sum_{i\in p} t_i.
+$$
+
+\begin{itemize}
+    \item $\mathcal P$: todas las rutas de dependencia desde el inicio hasta el final;
+    \item $t_i$: tiempo de ejecución del paso $i$;
+    \item la ruta de dependencia más larga determina el tiempo que no se puede eliminar mediante paralelización.
+\end{itemize}
+
+\subsection{Synthetic Data Creation}
+
+SPRINT parte de trayectorias largas de un reasoning model potente, usa otro LLM para dividir la trayectoria en pasos, identifica las relaciones de dependencia y las reescribe como ejemplos de entrenamiento de "primero planificar, luego ejecutar en paralelo y después agregar".
+
+\videofigure{figures/sprint-data.jpg}{Construcción de un plan explícito y sus relaciones de dependencia a partir de una reasoning trajectory serial.}{00:27:18--00:30:20}
+
+Este tipo de datos no solo enseña la respuesta final, sino que también enseña al modelo a producir una estructura planificable: qué tareas son independientes, cuáles deben esperar y qué resultados intermedios se necesitan al agregar.
+
+\subsection{Planning y Parallel Execution}
+
+\videofigure{figures/sprint-plan-execute.jpg}{SPRINT primero genera un plan y después ejecuta en paralelo las ramas independientes.}{00:30:20--00:33:56}
+
+El plan se puede representar como un conjunto de tareas $\{u_i\}$ y aristas de dependencia $E$. El scheduler inicia $u_i$ una vez que todas las tareas previas han terminado:
+
+$$
+\mathrm{ready}(u_i)\iff \forall (u_j,u_i)\in E,\;u_j\text{ completed}.
+$$
+
+\videofigure{figures/overlap-execution.jpg}{Solapar pasos de ejecución independientes reduce la decodificación secuencial en la ruta crítica.}{00:33:56--00:36:06}
+
+\subsection{Exactitud, velocidad y costo de coordinación}
+
+La paralelización no es gratuita:
+
+\begin{itemize}
+    \item el plan en sí requiere tokens adicionales;
+    \item las ramas pueden duplicar trabajo o producir resultados intermedios en conflicto;
+    \item el agregador necesita determinar qué resultado es confiable;
+    \item los recursos de las herramientas pueden convertirse en un cuello de botella de concurrencia;
+    \item paralelizar demasiado pronto hace perder la posibilidad de que un paso posterior se adapte a la retroalimentación del paso anterior.
+\end{itemize}
+
+\begin{importantbox}{Solo los pasos independientes se pueden paralelizar de forma segura}
+La clave de la paralelización no es cortar el texto en varios bloques, sino identificar las dependencias reales. Si un paso necesita leer nueva evidencia producida por otro paso, forzar la concurrencia genera un estado obsoleto o conclusiones inconsistentes.
+\end{importantbox}
+
+\subsection{Generalización entre dominios y adaptación a la dificultad}
+
+\videofigure{figures/sprint-generalization.jpg}{SPRINT se pone a prueba en MATH500, Countdown y GPQA-Diamond para evaluar la generalización entre dominios.}{00:36:06--00:41:28}
+
+\videofigure{figures/parallel-patterns.jpg}{Los problemas difíciles requieren más rondas de planning--execution, en lugar de una paralelización completa de una sola vez.}{00:41:28--00:45:02}
+
+Los problemas simples se pueden resolver planificando una vez y ejecutando en paralelo; los problemas difíciles se adaptan mejor a un ciclo intercalado: ejecutar un lote de ramas y, según los resultados, planificar el siguiente lote. Esto equilibra la velocidad con la capacidad de adaptación a la retroalimentación.
+
+\videofigure{figures/long-sequence-saving.jpg}{Cuanto más larga es la secuencia, mayor es el ahorro relativo de tiempo que aportan los pasos paralelizables.}{00:45:02--00:47:06}
+
+\subsection{Resumen de la sección}
+
+SPRINT vuelve a representar la reasoning trajectory como un grafo de dependencias entre tareas y, mediante fine-tuning supervisado, enseña al modelo a planificar la ejecución en paralelo. Lo que optimiza es el critical path del wall-clock, no solo el número de tokens; el beneficio real depende de la identificación de dependencias, de los recursos de ejecución y de la calidad de la agregación.

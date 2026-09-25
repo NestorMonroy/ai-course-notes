@@ -5,6 +5,7 @@
     translation_loop.py prompt   [--memory M] --out P.md
     translation_loop.py translate --bench B --model <id completo> [--width N] [--memfree TAM] [--timeout S]
     translation_loop.py usage    --bench B
+    translation_loop.py plan     --out P.tsv
     translation_loop.py retranslate --batch L
     translation_loop.py cycle    --batch L --model <id> [--compile] <nota.tex>...
     translation_loop.py assemble --bench B
@@ -359,9 +360,14 @@ def compile_signal(es: Path) -> list[tuple[str, str]]:
         pdf = Path(tmp) / (es.name[:-len(".tex")] + ".pdf")
         log = Path(tmp) / (es.name[:-len(".tex")] + ".log")
         lines = log.read_text(errors="ignore").splitlines() if log.is_file() else []
-        first = next((l for l in lines if l.startswith("! ")), None)
-        if first is not None or not (pdf.is_file() and pdf.stat().st_size > 0):
-            return [("compile:error", (first or "sin PDF")[:160])]
+        at = next((i for i, l in enumerate(lines) if l.startswith("! ")), None)
+        if at is not None or not (pdf.is_file() and pdf.stat().st_size > 0):
+            if at is None:
+                return [("compile:error", "sin PDF")]
+            # La línea `l.NN …\comando` que sigue al error nombra lo que falló;
+            # `retranslate` la usa para encontrar el fragmento.
+            context = next((l for l in lines[at + 1:at + 6] if re.match(r"l\.\d+ ", l)), "")
+            return [("compile:error", f"{lines[at][:120]} | {context[-80:]}".rstrip(" |"))]
         # Un glifo que la fuente no tiene no es un error de XeLaTeX: se omite
         # con un aviso y el PDF sale sin el texto (la portada del piloto).
         glyph = next((l for l in lines if l.startswith("Missing character")), None)
@@ -410,6 +416,12 @@ def verify_notes(notes: list[Path], compile_: bool, root: Path, lexicons) -> tup
         # Un error de cobertura que el original ya tiene es deuda del original,
         # no un defecto de la traducción: solo sale lo que la traducción rompió.
         inherited = coverage_errors(zh)
+        # Los patrones laxos de `readfig` en zh (`图.*说明`) no tienen equivalente
+        # en es-MX y casan por coincidencia («完整图景……说明»). Si el original no
+        # trae el marcador estricto (读图), la falta de lectura de figuras es suya.
+        from note_language import ZH
+        if not ZH.count("readfig_strict", zh_text):
+            inherited[READFIG_ERROR] = ""
         found += [(key, line) for key, line in coverage_errors(es).items() if key not in inherited]
         if compile_:
             found += compile_signal(es)
@@ -417,6 +429,9 @@ def verify_notes(notes: list[Path], compile_: bool, root: Path, lexicons) -> tup
         cached.write_text(json.dumps(note_rows, ensure_ascii=False), encoding="utf-8")
         rows += note_rows
     return rows, hits
+
+
+READFIG_ERROR = "coverage:figures-present-but-no-readfig-explanation"
 
 
 def coverage_errors(note: Path) -> dict[str, str]:
@@ -434,10 +449,37 @@ def load_lexicons():
     return es_lex, en_lex, prose.load_lemmas(), forbidden, keep, prose.load_baseline(prose.DEFAULT_BASELINE)
 
 
+def verify_each(notes: list[Path], compile_: bool, root: Path, lexicons) -> tuple[list[dict], int, set[str], dict[str, str]]:
+    """Verifica nota por nota: una que falla queda nombrada, no se pierde el lote."""
+    rows, hits, done, failed = [], 0, set(), {}
+    for note in notes:
+        try:
+            note_rows, note_hits = verify_notes([note], compile_, root, lexicons)
+        except Exception as error:  # noqa: BLE001 — cualquier falla deja la nota sin veredicto
+            failed[rel(note, root)] = f"{type(error).__name__}: {error}"[:160]
+            continue
+        rows += note_rows
+        hits += note_hits
+        done.add(rel(note, root))
+    return rows, hits, done, failed
+
+
+def incomplete_rows(notes: list[Path], root: Path, done: set[str], failed: dict[str, str]) -> list[dict]:
+    """Toda nota sin veredicto es una señal: nunca cuenta como limpia.
+
+    cs329a, iteración 02: un `verify-one` murió y «sin filas» se leyó como
+    «sin señales». El veredicto se cruza contra la lista pedida, nota por nota.
+    """
+    return [{"note": rel(n, root), "signal": "verify:incomplete",
+             "detail": failed.get(rel(n, root), "el verificador no reportó esta nota")}
+            for n in notes if rel(n, root) not in done]
+
+
 def run_verify(notes: list[Path], compile_: bool, jobs: int, root: Path) -> tuple[list[dict], int]:
     """Una nota: en este proceso. Varias: repartidas con GNU Parallel."""
     if len(notes) <= 1 or not shutil.which("parallel"):
-        return verify_notes(notes, compile_, root, load_lexicons())
+        rows, hits, done, failed = verify_each(notes, compile_, root, load_lexicons())
+        return rows + incomplete_rows(notes, root, done, failed), hits
     with tempfile.TemporaryDirectory() as tmp:
         listing = Path(tmp) / "notes.txt"
         listing.write_text("\n".join(str(n) for n in notes) + "\n", encoding="utf-8")
@@ -446,20 +488,31 @@ def run_verify(notes: list[Path], compile_: bool, jobs: int, root: Path) -> tupl
         if compile_:
             cmd.append("--compile")
         result = subprocess.run(cmd + ["{}"], capture_output=True, text=True)
-    rows, hits = [], 0
+    rows, done, failed = [], set(), {}
     for line in result.stdout.splitlines():
         if line.startswith("{"):
             rows.append(json.loads(line))
+    for line in result.stderr.splitlines():
+        if line.startswith("verified "):
+            done.add(line[len("verified "):])
+        elif line.startswith("failed "):
+            note, _sep, reason = line[len("failed "):].partition("\t")
+            failed[note] = reason
     hits = sum(int(l.split()[1]) for l in result.stderr.splitlines() if l.startswith("hits "))
-    return rows, hits
+    return rows + incomplete_rows(notes, root, done, failed), hits
 
 
 def cmd_verify_one(args) -> int:
-    rows, hits = verify_notes([Path(n).resolve() for n in args.notes], args.compile, args.root, load_lexicons())
+    rows, hits, done, failed = verify_each([Path(n).resolve() for n in args.notes], args.compile, args.root,
+                                           load_lexicons())
     for row in rows:
         print(json.dumps(row, ensure_ascii=False))
+    for note in sorted(done):
+        print(f"verified {note}", file=sys.stderr)
+    for note, reason in failed.items():
+        print(f"failed {note}\t{reason}", file=sys.stderr)
     print(f"hits {hits}", file=sys.stderr)
-    return 0
+    return 1 if failed else 0
 
 
 def cmd_verify(args) -> int:
@@ -469,6 +522,11 @@ def cmd_verify(args) -> int:
     args.out.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
     print(f"cache: {hits} de {len(notes)} nota(s)", file=sys.stderr)
     print(f"verify: {len(rows)} senal(es) en {len(notes)} nota(s) -> {args.out}")
+    incomplete = [r["note"] for r in rows if r["signal"] == "verify:incomplete"]
+    if incomplete:
+        print(f"verify: verificación incompleta en {len(incomplete)} nota(s): {', '.join(incomplete[:5])}",
+              file=sys.stderr)
+        return 2
     return 1 if rows else 0
 
 
@@ -538,6 +596,41 @@ def cmd_cycle(args) -> int:
     return code
 
 
+# --- plan -------------------------------------------------------------------
+
+SKIPPED_DIRS = {".git", ".venv", ".claude", "node_modules", ".web-build", ".web-build-es-mx"}
+
+
+def batch_name(course: str) -> str:
+    """`talks/lab/sp25` → `talks__lab__sp25`: el nombre del banco del lote."""
+    return course.replace("/", "__") if course not in ("", ".") else "raiz"
+
+
+def cmd_plan(args) -> int:
+    """Fase 3 del plan: un lote por curso, del más pequeño al más grande.
+
+    El curso de una nota es el directorio que contiene al de la nota
+    (`cs329a/lecture01/…` → `cs329a`). El plan se escribe versionado; el
+    tamaño es el de los originales zh, que es lo que el traductor recibe.
+    """
+    root = Path.cwd()
+    courses: dict[str, list[Path]] = {}
+    for path in sorted(root.rglob("*-notes.tex")):
+        parts = path.relative_to(root).parts
+        if path.name.endswith(".es-mx.tex") or SKIPPED_DIRS & set(parts):
+            continue
+        courses.setdefault(str(Path(*parts[:-2])) if len(parts) > 2 else ".", []).append(path)
+    sized = sorted(((sum(p.stat().st_size for p in ps), c, ps) for c, ps in courses.items()), key=lambda t: (t[0], t[1]))
+    lines = ["\t".join(["order", "batch", "bytes", "notes", "paths"])]
+    for order, (size, course, paths) in enumerate(sized, 1):
+        lines.append("\t".join([str(order), batch_name(course), str(size), str(len(paths)),
+                                 " ".join(rel(p, root) for p in paths)]))
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"plan: {len(sized)} lote(s), {sum(len(t[2]) for t in sized)} nota(s) -> {args.out}", file=sys.stderr)
+    return 0
+
+
 # --- retranslate ------------------------------------------------------------
 
 # Las señales que llevan el texto que las produjo, y cómo buscarlo en un fragmento.
@@ -567,11 +660,16 @@ def cmd_retranslate(args) -> int:
     for row in rows:
         signal, note_id = row["signal"], note_ids.get(row["note"])
         prefix = next((p for p in LOCATABLE if signal.startswith(p)), None)
-        if prefix is None or note_id is None:
+        command = re.search(r"(\\[A-Za-z]+)\s*$", row.get("detail", "")) if signal == "compile:error" else None
+        if (prefix is None and command is None) or note_id is None:
             out.append((signal, row["note"], "", "manual"))
             continue
-        text = signal[len(prefix):]
-        pattern = re.compile(rf"(?<![\w-]){re.escape(text)}(?![\w-])", re.I)
+        if command is not None:
+            # El comando que la compilación no conoce, tal como lo escribe el fragmento.
+            pattern = re.compile(re.escape(command.group(1)) + r"(?![A-Za-z])")
+        else:
+            text = signal[len(prefix):]
+            pattern = re.compile(rf"(?<![\w-]){re.escape(text)}(?![\w-])", re.I)
         for unit in (u for u in units if u[1] == note_id):
             es = Path(unit[4])
             if es.is_file() and pattern.search(es.read_text(encoding="utf-8")):
@@ -639,6 +737,7 @@ def main(argv=None) -> int:
     p.set_defaults(func=cmd_translate)
     p = sub.add_parser("usage"); p.add_argument("--bench", type=Path, required=True); p.set_defaults(func=cmd_usage)
     p = sub.add_parser("assemble"); p.add_argument("--bench", type=Path, required=True); p.set_defaults(func=cmd_assemble)
+    p = sub.add_parser("plan"); p.add_argument("--out", type=Path, required=True); p.set_defaults(func=cmd_plan)
     p = sub.add_parser("retranslate"); p.add_argument("--batch", default=None)
     p.add_argument("--bench", type=Path, default=None); p.set_defaults(func=cmd_retranslate)
     p = sub.add_parser("cycle"); p.add_argument("--batch", default=None)

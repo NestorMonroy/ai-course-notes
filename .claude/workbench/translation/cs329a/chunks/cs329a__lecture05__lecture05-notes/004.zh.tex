@@ -1,0 +1,88 @@
+\section{SWiRL：Synthetic Data 与 Multi-Step RL}
+
+\subsection{设计目标}
+
+多步工具任务要求模型学会：何时推理、何时调用工具、如何消费 observation、错误后如何恢复、何时停止并给出最终答案。
+
+\videofigure{figures/swirl-motivation.jpg}{现实任务通常需要多步推理与工具使用。}{00:50:30--00:53:02}
+
+\videofigure{figures/swirl-goals.jpg}{SWiRL 希望学习工具选择、反馈消费、错误恢复和停止。}{00:53:02--00:54:34}
+
+SWiRL 的关键约束是：训练 RL 时尽量不在线调用真实工具，因为工具慢、易失败且难并行。它先离线生成带 observation 的完整轨迹，再在这些固定数据上进行 step-wise RL。
+
+\subsection{Stage 1：离线合成多步轨迹}
+
+对每个 prompt，teacher model 一次只生成一个 action：可以是 reasoning、tool call 或 final answer。若调用工具，离线环境执行并把 observation 写回上下文，然后继续下一步。LLM judge 对每一步给 process score。
+
+\videofigure{figures/swirl-data-generation.jpg}{SWiRL 离线生成并过滤多步 reasoning--tool trajectories。}{00:54:34--00:58:32}
+
+两种主要过滤方式：
+
+\begin{itemize}
+    \item \textbf{Process filtered}：保留每一步都被 judge 认为合理的轨迹；
+    \item \textbf{Outcome filtered}：只保留最终答案正确的轨迹，不管中间步骤评分；
+    \item 也可要求 process 与 outcome 同时通过。
+\end{itemize}
+
+\subsection{Stage 2：Step-Wise Reinforcement Learning}
+
+训练时不再调用工具，而是重放离线数据中的 tool response。模型在每个状态选择 action，使用步骤 reward 更新 policy。
+
+\videofigure{figures/swirl-step-rl.jpg}{SWiRL 在离线轨迹上执行步骤级强化学习。}{00:58:32--01:03:54}
+
+\videofigure{figures/swirl-objective.jpg}{SWiRL 的多步 RL 目标对每个状态--动作对累积 reward。}{01:03:54--01:05:16}
+
+可抽象为：
+
+$$
+J(\theta)=\mathbb E_{(s_t,a_t)\sim\mathcal D}
+\left[w_t\log\pi_\theta(a_t\mid s_t)\right],
+$$
+
+其中 $w_t$ 由步骤 reward 或 advantage 决定。高质量 action 被提高概率，低质量 action 被抑制。
+
+\begin{knowledgebox}{离线工具轨迹的工程优势}
+工具执行与 judge 标注可以预先并行完成，RL 训练只读取固定上下文，吞吐量更高、环境更稳定、实验更可复现。但模型无法探索数据集中没有的新动作，其表现受离线覆盖限制。
+\end{knowledgebox}
+
+\subsection{Stage 3：真实多步推理}
+
+部署时模型重新连接真实工具，按训练得到的策略迭代 reasoning、tool use 与 final answer。
+
+\videofigure{figures/swirl-inference.jpg}{推理阶段重新启用真实工具，执行多步闭环。}{01:05:16--01:06:16}
+
+\subsection{为什么 Process Filtering 反而更好}
+
+实验中，只按 process 质量过滤的数据优于只保留最终正确、或同时要求过程和结果正确的数据。
+
+\videofigure{figures/swirl-filtering.jpg}{Process-filtered synthetic trajectories 带来最强训练收益。}{01:06:16--01:08:18}
+
+原因是 outcome filtering 只保留 teacher 已经会解的问题，容易形成“成功轨迹的窄分布”；process filtering 还能保留局部步骤正确但最终失败的难题，为模型提供新的推理组件和错误恢复信号。
+
+\begin{importantbox}{局部正确可以比终局成功提供更多学习覆盖}
+一条最终失败的轨迹仍可能包含好的问题分解、正确工具调用或有效中间证据。若只按终局 reward 丢弃整条轨迹，这些可复用技能也被删除。Process filtering 把数据选择从“整题成败”改为“步骤价值”。
+\end{importantbox}
+
+\subsection{跨任务、跨工具泛化}
+
+用 GSM8K + calculator 训练后，模型在 HotpotQA + search 上也提升；反向亦然。这表明模型不仅记住特定 API，而是在学习多步状态管理和“何时借助工具”的通用策略。
+
+\videofigure{figures/swirl-generalization.jpg}{SWiRL 在数学与多跳问答之间表现出跨工具泛化。}{01:08:18--01:10:02}
+
+\videofigure{figures/swirl-data-scaling.jpg}{增加合成训练数据规模继续提高分布内与分布外任务表现。}{01:10:02--01:11:34}
+
+\videofigure{figures/process-correctness.jpg}{分布外 process reward 提升说明收益来自更好的多步过程。}{01:11:34--01:12:20}
+
+\subsection{局限}
+
+\begin{itemize}
+    \item LLM judge 的偏差会进入 process reward；
+    \item 离线 observation 使 policy 无法体验新工具错误；
+    \item 轨迹生成成本高，且可能覆盖不足；
+    \item 新工具 schema 与训练工具差异过大时，泛化仍会失败。
+\end{itemize}
+
+\subsection{本章小结}
+
+SWiRL 将在线工具交互转化为离线 synthetic trajectory，再以 step-wise RL 学习多步策略。最重要的结果是过程质量过滤比单纯终局正确更有利于泛化，说明训练数据应保留可复用的局部能力。
+

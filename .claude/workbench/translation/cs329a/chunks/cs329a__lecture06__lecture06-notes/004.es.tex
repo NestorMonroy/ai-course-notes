@@ -1,0 +1,72 @@
+\section{DAPO: cómo hacer que el reasoning RL de cadenas largas escale de forma estable}
+
+\subsection{Cuatro tipos de problemas del GRPO ingenuo}
+
+\videofigure{figures/dapo-problems.jpg}{El GRPO ingenuo (naive), aplicado a reasoning largo, presenta colapso de entropía, muestras inválidas, sesgo de longitud e inestabilidad.}{00:53:34--00:54:24}
+
+DAPO (Decoupled Clip and Dynamic sAmpling Policy Optimization) usa un conjunto de técnicas que se complementan entre sí para llevar el desempeño en AIME cada vez más arriba desde el baseline ingenuo (naive).
+
+\subsection{Clip-Higher: permitir que las acciones de baja probabilidad pero de buena calidad suban más rápido}
+
+El PPO estándar usa un clipping simétrico para el aumento y la disminución de probabilidad. En CoT largos, un token o acción correcto pero poco frecuente parte de una probabilidad inicial baja, y una cota superior demasiado estrecha impide que crezca con rapidez. Clip-Higher usa un intervalo de clipping más amplio para el aumento:
+
+$$
+\operatorname{clip}(\rho,1-\epsilon_{\rm low},1+\epsilon_{\rm high}),
+\qquad \epsilon_{\rm high}>\epsilon_{\rm low}.
+$$
+
+\videofigure{figures/clip-higher.jpg}{El Clip-Higher asimétrico conserva más actualizaciones positivas para conductas de buena calidad pero poco frecuentes.}{00:54:24--00:55:46}
+
+Esto ayuda a mantener la exploración, pero una cota superior demasiado amplia también puede hacer que la policy se incline de golpe hacia unas cuantas trayectorias, por lo que aun así hay que vigilar el KL y la entropía.
+
+\subsection{Dynamic Sampling: entrenar solo con problemas que tengan señal de contraste}
+
+Para cada pregunta se muestrean 64 respuestas. Si las 64 son todas correctas o todas incorrectas, el advantage dentro del grupo es cercano a cero. Dynamic sampling descarta esos grupos y vuelve a muestrear preguntas «parcialmente correctas, parcialmente incorrectas».
+
+\videofigure{figures/dynamic-sampling.jpg}{Dynamic sampling filtra los grupos totalmente correctos y totalmente incorrectos, y conserva gradientes válidos.}{00:55:46--00:57:46}
+
+\begin{knowledgebox}{Dynamic sampling es un currículo en línea}
+Una pregunta solo tiene el mayor valor de aprendizaje cuando la policy actual puede tanto tener éxito como fallar en ella. A medida que cambia la capacidad del modelo, esta «frontera de aprendizaje» se desplaza, y el muestreador concentra automáticamente el cómputo de entrenamiento en las muestras de dificultad actualmente moderada.
+\end{knowledgebox}
+
+\subsection{Token-Level Loss: corregir el peso por longitud}
+
+El sample-level loss hace que cada respuesta contribuya con el mismo peso; por eso cada token de una respuesta larga queda diluido por el promedio. El token-level loss agrega a nivel de todos los tokens, de modo que las decisiones locales de un reasoning largo reciben un gradiente más directo.
+
+\videofigure{figures/token-loss.jpg}{El objetivo a nivel de token evita que cada token de una respuesta larga se subpondere en exceso.}{00:57:46--00:58:48}
+
+\begin{warningbox}{La ponderación a nivel de token también puede favorecer respuestas largas}
+Si el reward solo mira el resultado final, una trayectoria larga tiene más tokens que se actualizan, lo que puede inducir al modelo a alargar el reasoning sin sentido. Es necesario combinarlo con un costo por longitud, una estrategia de detención y el overlong punishment.
+\end{warningbox}
+
+\subsection{Soft Overlong Punishment}
+
+Un corte duro penaliza por igual un reasoning de buena calidad que apenas rebasa la longitud máxima y una respuesta severamente demasiado larga, lo que produce ruido de alta varianza. El soft punishment aumenta la penalización de forma gradual conforme se acerca al límite de longitud, de modo que el modelo aprenda a converger sin brusquedad.
+
+\videofigure{figures/overlong.jpg}{El soft overlong punishment evita el ruido que produce una frontera dura de longitud máxima.}{00:58:48--00:59:42}
+
+\subsection{Ganancias progresivas}
+
+\videofigure{figures/dapo-results.jpg}{Clip-Higher, soft overlong, token loss y dynamic sampling mejoran AIME de forma incremental.}{00:59:42--01:00:42}
+
+La tendencia que resume el curso es: el GRPO ingenuo (naive) llega a aproximadamente 30, y tras agregar overlong filtering, asymmetric clipping, soft punishment, token-level loss y dynamic sampling, se eleva progresivamente hasta el rango de 40 o más. Lo importante no es la cifra en sí, sino que cada técnica corrige una patología de entrenamiento específica.
+
+\subsection{Qué se debe monitorear al escalar RL}
+
+\videofigure{figures/rl-monitoring.jpg}{El reasoning RL de cadenas largas requiere monitorear la longitud de las respuestas, la entropía, la distribución del reward y la tasa de muestras válidas.}{01:00:42--01:02:26}
+
+Mirar solo la training loss lleva fácilmente a conclusiones equivocadas. Como mínimo se debe monitorear:
+
+\begin{itemize}
+    \item si la longitud de las respuestas crece y luego se estabiliza, en vez de expandirse sin límite;
+    \item si la entropía de los tokens colapsa con rapidez;
+    \item la proporción de grupos totalmente correctos o totalmente incorrectos y la proporción de batch efectivo;
+    \item el KL, la clip fraction y la norma del gradiente;
+    \item las variaciones distintas de pass@1, majority@$k$ y pass@$k$;
+    \item si el reward sigue siendo consistente con una evaluación real independiente.
+\end{itemize}
+
+\subsection{Resumen de la sección}
+
+La contribución de DAPO es tratar el reasoning RL como un sistema completo: el clip controla la exploración, dynamic sampling garantiza el gradiente, token loss corrige el peso por longitud y soft punishment suaviza la restricción sobre la salida. El éxito o el fracaso al escalar RL lo determinan estos mecanismos en conjunto.
+
