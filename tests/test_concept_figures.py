@@ -97,3 +97,11 @@ def test_a_title_wider_than_the_canvas_is_shrunk_to_fit() -> None:
     assert size < 42
     assert mod.font(size).getlength(title) <= mod.W - 156
     assert mod.fit_size("Corto", 42, mod.W - 156) == 42
+
+
+def test_the_table_is_read_without_csv_quoting(tmp_path: Path) -> None:
+    # Un rótulo que empieza con comillas no es un campo entrecomillado de CSV.
+    mod = module()
+    table = tmp_path / "figure_text.tsv"
+    table.write_text('zh\tes_mx\n"引号"开头\t"Comillas" al inicio\n', encoding="utf-8")
+    assert mod.load_table(table) == {'"引号"开头': '"Comillas" al inicio'}

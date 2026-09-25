@@ -723,7 +723,8 @@ def load_table(path: Path) -> dict[str, str]:
     if not path.is_file():
         return {}
     with path.open(encoding="utf-8", newline="") as handle:
-        return {r["zh"]: r["es_mx"] for r in csv.DictReader(handle, delimiter="\t") if (r.get("es_mx") or "").strip()}
+        return {r["zh"]: r["es_mx"] for r in csv.DictReader(handle, delimiter="\t", quoting=csv.QUOTE_NONE)
+                if (r.get("es_mx") or "").strip()}
 
 
 def main(argv: list[str] | None = None) -> int:
