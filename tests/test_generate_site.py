@@ -840,7 +840,9 @@ def test_pages_workflow_installs_tikz_font_dependencies_and_fails_on_fallback() 
     workflow = (REPO_ROOT / ".github" / "workflows" / "pages.yml").read_text(encoding="utf-8")
 
     assert "cancel-in-progress: true" in workflow
-    assert "cache: pip" in workflow
+    assert "enable-cache: true" in workflow
+    assert "cache-dependency-glob: uv.lock" in workflow
+    assert "uv sync --locked" in workflow
     assert "actions/cache@v4" in workflow
     assert ".web-build/.cache" in workflow
     assert "--check-tikz-cache" in workflow

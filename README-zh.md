@@ -264,16 +264,16 @@ graph LR
 ### 本地预览在线阅读站
 
 ```bash
-python -m pip install -r requirements-web.txt
-python tools/web/generate_site.py --strict --skip-tikz
-mkdocs serve -f .web-build/mkdocs.yml
+uv sync
+uv run python tools/web/generate_site.py --strict --skip-tikz
+uv run mkdocs serve -f .web-build/mkdocs.yml
 ```
 
 完整构建与 GitHub Pages 工作流一致：
 
 ```bash
-python tools/web/generate_site.py --strict --verbose-warnings --fail-on-tikz-warnings
-mkdocs build -f .web-build/mkdocs.yml --strict
+uv run python tools/web/generate_site.py --strict --verbose-warnings --fail-on-tikz-warnings
+uv run mkdocs build -f .web-build/mkdocs.yml --strict
 ```
 
 ## 🔗 项目链接

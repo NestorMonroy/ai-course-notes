@@ -266,16 +266,16 @@ graph LR
 ### Vista previa local del sitio de lectura en línea
 
 ```bash
-python -m pip install -r requirements-web.txt
-python tools/web/generate_site.py --strict --skip-tikz
-mkdocs serve -f .web-build/mkdocs.yml
+uv sync
+uv run python tools/web/generate_site.py --strict --skip-tikz
+uv run mkdocs serve -f .web-build/mkdocs.yml
 ```
 
 Compilación completa, igual al workflow de GitHub Pages:
 
 ```bash
-python tools/web/generate_site.py --strict --verbose-warnings --fail-on-tikz-warnings
-mkdocs build -f .web-build/mkdocs.yml --strict
+uv run python tools/web/generate_site.py --strict --verbose-warnings --fail-on-tikz-warnings
+uv run mkdocs build -f .web-build/mkdocs.yml --strict
 ```
 
 ## 🔗 Enlaces del proyecto
