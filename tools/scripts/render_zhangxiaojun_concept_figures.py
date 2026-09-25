@@ -4,11 +4,21 @@
 The generated podcast notes intentionally avoid repeated fixed-camera speaker
 frames. These compact teaching diagrams are the visual spine for episodes with
 no slides or screen-share content.
+
+Con `--lang es-mx` cada cadena con chino se sustituye por su traduccion de
+`tools/lang/es-mx/figure_text.tsv` y la figura se escribe como
+`<nombre>.es-mx.png` junto al original, que no se toca. Una cadena sin
+traduccion hace que el renderer rehuse (exit 3) antes de escribir nada;
+`--extract` lista las que faltan, una por linea, para completar la tabla.
 """
 
 from __future__ import annotations
 
+import argparse
+import csv
 import math
+import re
+import sys
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -23,6 +33,30 @@ FONT_CANDIDATES = [
 ]
 
 FONT_PATH = next((p for p in FONT_CANDIDATES if p.exists()), FONT_CANDIDATES[-1])
+LATIN_FONT = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+DEFAULT_TABLE = ROOT / "tools" / "lang" / "es-mx" / "figure_text.tsv"
+HAN = re.compile(r"[\u4e00-\u9fff]")
+
+FLOW_FOOTER = "读图：从左到右看依赖关系；正文负责展开细节，图只保留骨架。"
+
+# Estado del idioma activo; `configure` lo fija antes de renderizar.
+LANG = "zh"
+OUT_ROOT = ROOT
+# En zh las palabras latinas se unen sin espacio (conducta con la que se
+# generaron los PNG publicados); en es-MX eso fundiria las palabras.
+LATIN_SPACING = False
+
+
+def configure(lang: str, out_root: Path | None = None) -> None:
+    global LANG, FONT_PATH, LATIN_SPACING, OUT_ROOT
+    LANG = lang
+    LATIN_SPACING = lang != "zh"
+    FONT_PATH = next((p for p in FONT_CANDIDATES if p.exists()), FONT_CANDIDATES[-1]) if lang == "zh" else LATIN_FONT
+    OUT_ROOT = out_root or ROOT
+
+
+def output_path(rel: str) -> str:
+    return rel if LANG == "zh" else re.sub(r"\.png$", f".{LANG}.png", rel)
 
 W, H = 1600, 960
 
@@ -83,7 +117,8 @@ def wrap_text(text: str, fnt: ImageFont.FreeTypeFont, max_width: int) -> list[st
     lines: list[str] = []
     cur = ""
     for token in words:
-        trial = cur + token
+        joint = " " if LATIN_SPACING and cur and not HAN.match(token) and not HAN.match(cur[-1]) else ""
+        trial = cur + joint + token
         if cur and text_width(trial, fnt) > max_width:
             lines.append(cur)
             cur = token
@@ -117,12 +152,23 @@ def draw_text(
     return y
 
 
+def fit_size(text: str, size: int, max_width: int, floor: int = 12) -> int:
+    """El mayor tamano, hasta `size`, con el que `text` cabe en `max_width`.
+
+    Un texto que ya cabe conserva su tamano, asi que las figuras zh no cambian;
+    la traduccion al espanol es mas larga y es la que lo necesita.
+    """
+    while size > floor and text_width(text, font(size)) > max_width:
+        size -= 1
+    return size
+
+
 def canvas(title: str, subtitle: str = "") -> tuple[Image.Image, ImageDraw.ImageDraw]:
     image = Image.new("RGB", (W, H), COLORS["bg"])
     draw = ImageDraw.Draw(image)
-    draw.text((78, 48), title, fill=COLORS["ink"], font=font(42))
+    draw.text((78, 48), title, fill=COLORS["ink"], font=font(fit_size(title, 42, W - 156)))
     if subtitle:
-        draw.text((80, 108), subtitle, fill=COLORS["muted"], font=font(23))
+        draw.text((80, 108), subtitle, fill=COLORS["muted"], font=font(fit_size(subtitle, 23, W - 160)))
     draw.line((76, 150, W - 76, 150), fill=COLORS["line"], width=2)
     return image, draw
 
@@ -152,12 +198,12 @@ def card(
     draw.rounded_rectangle((x1 + 5, y1 + 7, x2 + 5, y2 + 7), radius=18, fill=COLORS["shadow"])
     draw.rounded_rectangle(xy, radius=18, fill=COLORS["card"], outline=color, width=3)
     draw.rounded_rectangle((x1, y1, x1 + 12, y2), radius=6, fill=color)
-    draw.text((x1 + 30, y1 + 24), title, fill=color, font=font(title_size))
+    draw.text((x1 + 30, y1 + 24), title, fill=color, font=font(fit_size(title, title_size, x2 - x1 - 56)))
     draw_text(draw, (x1 + 30, y1 + 68), body, font(body_size), COLORS["ink"], x2 - x1 - 56, 7)
 
 
 def save(image: Image.Image, rel: str) -> None:
-    path = ROOT / rel
+    path = OUT_ROOT / output_path(rel)
     path.parent.mkdir(parents=True, exist_ok=True)
     image.save(path, quality=95)
 
@@ -174,7 +220,8 @@ def draw_flow(rel: str, title: str, subtitle: str, nodes: list[tuple[str, str]],
         card(draw, (x, y, x + card_w, y + 160), node_title, body, color, 23, 18)
         if i < count - 1:
             arrow(draw, (x + card_w + 5, y + 80), (x + card_w + gap - 8, y + 80))
-    draw.text((135, 760), "读图：从左到右看依赖关系；正文负责展开细节，图只保留骨架。", fill=COLORS["muted"], font=font(26))
+    footer = translate(FLOW_FOOTER)
+    draw.text((135, 760), footer, fill=COLORS["muted"], font=font(fit_size(footer, 26, W - 270)))
     save(image, rel)
 
 
@@ -636,11 +683,80 @@ def render(spec: tuple[object, ...]) -> None:
         raise ValueError(f"unknown figure kind: {kind}")
 
 
-def main() -> None:
-    for spec in SPECS:
+TABLE: dict[str, str] = {}
+
+
+def translate(text: str) -> str:
+    return TABLE.get(text, text) if LANG != "zh" else text
+
+
+def texts(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [t for item in value for t in texts(item)]
+    return []
+
+
+def figure_strings(specs) -> list[str]:
+    """Las cadenas con chino de las figuras, en orden y sin repetir."""
+    found: list[str] = []
+    for spec in specs:
+        pool = texts(list(spec[2:])) + ([FLOW_FOOTER] if spec[1] == "flow" else [])
+        for text in pool:
+            if HAN.search(text) and text not in found:
+                found.append(text)
+    return found
+
+
+def localize(value: object) -> object:
+    if isinstance(value, str):
+        return translate(value)
+    if isinstance(value, list):
+        return [localize(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(localize(v) for v in value)
+    return value
+
+
+def load_table(path: Path) -> dict[str, str]:
+    if not path.is_file():
+        return {}
+    with path.open(encoding="utf-8", newline="") as handle:
+        return {r["zh"]: r["es_mx"] for r in csv.DictReader(handle, delimiter="\t") if (r.get("es_mx") or "").strip()}
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--lang", default="zh", choices=["zh", "es-mx"])
+    parser.add_argument("--table", type=Path, default=DEFAULT_TABLE)
+    parser.add_argument("--out-root", type=Path, default=None)
+    parser.add_argument("--only", default=None, help="subcadena de la ruta de la figura")
+    parser.add_argument("--extract", action="store_true", help="lista las cadenas sin traduccion")
+    args = parser.parse_args(argv)
+    configure(args.lang, args.out_root)
+    specs = [s for s in SPECS if not args.only or args.only in str(s[0])]
+    if args.lang != "zh":
+        TABLE.clear()
+        TABLE.update(load_table(args.table))
+        missing = [t for t in figure_strings(specs) if t not in TABLE]
+        if args.extract:
+            print("\n".join(missing)) if missing else None
+            return 0
+        if missing:
+            print(f"{len(missing)} cadena(s) sin traduccion en {args.table}; no se escribio ninguna figura:",
+                  file=sys.stderr)
+            for text in missing[:20]:
+                print(f"  {text}", file=sys.stderr)
+            return 3
+        specs = [localize(s) for s in specs]
+        # La ruta es la clave de la figura, no texto: se conserva.
+        specs = [(orig[0], *s[1:]) for orig, s in zip([x for x in SPECS if not args.only or args.only in str(x[0])], specs)]
+    for spec in specs:
         render(spec)
-    print(f"Rendered {len(SPECS)} Zhang Xiaojun concept figures with {FONT_PATH}")
+    print(f"Rendered {len(specs)} Zhang Xiaojun concept figures ({args.lang}) with {FONT_PATH}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
