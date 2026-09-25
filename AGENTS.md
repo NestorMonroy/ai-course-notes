@@ -304,12 +304,37 @@ Use the canonical PDF count command above; raw `find . -name '*-notes.pdf'` can 
 - `xelatex` is the PDF compiler.
 - `pdfinfo`, `pdftotext`, and `pdfimages` are available via `poppler-utils`.
 - `ffmpeg` is available.
+- `bash tools/setup.sh` checks the toolchain (uv, GNU parallel, gawk,
+  poppler, TeX Live compiling the es-MX template, hunspell); `--install`
+  installs what is missing. Status marks are `[OK]`, `[..]`, `[!!]`, `[EE]`
+  in colour on a terminal; no emoji.
+- The es-MX prose gate uses hunspell with the es_MX dictionary built from
+  RLA-ES sources (`tools/lang/build_hunspell_dictionary.sh`) plus the
+  glossary's adopted Spanish forms. Comments, docstrings and messages in
+  Spanish carry their accents and ñ.
 - `faster-whisper` large-v3 has been used for transcription on available GPUs.
 - For faster-whisper, check CTranslate2 CUDA support directly; this host may
   have CPU-only Torch while `ctranslate2` can still see A100 GPUs. Use
   `tools/scripts/transcribe_faster_whisper.py` for long podcast transcription.
 - `nvidia-smi` may hang on this host; prefer lightweight GPU visibility checks or known cached transcription tooling.
 - Bilibili full downloads often require cookies. Never commit cookie files or credentials.
+
+## Working Directories
+
+Never write working files to a session scratchpad or to `/tmp`: neither is
+versioned, so evidence left there is lost when the session ends. Use the
+consumer's `.claude/` directories instead:
+
+| Directory | What goes there | Versioned |
+|---|---|---|
+| `.claude/workbench/<bench>/` | evidence: measurements, logs, annulment-control scripts, QA contact sheets, with a `README.md` index | yes |
+| `.claude/cache/` | ephemeral files: backups during an annulment control, intermediate builds, verifier cache | no |
+| `.claude/jobs/` | background job records (`tools/thyrox/run thyrox-bg`) | yes |
+| `.claude/jobs-ledger/` | the `wait-jobs` barrier ledger | no |
+
+Collect a background job through the client's completion notification or
+`wait-jobs`, never by polling its output file for a pattern: the client
+appends `[exited with code N]` to that file, which breaks last-line checks.
 
 ## Git Hygiene
 
