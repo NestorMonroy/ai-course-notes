@@ -688,3 +688,25 @@ def test_triage_routes_signals_and_retranslate_only_takes_the_local_ones(tmp_pat
     assert listed["prose:english:weights"] == "retranslate"
     assert listed["prose:english:throughput"] == "shared"
     assert listed["prose:forbidden:la clave está en"] == "deterministic"
+
+
+def test_the_verdict_cache_changes_when_any_verifier_input_changes(tmp_path: Path) -> None:
+    # El caché de veredictos se reusaba aunque cambiaran las frases fijas o el
+    # diccionario es_MX: sus archivos no entraban en la huella.
+    import shutil
+    mod = load_loop()
+    lang = tmp_path / "es-mx"
+    shutil.copytree(mod.LANG_DIR, lang, symlinks=True)
+    mod.LANG_DIR = lang
+    for name in ("phrases.tsv", "glossary.tsv", "prohibited_forms.txt", "hunspell/es_MX.dic", "hunspell/es_MX.aff"):
+        before = mod.fingerprint(False)
+        with (lang / name).open("a", encoding="utf-8") as handle:
+            handle.write("\n")
+        assert mod.fingerprint(False) != before, name
+
+
+def test_the_prompt_carries_the_fixed_phrases(tmp_path: Path) -> None:
+    repo, _note, _runner = setup(tmp_path)
+    out = tmp_path / "prompt.md"
+    loop(repo, "prompt", "--out", str(out))
+    assert "`自我改进 AI Agent` → `Agentes de IA que se automejoran`" in out.read_text(encoding="utf-8")

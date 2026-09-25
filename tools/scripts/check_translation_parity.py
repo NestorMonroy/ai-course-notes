@@ -20,6 +20,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_GLOSSARY = REPO_ROOT / "tools" / "lang" / "es-mx" / "glossary.tsv"
+DEFAULT_PHRASES = DEFAULT_GLOSSARY.with_name("phrases.tsv")
 HAN = re.compile(r"[\u4e00-\u9fff]")
 # Un original chino entre paréntesis es legitimo: `Yao Shunyu (姚顺雨)`.
 PARENTHESIZED = re.compile(r"[(（][^()（）\n]*[)）]")
@@ -56,7 +57,20 @@ def keep_terms(glossary: Path) -> list[str]:
                 if (r.get("decision") or "").strip() == "keep" and (r.get("term_en") or "").strip()]
 
 
-def compare(zh_text: str, es_text: str, glossary: Path) -> list[tuple[str, str]]:
+def fixed_phrases(path: Path) -> list[tuple[str, str]]:
+    """Frases del original que se traducen una sola vez para todo el corpus.
+
+    cs329a: el título 自我改进 AI Agent salió de cinco formas en nueve notas,
+    porque cada cabecera se traduce por separado.
+    """
+    if not path.is_file():
+        return []
+    with path.open(encoding="utf-8", newline="") as handle:
+        return [(r["zh"], r["es_mx"]) for r in csv.DictReader(handle, delimiter="\t", quoting=csv.QUOTE_NONE)
+                if (r.get("zh") or "").strip() and (r.get("es_mx") or "").strip()]
+
+
+def compare(zh_text: str, es_text: str, glossary: Path, phrases: Path | None = None) -> list[tuple[str, str]]:
     zh_src, es_src = COMMENT.sub("", zh_text), COMMENT.sub("", es_text)
     zh, es = body(zh_src), body(es_src)
     out: list[tuple[str, str]] = []
@@ -113,6 +127,9 @@ def compare(zh_text: str, es_text: str, glossary: Path) -> list[tuple[str, str]]
         pattern = re.compile(rf"(?<![A-Za-z]){re.escape(term)}s?(?![A-Za-z])", re.I)
         if pattern.search(zh) and not pattern.search(es):
             out.append((f"parity:keep-term:{term.lower()}", "esta en la nota zh y no en la es-MX"))
+    for zh_phrase, es_phrase in fixed_phrases(phrases or DEFAULT_PHRASES):
+        if zh_phrase in zh_text and es_phrase not in es_text:
+            out.append((f"parity:phrase:{zh_phrase}", f"se traduce siempre «{es_phrase}»"))
     return out
 
 
@@ -121,12 +138,14 @@ def main(argv=None) -> int:
     parser.add_argument("zh", type=Path)
     parser.add_argument("es", type=Path)
     parser.add_argument("--glossary", type=Path, default=DEFAULT_GLOSSARY)
+    parser.add_argument("--phrases", type=Path, default=DEFAULT_PHRASES)
     args = parser.parse_args(argv)
     for path in (args.zh, args.es):
         if not path.is_file():
             print(f"check_translation_parity: no existe {path}", file=sys.stderr)
             return 2
-    found = compare(args.zh.read_text(encoding="utf-8"), args.es.read_text(encoding="utf-8"), args.glossary)
+    found = compare(args.zh.read_text(encoding="utf-8"), args.es.read_text(encoding="utf-8"), args.glossary,
+                    args.phrases)
     for key, detail in found:
         print(f"{key}\t{detail}")
     return 1 if found else 0

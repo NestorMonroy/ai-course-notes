@@ -128,3 +128,21 @@ def test_chinese_left_in_the_preamble_is_residual(tmp_path: Path) -> None:
     assert "parity:residual-han" in signals(check(tmp_path, left, title_zh))
     done = left.replace("自我改进", "Automejora")
     assert "parity:residual-han" not in signals(check(tmp_path, done, title_zh))
+
+
+def test_a_fixed_phrase_of_the_original_requires_its_fixed_translation(tmp_path: Path) -> None:
+    # cs329a: el mismo título (自我改进 AI Agent) salió traducido de cinco
+    # formas en nueve notas, porque cada cabecera se traduce por separado.
+    phrases = tmp_path / "phrases.tsv"
+    phrases.write_text("zh\tes_mx\tsource\n自我改进 AI Agent\tAgentes de IA que se automejoran\tcurso cs329a\n",
+                       encoding="utf-8")
+    zh = ZH.replace("\\begin{document}", "\\newcommand{\\notetitle}{自我改进 AI Agent}\n\\begin{document}", 1)
+    other = ES.replace("\\begin{document}", "\\newcommand{\\notetitle}{Agentes de IA con automejora}\n\\begin{document}", 1)
+    fixed = ES.replace("\\begin{document}", "\\newcommand{\\notetitle}{Agentes de IA que se automejoran}\n\\begin{document}", 1)
+    zh_path, es_path = tmp_path / "lecture01-notes.tex", tmp_path / "lecture01-notes.es-mx.tex"
+    zh_path.write_text(zh, encoding="utf-8")
+    for text, expected in ((other, True), (fixed, False)):
+        es_path.write_text(text, encoding="utf-8")
+        result = subprocess.run([sys.executable, str(SCRIPT), "--phrases", str(phrases), str(zh_path), str(es_path)],
+                                capture_output=True, text=True)
+        assert ("parity:phrase:自我改进 AI Agent" in result.stdout) is expected, result.stdout

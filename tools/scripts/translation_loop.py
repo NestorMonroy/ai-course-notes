@@ -181,6 +181,11 @@ def build_prompt(memory: Path) -> str:
         for row in csv.DictReader(handle, delimiter="\t"):
             parts.append(f"| {row['term_en']} | {row['decision']} | {row.get('es_mx') or '—'} | "
                          f"{row.get('meaning') or ''} | {cited(row.get('rejected'))} |")
+    import check_translation_parity as parity
+    phrases = parity.fixed_phrases(LANG_DIR / "phrases.tsv")
+    if phrases:
+        parts += ["", "## Frases fijas (se traducen siempre así, en todas las notas)", ""]
+        parts += [f"- `{zh}` → `{es}`" for zh, es in phrases]
     parts += ["", "## Etiquetas de estructura (se traducen siempre así)", ""]
     parts += [f"- `{zh}` → `{es}`" for zh, es in [
         (ZH.section_summary_title, ES_MX.section_summary_title),
@@ -403,12 +408,20 @@ def cache_dir() -> Path:
     return path
 
 
+VERIFIER_INPUTS = ("glossary.tsv", "prohibited_forms.txt", "prose_vocabulary_baseline.txt", "phrases.tsv",
+                   "hunspell/es_MX.dic", "hunspell/es_MX.aff")
+
+
 def fingerprint(compile_: bool) -> str:
     digest = hashlib.sha256(b"compile" if compile_ else b"")
     for name in VERIFIERS:
         digest.update((HERE / name).read_bytes())
-    for name in ("glossary.tsv", "prohibited_forms.txt", "prose_vocabulary_baseline.txt"):
-        digest.update((LANG_DIR / name).read_bytes())
+    # Todo lo que el verificador lee de la carpeta del idioma: si cambia, el
+    # veredicto guardado ya no vale (las frases fijas y el diccionario es_MX
+    # quedaban fuera de la huella).
+    for name in VERIFIER_INPUTS:
+        path = LANG_DIR / name
+        digest.update(name.encode() + (path.read_bytes() if path.is_file() else b""))
     return digest.hexdigest()
 
 
