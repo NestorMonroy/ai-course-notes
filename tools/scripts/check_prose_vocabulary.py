@@ -243,6 +243,11 @@ def canonical_path(path: pathlib.Path, root: pathlib.Path) -> str:
         return str(resolved)
 
 
+def singular(word: str) -> str:
+    """El singular ingles regular: `prompts` es el mismo termino que `prompt`."""
+    return word[:-1] if len(word) > 3 and word.endswith("s") and not word.endswith("ss") else word
+
+
 def scan(files, es, en, forbidden, keep, root, lemmas=None):
     hits: collections.Counter = collections.Counter()
     compiled = [(form, sub, re.compile(rf"\b{re.escape(form)}\b", re.I)) for form, sub in forbidden]
@@ -256,7 +261,7 @@ def scan(files, es, en, forbidden, keep, root, lemmas=None):
                 hits[word] += 1
             elif is_spanglish(word, es, en, lemmas):
                 hits[f"spanglish:{word}"] += 1
-            elif raw[0].islower() and word not in keep and is_english(word, es, en):
+            elif raw[0].islower() and singular(word) not in keep and word not in keep and is_english(word, es, en):
                 hits[f"english:{word}"] += 1
         for form, _sub, pattern in compiled:
             found = len(pattern.findall(text))

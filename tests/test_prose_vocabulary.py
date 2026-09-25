@@ -177,3 +177,12 @@ def test_glossary_translated_form_is_not_invented(tmp_path: Path) -> None:
     )
     result = run(str(note(tmp_path, body)), glossary=declared)
     assert "tokenización" not in result.stdout, result.stdout
+
+
+def test_the_english_plural_of_a_kept_term_is_not_reported(tmp_path: Path) -> None:
+    glossary = tmp_path / "glossary.tsv"
+    glossary.write_text("term_en\tdecision\tes_mx\tmeaning\tsource\trejected\n"
+                        "prompt\tkeep\t\ttexto de entrada\t\t\n", encoding="utf-8")
+    result = run(str(note(tmp_path, "Se comparan varios prompts y sus weights.")), glossary=glossary)
+    assert "english:prompts" not in result.stdout, result.stdout
+    assert "english:weights" in result.stdout

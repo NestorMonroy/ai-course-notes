@@ -301,8 +301,9 @@ def test_usage_sums_tokens_by_component_and_measures_letters_per_han(tmp_path: P
 def test_english_the_original_already_uses_is_not_a_translation_defect(tmp_path: Path) -> None:
     # La nota zh ya escribe `reward model` en ingles: es termino tecnico que se
     # queda. `weights` no esta en el original: lo introdujo la traduccion.
-    source = NOTE.replace("小结。", "小结：reward model 很重要。")
-    dictionary = dict(DICTIONARY, **{"小结：reward model 很重要。": "Resumen: el reward model importa, igual que los weights."})
+    source = NOTE.replace("小结。", "小结：reward model 和 worker 很重要。")
+    dictionary = dict(DICTIONARY, **{"小结：reward model 和 worker 很重要。":
+                                     "Resumen: el reward model y los workers importan, igual que los weights."})
     repo, note, runner = setup(tmp_path, dictionary, source)
     bench = tmp_path / "bench"
     loop(repo, "prepare", "--bench", str(bench), str(note))
@@ -313,3 +314,5 @@ def test_english_the_original_already_uses_is_not_a_translation_defect(tmp_path:
     signals = {json.loads(l)["signal"] for l in out.read_text(encoding="utf-8").splitlines()}
     assert "prose:english:weights" in signals, signals
     assert "prose:english:reward" not in signals and "prose:english:model" not in signals
+    # El plural ingles de un termino del original sigue siendo ese termino.
+    assert "prose:english:workers" not in signals

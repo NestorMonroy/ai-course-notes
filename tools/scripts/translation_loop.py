@@ -355,7 +355,8 @@ def verify_notes(notes: list[Path], compile_: bool, root: Path, lexicons) -> tup
             if k in baseline:
                 continue
             if k.startswith("english:"):
-                if k.split(":", 1)[1] in inherited_english:
+                word = k.split(":", 1)[1]
+                if word in inherited_english or prose.singular(word) in inherited_english:
                     continue
                 found.append((f"prose:{k}", ""))
             elif k.startswith("spanglish:"):
