@@ -8,6 +8,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from note_language import ZH, NoteLanguage, for_path  # noqa: E402
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Check note coverage and pedagogy heuristics.")
@@ -82,7 +85,7 @@ def strip_latex(line: str) -> str:
     return re.sub(r"\s+", " ", line).strip()
 
 
-def prose_char_count(lines: list[str]) -> int:
+def prose_char_count(lines: list[str], lang: NoteLanguage = ZH) -> int:
     chars = 0
     for raw in lines:
         line = raw.strip()
@@ -97,11 +100,11 @@ def prose_char_count(lines: list[str]) -> int:
         if "&" in line and r"\\" in line:
             continue
         cleaned = strip_latex(line)
-        chars += len(re.findall(r"[\u4e00-\u9fffA-Za-z0-9]", cleaned))
+        chars += lang.prose_chars(cleaned)
     return chars
 
 
-def figure_local_explanation_counts(lines: list[str]) -> list[tuple[int, int]]:
+def figure_local_explanation_counts(lines: list[str], lang: NoteLanguage = ZH) -> list[tuple[int, int]]:
     counts: list[tuple[int, int]] = []
     body_start = next(
         (idx + 1 for idx, line in enumerate(lines) if r"\begin{document}" in line),
@@ -121,17 +124,16 @@ def figure_local_explanation_counts(lines: list[str]) -> list[tuple[int, int]]:
         if not is_visual:
             continue
         window = lines[max(body_start, idx - 10) : min(len(lines), idx + 24)]
-        counts.append((idx + 1, prose_char_count(window)))
+        counts.append((idx + 1, prose_char_count(window, lang)))
     return counts
 
 
-BRIDGE_WORDS = (
-    "本节", "前面", "上一", "接下来", "现在", "因此", "所以", "换句话说", "这意味着",
-    "为了", "问题", "核心", "直觉", "回到", "进一步", "从", "下面", "这里",
-)
+# Las palabras de transicion viven en el perfil de idioma; el nombre se
+# conserva porque es la forma en que se citaban.
+BRIDGE_WORDS = ZH.bridge_words
 
 
-def weak_section_openers(lines: list[str]) -> list[tuple[int, str]]:
+def weak_section_openers(lines: list[str], lang: NoteLanguage = ZH) -> list[tuple[int, str]]:
     weak: list[tuple[int, str]] = []
     heading_re = re.compile(r"\\(?:section|subsection)\{([^}]*)\}")
     for idx, line in enumerate(lines):
@@ -139,7 +141,7 @@ def weak_section_openers(lines: list[str]) -> list[tuple[int, str]]:
         if not match:
             continue
         title = match.group(1)
-        if any(skip in title for skip in ["本章小结", "拓展阅读", "总结与延伸"]):
+        if any(skip in title for skip in lang.closing_titles):
             continue
         opener_lines: list[str] = []
         first_meaningful = ""
@@ -152,17 +154,17 @@ def weak_section_openers(lines: list[str]) -> list[tuple[int, str]]:
             if is_visual_line(stripped):
                 break
             opener_lines.append(stripped)
-            if prose_char_count(opener_lines) >= 120:
+            if prose_char_count(opener_lines, lang) >= lang.scaled(120):
                 break
         opener_text = " ".join(strip_latex(x) for x in opener_lines)
-        opener_chars = len(re.findall(r"[\u4e00-\u9fffA-Za-z0-9]", opener_text))
+        opener_chars = lang.prose_chars(opener_text)
         starts_with_visual = is_visual_line(first_meaningful)
-        has_bridge = any(word in opener_text for word in BRIDGE_WORDS)
+        has_bridge = any(word in opener_text for word in lang.bridge_words)
         # A substantial prose opener is already a valid transition even when it
         # does not contain one of the small hand-written bridge-word probes.
         # Keep requiring an explicit bridge for shorter openers, and continue
         # rejecting sections that start directly with a visual.
-        if starts_with_visual or opener_chars < 90 or (opener_chars < 120 and not has_bridge):
+        if starts_with_visual or opener_chars < lang.scaled(90) or (opener_chars < lang.scaled(120) and not has_bridge):
             weak.append((idx + 1, title))
     return weak
 
@@ -177,31 +179,25 @@ def main() -> None:
     args = parse_args()
     tex = args.tex
     text = read(tex)
+    lang = for_path(tex)
     errors: list[str] = []
     warnings: list[str] = []
     lines = text.splitlines()
 
     figs = figure_count(text)
-    readfig = len(re.findall(r"读图|怎么看|图.*说明|图.*含义", text))
+    readfig = lang.count("readfig", text)
     boxes = len(re.findall(r"\\begin\{(?:importantbox|knowledgebox|warningbox)\}", text))
-    term_digest = len(re.findall(r"术语消化|术语表|背景概念|什么是|概念.*解释", text))
+    term_digest = lang.count("term_digest", text)
     teacher_voice = max(
         len(re.findall(r"\\teachervoice\{", text)),
-        len(
-            re.findall(
-                r"课堂提示|老师强调|讲者强调|讲义提醒|口头|课上|经验判断|实践经验|"
-                r"这里的提醒|课程提醒|老师在这里|teacher voice|speaker note",
-                text,
-                flags=re.I,
-            )
-        ),
+        lang.count("teacher_voice", text),
     )
     formulas = len(re.findall(r"\\\[|\\\]|\$\$", text)) // 2 + len(re.findall(r"\\begin\{(?:align|equation)\*?\}", text))
-    symbol_words = len(re.findall(r"其中|符号|表示|定义为|记为", text))
+    symbol_words = lang.count("symbol_words", text)
     code_blocks = len(re.findall(r"\\begin\{lstlisting\}", text))
-    summary = len(re.findall(r"本章小结|总结与延伸", text))
-    prose_chars = prose_char_count(lines)
-    fig_local_counts = figure_local_explanation_counts(lines)
+    summary = lang.count("summary", text)
+    prose_chars = prose_char_count(lines, lang)
+    fig_local_counts = figure_local_explanation_counts(lines, lang)
 
     if figs >= 3 and readfig == 0:
         errors.append("figures-present-but-no-readfig-explanation")
@@ -209,10 +205,10 @@ def main() -> None:
         warnings.append("many-figures-but-few-readfig-explanations")
     if figs >= 12:
         prose_per_fig = prose_chars / max(1, figs)
-        if prose_per_fig < 260:
-            warnings.append(f"figure-heavy-prose-thin=chars_per_figure:{prose_per_fig:.0f}<260")
+        if prose_per_fig < lang.scaled(260):
+            warnings.append(f"figure-heavy-prose-thin=chars_per_figure:{prose_per_fig:.0f}<{lang.scaled(260)}")
     if fig_local_counts:
-        thin_figs = [(line_no, count) for line_no, count in fig_local_counts if count < 220]
+        thin_figs = [(line_no, count) for line_no, count in fig_local_counts if count < lang.scaled(220)]
         if figs >= 8 and len(thin_figs) >= max(3, int(figs * 0.15)):
             preview = ",".join(f"L{line}:{count}" for line, count in thin_figs[:8])
             warnings.append(f"thin-local-figure-explanations={len(thin_figs)}/{figs} ({preview})")
@@ -232,26 +228,12 @@ def main() -> None:
         errors.append("missing-section-or-final-summary")
     if code_blocks and "caption=" not in text:
         errors.append("code-blocks-without-captions")
-    weak_openers = weak_section_openers(lines)
+    weak_openers = weak_section_openers(lines, lang)
     if weak_openers:
         preview = ",".join(f"L{line}:{title[:24]}" for line, title in weak_openers[:8])
         warnings.append(f"weak-section-openers={len(weak_openers)} ({preview})")
 
-    first_use_terms = {
-        "ZeRO": ["ZeRO-1", "Zero Redundancy", "优化器状态", "分片", "stage"],
-        "sharding": ["分片", "切分", "每张 GPU", "每卡", "只存"],
-        "state sharding": ["优化器状态", "梯度", "参数", "分片"],
-        "fused kernel": ["融合", "合并", "减少", "显存读写", "HBM"],
-        "fused kernels": ["融合", "合并", "减少", "显存读写", "HBM"],
-        "collectives": ["all-reduce", "all-gather", "reduce-scatter", "集合通信", "多 GPU"],
-        "DRAM": ["Dynamic", "HBM", "显存", "全称", "memory"],
-        "SRAM": ["Static", "cache", "片上", "高速缓存", "全称"],
-        "HBM": ["High Bandwidth", "显存", "DRAM", "带宽"],
-        "optimizer state": ["Adam", "m", "v", "一阶", "二阶", "动量"],
-        "Activation checkpointing": ["重算", "激活", "显存", "gradient checkpointing"],
-        "activation checkpointing": ["重算", "激活", "显存", "gradient checkpointing"],
-        "perplexity": ["PPL", "交叉熵", "惊讶", "选项", "exp"],
-    }
+    first_use_terms = lang.first_use_terms
     unexplained_terms: list[str] = []
     for term, clues in first_use_terms.items():
         match = find_first_use(text, term)

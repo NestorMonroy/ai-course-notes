@@ -9,6 +9,10 @@
 
 set -euo pipefail
 
+# El perfil de idioma (zh o es-mx) decide que etiquetas marcan cada rasgo;
+# vive en note_language.py, que tambien leen los otros scripts de QA.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 pdf_pages() {
     local pdf="$1"
     local pages=""
@@ -47,6 +51,8 @@ check_one() {
     local f="$1"
     local pdf="${f%.tex}.pdf"
     local name=$(echo "$f" | sed 's|^\./||')
+    local NOTE_LANG SUMMARY_RE READFIG_RE PROSE_CLASS PROSE_PER_FIG_MIN
+    eval "$(python3 "$SCRIPT_DIR/note_language.py" shell "$f")"
 
     local pages=0 secs=0 subs=0 boxes=0 figs=0 summary=0
     local readfig=0 prose_chars=0 prose_per_fig=0
@@ -66,9 +72,9 @@ counts = [
 print(max(counts))
 PY
 )
-    summary=$(grep -c '本章小结\|总结与延伸' "$f" 2>/dev/null || true)
-    readfig=$(grep -c '读图' "$f" 2>/dev/null || true)
-    prose_chars=$(python3 - "$f" <<'PY'
+    summary=$(grep -cE "$SUMMARY_RE" "$f" 2>/dev/null || true)
+    readfig=$(grep -cE "$READFIG_RE" "$f" 2>/dev/null || true)
+    prose_chars=$(python3 - "$f" "$PROSE_CLASS" <<'PY'
 from pathlib import Path
 import re, sys
 text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="ignore")
@@ -88,7 +94,7 @@ for raw in text.splitlines():
     line = re.sub(r"\\(?:begin|end)\{[^}]*\}", " ", line)
     line = re.sub(r"\\[a-zA-Z]+\*?(?:\[[^\]]*\])?", " ", line)
     line = re.sub(r"[{}$^_]", " ", line)
-    chars += len(re.findall(r"[\u4e00-\u9fffA-Za-z0-9]", line))
+    chars += len(re.findall(sys.argv[2], line))
 print(chars)
 PY
 )
@@ -101,12 +107,12 @@ PY
     [ "$boxes" -lt 5 ] && issues="${issues} boxes<5"
     [ "$figs" -lt 3 ] && issues="${issues} figs<3"
     [ "$summary" -lt 2 ] && issues="${issues} no-summary"
-    [ "$figs" -ge 12 ] && [ "$prose_per_fig" -lt 260 ] && issues="${issues} prose/fig<260"
+    [ "$figs" -ge 12 ] && [ "$prose_per_fig" -lt "$PROSE_PER_FIG_MIN" ] && issues="${issues} prose/fig<${PROSE_PER_FIG_MIN}"
 
     local grade="⭐⭐⭐"
     [ -n "$issues" ] && grade="⭐"
     [ "$pages" -ge 8 ] && [ "$boxes" -ge 5 ] && [ "$figs" -ge 3 ] && [ "$summary" -ge 2 ] && grade="⭐⭐"
-    [ "$pages" -ge 20 ] && [ "$boxes" -ge 10 ] && [ "$figs" -ge 8 ] && { [ "$figs" -lt 12 ] || [ "$prose_per_fig" -ge 260 ]; } && grade="⭐⭐⭐"
+    [ "$pages" -ge 20 ] && [ "$boxes" -ge 10 ] && [ "$figs" -ge 8 ] && { [ "$figs" -lt 12 ] || [ "$prose_per_fig" -ge "$PROSE_PER_FIG_MIN" ]; } && grade="⭐⭐⭐"
 
     # Long-form podcast/interview notes often have no slides or demos. In that
     # case, do not require repeated speaker frames just to satisfy a figure
@@ -131,7 +137,7 @@ if [ -f "$target" ]; then
     check_one "$target"
 else
     files=$(
-        find "$target" \( -name '*-notes.tex' -o -name 'notes.tex' \) \
+        find "$target" \( -name '*-notes.tex' -o -name '*-notes.es-mx.tex' -o -name 'notes.tex' \) \
             -not -path '*/templates/*' \
             -not -path '*/.web-build/*' \
             -not -path '*/site/*' \

@@ -10,6 +10,10 @@ import subprocess
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Iterable
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from note_language import ES_MX, ZH, NoteLanguage, for_path  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -247,13 +251,15 @@ def min_boxes_for(min_pages: int) -> int:
     return 3
 
 
-def structural_failures(text: str, notedate: str, authors: str, videourl: str) -> list[str]:
+def structural_failures(
+    text: str, notedate: str, authors: str, videourl: str, language: NoteLanguage = ZH
+) -> list[str]:
     failures: list[str] = []
-    if r"\section{总结与延伸}" not in text:
+    if rf"\section{{{language.final_section_title}}}" not in text:
         failures.append("missing-final-summary")
-    if "本章小结" not in text:
+    if language.section_summary_title not in text:
         failures.append("missing-section-summary")
-    if not notedate or notedate == r"\today" or notedate == "[在此填写日期]":
+    if not notedate or notedate == r"\today" or notedate == language.date_placeholder:
         failures.append("bad-notedate")
     bad_authors = {
         "五道口纳什 & Codex",
@@ -265,13 +271,15 @@ def structural_failures(text: str, notedate: str, authors: str, videourl: str) -
     }
     if authors in bad_authors:
         failures.append("bad-author")
-    if "视频链接：未填写" in text or "文章链接：未填写" in text:
+    if any(marker in text for marker in language.missing_link_markers):
         failures.append("visible-missing-link")
     return failures
 
 
 def iter_rows() -> Iterable[AuditRow]:
-    for tex in sorted(ROOT.rglob("*-notes.tex")):
+    # Las notas zh y las es-mx; `*-notes.tex` no alcanza a `*-notes.es-mx.tex`.
+    notes = {*ROOT.rglob(ZH.notes_glob), *ROOT.rglob(ES_MX.notes_glob)}
+    for tex in sorted(notes):
         if ".git" in tex.parts or "tools/templates" in str(tex):
             continue
         # Parallel workers may briefly replace files during rewrites; skip paths
@@ -297,8 +305,9 @@ def iter_rows() -> Iterable[AuditRow]:
         min_boxes = min_boxes_for(min_pages)
         pages = pdf_pages(pdf) if pdf.exists() else None
         boxes = len(re.findall(r"importantbox|knowledgebox|warningbox", text))
-        summary_count = len(re.findall(r"本章小结|总结与延伸", text))
-        failures = structural_failures(text, notedate, authors, videourl)
+        lang = for_path(tex)
+        summary_count = lang.count("summary", text)
+        failures = structural_failures(text, notedate, authors, videourl, lang)
         gap_pages = max(0, min_pages - (pages or 0))
         gap_boxes = max(0, min_boxes - boxes)
         pass_pages = pages is not None and pages >= min_pages
@@ -325,7 +334,7 @@ def iter_rows() -> Iterable[AuditRow]:
             has_importantbox="importantbox" in text,
             has_knowledgebox="knowledgebox" in text,
             has_warningbox="warningbox" in text,
-            has_final_summary=r"\section{总结与延伸}" in text,
+            has_final_summary=rf"\section{{{lang.final_section_title}}}" in text,
             summary_count=summary_count,
             notedate=notedate,
             noteauthors=authors,
