@@ -534,3 +534,18 @@ def test_a_verifier_that_dies_is_an_incomplete_verdict_not_a_clean_one(tmp_path:
     incomplete = {r["note"] for r in rows if r["signal"] == "verify:incomplete"}
     assert "cs001/lecture01/lecture01-notes.es-mx.tex" in incomplete
     assert "incompleta" in result.stderr
+
+
+def test_prompt_cites_every_prohibited_form(tmp_path: Path) -> None:
+    # cs329a, iteración 02: «la clave está en» sobrevivió a la retraducción; la
+    # plantilla solo citaba tres clichés de ejemplo y no la lista entera.
+    repo, _note, _runner = setup(tmp_path)
+    out = tmp_path / "prompt.md"
+    assert loop(repo, "prompt", "--out", str(out)).returncode == 0
+    prompt = out.read_text(encoding="utf-8")
+    forms = [l.split("→")[0].split("->")[0].strip()
+             for l in (REPO_ROOT / "tools/lang/es-mx/prohibited_forms.txt").read_text(encoding="utf-8").splitlines()
+             if l.strip() and not l.startswith("#")]
+    assert "la clave está en" in forms
+    missing = [f for f in forms if f"`{f}`" not in prompt]
+    assert not missing, missing[:5]

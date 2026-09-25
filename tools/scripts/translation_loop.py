@@ -161,6 +161,12 @@ def build_prompt(memory: Path) -> str:
         ("拓展阅读", "Lecturas adicionales"), ("读图", "Lectura de la figura"),
         ("背景概念", "Concepto previo"), ("术语表", "Glosario"), ("术语消化", "Términos clave"),
         ("课堂提示", "Nota de clase"), ("老师强调", "el docente enfatiza"), ("来源", "Fuente")]]
+    # La lista entera de `prohibited_forms.txt`, citada: con solo tres clichés de
+    # ejemplo, «la clave está en» sobrevivió a una retraducción (cs329a, it. 02).
+    import check_prose_vocabulary as prose
+    forbidden = prose.load_forbidden(prose.DEFAULT_FORBIDDEN)
+    parts += ["", "## Formas prohibidas (no aparecen en la traducción)", "",
+              ", ".join(f"`{form}`" + (f" → {sub}" if sub else "") for form, sub in forbidden)]
     rules = [e["fix_generico"].get("regla", "") for e in read_jsonl(memory)
              if isinstance(e.get("fix_generico"), dict) and e["fix_generico"].get("tipo") == "prompt"]
     if rules:
