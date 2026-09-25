@@ -84,7 +84,9 @@ def test_glossary_is_well_formed() -> None:
         assert r["meaning"].strip(), f"{r['term_en']}: falta el significado"
         if r["decision"] == "translate":
             assert r["es_mx"].strip(), f"{r['term_en']}: translate sin forma es-MX"
-        rejected = [f for f in r["rejected"].split("|") if f]
+        # La ultima columna vacia puede omitirse: un tabulador final lo rechaza
+        # `git diff --check`, y el lector del revisor de prosa ya lo acepta.
+        rejected = [f for f in (r["rejected"] or "").split("|") if f]
         assert r["es_mx"] not in rejected, r
 
 
