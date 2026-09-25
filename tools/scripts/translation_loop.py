@@ -6,6 +6,7 @@
     translation_loop.py translate --bench B --model <id completo> [--width N] [--memfree TAM] [--timeout S]
     translation_loop.py usage    --bench B
     translation_loop.py plan     --out P.tsv
+    translation_loop.py advance  --batch L --model <id> [--compile] [--max-iterations N]
     translation_loop.py triage   [--memory M]
     translation_loop.py retranslate --batch L
     translation_loop.py cycle    --batch L --model <id> [--compile] <nota.tex>...
@@ -460,7 +461,10 @@ def verify_notes(notes: list[Path], compile_: bool, root: Path, lexicons) -> tup
         key = hashlib.sha256(key_base.encode() + zh.read_bytes() + es.read_bytes()).hexdigest()
         cached = cache_dir() / f"{key}.json"
         if cached.is_file():
-            rows += json.loads(cached.read_text(encoding="utf-8"))
+            # El caché guarda el veredicto del contenido; la nota es la que se
+            # verifica ahora. Dos notas con el mismo contenido compartían la ruta
+            # de la primera y una causa compartida parecía local.
+            rows += [{**r, "note": rel(es, root)} for r in json.loads(cached.read_text(encoding="utf-8"))]
             hits += 1
             continue
         zh_text = zh.read_text(encoding="utf-8")
@@ -850,6 +854,64 @@ def cmd_retranslate(args) -> int:
     return 0
 
 
+# --- advance ------------------------------------------------------------------
+
+def batch_notes(plan: Path, batch: str) -> list[str]:
+    """Las notas de un lote según el plan versionado."""
+    for line in plan.read_text(encoding="utf-8").splitlines()[1:]:
+        fields = line.split("\t")
+        if len(fields) >= 5 and fields[1] == batch:
+            return fields[4].split(" ")
+    return []
+
+
+def cmd_advance(args) -> int:
+    """Itera las rutas 1 y 3 de un lote y se detiene cuando hace falta juicio.
+
+    Cada vuelta: `cycle`; si hay una señal compartida (ruta 2) se detiene y la
+    nombra, porque se decide una vez y no se retraduce nota por nota; si no,
+    `sweep` (ruta 1) y `retranslate` (ruta 3). Sale con 0 si el lote queda
+    limpio, 2 si la verificación quedó incompleta y 3 si hace falta juicio:
+    una causa compartida, señales que no se pueden localizar o el tope de
+    iteraciones.
+    """
+    ns = argparse.Namespace
+    root = Path.cwd()
+    notes = batch_notes(args.plan, args.batch)
+    if not notes:
+        print(f"advance: el lote {args.batch} no está en {args.plan}", file=sys.stderr)
+        return 2
+    bench = batch_bench(args.batch)
+    for _round in range(args.max_iterations):
+        code = cmd_cycle(ns(batch=args.batch, bench=None, model=args.model, width=args.width, memfree=args.memfree,
+                            timeout=args.timeout, memory=args.memory, compile=args.compile, jobs=args.jobs,
+                            notes=notes))
+        if code in (0, 2):
+            return code
+        last = sorted(d for d in (bench / "iterations").glob("[0-9][0-9]") if d.is_dir())[-1]
+        signals = {json.loads(l)["signal"] for l in (last / "signals.jsonl").read_text(encoding="utf-8").splitlines()
+                   if l.strip()}
+        routes = classify(root, args.memory)
+        shared = sorted(s for s in signals if routes.get(s, ("local",))[0] == "shared")
+        if shared:
+            print(f"advance: {len(shared)} causa(s) compartida(s); se deciden una vez (hace falta juicio): "
+                  + ", ".join(shared[:10]), file=sys.stderr)
+            return 3
+        # En una ola (`translate_wave.sh`) varios lotes corren a la vez: el barrido
+        # reescribe la memoria, así que corre una sola vez al final de la ola.
+        if not args.no_sweep and any(routes.get(s, ("local",))[0] == "deterministic" for s in signals):
+            cmd_sweep(ns(bench=bench, iteration=int(last.name), memory=args.memory, jobs=args.jobs))
+        cmd_retranslate(ns(batch=args.batch, bench=None, memory=args.memory))
+        listed = (last / "retranslate.tsv").read_text(encoding="utf-8").splitlines()[1:]
+        marked = [l for l in listed if l.endswith("\tretranslate")]
+        if not marked and not any(routes.get(s, ("local",))[0] == "deterministic" for s in signals):
+            print(f"advance: {len(listed)} señal(es) sin fragmento que retraducir; hace falta juicio", file=sys.stderr)
+            return 3
+    print(f"advance: tope de {args.max_iterations} iteraciones con señales abiertas; hace falta juicio",
+          file=sys.stderr)
+    return 3
+
+
 # --- sweep ----------------------------------------------------------------
 
 def cmd_sweep(args) -> int:
@@ -912,6 +974,14 @@ def main(argv=None) -> int:
     p = sub.add_parser("usage"); p.add_argument("--bench", type=Path, required=True); p.set_defaults(func=cmd_usage)
     p = sub.add_parser("assemble"); p.add_argument("--bench", type=Path, required=True); p.set_defaults(func=cmd_assemble)
     p = sub.add_parser("plan"); p.add_argument("--out", type=Path, required=True); p.set_defaults(func=cmd_plan)
+    p = sub.add_parser("advance"); p.add_argument("--batch", required=True)
+    p.add_argument("--plan", type=Path, default=Path(".claude/workbench/translation/plan.tsv"))
+    p.add_argument("--model", required=True); p.add_argument("--width", type=int, default=DEFAULT_WIDTH)
+    p.add_argument("--memfree", default=DEFAULT_MEMFREE); p.add_argument("--timeout", type=int, default=900)
+    p.add_argument("--memory", type=Path, default=DEFAULT_MEMORY); p.add_argument("--compile", action="store_true")
+    p.add_argument("--jobs", type=int, default=os.cpu_count() or 2)
+    p.add_argument("--max-iterations", type=int, default=4); p.add_argument("--no-sweep", action="store_true")
+    p.set_defaults(func=cmd_advance)
     p = sub.add_parser("triage"); p.add_argument("--memory", type=Path, default=DEFAULT_MEMORY)
     p.set_defaults(func=cmd_triage)
     p = sub.add_parser("retranslate"); p.add_argument("--batch", default=None)

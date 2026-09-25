@@ -729,3 +729,96 @@ def test_the_sweep_never_touches_evidence_under_dot_claude(tmp_path: Path) -> No
     assert evidence.read_text(encoding="utf-8") == "title=#1\n"
     row = json.loads((bench / "sweep.jsonl").read_text(encoding="utf-8").splitlines()[-1])
     assert row["notas_revisadas"] == 1
+
+
+def write_plan(repo: Path, batch: str, notes: list[Path]) -> Path:
+    plan = repo / ".claude/workbench/translation/plan.tsv"
+    plan.parent.mkdir(parents=True, exist_ok=True)
+    plan.write_text("order\tbatch\tbytes\tnotes\tpaths\n1\t%s\t0\t%d\t%s\n"
+                    % (batch, len(notes), " ".join(str(n.relative_to(repo)) for n in notes)), encoding="utf-8")
+    return plan
+
+
+def test_advance_runs_a_clean_batch_in_one_iteration(tmp_path: Path) -> None:
+    repo, note, runner = setup(tmp_path)
+    write_plan(repo, "cs000", [note])
+    result = loop(repo, "advance", "--batch", "cs000", "--model", "claude-sonnet-5", runner=runner, cache=tmp_path / "c")
+    assert result.returncode == 0, result.stdout + result.stderr
+    rows = (repo / ".claude/workbench/translation/batches.tsv").read_text(encoding="utf-8").splitlines()[1:]
+    assert len(rows) == 1 and rows[0].split("\t")[6] == "0"
+
+
+def test_advance_retranslates_local_signals_and_stops_bounded(tmp_path: Path) -> None:
+    # El runner falso repite el mismo defecto al retraducir: `advance` tiene
+    # que parar en su tope de iteraciones y pedir juicio (exit 3), no girar.
+    dictionary = dict(DICTIONARY, **{"训练用 checkpoint。": "El training usa checkpoint."})
+    repo, note, runner = setup(tmp_path, dictionary)
+    write_plan(repo, "cs000", [note])
+    result = loop(repo, "advance", "--batch", "cs000", "--model", "claude-sonnet-5", "--max-iterations", "3",
+                  runner=runner, cache=tmp_path / "c")
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "juicio" in result.stderr
+    rows = (repo / ".claude/workbench/translation/batches.tsv").read_text(encoding="utf-8").splitlines()[1:]
+    assert len(rows) == 3 and all(int(r.split("\t")[5]) >= 1 for r in rows[1:])
+
+
+def test_advance_stops_on_a_shared_cause_without_retranslating(tmp_path: Path) -> None:
+    # Ruta 2: la misma señal en dos notas se decide una vez; `advance` no la
+    # retraduce nota por nota, se detiene y la nombra.
+    dictionary = dict(DICTIONARY, **{"训练用 checkpoint。": "El training usa checkpoint."})
+    repo, note, runner = setup(tmp_path, dictionary)
+    other = repo / "cs000" / "lecture02" / "lecture02-notes.tex"
+    other.parent.mkdir(parents=True)
+    other.write_text(NOTE, encoding="utf-8")
+    write_plan(repo, "cs000", [note, other])
+    result = loop(repo, "advance", "--batch", "cs000", "--model", "claude-sonnet-5", runner=runner, cache=tmp_path / "c")
+    assert result.returncode == 3
+    assert "prose:english:training" in result.stderr and "compartida" in result.stderr
+    rows = (repo / ".claude/workbench/translation/batches.tsv").read_text(encoding="utf-8").splitlines()[1:]
+    assert len(rows) == 1
+
+
+WAVE = REPO_ROOT / "tools" / "scripts" / "translate_wave.sh"
+
+
+def test_advance_no_sweep_never_writes_the_memory(tmp_path: Path) -> None:
+    # En una ola, varios lotes corren a la vez: un barrido por lote reescribiría
+    # la memoria en paralelo y perdería entradas. `--no-sweep` la deja intacta.
+    dictionary = dict(DICTIONARY, **{"训练用 checkpoint。": "El training usa checkpoint."})
+    repo, note, runner = setup(tmp_path, dictionary)
+    write_plan(repo, "cs000", [note])
+    memory = tmp_path / "memory.jsonl"
+    memory.write_text(json.dumps({"patron": "p", "senal_del_verificador": "prose:english:training",
+                                  "fix_generico": {"tipo": "mechanical", "buscar": "training", "reemplazar": "entrenamiento"},
+                                  "archivos_donde_ya_se_aplico": ["x"]}) + "\n", encoding="utf-8")
+    before = memory.read_bytes()
+    result = loop(repo, "advance", "--batch", "cs000", "--model", "claude-sonnet-5", "--memory", str(memory),
+                  "--no-sweep", "--max-iterations", "2", runner=runner, cache=tmp_path / "c")
+    # Que corrió de verdad: sin esto, un `--no-sweep` desconocido aprobaba sin ejecutar nada.
+    assert result.returncode == 3, result.stderr
+    rows = (repo / ".claude/workbench/translation/batches.tsv").read_text(encoding="utf-8").splitlines()[1:]
+    assert len(rows) == 2
+    assert memory.read_bytes() == before
+    assert not (repo / ".claude/workbench/translation/cs000/sweep.jsonl").exists()
+
+
+def test_a_wave_runs_batches_with_gnu_parallel_then_one_sweep_and_triage(tmp_path: Path) -> None:
+    repo, note, runner = setup(tmp_path)
+    other = repo / "cs001" / "lecture01" / "lecture01-notes.tex"
+    other.parent.mkdir(parents=True)
+    other.write_text(NOTE, encoding="utf-8")
+    plan = repo / ".claude/workbench/translation/plan.tsv"
+    plan.parent.mkdir(parents=True, exist_ok=True)
+    plan.write_text("order\tbatch\tbytes\tnotes\tpaths\n"
+                    "1\tcs000\t1\t1\tcs000/lecture01/lecture01-notes.tex\n"
+                    "2\tcs001\t2\t1\tcs001/lecture01/lecture01-notes.tex\n", encoding="utf-8")
+    env = dict(os.environ, TRANSLATION_RUNNER=str(runner), THYROX_CACHE_DIR=str(tmp_path / "c"))
+    result = subprocess.run(["bash", str(WAVE), "--from", "1", "--to", "2", "--jobs", "2", "--model", "claude-sonnet-5"],
+                            cwd=repo, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    wave = next((repo / ".claude/workbench/translation/waves").iterdir())
+    joblog = (wave / "joblog.tsv").read_text(encoding="utf-8").splitlines()
+    assert len(joblog) == 3 and all(l.split("\t")[6] == "0" for l in joblog[1:])  # columna Exitval
+    assert (wave / "sweep.jsonl").is_file() and (wave / "triage.tsv").is_file()
+    for batch in ("cs000", "cs001"):
+        assert (repo / f".claude/workbench/translation/{batch}/iterations/01/signals.jsonl").is_file()

@@ -181,6 +181,20 @@ por cada lote del PLAN:
     *** GATE C: 0 señales en la última iteración y la muestra de V7 revisada ***
 ```
 
+**Fase 3, por olas con GNU Parallel.** Los lotes son independientes, así que
+`translate_wave.sh --from N --to M --jobs J` lanza un
+`translation_loop.py advance --no-sweep` por lote con `parallel -j J`:
+
+- la anchura contra la API se reparte entre los trabajos (`10 // J`);
+- el `--joblog` de Parallel es el registro de la ola;
+- el barrido (ruta 1) y el triage (ruta 2) corren **una sola vez** al final de
+  la ola, porque el barrido reescribe la memoria y dos en paralelo perderían
+  entradas.
+
+`advance` itera las rutas 1 y 3 por sí solo y sale con 3 cuando hace falta
+juicio: una causa compartida, señales sin fragmento que retraducir o el tope de
+iteraciones. Lo que pide juicio se decide entre olas.
+
 **El registro de cada lote** vive en un banco estable,
 `.claude/workbench/translation/<lote>/`, versionado:
 
