@@ -37,7 +37,7 @@ def write_sample_repo(root: Path) -> None:
     write_image(root / "sample-course" / "lecture01" / "images" / "fallback.png", (1800, 900), mode="RGBA")
     (root / "sample-course" / "lecture01" / "lecture01-notes.pdf").write_bytes(b"%PDF-1.4")
     (root / "sample-course" / "lecture01" / "slides.pdf").write_bytes(b"%PDF-1.4")
-    (root / "README.md").write_text(
+    (root / "README-zh.md").write_text(
         """
 # AI Course Notes
 

@@ -19,6 +19,26 @@ from urllib.parse import quote
 
 from PIL import Image, ImageOps
 
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from note_language import BY_CODE, ZH, NoteLanguage  # noqa: E402
+
+# El idioma del sitio. Por defecto zh, el sitio que ya se publica; `--lang
+# es-mx` cambia la busqueda de notas, el README del catalogo, el idioma de
+# MkDocs y las etiquetas de la interfaz, todo desde `note_language.py`.
+SITE: NoteLanguage = ZH
+
+
+def set_language(code: str) -> None:
+    global SITE
+    SITE = BY_CODE[code]
+
+
+def site_label(key: str, **values: object) -> str:
+    text = SITE.site_labels[key]
+    return text.format(**values) if values else text
+
 
 SITE_URL = "https://hqhq1025.github.io/ai-course-notes/"
 REPO_URL = "https://github.com/hqhq1025/ai-course-notes"
@@ -296,7 +316,7 @@ def expand_videofigure_commands(text: str) -> str:
             f"\\includegraphics[width={width}\\textwidth]{{{image_ref}}}\n"
             f"\\caption{{{caption}}}\n"
             "\\end{figure}\n"
-            f"\\footnotetext{{视频讲解区间：{interval}。}}\n"
+            f"\\footnotetext{{{site_label('footnote_interval', interval=interval)}}}\n"
         )
         pos = index
     return "".join(pieces)
@@ -797,9 +817,9 @@ def markdown_pdf_figure(ctx: BuildContext, src: Path, caption: str) -> str:
     link = external_asset_url(ctx, src)
     caption_line = f"    {caption}\n\n" if caption else ""
     return (
-        '\n??? info "PDF 图示资源"\n'
+        f'\n??? info "{site_label("pdf_asset_title")}"\n'
         + caption_line
-        + f"    [打开 PDF 图示]({link})\n\n"
+        + f"    [{site_label('open_pdf')}]({link})\n\n"
     )
 
 
@@ -812,12 +832,12 @@ def markdown_image_figure(ctx: BuildContext, src: Path, preview_path: str, capti
     return (
         '\n<figure class="ai-notes-figure">\n'
         f'  <a class="ai-notes-figure__preview" href="{escaped_original}" '
-        'target="_blank" rel="noopener noreferrer" aria-label="查看原图">\n'
+        f'target="_blank" rel="noopener noreferrer" aria-label="{site_label("view_original")}">\n'
         f'    <img src="{escaped_preview}" alt="{escaped_alt}" loading="lazy" decoding="async">\n'
         '  </a>\n'
         f'  <figcaption>{escaped_caption} '
         f'<a class="ai-notes-figure__original" href="{escaped_original}" '
-        'target="_blank" rel="noopener noreferrer">查看原图</a></figcaption>\n'
+        f'target="_blank" rel="noopener noreferrer">{site_label("view_original")}</a></figcaption>\n'
         '</figure>\n\n'
     )
 
@@ -843,7 +863,7 @@ def markdown_figure_from_block(ctx: BuildContext, block: EnvBlock) -> str:
         if src.is_file():
             return markdown_pdf_figure(ctx, src, caption)
         return (
-            '\n??? warning "图片资源缺失"\n'
+            f'\n??? warning "{site_label("missing_image")}"\n'
             "    ```latex\n"
             + "\n".join(f"    {line}" for line in block.source.strip().splitlines())
             + "\n    ```\n\n"
@@ -851,7 +871,7 @@ def markdown_figure_from_block(ctx: BuildContext, block: EnvBlock) -> str:
     rel = copy_asset(ctx, src, relative_name)
     if rel is None:
         return (
-            '\n??? warning "图片资源缺失"\n'
+            f'\n??? warning "{site_label("missing_image")}"\n'
             "    ```latex\n"
             + "\n".join(f"    {line}" for line in block.source.strip().splitlines())
             + "\n    ```\n\n"
@@ -914,7 +934,7 @@ def markdown_list_from_block(ctx: BuildContext, block: EnvBlock, ordered: bool) 
 def markdown_description_from_block(ctx: BuildContext, block: EnvBlock) -> str:
     lines: list[str] = []
     for label, item in split_latex_items(block.body):
-        term = clean_latex_text(label) if label else "说明"
+        term = clean_latex_text(label) if label else site_label("term_default")
         content = convert_latex_fragment(item, ctx).strip()
         content_lines = [line for line in content.splitlines() if line.strip()]
         if not content_lines:
@@ -1073,8 +1093,8 @@ def validate_tikz_svg(svg_path: Path) -> None:
 def fallback_tikz_environment(block: EnvBlock) -> str:
     source = block.source.strip().replace("```", "``\\`")
     return (
-        '\n??? info "TikZ 图暂未渲染"\n'
-        "    当前构建环境没有成功生成 SVG，保留原始 TikZ 源码。\n\n"
+        f'\n??? info "{site_label("tikz_title")}"\n'
+        f"    {site_label('tikz_body')}\n\n"
         "    ```latex\n"
         + "\n".join(f"    {line}" for line in source.splitlines())
         + "\n    ```\n\n"
@@ -1086,7 +1106,7 @@ def fallback_environment(block: EnvBlock) -> str:
         return fallback_tikz_environment(block)
     source = block.source.strip().replace("```", "``\\`")
     return (
-        f'\n??? quote "未转换的 LaTeX 环境：{block.env}"\n'
+        f'\n??? quote "{site_label("unconverted_env", env=block.env)}"\n'
         "    ```latex\n"
         + "\n".join(f"    {line}" for line in source.splitlines())
         + "\n    ```\n\n"
@@ -1235,7 +1255,7 @@ def convert_latex_fragment(fragment: str, ctx: BuildContext) -> str:
     text = replace_environment(text, "description", lambda block: markdown_description_from_block(ctx, block))
     text = convert_display_math(text)
     text = convert_sections(text)
-    text = re.sub(r"\\footnotetext\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}", lambda m: f"\n> 来源：{clean_latex_text(m.group(1))}\n", text)
+    text = re.sub(r"\\footnotetext\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}", lambda m: f"\n> {site_label('source_quote')}{clean_latex_text(m.group(1))}\n", text)
     text = replace_unknown_environments(text)
     return normalize_markdown(text)
 
@@ -1267,10 +1287,10 @@ def humanize_path(path: Path) -> str:
     special = {
         "6s191": "MIT 6.S191",
         "agentic-rl": "Agentic RL",
-        "articles": "技术文章笔记",
+        "articles": site_label("dir:articles"),
         "20vc": "20VC with Harry Stebbings",
-        "aitime": "AITIME 论道",
-        "alibaba-cloud": "阿里云",
+        "aitime": site_label("dir:aitime"),
+        "alibaba-cloud": site_label("dir:alibaba-cloud"),
         "cs146s": "CS146S",
         "cs153": "CS153",
         "cs224n": "CS224N",
@@ -1280,21 +1300,21 @@ def humanize_path(path: Path) -> str:
         "cs329a": "CS329A",
         "cs336": "CS336",
         "cs336-2026": "CS336 2026",
-        "interviews": "访谈笔记",
+        "interviews": site_label("dir:interviews"),
         "cleo-abram": "Cleo Abram",
         "dwarkesh-patel": "Dwarkesh Patel Podcast",
         "greg-isenberg": "Greg Isenberg",
-        "ungrounded": "Ungrounded 不着边际",
+        "ungrounded": site_label("dir:ungrounded"),
         "whynot-tv": "WhynotTV",
-        "zhang-xiaojun": "张小珺商业访谈录",
+        "zhang-xiaojun": site_label("dir:zhang-xiaojun"),
         "kaist-cs492d": "KAIST CS492D",
         "lex-fridman": "Lex Fridman Podcast",
         "llm-architect": "LLM Architect",
         "modern-agent": "Modern Agent",
         "no-priors": "No Priors Podcast",
         "nvidia-gtc": "NVIDIA GTC",
-        "qingke": "青稞社区",
-        "talks": "演讲与访谈",
+        "qingke": site_label("dir:qingke"),
+        "talks": site_label("dir:talks"),
     }
     text = path.as_posix()
     if text in special:
@@ -1309,7 +1329,7 @@ def humanize_path(path: Path) -> str:
 
 def discover_notes(root: Path) -> list[Note]:
     notes: list[Note] = []
-    for tex_path in sorted(root.rglob("*-notes.tex"), key=natural_key):
+    for tex_path in sorted(root.rglob(SITE.notes_glob), key=natural_key):
         rel = tex_path.relative_to(root)
         if ".git" in rel.parts or ".web-build" in rel.parts or rel.parts[:2] == ("tools", "templates"):
             continue
@@ -1324,11 +1344,11 @@ def strip_markdown(text: str) -> str:
 
 
 def parse_readme_catalog(root: Path) -> list[CatalogEntry]:
-    readme = root / "README.md"
+    readme = root / SITE.site_readme
     if not readme.is_file():
         return []
     entries: list[CatalogEntry] = []
-    category = "课程"
+    category = site_label("category_default")
     for line in read_text(readme).splitlines():
         heading = re.match(r"^###\s+(.+)$", line)
         if heading:
@@ -1374,10 +1394,10 @@ def infer_category(course_dir: Path, entries: list[CatalogEntry]) -> str:
         return prefixed[0].category
     top = course_dir.parts[0] if course_dir.parts else ""
     if top == "articles":
-        return "📝 技术文章笔记"
+        return site_label("category_articles")
     if top in {"talks", "interviews"}:
-        return "🎤 演讲与访谈"
-    return "其他"
+        return site_label("category_talks")
+    return site_label("category_other")
 
 
 def topic_for_course(course_dir: Path, entries_by_path: dict[str, CatalogEntry]) -> str:
@@ -1425,19 +1445,19 @@ def note_page_markdown(ctx: BuildContext, note: Note) -> str:
     pdf_link, tex_link, cover_link = copy_note_static_files(ctx, note, out_dir)
     body = convert_latex_fragment(strip_document_shell(read_text(note.tex_path)), ctx)
     actions = []
-    actions.append(f"[LaTeX 源码]({tex_link})")
+    actions.append(f"[{site_label('latex_source')}]({tex_link})")
     if pdf_link:
-        actions.append(f"[备用 PDF]({pdf_link})")
+        actions.append(f"[{site_label('backup_pdf')}]({pdf_link})")
     if note.video_url:
-        actions.append(f"[观看视频]({note.video_url})")
+        actions.append(f"[{site_label('watch_video')}]({note.video_url})")
     metadata_rows = [
-        ("作者/整理", note.authors),
-        ("来源", note.channel),
-        ("日期", note.date),
+        (site_label("meta_authors"), note.authors),
+        (site_label("meta_channel"), note.channel),
+        (site_label("meta_date"), note.date),
     ]
     lines = [f"# {note.title}", "", " · ".join(actions), ""]
     if any(value for _, value in metadata_rows):
-        lines.extend(["| 字段 | 内容 |", "| --- | --- |"])
+        lines.extend([f"| {site_label('meta_field')} | {site_label('meta_content')} |", "| --- | --- |"])
         for key, value in metadata_rows:
             if value:
                 lines.append(f"| {key} | {value} |")
@@ -1452,14 +1472,14 @@ def course_page_markdown(course_dir: Path, notes: list[Note], title: str, topic:
     lines = [f"# {title}", ""]
     if topic:
         lines.extend([topic, ""])
-    lines.extend([f"共 {len(notes)} 份讲义。", "", "| 讲义 | 日期 | 来源 | 资源 |", "| --- | --- | --- | --- |"])
+    lines.extend([site_label("course_total", count=len(notes)), "", site_label("course_header"), "| --- | --- | --- | --- |"])
     for note in sorted(notes, key=lambda item: natural_key(item.route_dir)):
         page_rel = markdown_page_target(course_dir, note.route_dir)
         dir_rel = relative_dir_target(course_dir, note.route_dir)
-        resources = [f"[阅读]({page_rel})"]
+        resources = [f"[{site_label('read')}]({page_rel})"]
         resources.append(f"[LaTeX]({dir_rel}{note.tex_path.name})")
         if note.pdf_path.is_file():
-            resources.append(f"[备用 PDF]({raw_github_url(note.pdf_path.relative_to(note.root))})")
+            resources.append(f"[{site_label('backup_pdf')}]({raw_github_url(note.pdf_path.relative_to(note.root))})")
         lines.append(
             "| "
             + " | ".join(
@@ -1488,9 +1508,9 @@ def home_markdown(
     lines = [
         "# AI Course Notes",
         "",
-        f"这里是从 `{len(notes)}` 份 LaTeX 讲义自动生成的网页阅读站。正文直接由 `.tex` 渲染成网页，适合浏览、搜索和连续阅读。",
+        site_label("index_intro", count=len(notes)),
         "",
-        "## 课程地图",
+        site_label("index_map"),
         "",
     ]
     for category, course_dirs in groups.items():
@@ -1500,16 +1520,16 @@ def home_markdown(
             topic = topic_for_course(course_dir, entries_by_path)
             count = len(courses[course_dir])
             detail = f"<br><span>{html.escape(topic)}</span>" if topic else ""
-            lines.append(f"-   [**{title}**]({course_dir.as_posix()}/index.md){detail}<br><small>{count} 份讲义</small>")
+            lines.append(f"-   [**{title}**]({course_dir.as_posix()}/index.md){detail}<br><small>{site_label('index_count', count=count)}</small>")
         lines.extend(["", "</div>", ""])
     lines.extend(
         [
-            "## 推荐阅读路线",
+            site_label("index_routes"),
             "",
-            "- 入门 LLM：CS336 → CS224R L09 → CS25 Karpathy Transformer 入门",
-            "- 深入 Agent：Berkeley LLM Agents → Modern Agent → Agentic RL",
-            "- 模型架构：LLM Architect → CS25 Mixtral → CS336 MoE",
-            "- 前沿洞察：Ilya → Dario → State of AI 2026",
+            site_label("route_1"),
+            site_label("route_2"),
+            site_label("route_3"),
+            site_label("route_4"),
         ]
     )
     return "\n".join(lines)
@@ -1803,7 +1823,7 @@ def css_content() -> str:
 
 
 def sidebar_script() -> str:
-    return """
+    script = """
 (function () {
   var sidebarConfigs = [
     {
@@ -1812,8 +1832,8 @@ def sidebar_script() -> str:
       storageKey: "ai-notes-sidebar-nav-collapsed",
       buttonClass: "ai-notes-sidebar-toggle--primary",
       restoreClass: "ai-notes-sidebar-restore--primary",
-      collapseLabel: "折叠左侧导航",
-      restoreLabel: "展开左侧导航",
+      collapseLabel: "__NAV_COLLAPSE_LEFT__",
+      restoreLabel: "__NAV_RESTORE_LEFT__",
       collapseIcon: "M15 6 9 12l6 6",
       restoreIcon: "M9 6l6 6-6 6"
     },
@@ -1823,8 +1843,8 @@ def sidebar_script() -> str:
       storageKey: "ai-notes-sidebar-toc-collapsed",
       buttonClass: "ai-notes-sidebar-toggle--secondary",
       restoreClass: "ai-notes-sidebar-restore--secondary",
-      collapseLabel: "折叠右侧目录",
-      restoreLabel: "展开右侧目录",
+      collapseLabel: "__NAV_COLLAPSE_RIGHT__",
+      restoreLabel: "__NAV_RESTORE_RIGHT__",
       collapseIcon: "M9 6l6 6-6 6",
       restoreIcon: "M15 6 9 12l6 6"
     }
@@ -1949,6 +1969,16 @@ def sidebar_script() -> str:
   });
 })();
 """.strip()
+    # Las etiquetas de los botones van como marcadores dentro del JavaScript:
+    # sus llaves harian fragil una f-string.
+    for marker, key in (
+        ("__NAV_COLLAPSE_LEFT__", "nav_collapse_left"),
+        ("__NAV_RESTORE_LEFT__", "nav_restore_left"),
+        ("__NAV_COLLAPSE_RIGHT__", "nav_collapse_right"),
+        ("__NAV_RESTORE_RIGHT__", "nav_restore_right"),
+    ):
+        script = script.replace(marker, site_label(key))
+    return script
 
 
 def mathjax_config() -> str:
@@ -1982,20 +2012,20 @@ def generate_mkdocs_yml(courses: OrderedDict[Path, list[Note]], entries_by_path:
         "site_dir: site",
         "theme:",
         "  name: material",
-        "  language: zh",
+        f"  language: {SITE.site_language}",
         "  palette:",
         "    - scheme: default",
         "      primary: teal",
         "      accent: amber",
         "      toggle:",
         "        icon: material/weather-night",
-        "        name: 切换到深色模式",
+        f"        name: {site_label('theme_dark')}",
         "    - scheme: slate",
         "      primary: teal",
         "      accent: amber",
         "      toggle:",
         "        icon: material/weather-sunny",
-        "        name: 切换到浅色模式",
+        f"        name: {site_label('theme_light')}",
         "  features:",
         "    - navigation.tracking",
         "    - navigation.top",
@@ -2004,7 +2034,7 @@ def generate_mkdocs_yml(courses: OrderedDict[Path, list[Note]], entries_by_path:
         "plugins:",
         "  - search:",
         "      lang:",
-        "        - zh",
+        f"        - {SITE.site_language}",
         "        - en",
         "markdown_extensions:",
         "  - admonition",
@@ -2021,13 +2051,13 @@ def generate_mkdocs_yml(courses: OrderedDict[Path, list[Note]], entries_by_path:
         "  - assets/javascripts/mathjax.js",
         "  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js",
         "nav:",
-        "  - 首页: index.md",
-        "  - 课程:",
+        f"  - {site_label('nav_home')}: index.md",
+        f"  - {site_label('nav_courses')}:",
     ]
     for course_dir, notes in courses.items():
         title = course_title(course_dir, entries_by_path)
         lines.append(f"      - {yaml_quote(title)}:")
-        lines.append(f"          - 概览: {yaml_quote(course_dir.as_posix() + '/index.md')}")
+        lines.append(f"          - {site_label('nav_overview')}: {yaml_quote(course_dir.as_posix() + '/index.md')}")
         for note in sorted(notes, key=lambda item: natural_key(item.route_dir)):
             lines.append(f"          - {yaml_quote(note.title)}: {yaml_quote(note.route_dir.as_posix() + '/index.md')}")
     return "\n".join(lines) + "\n"
@@ -2131,7 +2161,10 @@ def build_site(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("."), help="Repository root")
-    parser.add_argument("--output", type=Path, default=Path(".web-build"), help="Generated MkDocs workspace")
+    parser.add_argument("--lang", choices=sorted(BY_CODE), default="zh",
+                        help="Idioma del sitio: zh (el publicado) o es-mx")
+    parser.add_argument("--output", type=Path, default=None,
+                        help="Generated MkDocs workspace (default: .web-build, o .web-build-es-mx para es-mx)")
     parser.add_argument("--cache-dir", type=Path, default=None, help="Persistent cache root for generated TikZ SVGs and compressed images")
     parser.add_argument("--check-tikz-cache", action="store_true", help="Return zero when every TikZ diagram already has a cached SVG")
     parser.add_argument("--strict", action="store_true", help="Return non-zero if no notes can be generated")
@@ -2142,6 +2175,9 @@ def main() -> int:
     parser.add_argument("--image-max-width", type=int, default=1600, help="Maximum width for copied JPG/PNG assets")
     parser.add_argument("--jpeg-quality", type=int, default=82, help="JPEG quality for copied JPG assets")
     args = parser.parse_args()
+    set_language(args.lang)
+    if args.output is None:
+        args.output = Path(".web-build" if args.lang == "zh" else f".web-build-{args.lang}")
     if args.check_tikz_cache:
         root = args.root.resolve()
         output = args.output.resolve()

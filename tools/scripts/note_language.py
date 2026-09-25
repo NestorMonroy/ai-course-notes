@@ -45,6 +45,12 @@ class NoteLanguage:
     missing_link_markers: tuple[str, ...] = ()
     # Terminos que exigen una explicacion en su primer uso, con sus pistas.
     first_use_terms: dict[str, list[str]] = field(default_factory=dict)
+    # Sitio de lectura: el README del que sale el catalogo, el idioma de
+    # MkDocs y las etiquetas de la interfaz. Las claves `dir:<nombre>` son los
+    # nombres visibles de los directorios que no se derivan del nombre.
+    site_readme: str = "README.md"
+    site_language: str = "zh"
+    site_labels: dict[str, str] = field(default_factory=dict)
 
     def count(self, feature: str, text: str) -> int:
         return len(re.findall(self.markers[feature], text, flags=re.I if feature == "teacher_voice" else 0))
@@ -96,6 +102,60 @@ ZH = NoteLanguage(
         "activation checkpointing": ["重算", "激活", "显存", "gradient checkpointing"],
         "perplexity": ["PPL", "交叉熵", "惊讶", "选项", "exp"],
     },
+    site_readme="README-zh.md",
+    site_language="zh",
+    site_labels={
+        "footnote_interval": "视频讲解区间：{interval}。",
+        "pdf_asset_title": "PDF 图示资源",
+        "open_pdf": "打开 PDF 图示",
+        "view_original": "查看原图",
+        "missing_image": "图片资源缺失",
+        "term_default": "说明",
+        "tikz_title": "TikZ 图暂未渲染",
+        "tikz_body": "当前构建环境没有成功生成 SVG，保留原始 TikZ 源码。",
+        "unconverted_env": "未转换的 LaTeX 环境：{env}",
+        "source_quote": "来源：",
+        "category_default": "课程",
+        "category_articles": "📝 技术文章笔记",
+        "category_talks": "🎤 演讲与访谈",
+        "category_other": "其他",
+        "latex_source": "LaTeX 源码",
+        "backup_pdf": "备用 PDF",
+        "watch_video": "观看视频",
+        "meta_authors": "作者/整理",
+        "meta_channel": "来源",
+        "meta_date": "日期",
+        "meta_field": "字段",
+        "meta_content": "内容",
+        "course_total": "共 {count} 份讲义。",
+        "course_header": "| 讲义 | 日期 | 来源 | 资源 |",
+        "read": "阅读",
+        "index_intro": "这里是从 `{count}` 份 LaTeX 讲义自动生成的网页阅读站。正文直接由 `.tex` 渲染成网页，适合浏览、搜索和连续阅读。",
+        "index_map": "## 课程地图",
+        "index_count": "{count} 份讲义",
+        "index_routes": "## 推荐阅读路线",
+        "route_1": "- 入门 LLM：CS336 → CS224R L09 → CS25 Karpathy Transformer 入门",
+        "route_2": "- 深入 Agent：Berkeley LLM Agents → Modern Agent → Agentic RL",
+        "route_3": "- 模型架构：LLM Architect → CS25 Mixtral → CS336 MoE",
+        "route_4": "- 前沿洞察：Ilya → Dario → State of AI 2026",
+        "nav_collapse_left": "折叠左侧导航",
+        "nav_restore_left": "展开左侧导航",
+        "nav_collapse_right": "折叠右侧目录",
+        "nav_restore_right": "展开右侧目录",
+        "theme_dark": "切换到深色模式",
+        "theme_light": "切换到浅色模式",
+        "nav_home": "首页",
+        "nav_courses": "课程",
+        "nav_overview": "概览",
+        "dir:articles": "技术文章笔记",
+        "dir:aitime": "AITIME 论道",
+        "dir:alibaba-cloud": "阿里云",
+        "dir:interviews": "访谈笔记",
+        "dir:ungrounded": "Ungrounded 不着边际",
+        "dir:zhang-xiaojun": "张小珺商业访谈录",
+        "dir:qingke": "青稞社区",
+        "dir:talks": "演讲与访谈",
+    },
 )
 
 # Cada etiqueta se eligio por la funcion que cumple en la nota, no por la
@@ -143,9 +203,64 @@ ES_MX = NoteLanguage(
         "activation checkpointing": ["recalcula", "activaciones", "memoria", "gradient checkpointing"],
         "perplexity": ["PPL", "entropía cruzada", "sorpresa", "opciones", "exp"],
     },
+    site_readme="README.md",
+    site_language="es",
+    site_labels={
+        "footnote_interval": "Intervalo del video: {interval}.",
+        "pdf_asset_title": "Figura en PDF",
+        "open_pdf": "Abrir la figura en PDF",
+        "view_original": "Ver la imagen original",
+        "missing_image": "Falta la imagen",
+        "term_default": "Nota",
+        "tikz_title": "Diagrama TikZ sin renderizar",
+        "tikz_body": "El entorno de compilación no generó el SVG; se conserva el código TikZ original.",
+        "unconverted_env": "Entorno de LaTeX sin convertir: {env}",
+        "source_quote": "Fuente: ",
+        "category_default": "Cursos",
+        "category_articles": "📝 Notas de artículos técnicos",
+        "category_talks": "🎤 Conferencias y entrevistas",
+        "category_other": "Otros",
+        "latex_source": "Código fuente LaTeX",
+        "backup_pdf": "PDF alternativo",
+        "watch_video": "Ver el video",
+        "meta_authors": "Autoría",
+        "meta_channel": "Fuente",
+        "meta_date": "Fecha",
+        "meta_field": "Campo",
+        "meta_content": "Contenido",
+        "course_total": "{count} notas en total.",
+        "course_header": "| Nota | Fecha | Fuente | Recursos |",
+        "read": "Leer",
+        "index_intro": "Sitio de lectura generado automáticamente a partir de `{count}` notas en LaTeX. El texto se genera directamente desde los `.tex`, para explorar, buscar y leer de corrido.",
+        "index_map": "## Mapa de cursos",
+        "index_count": "{count} notas",
+        "index_routes": "## Rutas de lectura recomendadas",
+        "route_1": "- Introducción a LLM: CS336 → CS224R L09 → CS25 Karpathy, introducción a Transformer",
+        "route_2": "- Agents a fondo: Berkeley LLM Agents → Modern Agent → Agentic RL",
+        "route_3": "- Arquitectura de modelos: LLM Architect → CS25 Mixtral → CS336 MoE",
+        "route_4": "- Perspectivas de frontera: Ilya → Dario → State of AI 2026",
+        "nav_collapse_left": "Contraer la navegación izquierda",
+        "nav_restore_left": "Mostrar la navegación izquierda",
+        "nav_collapse_right": "Contraer el índice derecho",
+        "nav_restore_right": "Mostrar el índice derecho",
+        "theme_dark": "Cambiar al modo oscuro",
+        "theme_light": "Cambiar al modo claro",
+        "nav_home": "Inicio",
+        "nav_courses": "Cursos",
+        "nav_overview": "Vista general",
+        "dir:articles": "Notas de artículos técnicos",
+        "dir:aitime": "AITIME Lundao (AITIME 论道)",
+        "dir:alibaba-cloud": "Alibaba Cloud (阿里云)",
+        "dir:interviews": "Notas de entrevistas",
+        "dir:ungrounded": "Ungrounded (不着边际)",
+        "dir:zhang-xiaojun": "Entrevistas de negocios de Zhang Xiaojun (张小珺商业访谈录)",
+        "dir:qingke": "Comunidad Qingke (青稞社区)",
+        "dir:talks": "Conferencias y entrevistas",
+    },
 )
 
 PROFILES = (ES_MX, ZH)
+BY_CODE = {profile.code: profile for profile in PROFILES}
 
 
 def for_path(path: str | Path) -> NoteLanguage:
