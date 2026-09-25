@@ -69,7 +69,10 @@ traduzcas: sirve solo para elegir el significado correcto.
 | scalability | translate | escalabilidad | capacidad de un sistema de crecer en carga sin rediseñarse | — |
 | token | keep | — | unidad mínima en la que el tokenizer divide el texto | `criptoficha` |
 | tokenization | translate | tokenización | división del texto en tokens, la operación que realiza el tokenizer | — |
+| tokenize | translate | tokenizar tokenizado tokenizada tokenizados tokenizadas tokeniza tokenizan | dividir un texto en tokens; verbo de «tokenización» | — |
 | transformer | keep | — | arquitectura de red neuronal basada en atención (Vaswani et al., 2017) | `transformador de potencia`, `transformador` |
+| render | translate | renderizar renderizado renderizada renderizados renderizadas | generar una imagen a partir de un modelo de escena | — |
+| productization | translate | conversión en producto | convertir una capacidad técnica en un producto utilizable | `productización` |
 
 ## Frases fijas (se traducen siempre así, en todas las notas)
 
