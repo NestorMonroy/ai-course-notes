@@ -6,6 +6,7 @@
     translation_loop.py translate --bench B --model <id completo> [--width N] [--memfree TAM] [--timeout S]
     translation_loop.py usage    --bench B
     translation_loop.py plan     --out P.tsv
+    translation_loop.py triage   [--memory M]
     translation_loop.py retranslate --batch L
     translation_loop.py cycle    --batch L --model <id> [--compile] <nota.tex>...
     translation_loop.py assemble --bench B
@@ -692,6 +693,73 @@ def cmd_plan(args) -> int:
     return 0
 
 
+# --- triage -------------------------------------------------------------------
+
+ROUTE_ORDER = {"deterministic": 0, "shared": 1, "local": 2}
+
+
+def latest_signals(root: Path) -> list[dict]:
+    """Las señales de la última iteración de cada lote."""
+    rows = []
+    for bench in sorted((root / ".claude" / "workbench" / "translation").glob("*/iterations")):
+        last = sorted(d for d in bench.glob("[0-9][0-9]") if d.is_dir())
+        if last and (last[-1] / "signals.jsonl").is_file():
+            rows += [json.loads(l) for l in (last[-1] / "signals.jsonl").read_text(encoding="utf-8").splitlines()
+                     if l.strip()]
+    return rows
+
+
+def classify(root: Path, memory: Path) -> dict[str, tuple[str, list[str]]]:
+    """Ruta de cada señal según dónde vive su causa (plan v3).
+
+    - determinista: un arreglo `mechanical` de la memoria la cubre;
+    - compartida: la misma señal en dos notas o más, de cualquier lote; se
+      decide una vez (glosario, plantilla, verificador, preámbulo);
+    - local: el resto; se retraduce su fragmento.
+    """
+    # Un arreglo mecánico cubre una señal solo si su texto está en la nota, igual
+    # que en el barrido: por el nombre de la señal, la entrada de `title=#1`
+    # (clave `compile:error`) volvía determinista todo error de compilación.
+    mechanical = [(e["senal_del_verificador"], e["fix_generico"]["buscar"]) for e in read_jsonl(memory)
+                  if isinstance(e.get("fix_generico"), dict) and e["fix_generico"].get("tipo") == "mechanical"]
+    texts: dict[str, str] = {}
+
+    def note_text(note: str) -> str:
+        if note not in texts:
+            path = root / note
+            texts[note] = path.read_text(encoding="utf-8") if path.is_file() else ""
+        return texts[note]
+
+    notes: dict[str, set[str]] = {}
+    for row in latest_signals(root):
+        notes.setdefault(row["signal"], set()).add(row["note"])
+    out = {}
+    for signal, where in notes.items():
+        if any(fnmatch.fnmatchcase(signal, pattern) and any(text in note_text(n) for n in where)
+               for pattern, text in mechanical):
+            route = "deterministic"
+        elif len(where) > 1:
+            route = "shared"
+        else:
+            route = "local"
+        out[signal] = (route, sorted(where))
+    return out
+
+
+def cmd_triage(args) -> int:
+    root = Path.cwd()
+    routes = classify(root, args.memory)
+    ordered = sorted(routes.items(), key=lambda kv: (ROUTE_ORDER[kv[1][0]], -len(kv[1][1]), kv[0]))
+    out = root / ".claude" / "workbench" / "translation" / "triage.tsv"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("route\tsignal\tnotes\tpaths\n" + "".join(
+        f"{route}\t{signal}\t{len(where)}\t{' '.join(where)}\n" for signal, (route, where) in ordered), encoding="utf-8")
+    counts = collections.Counter(route for route, _w in routes.values())
+    print(f"triage: {counts['deterministic']} determinista(s), {counts['shared']} compartida(s), "
+          f"{counts['local']} local(es) -> {out}", file=sys.stderr)
+    return 0
+
+
 # --- retranslate ------------------------------------------------------------
 
 # Las señales que llevan el texto que las produjo, y cómo buscarlo en un fragmento.
@@ -718,8 +786,14 @@ def cmd_retranslate(args) -> int:
     root = Path.cwd()
     note_ids = {rel(Path(target), root): note_id for _zh, note_id, target in notes}
     out, marked = [], set()
+    routes = classify(root, args.memory)
     for row in rows:
         signal, note_id = row["signal"], note_ids.get(row["note"])
+        route = routes.get(signal, ("local", []))[0]
+        if route != "local":
+            # Rutas 1 y 2 del plan v3: el arreglo no es retraducir este fragmento.
+            out.append((signal, row["note"], "", route))
+            continue
         prefix = next((p for p in LOCATABLE if signal.startswith(p)), None)
         command = re.search(r"(\\[A-Za-z]+)\s*$", row.get("detail", "")) if signal == "compile:error" else None
         if (prefix is None and command is None) or note_id is None:
@@ -770,23 +844,29 @@ def cmd_sweep(args) -> int:
     notes = sorted(p.resolve() for p in root.rglob("*-notes.es-mx.tex") if ".venv" not in p.parts)
     rows, _ = run_verify(notes, False, args.jobs, root)
     memory = read_jsonl(args.memory)
+    chunks = sorted((root / ".claude" / "workbench" / "translation").glob("*/chunks/*/*.es.tex"))
+    chunks += [c for c in sorted(args.bench.glob("chunks/*/*.es.tex")) if c not in chunks]
     sweep_log = args.bench / "sweep.jsonl"
     retranslate = []
     with sweep_log.open("a", encoding="utf-8") as log:
         for entry in memory:
-            hit = sorted({r["note"] for r in rows if fnmatch.fnmatchcase(r["signal"], entry["senal_del_verificador"])})
             fix = entry["fix_generico"]
             applied = 0
-            for note in hit:
-                path = root / note
-                if fix.get("tipo") == "mechanical":
+            if fix.get("tipo") == "mechanical":
+                # Ruta 1 (determinista, plan v3): por texto y no por señal (la del
+                # glifo solo sale compilando), en la nota y en sus fragmentos, que
+                # son la fuente de verdad: el siguiente ensamblado no la deshace.
+                hit = sorted(rel(n, root) for n in notes if fix["buscar"] in n.read_text(encoding="utf-8"))
+                for path in [root / n for n in hit] + chunks:
                     text = path.read_text(encoding="utf-8")
-                    new = text.replace(fix["buscar"], fix["reemplazar"])
-                    if new != text:
-                        path.write_text(new, encoding="utf-8")
-                        applied += 1
-                else:
-                    retranslate.append({"note": note, "senal": entry["senal_del_verificador"], "tipo": fix.get("tipo")})
+                    if fix["buscar"] in text:
+                        path.write_text(text.replace(fix["buscar"], fix["reemplazar"]), encoding="utf-8")
+                applied = len(hit)
+            else:
+                hit = sorted({r["note"] for r in rows if fnmatch.fnmatchcase(r["signal"], entry["senal_del_verificador"])})
+                retranslate += [{"note": note, "senal": entry["senal_del_verificador"], "tipo": fix.get("tipo")}
+                                for note in hit]
+            for note in hit:
                 if note not in entry["archivos_donde_ya_se_aplico"]:
                     entry["archivos_donde_ya_se_aplico"].append(note)
             log.write(json.dumps({"iteration": args.iteration, "senal_del_verificador": entry["senal_del_verificador"],
@@ -816,7 +896,10 @@ def main(argv=None) -> int:
     p = sub.add_parser("usage"); p.add_argument("--bench", type=Path, required=True); p.set_defaults(func=cmd_usage)
     p = sub.add_parser("assemble"); p.add_argument("--bench", type=Path, required=True); p.set_defaults(func=cmd_assemble)
     p = sub.add_parser("plan"); p.add_argument("--out", type=Path, required=True); p.set_defaults(func=cmd_plan)
+    p = sub.add_parser("triage"); p.add_argument("--memory", type=Path, default=DEFAULT_MEMORY)
+    p.set_defaults(func=cmd_triage)
     p = sub.add_parser("retranslate"); p.add_argument("--batch", default=None)
+    p.add_argument("--memory", type=Path, default=DEFAULT_MEMORY)
     p.add_argument("--bench", type=Path, default=None); p.set_defaults(func=cmd_retranslate)
     p = sub.add_parser("cycle"); p.add_argument("--batch", default=None)
     p.add_argument("--bench", type=Path, default=None, help="por defecto .claude/workbench/translation/<lote>")

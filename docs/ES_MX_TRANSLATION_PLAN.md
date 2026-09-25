@@ -1,14 +1,20 @@
 # Plan de traducción es-MX: traductor + verificador + memoria con gates
 
-Versión 1.0 — adapta a la traducción del corpus el plan de corrección
-iterativa 2.2.0 (agente + verificador + memoria persistente). Su lección
-central se conserva tal cual: **un paso que se puede saltar, eventualmente se
-salta**. Por eso los pasos proactivos (escribir la memoria y barrer el corpus
-con ella) no son parte de una secuencia que se recorre de buena fe: son gates
-que detienen el ciclo con un error explícito, implementados como script, no
-como prosa.
+Versión 2.0. Adapta a la traducción del corpus el plan de corrección iterativa
+en dos pasos:
 
-Este documento es un plan: nada de lo que describe como «nuevo» existe todavía.
+- **de la 2.2.0** toma el agente, el verificador y la memoria persistente;
+- **de la 3.0.0** toma las tres rutas según dónde vive la causa (sección 6).
+
+La lección central se conserva: **un paso que se puede saltar, eventualmente
+se salta**. Por eso los pasos proactivos (escribir la memoria, barrer el corpus
+con ella, clasificar antes de retraducir) no forman una secuencia que se
+recorre de buena fe: son gates y subcomandos que detienen el ciclo con un error
+explícito, implementados como script, con pruebas y control de anulación.
+
+**Estado:** las piezas de este plan existen en `tools/scripts/translation_loop.py`
+y `translation_gate.py`. Las fases 0 y 1 están cerradas; la 2 (cs329a) está en
+curso. Lo medido en cada una está en su banco, bajo `.claude/workbench/`.
 
 ## 1. Alcance, medido
 
@@ -87,35 +93,41 @@ partir de la carga que producen otros.
 
 | Plan 2.2.0 | Aquí | Pieza |
 |---|---|---|
-| Agente | **Traductor**: una conversación `claude -p` por unidad, que lee la nota zh y escribe su `.es-mx.tex` | `headless-pool` de THYROX vía `tools/thyrox/run`, con `--tools Read,Write` (su default es solo `Read`) |
-| Verificador | **Batería determinista** por unidad (sección 4) | scripts de `tools/scripts/` |
-| Memoria | **Dos memorias persistentes**, versionadas | `tools/lang/es-mx/glossary.tsv` (decisiones por término, existe) y `tools/lang/es-mx/translation_memory.jsonl` (patrones, nuevo) |
+| Agente | **Traductor**: una conversación `claude -p` por fragmento, con `--tools Read,Grep`. Lee el fragmento zh y **devuelve** la traducción entre `<<<ES` y `ES>>>`; el ciclo la escribe | `headless-pool` de THYROX vía `tools/thyrox/run`. `Write` quedó fuera porque `claude -p` lo bloquea bajo `.claude/` (primer intento del piloto) |
+| Fuente original | la **transcripción en inglés** de la clase (`source.srt`, enlazada junto al fragmento): el traductor la consulta con `Grep` cuando duda de qué significa un término que el original escribe en chino | `english_source()` en `prepare`; 320 de las 370 notas tienen una |
+| Verificador | **Batería determinista** por nota (sección 4) | `tools/scripts/` |
+| Memoria | **Dos memorias persistentes**, versionadas | `tools/lang/es-mx/glossary.tsv` (decisiones por término, con fuente) y `tools/lang/es-mx/translation_memory.jsonl` (patrones) |
 
-La diferencia de fondo con la corrección: aquí la memoria **no solo sirve para
-barrer lo ya hecho, también previene**. Cada `fix_generico` que sea una regla
-de traducción entra a la plantilla del traductor del lote siguiente, así que el
-mismo error no se vuelve a producir, además de corregirse donde ya se produjo.
+La memoria **no solo barre lo ya hecho, también previene**: la plantilla del
+traductor se construye en cada iteración desde el glosario, la lista entera de
+formas prohibidas y las reglas `prompt` de la memoria.
 
 ## 4. El verificador
 
-| # | Verificación | Estado | Qué detecta |
-|---|---|---|---|
-| V1 | **Paridad estructural zh ↔ es-MX** (`check_translation_parity.py`) | **nuevo** | mismas secciones, cajas por tipo, figuras con las mismas rutas de imagen, fórmulas, listings con código idéntico byte a byte, `\label`/`\ref`, URLs de `\href` y columnas de tablas. Traducir no puede perder ni inventar estructura. |
-| V2 | **Chino residual** (dentro de V1) | **nuevo** | caracteres Han fuera de los originales entre paréntesis que la regla de nombres permite |
-| V3 | **Términos que se quedan en inglés** (dentro de V1) | **nuevo** | un término del glosario `keep` presente en la nota zh que no aparece en la es-MX (la fuente ya los tiene en inglés) |
-| V4 | `check_prose_vocabulary.py` | existe | palabra inventada, forma prohibida, spanglish, inglés sin glosario |
-| V5 | `check_note_coverage.py` + `check_quality.sh` con perfil es-MX | existe | rasgos didácticos (lectura de figura, resúmenes, glosario, voz del docente) |
-| V6 | Compilación doble con XeLaTeX | existe (guard `require_texlive` de THYROX) | LaTeX roto, TikZ roto, paquetes |
-| V7 | QA visual del PDF (`render_pdf_qa.py` + hoja de contacto) | existe | maquetación; **por muestreo**, requiere mirar |
+| # | Verificación | Qué detecta |
+|---|---|---|
+| V0 | **Al recibir el fragmento** (`translate`) | sin marcadores `<<<ES`/`ES>>>`, o con otro multiconjunto de `\begin`/`\end` que el original: se rechaza y queda pendiente, antes de escribirse |
+| V1 | Paridad estructural zh ↔ es-MX (`check_translation_parity.py`) | secciones, cajas por tipo, figuras e imágenes (`x.es-mx.png` cuenta como `x.png`), fórmulas, listings, `\label`/`\ref`, URLs, `\input` |
+| V2 | Chino residual, en todo el documento (preámbulo incluido) | caracteres Han fuera de los originales entre paréntesis |
+| V3 | Términos `keep` del glosario presentes en zh y ausentes en es-MX (el plural inglés cuenta) | un término técnico traducido fuera |
+| V4 | `check_prose_vocabulary.py` con hunspell es_MX (RLA-ES) | palabra inventada (con prefijos cultos), forma prohibida, spanglish, inglés, español sin tildes ni eñe |
+| V5 | `check_note_coverage.py` con perfil es-MX | rasgos didácticos |
+| V6 | Compilación doble con XeLaTeX | el error del log con su línea `l.NN` (que nombra el comando), y los glifos que la fuente no tiene |
+| V7 | QA visual del PDF, por muestreo | maquetación; requiere mirar |
 
-Todas las de V1–V6 dan una **señal** por hallazgo con forma estable
-(`<verificación>:<clave>`, por ejemplo `parity:boxes`, `prose:english:weights`,
-`compile:polyglossia.sty`). Esa señal es la que la memoria registra y la que el
-barrido busca.
+**Herencia:** lo que el original ya trae no es defecto de la traducción. Cuenta
+el inglés que la nota zh escribe (y su plural), y un error de cobertura que el
+original también tiene. En el caso de `readfig` se mide con el marcador
+estricto 读图, porque los patrones laxos del perfil zh casan por coincidencia.
 
-*Ciega a:* el significado. V1–V6 miden forma; una traducción fluida con otro
-sentido pasa. Por eso V7 y la revisión por muestreo (sección 8) no son
-opcionales.
+**Veredicto completo o nada:** cada nota pedida tiene que reportarse. Una que
+no se reporta (un proceso que murió) es `verify:incomplete` y la verificación
+sale con 2. En cs329a, iteración 02, un proceso muerto se leyó como «sin
+señales».
+
+Todas dan una señal con forma estable (`<verificación>:<clave>`), que es la que
+la memoria registra y la que `triage` clasifica. *Ciega a:* el significado. Por
+eso V7 y la revisión humana por muestreo no son opcionales.
 
 ## 5. La memoria de patrones
 
@@ -135,69 +147,70 @@ glosario), `prohibited` (forma prohibida), `prompt` (regla en la plantilla del
 traductor), `mechanical` (sustitución exacta aplicada por script) o `manual`
 (requiere juicio; el barrido la marca y no la aplica sola).
 
-## 6. El ciclo, con los gates integrados
+## 6. El ciclo: clasificar antes de asignar (tres rutas, plan 3.0.0)
+
+La 2.2.0 suponía que todo error se resuelve donde el verificador lo señala. En
+esta traducción no es así, y está medido: de las 36 señales de la primera
+pasada de cs329a, **13 (36%) se resolvieron cambiando el verificador una
+vez**, con 0 tokens. En el piloto, corregir `title=#1` en `localize_preamble`
+evitó romper **838 definiciones en 275 archivos**. Por eso cada señal se
+clasifica según dónde vive su causa antes de retraducir nada:
+
+| Ruta | Cuándo | Cómo se resuelve | Juicio |
+|---|---|---|---|
+| **1. Determinista** | un arreglo `mechanical` de la memoria cubre la señal y su texto está en la nota | `sweep`: sustitución exacta en **los fragmentos** (la fuente de verdad) y en las notas, de todos los lotes | no |
+| **2. Causa compartida** | la misma señal en dos notas o más, de cualquier lote; o una causa en el verificador, el glosario, la plantilla o un preámbulo compartido | una decisión por causa, en orden de frecuencia (`triage.tsv`), midiendo su efecto neto antes de la siguiente | sí, una vez por causa |
+| **3. Local** | el resto | `retranslate` devuelve a pendientes solo los fragmentos que llevan la señal; la siguiente iteración los retraduce | sí, por fragmento |
 
 ```
 MEMORIA = translation_memory.jsonl + glossary.tsv   (persisten entre lotes)
+PLAN    = translation_loop.py plan  → translation/plan.tsv (un lote por curso, de menor a mayor)
 
-por cada lote (un curso):
-    0. Construir la plantilla del traductor desde la MEMORIA
-       (reglas `prompt` y el glosario completo)
-    1. Traducir el lote (headless-pool, una unidad por item)
+por cada lote del PLAN:
+    cycle --batch L --compile       # prepare → translate → assemble → verify, en iterations/NN/
     mientras (señales > 0):
-        2. Ejecutar el Verificador (V1–V6) sobre el lote
-        3. Para cada grupo de señales que NO coincide con un patron de la MEMORIA:
-            a. Corregir la causa raiz de ese grupo
-            b. Escribir a la MEMORIA una entrada con los 4 campos
-
-               *** GATE A (translation_gate.py memory): una entrada sin los
-                   4 campos, o una señal nueva sin entrada, DETIENE el ciclo
-                   con exit 2. No se continua al paso 4. ***
-
-        4. Para cada patron de la MEMORIA:
-            a. Buscar su señal en TODAS las notas es-MX ya traducidas,
-               no solo en el lote
-            b. Aplicar el fix_generico a cada instancia (o marcarla si es
-               `manual`) y actualizar archivos_donde_ya_se_aplico
-            c. Registrar el barrido: patron, notas revisadas, instancias
-
-               *** GATE B (translation_gate.py sweep): si en esta iteracion
-                   hay >= 1 patron en la MEMORIA y el registro de barrido no
-                   cubre a todos, DETIENE el ciclo con exit 2 antes de volver
-                   al paso 2. ***
-
-        5. Volver al paso 2
-
-    *** GATE C (translation_gate.py batch): el lote se cierra solo con
-        0 señales de V1–V6 en todas sus unidades y la muestra de V7 revisada. ***
+        triage                      # rutas 1, 2 y 3, con la cola de la ruta 2 por frecuencia
+        1. sweep                    # ruta 1, en fragmentos y notas de todos los lotes
+                *** GATE B: el registro del barrido cubre todos los patrones ***
+        2. una decisión por causa compartida (glosario con fuente, regla de la
+           plantilla o del verificador con prueba y control de anulación) y su
+           entrada de memoria
+                *** GATE A: toda señal tiene un patrón con los 4 campos ***
+        3. retranslate --batch L    # ruta 3: solo fragmentos locales
+        cycle --batch L --compile   # siguiente iteración
+    *** GATE C: 0 señales en la última iteración y la muestra de V7 revisada ***
 ```
 
-Los gates viven en un script con pruebas y control de anulación, no en este
-documento. El registro de cada iteración (señales, entradas escritas,
-barridos) va a un banco en `.claude/workbench/`, que se versiona.
+**El registro de cada lote** vive en un banco estable,
+`.claude/workbench/translation/<lote>/`, versionado:
+
+- `iterations/NN/` guarda las señales, el uso de tokens y la lista de
+  retraducción de cada ejecución, sin sobrescribir las anteriores;
+- `translation/batches.tsv` recibe una fila por iteración (solo se agrega);
+- `.claude/workbench/.last-bank` apunta al lote en curso.
 
 ## 7. Cómo verificar que los gates se respetaron
 
 Antes de aceptar un lote, en su banco y no en el conteo de señales:
 
-1. **¿Hay al menos una entrada de memoria con los 4 campos por cada grupo de
-   señales nuevo?** Una bitácora de «nota X corregida, nota Y corregida» sin
-   entradas estructuradas es la falla que el plan 2.2.0 observó.
-2. **¿Algún barrido cubrió varias notas con un patrón ya guardado?** Si cada
-   corrección del registro corresponde a una sola nota señalada en esa misma
-   iteración, el paso 4 no se ejecutó.
-3. **Iteraciones contra unidades.** Si el número de iteraciones de un lote se
-   acerca al de unidades con señal, el ciclo corrió en modo reactivo. `translation_gate.py
-   report` lo publica por lote.
+1. **¿Cada grupo de señales nuevo tiene una entrada de memoria con los 4
+   campos?** `translation_gate.py memory` sobre cada `iterations/NN/signals.jsonl`.
+2. **¿Las rutas 1 y 2 se agotaron antes de retraducir?** Un
+   `retranslate.tsv` con señales `shared` o `deterministic` marcadas como
+   `retranslate` indica que se saltó la clasificación.
+3. **Iteraciones contra unidades.** `batches.tsv` da, por iteración, cuántos
+   fragmentos se tradujeron y cuántas señales quedaron. Si las iteraciones se
+   acercan al número de fragmentos con señal, el ciclo corrió en modo reactivo
+   (`translation_gate.py report`).
 
 ## 8. Fases
 
-| Fase | Qué | Criterio de salida |
+| Fase | Qué | Estado |
 |---|---|---|
-| 0. Herramientas | con TDD y control de anulación: `localize_preamble.py` (y con él las plantillas es-MX que faltan, `cs336-2026-notes-template.es-mx.tex` entre ellas, y los 4 preámbulos compartidos), `check_translation_parity.py` (V1–V3), `translation_memory.jsonl` y `translation_gate.py` (gates A, B, C y `report`), la plantilla del traductor y el script de figuras parametrizado por idioma | pruebas en verde; cada gate rehúsa en su caso negativo |
-| 1. Piloto de una nota | una nota corta y representativa, con figura, caja, fórmula y listing | V1–V6 en verde; **se miden** tokens de entrada y salida, tiempo y dinero por unidad (la salida JSON de `claude -p` trae el uso); se recalibra el factor 4.38 letras/Han del perfil con prosa real |
-| 2. Piloto de curso | `cs329a` (9 notas, 34,785 Han): el lote más pequeño con estructura de curso completa | gates A y B ejercidos al menos una vez; reporte de iteraciones contra unidades |
-| 3. Escalado | un curso por lote, en el orden que se decida; la anchura del pool derivada de los recursos (sección 2.1), con el factor por núcleo corregido en la fase 1 | gate C por lote |
+| 0. Herramientas | `localize_preamble.py`, paridad, gates A/B/C, plantilla, figuras por idioma, ciclo | **cerrada**; cada pieza con prueba y control de anulación |
+| 1. Piloto de una nota | `cs329a/lecture01` | **cerrada**: 0 señales, 22 páginas, QA visual; el primer intento falló por el contrato (banco `piloto-…-061536`) |
+| 2. Piloto de curso | `cs329a`, lecciones 02 a 09, en `translation/cs329a/` | **en curso**: 36 → 23 → 8 → 6 → 3 señales en cinco iteraciones |
+| 3. Escalado | un lote por curso según `translation/plan.tsv`, de menor a mayor | gate C por lote |
 | 4. Cierre | sitio es-MX (`generate_site.py --lang es-mx`), conteos del README, `TRACKING.md` | sitio compila en `--strict` |
 
 ## 9. Costo: se mide en tokens, no se estima
@@ -235,22 +248,25 @@ Ese intento destapó dos defectos del contrato y se corrigieron:
 |---|---|
 | El verificador no ve el significado | V7 por muestreo y revisión humana de una fracción por lote |
 | Texto chino incorporado en imágenes que no genera el script (capturas) | inventario por muestreo en la fase 1; sin OCR no hay medición completa |
-| Una nota grande excede lo que una conversación produce de una vez (la mayor tiene 95,677 bytes) | la fase 1 mide el límite; si hace falta, la unidad pasa a ser la sección |
+| Una nota grande excede lo que una conversación produce de una vez (la mayor tiene 95,677 bytes) | resuelto: la unidad es el fragmento por `\section` (y por `\subsection` si pasa de 12,000 caracteres) |
+| Un fragmento retraducido rompe la estructura LaTeX (cs329a, it. 04: `itemize` desbalanceado) | V0 lo rechaza al recibirlo, y `retranslate` audita los ya escritos |
+| Un proceso del verificador muere y el lote parece limpio (cs329a, it. 02) | `verify:incomplete` por nota sin veredicto y salida 2; el registro lo conserva y el README del lote lo explica |
+| Una fila del registro es falsa | `batches.tsv` es de solo agregar: la corrección va en la iteración siguiente y en el README del lote, nunca reescribiendo la fila |
 | TikZ roto al traducir etiquetas (93 bloques) | V6 lo detecta; patrón `mechanical` si se repite |
 | La memoria crece con reglas contradictorias | GATE A rechaza una señal que ya tiene patrón; una contradicción se resuelve editando la entrada, no agregando otra |
 
-## 11. Decisiones pendientes
+## 11. Decisiones
 
-1. **Modelo** del traductor: `claude-sonnet-5`, sostenido por los pilotos.
-   - El fallo del primer intento fue del contrato, no del modelo.
-   - Fase 2: los defectos reales del traductor fueron unas 15 palabras en
-     inglés introducidas, un `\enquote` y un cliché, sobre 75 fragmentos.
-
-   **Se reabre** si, tras las reglas nuevas de la plantilla, la retraducción de
-   la fase 2 sigue introduciendo inglés donde el original escribe chino. En ese
-   caso se hace una prueba A/B con otro modelo sobre los mismos fragmentos,
-   comparando señales y tokens, antes de cambiar.
-2. **Techo de costo**, después de la fase 1. La anchura ya no es una decisión: se deriva (sección 2.1).
-3. **Orden de los cursos** en la fase 3.
-4. **Fracción de revisión humana** por lote.
-5. **Publicar** el sitio es-MX en GitHub Pages o solo construirlo.
+1. **Modelo del traductor:** `claude-sonnet-5`, sostenido por los pilotos. El
+   fallo del primer intento fue del contrato, no del modelo. **Se reabre** si la
+   retraducción sigue introduciendo inglés donde el original escribe chino; en
+   ese caso, A/B con otro modelo sobre los mismos fragmentos, midiendo señales
+   y tokens.
+2. **Orden de los cursos:** decidido. Lo deriva `plan` por tamaño.
+3. **Anchura:** no es una decisión. `--memfree` acota la memoria y `--width`
+   solo la concurrencia contra la API (sección 2.1).
+4. **Pendientes para el ejecutor:**
+   - la fracción de revisión humana (V7) por lote;
+   - publicar el sitio es-MX o solo construirlo;
+   - «AI Agent» contra «Agentes de IA» en los títulos: si «Agent» entra al
+     glosario como `keep`.

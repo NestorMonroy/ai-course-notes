@@ -627,3 +627,64 @@ def test_the_prompt_says_when_to_consult_the_english_source(tmp_path: Path) -> N
     loop(repo, "prompt", "--out", str(out))
     text = out.read_text(encoding="utf-8")
     assert "source.srt" in text and "Grep" in text
+
+
+def test_a_mechanical_fix_lands_in_the_chunks_and_survives_the_next_assemble(tmp_path: Path) -> None:
+    # Ruta 1 (determinista) del plan v3: se aplica por texto, sin esperar una
+    # señal (la del glifo solo sale compilando), y en los fragmentos, que son la
+    # fuente de verdad: un arreglo solo en la nota lo deshacía el siguiente ensamblado.
+    dictionary = dict(DICTIONARY, **{"小结。": "Resumen （breve）: la clave está en los datos."})
+    repo, note, runner = setup(tmp_path, dictionary)
+    loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note), runner=runner, cache=tmp_path / "c")
+    memory = tmp_path / "memory.jsonl"
+    memory.write_text("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in [
+        {"patron": "paréntesis de ancho completo", "senal_del_verificador": "compile:missing-glyph",
+         "fix_generico": {"tipo": "mechanical", "buscar": "（", "reemplazar": "("}, "archivos_donde_ya_se_aplico": []},
+        {"patron": "paréntesis de ancho completo", "senal_del_verificador": "compile:missing-glyph",
+         "fix_generico": {"tipo": "mechanical", "buscar": "）", "reemplazar": ")"}, "archivos_donde_ya_se_aplico": []},
+        {"patron": "cliché", "senal_del_verificador": "prose:forbidden:la clave está en",
+         "fix_generico": {"tipo": "mechanical", "buscar": "la clave está en", "reemplazar": "lo esencial está en"},
+         "archivos_donde_ya_se_aplico": []}]), encoding="utf-8")
+    bench = repo / ".claude" / "workbench" / "translation" / "cs000"
+    result = loop(repo, "sweep", "--bench", str(bench), "--iteration", "1", "--memory", str(memory), cache=tmp_path / "c")
+    assert result.returncode == 0, result.stderr
+    assert loop(repo, "assemble", "--bench", str(bench)).returncode == 0
+    text = note.with_name("lecture01-notes.es-mx.tex").read_text(encoding="utf-8")
+    assert "Resumen (breve): lo esencial está en los datos." in text, text[-200:]
+    log = [json.loads(l) for l in (bench / "sweep.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [r["aplicadas"] for r in log] == [1, 1, 1]
+
+
+def test_triage_routes_signals_and_retranslate_only_takes_the_local_ones(tmp_path: Path) -> None:
+    # Plan v3: clasificar antes de asignar. `throughput` en dos notas de dos
+    # lotes es una causa compartida (se decide una vez: glosario, plantilla o
+    # verificador); `weights` en una sola nota es local (se retraduce); la forma
+    # prohibida con arreglo mecánico en memoria es determinista.
+    dictionary = dict(DICTIONARY, **{"训练用 checkpoint。": "El throughput usa checkpoint.",
+                                     "权重。": "Los weights y la clave está en ellos."})
+    repo, note, runner = setup(tmp_path, dictionary)
+    other = repo / "cs001" / "lecture01" / "lecture01-notes.tex"
+    other.parent.mkdir(parents=True)
+    other.write_text(NOTE.replace("小结。", "小结。\n权重。"), encoding="utf-8")
+    for batch, path in (("cs000", note), ("cs001", other)):
+        loop(repo, "cycle", "--batch", batch, "--model", "claude-sonnet-5", str(path), runner=runner, cache=tmp_path / "c")
+    memory = tmp_path / "memory.jsonl"
+    memory.write_text(json.dumps({"patron": "cliché", "senal_del_verificador": "prose:forbidden:la clave está en",
+                                  "fix_generico": {"tipo": "mechanical", "buscar": "la clave está en",
+                                                   "reemplazar": "lo esencial está en"},
+                                  "archivos_donde_ya_se_aplico": []}, ensure_ascii=False) + "\n", encoding="utf-8")
+    result = loop(repo, "triage", "--memory", str(memory))
+    assert result.returncode == 0, result.stderr
+    rows = [dict(zip(["route", "signal", "notes", "paths"], l.split("\t")))
+            for l in (repo / ".claude/workbench/translation/triage.tsv").read_text(encoding="utf-8").splitlines()[1:]]
+    route = {r["signal"]: r["route"] for r in rows}
+    assert route["prose:english:throughput"] == "shared" and route["prose:english:weights"] == "local"
+    assert route["prose:forbidden:la clave está en"] == "deterministic"
+    assert rows[0]["route"] == "deterministic" and rows[1]["signal"] == "prose:english:throughput"
+    bench = repo / ".claude/workbench/translation/cs001"
+    loop(repo, "retranslate", "--batch", "cs001", "--memory", str(memory))
+    listed = {l.split("\t")[0]: l.split("\t")[3] for l in
+              (bench / "iterations/01/retranslate.tsv").read_text(encoding="utf-8").splitlines()[1:]}
+    assert listed["prose:english:weights"] == "retranslate"
+    assert listed["prose:english:throughput"] == "shared"
+    assert listed["prose:forbidden:la clave está en"] == "deterministic"
