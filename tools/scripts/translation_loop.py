@@ -854,7 +854,10 @@ def cmd_retranslate(args) -> int:
 
 def cmd_sweep(args) -> int:
     root = Path.cwd()
-    notes = sorted(p.resolve() for p in root.rglob("*-notes.es-mx.tex") if ".venv" not in p.parts)
+    # Las notas del producto, nunca las copias de evidencia bajo `.claude/`: el
+    # barrido corrigió una en `.claude/workbench/` y contaba 10 notas en un lote de 9.
+    notes = sorted(p.resolve() for p in root.rglob("*-notes.es-mx.tex")
+                   if not SKIPPED_DIRS & set(p.relative_to(root).parts))
     rows, _ = run_verify(notes, False, args.jobs, root)
     memory = read_jsonl(args.memory)
     chunks = sorted((root / ".claude" / "workbench" / "translation").glob("*/chunks/*/*.es.tex"))

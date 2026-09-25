@@ -710,3 +710,22 @@ def test_the_prompt_carries_the_fixed_phrases(tmp_path: Path) -> None:
     out = tmp_path / "prompt.md"
     loop(repo, "prompt", "--out", str(out))
     assert "`自我改进 AI Agent` → `Agentes de IA que se automejoran`" in out.read_text(encoding="utf-8")
+
+
+def test_the_sweep_never_touches_evidence_under_dot_claude(tmp_path: Path) -> None:
+    # El barrido buscaba `*-notes.es-mx.tex` en todo el árbol y corrigió una
+    # copia de evidencia en `.claude/workbench/`: contaba 10 notas en un lote de 9.
+    repo, note, runner = setup(tmp_path)
+    loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note), runner=runner, cache=tmp_path / "c")
+    evidence = repo / ".claude" / "workbench" / "old" / "copy-notes.es-mx.tex"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text("title=#1\n", encoding="utf-8")
+    memory = tmp_path / "memory.jsonl"
+    memory.write_text(json.dumps({"patron": "p", "senal_del_verificador": "compile:error",
+                                  "fix_generico": {"tipo": "mechanical", "buscar": "title=#1", "reemplazar": "title={#1}"},
+                                  "archivos_donde_ya_se_aplico": []}) + "\n", encoding="utf-8")
+    bench = repo / ".claude" / "workbench" / "translation" / "cs000"
+    loop(repo, "sweep", "--bench", str(bench), "--iteration", "1", "--memory", str(memory), cache=tmp_path / "c")
+    assert evidence.read_text(encoding="utf-8") == "title=#1\n"
+    row = json.loads((bench / "sweep.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert row["notas_revisadas"] == 1
