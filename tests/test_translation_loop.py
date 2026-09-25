@@ -45,20 +45,30 @@ DICTIONARY = {
 
 FAKE_RUNNER = r'''#!/usr/bin/env python3
 # Runner falso: `run headless-pool --prompt P --out O ... < items`. Cada item es
-# `<fragmento zh>\t<fragmento es>`; escribe la traduccion por diccionario.
+# la ruta del fragmento zh; devuelve la traduccion por diccionario en `result`,
+# entre marcadores, como lo hace el `claude -p` real. No escribe el fragmento.
 import json, sys
 from pathlib import Path
 args = sys.argv[1:]
 assert args[0] == "headless-pool", args
 out = Path(args[args.index("--out") + 1]); out.mkdir(parents=True, exist_ok=True)
-assert "Write" in args[args.index("--tools") + 1]
+assert args[args.index("--tools") + 1] == "Read", args
+Path(__file__).with_suffix(".args").write_text(json.dumps(args))
 table = json.loads(Path(__file__).with_suffix(".json").read_text(encoding="utf-8"))
 items = [l for l in sys.stdin.read().splitlines() if l.strip()]
-for n, item in enumerate(items, 1):
-    zh, es = item.split("\t")
+index = []
+for n, zh in enumerate(items, 1):
+    assert "\t" not in zh
+    index.append(f"{n}\t{zh}")
     lines = [table.get(l, l) for l in Path(zh).read_text(encoding="utf-8").splitlines()]
-    Path(es).write_text("\n".join(lines) + "\n", encoding="utf-8")
-    (out / f"{n}.json").write_text(json.dumps({"is_error": False, "usage": {"input_tokens": 10, "output_tokens": 20}}))
+    body = "\n".join(lines)
+    result = "SIN MARCADORES" if "OMITIR" in body else f"Listo.\n<<<ES\n{body}\nES>>>\n"
+    (out / f"{n}.json").write_text(json.dumps({"is_error": False, "result": result, "total_cost_usd": 0.5,
+                                               "duration_ms": 1000,
+                                               "usage": {"input_tokens": 10, "output_tokens": 20,
+                                                         "cache_creation_input_tokens": 100,
+                                                         "cache_read_input_tokens": 50}}))
+(out / "index.tsv").write_text("\n".join(index) + "\n", encoding="utf-8")
 print(f"items={len(items)} ok={len(items)} fallidos=0")
 '''
 
@@ -156,7 +166,7 @@ def test_translate_skips_chunks_already_clean(tmp_path: Path) -> None:
     loop(repo, "prepare", "--bench", str(bench), str(note))
     loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
     again = loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
-    assert "0 fragmento(s) por traducir" in again.stdout, again.stdout
+    assert "0 fragmento(s) por traducir" in again.stderr, again.stderr
 
 
 def test_translate_refuses_a_model_alias(tmp_path: Path) -> None:
@@ -217,32 +227,72 @@ def load_loop():
     return mod
 
 
-def test_auto_width_is_derived_from_memory_load_and_cores() -> None:
-    mod = load_loop()
-    # La medicion del ejecutor: 13 528 MB disponibles, carga 0.86 en 4 nucleos,
-    # 26 `claude -p` con 3017 MB de RSS (116 MB cada uno).
-    assert mod.auto_width(mem_available_mb=13528, load1=0.86, cpus=4) == 12
-    # La memoria acota cuando escasea: 2048 de reserva + 3 procesos de 116 MB.
-    assert mod.auto_width(mem_available_mb=2048 + 3 * 116, load1=0.0, cpus=4) == 3
-    # Con los nucleos saturados, la cota por CPU baja a su piso.
-    assert mod.auto_width(mem_available_mb=13528, load1=8.0, cpus=4) == 1
-    assert mod.auto_width(mem_available_mb=100, load1=0.0, cpus=4) == 1
-
-
-def test_translate_passes_the_derived_width_and_records_the_measurement(tmp_path: Path) -> None:
+def test_memory_is_bounded_by_memfree_and_width_is_only_a_ceiling(tmp_path: Path) -> None:
     repo, note, runner = setup(tmp_path)
-    runner.write_text(FAKE_RUNNER.replace(
-        'print(f"items=',
-        'Path(__file__).with_suffix(".width").write_text(args[args.index("--width") + 1])\nprint(f"items='),
-        encoding="utf-8")
     bench = tmp_path / "bench"
     loop(repo, "prepare", "--bench", str(bench), str(note))
     result = loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
     assert result.returncode == 0, result.stderr
-    width = int(runner.with_suffix(".width").read_text())
-    assert width >= 1
-    assert f"width={width}" in result.stderr and "mem_available_mb=" in result.stderr
+    args = json.loads(runner.with_suffix(".args").read_text())
+    # La memoria la hace cumplir GNU Parallel mientras el pool corre; la
+    # anchura no depende de la carga, que mide a otros procesos.
+    assert args[args.index("--memfree") + 1] == "3G"
+    assert args[args.index("--width") + 1] == "10"
     other = tmp_path / "bench2"
     loop(repo, "prepare", "--bench", str(other), str(note))
-    fixed = loop(repo, "translate", "--bench", str(other), "--model", "claude-sonnet-5", "--width", "2", runner=runner)
-    assert runner.with_suffix(".width").read_text() == "2", fixed.stderr
+    loop(repo, "translate", "--bench", str(other), "--model", "claude-sonnet-5", "--width", "2",
+         "--memfree", "1G", runner=runner)
+    args = json.loads(runner.with_suffix(".args").read_text())
+    assert args[args.index("--width") + 1] == "2" and args[args.index("--memfree") + 1] == "1G"
+
+
+def test_a_result_without_markers_leaves_the_chunk_pending(tmp_path: Path) -> None:
+    dictionary = dict(DICTIONARY, **{"训练用 checkpoint。": "OMITIR"})
+    repo, note, runner = setup(tmp_path, dictionary)
+    bench = tmp_path / "bench"
+    loop(repo, "prepare", "--bench", str(bench), str(note))
+    result = loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    assert result.returncode == 1
+    assert "sin marcadores" in result.stderr
+    written = sorted(p.name for p in bench.rglob("*.es.tex"))
+    pending = [l for l in (bench / "units.tsv").read_text(encoding="utf-8").splitlines()]
+    assert len(written) == len(pending) - 1
+
+
+def test_a_chunk_without_han_is_copied_without_the_model(tmp_path: Path) -> None:
+    source = NOTE.replace("\\section{训练}", "\\section{Setup}\nEnglish only.\n\\section{训练}")
+    repo, note, runner = setup(tmp_path, source=source)
+    bench = tmp_path / "bench"
+    loop(repo, "prepare", "--bench", str(bench), str(note))
+    units = (bench / "units.tsv").read_text(encoding="utf-8").splitlines()
+    result = loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    assert result.returncode == 0, result.stderr
+    items = (next(bench.rglob("index.tsv"))).read_text(encoding="utf-8").splitlines()
+    plain = [u for u in units if not any("\u4e00" <= ch <= "\u9fff" for ch in Path(u.split("\t")[3]).read_text())]
+    assert any("English only." in Path(u.split("\t")[3]).read_text() for u in plain)
+    assert len(items) == len(units) - len(plain)
+    assert f"sin chino: {len(plain)}" in result.stderr
+    for u in plain:
+        zh, es = u.split("\t")[3:5]
+        assert Path(es).read_text() == Path(zh).read_text()
+
+
+def test_usage_sums_tokens_by_component_and_measures_letters_per_han(tmp_path: Path) -> None:
+    repo, note, runner = setup(tmp_path)
+    bench = tmp_path / "bench"
+    loop(repo, "prepare", "--bench", str(bench), str(note))
+    loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    items = len(next(bench.rglob("index.tsv")).read_text(encoding="utf-8").splitlines())
+    result = loop(repo, "usage", "--bench", str(bench))
+    assert result.returncode == 0, result.stderr
+    totals = dict(kv.split("=") for kv in result.stdout.split())
+    assert int(totals["items"]) == items
+    # Los cuatro componentes por separado, como THYROX (`transcript/usage.py`):
+    # el peso de cada uno es del contrato de precio, no del ciclo.
+    assert int(totals["input"]) == 10 * items and int(totals["output"]) == 20 * items
+    assert int(totals["cache_creation"]) == 100 * items and int(totals["cache_read"]) == 50 * items
+    assert not any("cost" in k or "usd" in k for k in totals)
+    assert float(totals["letters_per_han"]) > 0
+    rows = (bench / "usage.tsv").read_text(encoding="utf-8").splitlines()
+    assert rows[0].split("\t") == ["chunk", "han", "letters", "input", "cache_creation", "cache_read", "output"]
+    assert len(rows) == items + 1

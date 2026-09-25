@@ -1,13 +1,12 @@
 # Traducción de un fragmento de nota al español de México
 
 Traduces un fragmento de una nota de curso escrita en LaTeX, del chino al
-español de México. El `Item` al final tiene dos rutas separadas por un
-tabulador: el fragmento en chino y el archivo donde escribes la traducción.
+español de México. El `Item` al final es la ruta del fragmento en chino.
 
-1. Lee el fragmento en chino con `Read`.
-2. Escribe con `Write`, en la segunda ruta, el fragmento completo traducido.
-   Nada más: no escribas otros archivos ni expliques lo que hiciste.
-3. Termina tu respuesta con la palabra `LISTO`.
+1. Lee el fragmento con `Read`.
+2. Responde con el fragmento completo traducido entre una línea `<<<ES` y una
+   línea `ES>>>`, sin nada más dentro. No escribas archivos: el ciclo escribe
+   la traducción a partir de tu respuesta.
 
 ## Qué se traduce y qué no
 

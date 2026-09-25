@@ -50,30 +50,38 @@ Lo que no se automatiza es la prosa: la tabla de lemas y los léxicos dicen si
 una palabra existe y de qué idioma es, no si la traducción dice lo mismo que el
 original.
 
-### 2.1 La anchura del pool se deriva de los recursos medidos
+### 2.1 Memoria y anchura del pool: dos cotas distintas
 
-La anchura de `headless-pool` no es una constante: `translation_loop.py
-translate --width auto` (el default) la calcula antes de cada lanzamiento y la
-imprime junto con lo que midió.
+**La memoria la hace cumplir GNU Parallel mientras el pool corre.**
+`translate` pasa `--memfree 3G` a `headless-pool` (THYROX `bfb4eb15`), que tiene
+dos efectos:
 
-```text
-anchura = max(1, min(16, (MemAvailable − 2048 MB) // 116 MB, ⌊núcleos × 4 × (1 − carga₁ / núcleos)⌋))
-```
+- **Admisión:** no se lanza un item si la memoria libre está por debajo de la cota.
+- **Aplicación:** si la memoria baja de la mitad de la cota, se mata el trabajo
+  más joven y se vuelve a encolar.
 
-- **116 MB por `claude -p`**: medido por el ejecutor el 2026-09-25, 26 procesos
-  con 3,017 MB de RSS en total, con carga 0.86 en 4 núcleos y 13,528 MB
-  disponibles. Con esas cifras la fórmula da 12.
-- **4 por núcleo**: un `claude -p` pasa casi todo el tiempo esperando la API,
-  así que no ocupa un núcleo entero. Es una estimación que la fase 1 corrige.
-- **2,048 MB de reserva**: para XeLaTeX y el verificador, que corren en paralelo
-  con la traducción.
+Los 3G dejan lugar a un `tsc` de 2 GB en paralelo. Una estimación estática al
+lanzar no reacciona a lo que empiece después y duplica este mecanismo, así que
+no se usa.
 
-*Métrica:* memoria disponible, carga a un minuto y núcleos del contenedor en el
-momento de lanzar. *Ciega a:* los límites de tasa de la API, que no se ven desde
-el contenedor. Si la API responde 429, se fija `--width N` a mano y se registra
-en el banco. `headless-pool` de THYROX no acepta `--memfree` como
-`run-task-pool`, así que la cota por memoria vive en el consumer. Si el provider
-lo agrega, esta fórmula pasa a ser su valor inicial.
+**La anchura (`--width`, 10 por defecto) solo acota la concurrencia contra la
+API.** Sus límites de tasa (429) no se ven desde el contenedor, y 10 es lo que
+el piloto corrió sin ningún 429. Si aparece uno, se baja con `--width` y se
+registra en el banco.
+
+La anchura **no** se deriva de la carga. Una primera versión lo hacía y tenía
+tres defectos, que señaló el ejecutor:
+
+1. **Contaba procesos, no items.** Usaba 116 MB, que es la cifra por proceso.
+   Cada item son dos procesos: 232 MB por item, medido con 33 procesos y 17 items.
+2. **La carga a un minuto mide a los otros procesos, no al pool.** Un `tsc` en
+   paralelo la sube a 3.82 en 4 núcleos, y la fórmula daba anchura 1 durante toda
+   la corrida.
+3. **Se decidía una sola vez, al lanzar.**
+
+Si hace falta una anchura automática, se mide la memoria **por item** (la suma
+del árbol de procesos) y los núcleos libres **al arrancar el pool**, nunca a
+partir de la carga que producen otros.
 
 ## 3. Los tres papeles, adaptados
 
@@ -192,14 +200,34 @@ Antes de aceptar un lote, en su banco y no en el conteo de señales:
 | 3. Escalado | un curso por lote, en el orden que se decida; la anchura del pool derivada de los recursos (sección 2.1), con el factor por núcleo corregido en la fase 1 | gate C por lote |
 | 4. Cierre | sitio es-MX (`generate_site.py --lang es-mx`), conteos del README, `TRACKING.md` | sitio compila en `--strict` |
 
-## 9. Costo: se mide, no se estima
+## 9. Costo: se mide en tokens, no se estima
+
+El costo se mide en tokens, por separado en los cuatro componentes que THYROX
+ya distingue (`src/transcript/usage.py`): `input`, `cache_creation`,
+`cache_read` y `output`. No se reporta en dinero: el peso de cada componente es
+del contrato de precio del modelo, no del ciclo. `translation_loop.py usage
+--bench B` suma los componentes de cada item, escribe `usage.tsv` por
+fragmento y mide las letras del es-MX por carácter Han del original, que es el
+dato con el que se recalibra el factor 4.38 del perfil.
 
 El corpus pide del orden de 2.3 millones de caracteres Han de entrada más el
 LaTeX que los rodea (13.2 MB), y una salida mayor, porque el español ocupa más
-caracteres por idea. Cuántos tokens, cuánto tiempo y cuánto dinero es cosa de
-la fase 1: se mide en una unidad real y se extrapola con la distribución de
-tamaños de la sección 1, no con un promedio supuesto. Hasta entonces, cualquier
-cifra de costo sería inventada.
+caracteres por idea. La extrapolación sale de la fase 1, con la distribución de
+tamaños de la sección 1, no con un promedio supuesto.
+
+**Primera medición: el intento fallido del piloto** (10 fragmentos de
+`cs329a/lecture01`). Cada item pagó un piso de **~24,000 `cache_read` y ~6,000
+`cache_creation`**, que son el prompt de sistema y la plantilla, antes de
+traducir nada. En los fragmentos de 3.4 a 5.3 KB, la traducción que el modelo
+devolvió en su respuesta midió **~7,000 `output`**. Totales: 80 `input`, 90,414
+`cache_creation`, 375,637 `cache_read` y 37,784 `output`.
+
+Ese intento destapó dos defectos del contrato y se corrigieron:
+
+1. `claude -p` bloquea `Write` bajo `.claude/`. Por eso ahora el modelo solo lee
+   y devuelve la traducción entre `<<<ES` y `ES>>>`, y el ciclo la escribe.
+2. El item llevaba dos rutas separadas por un tabulador, y `headless-pool` parte
+   el índice con `--colsep '\t'`, así que la segunda ruta se perdía.
 
 ## 10. Riesgos
 

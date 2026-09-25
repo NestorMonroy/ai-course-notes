@@ -3,7 +3,8 @@
 
     translation_loop.py prepare  --bench B <nota.tex>...
     translation_loop.py prompt   [--memory M] --out P.md
-    translation_loop.py translate --bench B --model <id completo> [--width N|auto] [--timeout S]
+    translation_loop.py translate --bench B --model <id completo> [--width N] [--memfree TAM] [--timeout S]
+    translation_loop.py usage    --bench B
     translation_loop.py assemble --bench B
     translation_loop.py verify   --out S.jsonl [--compile] [--jobs N] <nota.es-mx.tex>...
     translation_loop.py sweep    --bench B --iteration N [--memory M] [--jobs N]
@@ -170,34 +171,41 @@ def pending_units(bench: Path) -> list[list[str]]:
     return pending
 
 
-# La anchura del pool se deriva de lo medido, no se fija. Medicion del ejecutor
-# (2026-09-25): 26 `claude -p` vivos sumaban 3017 MB de RSS, 116 MB cada uno,
-# con carga 0.86 en 4 nucleos. Un `claude -p` pasa casi todo su tiempo
-# esperando la API, por eso caben varios por nucleo.
-CLAUDE_P_RSS_MB = 116
-MEMORY_RESERVE_MB = 2048
-PER_CORE = 4
-WIDTH_CAP = 16
+# La memoria del pool la hace cumplir GNU Parallel mientras corre (`--memfree`
+# de headless-pool, THYROX bfb4eb15): no lanza un item bajo la cota y reencola
+# el mas joven si la memoria baja de la mitad. 3G deja lugar a un `tsc` de 2 GB
+# en paralelo. La anchura NO se deriva de la carga —la carga a un minuto mide a
+# los otros procesos, no al pool—: solo acota la concurrencia contra la API,
+# cuyos limites de tasa no se ven desde el contenedor. 10 es lo que el piloto
+# corrio sin un 429; si aparece uno, se baja con `--width`.
+DEFAULT_MEMFREE = "3G"
+DEFAULT_WIDTH = 10
+BEGIN_MARK, END_MARK = "<<<ES", "ES>>>"
 
 
-def auto_width(mem_available_mb: int, load1: float, cpus: int, rss_mb: int = CLAUDE_P_RSS_MB,
-               reserve_mb: int = MEMORY_RESERVE_MB, cap: int = WIDTH_CAP) -> int:
-    """La anchura que cabe en memoria y en CPU libre, entre 1 y `cap`.
-
-    Ciega a: los limites de tasa de la API, que no se ven desde el contenedor;
-    si la API responde 429, se baja `--width` a mano.
-    """
-    by_memory = (mem_available_mb - reserve_mb) // rss_mb
-    by_cpu = int(cpus * PER_CORE * (1 - load1 / cpus))
-    return max(1, min(cap, by_memory, by_cpu))
+def extract_translation(result: str) -> str | None:
+    """El fragmento traducido que el modelo devuelve entre marcadores."""
+    match = re.search(rf"^{re.escape(BEGIN_MARK)}\n(.*?)\n?^{re.escape(END_MARK)}\s*$", result or "", re.M | re.S)
+    return match.group(1) + "\n" if match else None
 
 
-def measured_width() -> tuple[int, str]:
-    meminfo = Path("/proc/meminfo").read_text(encoding="utf-8")
-    available = int(re.search(r"^MemAvailable:\s+(\d+)", meminfo, re.M).group(1)) // 1024
-    load1, cpus = os.getloadavg()[0], os.cpu_count() or 1
-    width = auto_width(available, load1, cpus)
-    return width, f"mem_available_mb={available} load1={load1:.2f} cpus={cpus} rss_mb={CLAUDE_P_RSS_MB}"
+def collect_results(out_dir: Path, targets: dict[str, str]) -> list[str]:
+    """Escribe cada fragmento traducido; devuelve los items sin marcadores."""
+    missing = []
+    index = out_dir / "index.tsv"
+    rows = [l.split("\t", 1) for l in index.read_text(encoding="utf-8").splitlines() if l.strip()] if index.is_file() else []
+    for n, zh in rows:
+        result_file = out_dir / f"{n}.json"
+        try:
+            result = json.loads(result_file.read_text(encoding="utf-8")).get("result", "")
+        except (OSError, ValueError):
+            result = ""
+        text = extract_translation(result)
+        if text is None:
+            missing.append(zh)
+            continue
+        Path(targets[zh]).write_text(text, encoding="utf-8")
+    return missing
 
 
 def cmd_translate(args) -> int:
@@ -206,23 +214,69 @@ def cmd_translate(args) -> int:
               "headless-pool rechaza alias.", file=sys.stderr)
         return 2
     pending = pending_units(args.bench)
-    print(f"translate: {len(pending)} fragmento(s) por traducir")
+    # Un fragmento sin chino (la portada ya localizada por script) se copia: el
+    # piloto pago una conversacion entera para oir que no habia nada que traducir.
+    plain = [row for row in pending if not HAN.search(Path(row[3]).read_text(encoding="utf-8"))]
+    for row in plain:
+        shutil.copyfile(row[3], row[4])
+    pending = [row for row in pending if row not in plain]
+    print(f"translate: {len(pending)} fragmento(s) por traducir; sin chino: {len(plain)} (copiados)", file=sys.stderr)
     if not pending:
         return 0
-    if args.width == "auto":
-        width, measure = measured_width()
-    else:
-        width, measure = int(args.width), "fijada con --width"
     prompt = args.bench / "prompt.md"
     prompt.write_text(build_prompt(args.memory), encoding="utf-8")
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S")
+    out_dir = args.bench / "translate" / stamp
     runner = os.environ.get("TRANSLATION_RUNNER", str(REPO_ROOT / "tools" / "thyrox" / "run"))
-    cmd = [runner, "headless-pool", "--prompt", str(prompt), "--out", str(args.bench / "translate" / stamp),
-           "--model", args.model, "--tools", "Read,Write", "--width", str(width),
-           "--timeout", str(args.timeout), "--max-turns", "8", "--cwd", str(Path.cwd())]
-    items = "".join(f"{row[3]}\t{row[4]}\n" for row in pending)
-    print(f"translate: width={width} ({measure})", file=sys.stderr)
-    return subprocess.run(cmd, input=items, text=True).returncode
+    cmd = [runner, "headless-pool", "--prompt", str(prompt), "--out", str(out_dir),
+           "--model", args.model, "--tools", "Read", "--width", str(args.width), "--memfree", args.memfree,
+           "--timeout", str(args.timeout), "--max-turns", "4", "--cwd", str(Path.cwd())]
+    print(f"translate: width={args.width} memfree={args.memfree}", file=sys.stderr)
+    code = subprocess.run(cmd, input="".join(f"{row[3]}\n" for row in pending), text=True).returncode
+    missing = collect_results(out_dir, {row[3]: row[4] for row in pending})
+    for zh in missing:
+        print(f"translate: sin marcadores {BEGIN_MARK}/{END_MARK}: {zh}", file=sys.stderr)
+    return 1 if missing or code else 0
+
+
+# --- usage ----------------------------------------------------------------
+
+# Copiados de THYROX `src/transcript/usage.py` (feature/ai-course-notes-l1):
+# los cuatro tipos de token que se facturan por separado. El ciclo reporta
+# tokens y no dinero: el peso de cada componente es del contrato de precio.
+COMPONENTS = ("input", "cache_creation", "cache_read", "output")
+USAGE_KEYS = {"input": "input_tokens", "cache_creation": "cache_creation_input_tokens",
+              "cache_read": "cache_read_input_tokens", "output": "output_tokens"}
+LATIN_LETTER = re.compile(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]")
+
+
+def cmd_usage(args) -> int:
+    targets = {row[3]: row[4] for row in
+               (l.split("\t") for l in (args.bench / "units.tsv").read_text(encoding="utf-8").splitlines() if l.strip())}
+    rows, totals, han_sum, letter_sum = [], dict.fromkeys(COMPONENTS, 0), 0, 0
+    for index in sorted(args.bench.glob("translate/*/index.tsv")):
+        for line in index.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            n, zh = line.split("\t", 1)
+            try:
+                usage = json.loads((index.parent / f"{n}.json").read_text(encoding="utf-8")).get("usage", {})
+            except (OSError, ValueError):
+                usage = {}
+            counts = {c: int(usage.get(USAGE_KEYS[c], 0) or 0) for c in COMPONENTS}
+            han = len(HAN.findall(Path(zh).read_text(encoding="utf-8")))
+            es = Path(targets.get(zh, ""))
+            letters = len(LATIN_LETTER.findall(es.read_text(encoding="utf-8"))) if es.is_file() else 0
+            if letters:
+                han_sum, letter_sum = han_sum + han, letter_sum + letters
+            rows.append([Path(zh).name, str(han), str(letters), *(str(counts[c]) for c in COMPONENTS)])
+            for c in COMPONENTS:
+                totals[c] += counts[c]
+    header = ["chunk", "han", "letters", *COMPONENTS]
+    (args.bench / "usage.tsv").write_text("\n".join("\t".join(r) for r in [header, *rows]) + "\n", encoding="utf-8")
+    ratio = letter_sum / han_sum if han_sum else 0.0
+    print(f"items={len(rows)} " + " ".join(f"{c}={totals[c]}" for c in COMPONENTS) + f" letters_per_han={ratio:.2f}")
+    return 0
 
 
 # --- assemble -------------------------------------------------------------
@@ -414,9 +468,11 @@ def main(argv=None) -> int:
     p = sub.add_parser("prompt"); p.add_argument("--memory", type=Path, default=DEFAULT_MEMORY)
     p.add_argument("--out", type=Path, required=True); p.set_defaults(func=cmd_prompt)
     p = sub.add_parser("translate"); p.add_argument("--bench", type=Path, required=True)
-    p.add_argument("--model", required=True); p.add_argument("--width", default="auto")
+    p.add_argument("--model", required=True); p.add_argument("--width", type=int, default=DEFAULT_WIDTH)
+    p.add_argument("--memfree", default=DEFAULT_MEMFREE)
     p.add_argument("--timeout", type=int, default=900); p.add_argument("--memory", type=Path, default=DEFAULT_MEMORY)
     p.set_defaults(func=cmd_translate)
+    p = sub.add_parser("usage"); p.add_argument("--bench", type=Path, required=True); p.set_defaults(func=cmd_usage)
     p = sub.add_parser("assemble"); p.add_argument("--bench", type=Path, required=True); p.set_defaults(func=cmd_assemble)
     p = sub.add_parser("verify"); p.add_argument("--out", type=Path, required=True)
     p.add_argument("--compile", action="store_true"); p.add_argument("--jobs", type=int, default=os.cpu_count() or 2)
