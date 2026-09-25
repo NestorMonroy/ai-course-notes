@@ -162,3 +162,18 @@ def test_spanish_verb_forms_known_to_the_lemma_table_are_not_spanglish(tmp_path:
         assert f"spanglish:{word}" not in result.stdout, result.stdout
     for word in ("testeado", "pusheado"):
         assert f"spanglish:{word}" in result.stdout, result.stdout
+
+
+def test_glossary_translated_form_is_not_invented(tmp_path: Path) -> None:
+    body = "La tokenización divide el texto."
+    bare = tmp_path / "bare.tsv"
+    bare.write_text("term_en\tdecision\tes_mx\tmeaning\tsource\trejected\n", encoding="utf-8")
+    assert "tokenización" in run(str(note(tmp_path, body)), glossary=bare).stdout
+    declared = tmp_path / "declared.tsv"
+    declared.write_text(
+        "term_en\tdecision\tes_mx\tmeaning\tsource\trejected\n"
+        "tokenization\ttranslate\ttokenización\tdivisión del texto en tokens\tIATE:3592517\t\n",
+        encoding="utf-8",
+    )
+    result = run(str(note(tmp_path, body)), glossary=declared)
+    assert "tokenización" not in result.stdout, result.stdout
