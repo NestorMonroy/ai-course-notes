@@ -20,6 +20,7 @@ wrappers que preparan el entorno del consumer y delegan en
    | `THYROX_WORKBENCH_DIR` | `<consumer>/.claude/workbench` |
    | `THYROX_BACKGROUND_LOG_DIR` | `<consumer>/.claude/build-logs` |
    | `THYROX_JOBS_DIR` | `<consumer>/.claude/jobs` |
+   | `THYROX_JOBS_LEDGER_DIR` | `<consumer>/.claude/jobs-ledger` (cada sesion recibe su subdirectorio) |
    | `THYROX_AGENT_STORE` | `<consumer>/agent-results/agent_store.sqlite3` |
    | `THYROX_TOOLCHAIN_AWK_BIN` | `gawk` |
    | `THYROX_COMMIT_AUTHOR` / `THYROX_COMMIT_COMMITTER` | la identidad de los commits |
@@ -27,6 +28,13 @@ wrappers que preparan el entorno del consumer y delegan en
 Sin el `.env`, los wrappers se niegan con codigo 2 en vez de continuar: THYROX
 resolveria cada clave desde su propio `.env` y el store, los logs y el
 workbench serian los del PROVIDER.
+
+## El store es el de este consumer
+
+Todo lo que este trabajo registra —hallazgos, tareas, sesiones— va a
+`agent-results/agent_store.sqlite3` de este repositorio. El store de THYROX es
+un ejemplo del mecanismo y no se escribe desde aqui: `tools/thyrox/run
+agent_store ...` lo garantiza porque exporta `THYROX_ENV_FILE`.
 
 ## Comandos
 
@@ -47,6 +55,7 @@ tools/thyrox/check-prose-vocabulary       # la prosa en espanol nueva o modifica
 | `THYROX_ENV_FILE` exportada | un comando de `bin/` busca el `.env` desde su ubicacion dentro de THYROX y no desde el consumer: `agent_store` escribe en el store del PROVIDER (H-THYROX-178). |
 | rechazo de `agent_store --repo` | `--repo` compone `<prefijo><repo>/.claude/agent-results`, y este clon no lleva el prefijo `kaupamex-` (H-THYROX-177). |
 | `THYROX_WORKBENCH_DIR` global en el `.env` | la clave por clon `THYROX_WORKBENCH_AI_COURSE_NOTES` se ignora sin aviso (H-THYROX-176). |
+| `THYROX_JOBS_LEDGER_DIR` en el `.env` | el ledger de `wait-jobs`, `run-task-pool` y `thyrox-bg register` cae en `<thyrox>/.claude/jobs-ledger/`. `THYROX_JOBS_DIR` no sirve para eso: en `job_runs.py` nombra el hogar de los runs (H-THYROX-179). |
 | `VOCAB_GATE_*` exportadas | el gate de vocabulario solo lee sus parametros del proceso, no del `.env`. |
 
 ## El gate de vocabulario: que mide y que no
