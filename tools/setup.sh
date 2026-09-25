@@ -3,8 +3,9 @@
 # setup.sh: prepara un clon de ai-course-notes
 # =============================================================================
 #
-#   bash tools/setup.sh            comprueba; no instala nada del sistema
-#   bash tools/setup.sh --install  instala lo que falte (apt y uv)
+#   bash tools/setup.sh            comprueba el sistema e instala las skills
+#   bash tools/setup.sh --install  además instala lo que falte (apt y uv)
+#   bash tools/setup.sh --check    solo comprueba: no escribe fuera del repositorio
 #
 # Pasos: dependencias de Python con uv, herramientas del sistema que usan las
 # notas y el ciclo de traducción es-MX (tools/lib/toolchain.sh) y las skills de
@@ -20,6 +21,8 @@ SKILLS_DIR="${SKILLS_DIR:-$HOME/.claude/skills}"
 # shellcheck source=lib/toolchain.sh
 source "$SCRIPT_DIR/lib/toolchain.sh"
 
+CHECK_ONLY=0
+[[ "${1:-}" == "--check" ]] && CHECK_ONLY=1
 if [[ "${1:-}" == "--install" ]]; then
     export NOTES_INSTALL_PARALLEL=1 NOTES_INSTALL_GAWK=1 NOTES_INSTALL_POPPLER=1
     export NOTES_INSTALL_TEXLIVE=1 NOTES_INSTALL_HUNSPELL=1
@@ -50,7 +53,11 @@ if ! command -v ffmpeg >/dev/null 2>&1; then
 fi
 
 log_header "Skills de Claude Code en $SKILLS_DIR"
+if (( CHECK_ONLY )); then
+    log_info "se omiten con --check: instalarlas escribe en $SKILLS_DIR"
+fi
 for skill_dir in "$SCRIPT_DIR/skills"/*/; do
+    (( CHECK_ONLY )) && break
     skill_name="$(basename "$skill_dir")"
     target="$SKILLS_DIR/$skill_name"
     if [[ -d "$target" ]]; then

@@ -125,18 +125,28 @@ function notes_toolchain_require_texlive() {
     rm -rf "$dir"
 }
 
-# --- hunspell con el diccionario es_MX ------------------------------------------------
+# --- hunspell con el diccionario es_MX del repositorio ---------------------------------
 
-# El diccionario de ortografía (LibreOffice / RLA-ES) mide pertenencia al
-# español de México, que los léxicos de spaCy no miden: ellos dan frecuencia y
-# lema. La sonda exige las dos mitades: aceptar `español` y rechazar `espanol`.
+# Adaptado de `thyrox_toolchain_require_hunspell` (THYROX, rama
+# feature/ai-course-notes-l1): mismo contrato, con el diccionario y el par de
+# sonda de este consumer fijos en vez de declarados. En `.env` los mismos
+# valores van en THYROX_TOOLCHAIN_HUNSPELL_*, que el preflight del proveedor
+# (`tools/thyrox/run check-toolchain-ready`) sondea.
+#
+# El diccionario de ortografía mide pertenencia al español de México, que los
+# léxicos de spaCy no miden: ellos dan frecuencia y lema. El diccionario es el
+# que el repositorio construye desde RLA-ES (`tools/lang/es-mx/hunspell/`),
+# así que del sistema solo hace falta el binario. La sonda exige las dos
+# mitades: aceptar `español` y rechazar `espanol`.
 function notes_toolchain_require_hunspell() {
-    _notes_ensure hunspell HUNSPELL "${NOTES_TOOLCHAIN_HUNSPELL_INSTALL_CMD:-sudo apt-get install -y hunspell hunspell-es}" || return 2
+    local root; root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    local dictionary="${NOTES_TOOLCHAIN_HUNSPELL_DICTIONARY:-$root/tools/lang/es-mx/hunspell/es_MX}"
+    _notes_ensure hunspell HUNSPELL "${NOTES_TOOLCHAIN_HUNSPELL_INSTALL_CMD:-sudo apt-get install -y hunspell}" || return 2
     local rejected
-    rejected="$(printf 'español\nespanol\n' | LANG=C.UTF-8 hunspell -i utf-8 -d es_MX -l 2>/dev/null)"
+    rejected="$(printf 'español\nespanol\n' | LANG=C.UTF-8 hunspell -i utf-8 -d "$dictionary" -l 2>/dev/null)"
     if [[ "$rejected" != "espanol" ]]; then
-        echo "notes_toolchain: hunspell es_MX no separa 'español' (válida) de 'espanol' (sin ñ)." >&2
-        echo "                 Rechazó: '${rejected//$'\n'/, }'. ¿Falta hunspell-es?" >&2
+        echo "notes_toolchain: hunspell con $dictionary no separa 'español' (válida) de 'espanol' (sin ñ)." >&2
+        echo "                 Rechazó: '${rejected//$'\n'/, }'." >&2
         return 2
     fi
 }

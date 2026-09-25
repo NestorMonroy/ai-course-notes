@@ -83,3 +83,13 @@ def test_setup_uses_no_emoji() -> None:
     emoji = re.compile("[\U0001F300-\U0001FAFF☀-➿️]")
     assert not emoji.search(text), emoji.findall(text)
     assert "log_success" in text and "notes_toolchain_require_hunspell" in text
+
+
+def test_check_mode_writes_nothing_outside_the_repository(tmp_path: Path) -> None:
+    # Una corrida para comprobar no instala skills: en la sesión que lo destapó,
+    # `setup.sh` sin opciones copió cuatro skills a ~/.claude/skills.
+    skills = tmp_path / "skills"
+    result = subprocess.run(["bash", str(SETUP), "--check"], capture_output=True, text=True,
+                            env={**os.environ, "SKILLS_DIR": str(skills)})
+    assert not skills.exists(), result.stdout
+    assert "[..]" in result.stdout and "--check" in result.stdout
