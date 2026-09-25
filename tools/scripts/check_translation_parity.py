@@ -98,7 +98,8 @@ def compare(zh_text: str, es_text: str, glossary: Path) -> list[tuple[str, str]]
     if re.search(r"\\usepackage(?:\[[^\]]*\])?\{ctex\}", es_src):
         out.append(("parity:ctex", "la traduccion sigue cargando ctex"))
 
-    residual = [(n, line.strip()) for n, line in enumerate(es.splitlines(), 1)
+    # Todo el documento, preambulo incluido: `\notetitle` se imprime en la portada.
+    residual = [(n, line.strip()) for n, line in enumerate(es_src.splitlines(), 1)
                 if HAN.search(PARENTHESIZED.sub("", line))]
     if residual:
         out.append(("parity:residual-han", f"{len(residual)} linea(s); primera: {residual[0][1][:80]}"))

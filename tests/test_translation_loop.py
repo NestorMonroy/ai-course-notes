@@ -329,3 +329,26 @@ def test_compile_reports_an_error_even_when_a_pdf_comes_out(tmp_path: Path) -> N
     clean = tmp_path / "clean.es-mx.tex"
     clean.write_text("\\documentclass{article}\n\\begin{document}\nhola\n\\end{document}\n")
     assert mod.compile_signal(clean) == []
+
+
+def test_chinese_in_the_head_is_translated_as_its_own_unit(tmp_path: Path) -> None:
+    title_zh = "\\newcommand{\\notetitle}{分词笔记}"
+    source = NOTE.replace("\\begin{document}", title_zh + "\n\\begin{document}", 1)
+    dictionary = dict(DICTIONARY, **{title_zh: "\\newcommand{\\notetitle}{Notas de tokenización}"})
+    repo, note, runner = setup(tmp_path, dictionary, source)
+    bench = tmp_path / "bench"
+    loop(repo, "prepare", "--bench", str(bench), str(note))
+    assert any("\thead\t" in l for l in (bench / "units.tsv").read_text(encoding="utf-8").splitlines())
+    loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    assert loop(repo, "assemble", "--bench", str(bench)).returncode == 0
+    text = note.with_name("lecture01-notes.es-mx.tex").read_text(encoding="utf-8")
+    assert "\\newcommand{\\notetitle}{Notas de tokenización}" in text and "分词" not in text
+    assert "\\setdefaultlanguage[variant=mexican]{spanish}" in text
+
+
+def test_compile_reports_glyphs_the_font_does_not_have(tmp_path: Path) -> None:
+    mod = load_loop()
+    tex = tmp_path / "glyph.es-mx.tex"
+    tex.write_text("\\documentclass{article}\n\\begin{document}\nTitulo 自我\n\\end{document}\n", encoding="utf-8")
+    signals = mod.compile_signal(tex)
+    assert [s for s, _ in signals] == ["compile:missing-glyph"], signals

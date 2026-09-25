@@ -110,3 +110,13 @@ def test_keep_term_translated_away_is_reported(tmp_path: Path) -> None:
 def test_ctex_left_in_the_translation_is_reported(tmp_path: Path) -> None:
     es = ES.replace("\\usepackage{polyglossia}", "\\usepackage[fontset=fandol]{ctex}")
     assert "parity:ctex" in signals(check(tmp_path, es))
+
+
+def test_chinese_left_in_the_preamble_is_residual(tmp_path: Path) -> None:
+    # `\notetitle` vive en el preambulo y se imprime en la portada; la fuente
+    # latina no tiene esos glifos y XeLaTeX los omite en silencio.
+    title_zh = ZH.replace("\\begin{document}", "\\newcommand{\\notetitle}{自我改进}\n\\begin{document}", 1)
+    left = ES.replace("\\begin{document}", "\\newcommand{\\notetitle}{自我改进}\n\\begin{document}", 1)
+    assert "parity:residual-han" in signals(check(tmp_path, left, title_zh))
+    done = left.replace("自我改进", "Automejora")
+    assert "parity:residual-han" not in signals(check(tmp_path, done, title_zh))

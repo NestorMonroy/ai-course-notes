@@ -44,6 +44,7 @@ DEFAULT_MEMORY = LANG_DIR / "translation_memory.jsonl"
 PROMPT_TEMPLATE = LANG_DIR / "translator_prompt.md"
 CHUNK_LIMIT = 12000  # caracteres; una seccion mas larga se parte por \subsection
 HAN = re.compile(r"[\u4e00-\u9fff]")
+COMMENT_LINE = re.compile(r"(?<!\\)%.*$", re.M)
 PARENTHESIZED = re.compile(r"[(（][^()（）\n]*[)）]")
 FULL_MODEL_ID = re.compile(r"^claude-[a-z]+-\d")
 VERIFIERS = ["check_translation_parity.py", "check_prose_vocabulary.py", "check_note_coverage.py",
@@ -110,6 +111,12 @@ def cmd_prepare(args) -> int:
         out = bench / "chunks" / note_id
         out.mkdir(parents=True, exist_ok=True)
         (out / "head.tex").write_text(head, encoding="utf-8")
+        if HAN.search(COMMENT_LINE.sub("", head)):
+            # Lo que el script no localiza del preambulo (`\notetitle`, que es
+            # prosa y va en la portada) se traduce como una unidad mas: la
+            # fuente latina no tiene esos glifos y XeLaTeX los omitiria en silencio.
+            (out / "head.zh.tex").write_text(head, encoding="utf-8")
+            units.append("\t".join([rel(zh, root), note_id, "head", str(out / "head.zh.tex"), str(out / "head.es.tex")]))
         for k, chunk in enumerate(split_body(body)):
             zh_chunk = out / f"{k:03d}.zh.tex"
             zh_chunk.write_text(chunk, encoding="utf-8")
@@ -291,8 +298,11 @@ def cmd_assemble(args) -> int:
         if absent:
             missing += absent
             continue
-        head = (args.bench / "chunks" / note_id / "head.tex").read_text(encoding="utf-8")
-        body = "".join(Path(r[4]).read_text(encoding="utf-8") for r in sorted(chunks, key=lambda r: r[2]))
+        heads = [r for r in chunks if r[2] == "head"]
+        head_file = Path(heads[0][4]) if heads else args.bench / "chunks" / note_id / "head.tex"
+        head = head_file.read_text(encoding="utf-8")
+        body = "".join(Path(r[4]).read_text(encoding="utf-8")
+                       for r in sorted((r for r in chunks if r[2] != "head"), key=lambda r: r[2]))
         Path(target).write_text(head + body, encoding="utf-8")
     for m in missing:
         print(f"assemble: falta el fragmento traducido {m}", file=sys.stderr)
@@ -329,9 +339,12 @@ def compile_signal(es: Path) -> list[tuple[str, str]]:
         log = Path(tmp) / (es.name[:-len(".tex")] + ".log")
         lines = log.read_text(errors="ignore").splitlines() if log.is_file() else []
         first = next((l for l in lines if l.startswith("! ")), None)
-        if first is None and pdf.is_file() and pdf.stat().st_size > 0:
-            return []
-        return [("compile:error", (first or "sin PDF")[:160])]
+        if first is not None or not (pdf.is_file() and pdf.stat().st_size > 0):
+            return [("compile:error", (first or "sin PDF")[:160])]
+        # Un glifo que la fuente no tiene no es un error de XeLaTeX: se omite
+        # con un aviso y el PDF sale sin el texto (la portada del piloto).
+        glyph = next((l for l in lines if l.startswith("Missing character")), None)
+        return [("compile:missing-glyph", glyph[:160])] if glyph else []
 
 
 def verify_notes(notes: list[Path], compile_: bool, root: Path, lexicons) -> tuple[list[dict], int]:
