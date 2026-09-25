@@ -1,6 +1,6 @@
 # Plan de traducción es-MX: traductor + verificador + memoria con gates
 
-Versión 2.0. Adapta a la traducción del corpus el plan de corrección iterativa
+Versión 2.1. Adapta a la traducción del corpus el plan de corrección iterativa
 en dos pasos:
 
 - **de la 2.2.0** toma el agente, el verificador y la memoria persistente;
@@ -13,8 +13,14 @@ recorre de buena fe: son gates y subcomandos que detienen el ciclo con un error
 explícito, implementados como script, con pruebas y control de anulación.
 
 **Estado:** las piezas de este plan existen en `tools/scripts/translation_loop.py`
-y `translation_gate.py`. Las fases 0 y 1 están cerradas; la 2 (cs329a) está en
-curso. Lo medido en cada una está en su banco, bajo `.claude/workbench/`.
+y `translation_gate.py`. Las fases 0, 1 y 2 (cs329a) están cerradas; de la 3,
+la ola 1 (filas 2 a 9 del plan) cerró en 0 señales. Lo medido en cada una está
+en su banco, bajo `.claude/workbench/`.
+
+**Cambios de la 2.1**, tras cotejar la sección 6 con la 3.0.0 punto por punto:
+la 2.0 decía «midiendo su efecto neto» y el código no lo medía (0 apariciones);
+agrupaba por nombre de señal, que junta causas distintas; y no declaraba los
+límites de sus propias cifras. Los tres quedan cerrados en la sección 6.
 
 ## 1. Alcance, medido
 
@@ -159,7 +165,7 @@ clasifica según dónde vive su causa antes de retraducir nada:
 | Ruta | Cuándo | Cómo se resuelve | Juicio |
 |---|---|---|---|
 | **1. Determinista** | un arreglo `mechanical` de la memoria cubre la señal y su texto está en la nota | `sweep`: sustitución exacta en **los fragmentos** (la fuente de verdad) y en las notas, de todos los lotes | no |
-| **2. Causa compartida** | la misma señal en dos notas o más, de cualquier lote; o una causa en el verificador, el glosario, la plantilla o un preámbulo compartido | una decisión por causa, en orden de frecuencia (`triage.tsv`), midiendo su efecto neto antes de la siguiente | sí, una vez por causa |
+| **2. Causa compartida** | la misma **causa** en dos notas o más, de cualquier lote; o una causa en el verificador, el glosario, la plantilla o un preámbulo compartido | una decisión por causa, en orden de frecuencia (`triage.tsv`), con `measure --decision` después de cada una y antes de la siguiente | sí, una vez por causa |
 | **3. Local** | el resto | `retranslate` devuelve a pendientes solo los fragmentos que llevan la señal; la siguiente iteración los retraduce | sí, por fragmento |
 
 ```
@@ -174,12 +180,51 @@ por cada lote del PLAN:
                 *** GATE B: el registro del barrido cubre todos los patrones ***
         2. una decisión por causa compartida (glosario con fuente, regla de la
            plantilla o del verificador con prueba y control de anulación) y su
-           entrada de memoria
+           entrada de memoria; después, antes de la siguiente decisión:
+           measure --decision "<causa → arreglo>"   # neto = resueltas - introducidas
                 *** GATE A: toda señal tiene un patrón con los 4 campos ***
         3. retranslate --batch L    # ruta 3: solo fragmentos locales
         cycle --batch L --compile   # siguiente iteración
     *** GATE C: 0 señales en la última iteración y la muestra de V7 revisada ***
 ```
+
+**La causa, no el nombre.** Una señal de prosa ya lleva su texto
+(`prose:english:pools`) y ése es su agrupador. Las genéricas no:
+`compile:missing-glyph` con «（» en una nota y «张» en otra son dos causas (el
+paréntesis de ancho completo, que arregla la memoria mecánica, y la falta de
+fuente CJK, que arregla xeCJK), y agrupadas por nombre contaban como una causa
+compartida falsa. `cause_key` agrupa `compile:missing-glyph` por carácter, con
+todos los Han como una sola causa (ninguno tiene glifo), y `compile:error` por
+mensaje más el comando que nombra su línea `l.NN`. Es lo que la 3.0.0 pide
+confirmar «tipo por tipo antes de unificar»: aquí la confirmación la hace la
+clave, no quien lee la cola.
+
+**El efecto neto de cada decisión se mide, no se supone.** `translation_loop.py
+measure --decision D` verifica **todo** el corpus traducido (una fila del
+glosario puede introducir señales en notas que estaban limpias) y compara, por
+(nota, causa), con la medición anterior o, si no la hay, con la última
+iteración de cada lote. Agrega una fila a `translation/decisions.tsv` (solo se
+agrega: decisión, antes, después, resueltas, introducidas, neto) y guarda la
+medición en `translation/measures/NNN-<ISO>.jsonl`. Con neto negativo sale con 4:
+la decisión se revierte antes de tomar la siguiente.
+
+**Límites de estas cifras, declarados.**
+
+- **Las rutas se solapan y gana la primera.** Una causa con arreglo mecánico en
+  la memoria es determinista aunque aparezca en varias notas; la precedencia
+  es determinista, luego compartida, luego local, y `triage.tsv` muestra sólo
+  la ruta ganadora.
+- **Un punto de datos no es una tendencia.** Las cifras de esta sección
+  (13 de 36 señales por el verificador en cs329a; 838 definiciones en el
+  piloto) son de un lote y un momento cada una; `decisions.tsv` es el lugar
+  donde se acumula la medición repetida.
+- **Una causa compartida puede no serlo.** `cause_key` separa lo que su
+  detalle distingue; dos errores con el mismo mensaje y el mismo comando pero
+  causas distintas siguen juntos. Por eso la decisión se mide con `measure`, y
+  un neto menor que el número de notas de la causa es la señal de que no era
+  una sola.
+- **`measure` ve lo que el verificador ve.** Un arreglo que empeora el
+  significado sin tocar una señal da neto 0 (riesgo de la sección 10, V7).
 
 **Fase 3, por olas con GNU Parallel.** Los lotes son independientes, así que
 `translate_wave.sh --from N --to M --jobs J` lanza un

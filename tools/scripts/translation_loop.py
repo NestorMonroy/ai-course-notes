@@ -8,6 +8,7 @@
     translation_loop.py plan     --out P.tsv
     translation_loop.py advance  --batch L --model <id> [--compile] [--max-iterations N]
     translation_loop.py triage   [--memory M]
+    translation_loop.py measure  --decision D [--compile] [--jobs N]
     translation_loop.py retranslate --batch L
     translation_loop.py cycle    --batch L --model <id> [--compile] <nota.tex>...
     translation_loop.py assemble --bench B
@@ -736,6 +737,32 @@ def latest_signals(root: Path) -> list[dict]:
     return rows
 
 
+GLYPH = re.compile(r"There is no (?P<char>\S+) \(U\+(?P<code>[0-9A-F]+)\)")
+
+
+def cause_key(row: dict) -> str:
+    """La causa de una señal, que es lo que se agrupa (plan v3).
+
+    Una señal de prosa ya lleva su texto (`prose:english:pools`). Las genéricas
+    (`compile:error`, `compile:missing-glyph`, `coverage:…`) juntan causas
+    distintas bajo un nombre: «（» en una nota y «张» en otra son dos causas
+    (memoria mecánica y fuente CJK), y agruparlas por nombre las volvía una
+    causa compartida falsa. Todos los Han son una causa: ninguno tiene glifo.
+    """
+    signal, detail = row["signal"], row.get("detail") or ""
+    if signal.count(":") >= 2:
+        return signal
+    if signal == "compile:missing-glyph":
+        glyph = GLYPH.search(detail)
+        if glyph:
+            return f"{signal}:han" if HAN.fullmatch(glyph.group("char")) else f"{signal}:U+{glyph.group('code')}"
+    if signal == "compile:error":
+        message, _sep, context = detail.partition(" | ")
+        command = re.search(r"(\\[A-Za-z]+)\s*$", context)
+        return f"{signal}:{message.lstrip('! ').strip()}" + (f":{command.group(1)}" if command else "")
+    return signal
+
+
 def classify(root: Path, memory: Path) -> dict[str, tuple[str, list[str]]]:
     """Ruta de cada señal según dónde vive su causa (plan v3).
 
@@ -758,18 +785,22 @@ def classify(root: Path, memory: Path) -> dict[str, tuple[str, list[str]]]:
         return texts[note]
 
     notes: dict[str, set[str]] = {}
+    names: dict[str, str] = {}
     for row in latest_signals(root):
-        notes.setdefault(row["signal"], set()).add(row["note"])
+        key = cause_key(row)
+        notes.setdefault(key, set()).add(row["note"])
+        names[key] = row["signal"]
     out = {}
-    for signal, where in notes.items():
-        if any(fnmatch.fnmatchcase(signal, pattern) and any(text in note_text(n) for n in where)
+    for key, where in notes.items():
+        # La memoria nombra la señal, no la causa: se compara con el nombre base.
+        if any(fnmatch.fnmatchcase(names[key], pattern) and any(text in note_text(n) for n in where)
                for pattern, text in mechanical):
             route = "deterministic"
         elif len(where) > 1:
             route = "shared"
         else:
             route = "local"
-        out[signal] = (route, sorted(where))
+        out[key] = (route, sorted(where))
     return out
 
 
@@ -784,6 +815,64 @@ def cmd_triage(args) -> int:
     counts = collections.Counter(route for route, _w in routes.values())
     print(f"triage: {counts['deterministic']} determinista(s), {counts['shared']} compartida(s), "
           f"{counts['local']} local(es) -> {out}", file=sys.stderr)
+    return 0
+
+
+DECISIONS_HEADER = ("decision", "started", "before", "after", "resolved", "introduced", "net", "incomplete")
+
+
+def translated_notes(root: Path) -> list[Path]:
+    """Toda nota o capítulo es-MX del corpus, podando lo que no es corpus."""
+    found = []
+    for base, dirs, files in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d not in SKIPPED_DIRS)
+        found += [Path(base, f).resolve() for f in files if f.endswith(".es-mx.tex")]
+    return sorted(found)
+
+
+def cmd_measure(args) -> int:
+    """El efecto neto de una decisión de ruta 2, antes de tomar la siguiente.
+
+    Plan v3, paso 3: una causa compartida a la vez. Se verifica todo el corpus
+    traducido —una regla del glosario puede introducir señales en notas que
+    estaban limpias— y se compara, por (nota, causa), con la medición anterior
+    o, si no la hay, con la última iteración de cada lote. `decisions.tsv` es
+    de solo agregar; cada medición queda en `measures/NNN-<ISO>.jsonl`. Sale
+    con 4 si el neto es negativo y con 2 si la verificación quedó incompleta.
+    """
+    root = Path.cwd()
+    translation = root / ".claude" / "workbench" / "translation"
+    measures = translation / "measures"
+    measures.mkdir(parents=True, exist_ok=True)
+    previous = sorted(measures.glob("*.jsonl"))
+    before_rows = read_jsonl(previous[-1]) if previous else latest_signals(root)
+    started = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    rows, _hits = run_verify(translated_notes(root), args.compile, args.jobs, root)
+    snapshot = measures / f"{len(previous) + 1:03d}-{started}.jsonl"
+    snapshot.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    before = {(r["note"], cause_key(r)) for r in before_rows}
+    after = {(r["note"], cause_key(r)) for r in rows}
+    resolved, introduced = before - after, after - before
+    incomplete = sum(1 for r in rows if r["signal"] == "verify:incomplete")
+    table = translation / "decisions.tsv"
+    if not table.is_file():
+        table.write_text("\t".join(DECISIONS_HEADER) + "\n", encoding="utf-8")
+    values = (args.decision, started, len(before), len(after), len(resolved), len(introduced),
+              len(resolved) - len(introduced), incomplete)
+    with table.open("a", encoding="utf-8") as handle:
+        handle.write("\t".join(str(v) for v in values) + "\n")
+    for note, key in sorted(introduced):
+        print(f"measure: introducida {key} en {note}", file=sys.stderr)
+    print(f"measure: {args.decision}: {len(resolved)} resuelta(s), {len(introduced)} introducida(s), "
+          f"neto {len(resolved) - len(introduced)} -> {table}", file=sys.stderr)
+    if incomplete:
+        return 2
+    if len(introduced) > len(resolved):
+        # Plan v3: cada decisión se mide antes de la siguiente; si introduce más
+        # de lo que resuelve, se revierte, y el código de salida lo exige.
+        print(f"measure: neto negativo; la decisión «{args.decision}» se revierte antes de la siguiente",
+              file=sys.stderr)
+        return 4
     return 0
 
 
@@ -816,7 +905,7 @@ def cmd_retranslate(args) -> int:
     routes = classify(root, args.memory)
     for row in rows:
         signal, note_id = row["signal"], note_ids.get(row["note"])
-        route = routes.get(signal, ("local", []))[0]
+        route = routes.get(cause_key(row), ("local", []))[0]
         if route != "local":
             # Rutas 1 y 2 del plan v3: el arreglo no es retraducir este fragmento.
             out.append((signal, row["note"], "", route))
@@ -903,7 +992,7 @@ def cmd_advance(args) -> int:
             # Fragmentos rechazados al recibirlos (sin marcadores, estructura rota):
             # son la siguiente vuelta, no un juicio (ola 1: siete lotes paraban aquí).
             continue
-        signals = {json.loads(l)["signal"] for l in (last / "signals.jsonl").read_text(encoding="utf-8").splitlines()
+        signals = {cause_key(json.loads(l)) for l in (last / "signals.jsonl").read_text(encoding="utf-8").splitlines()
                    if l.strip()}
         routes = classify(root, args.memory)
         shared = sorted(s for s in signals if routes.get(s, ("local",))[0] == "shared")
@@ -1010,6 +1099,9 @@ def main(argv=None) -> int:
     p.set_defaults(func=cmd_advance)
     p = sub.add_parser("triage"); p.add_argument("--memory", type=Path, default=DEFAULT_MEMORY)
     p.set_defaults(func=cmd_triage)
+    p = sub.add_parser("measure"); p.add_argument("--decision", required=True)
+    p.add_argument("--compile", action="store_true")
+    p.add_argument("--jobs", type=int, default=os.cpu_count() or 2); p.set_defaults(func=cmd_measure)
     p = sub.add_parser("retranslate"); p.add_argument("--batch", default=None)
     p.add_argument("--memory", type=Path, default=DEFAULT_MEMORY)
     p.add_argument("--bench", type=Path, default=None); p.set_defaults(func=cmd_retranslate)

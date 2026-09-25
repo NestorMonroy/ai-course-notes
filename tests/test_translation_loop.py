@@ -925,3 +925,72 @@ def test_a_mechanical_fix_that_extends_its_own_text_is_idempotent(tmp_path: Path
         loop(repo, "sweep", "--bench", str(bench), "--iteration", iteration, "--memory", str(memory), cache=tmp_path / "c")
     text = note.with_name("lecture01-notes.es-mx.tex").read_text(encoding="utf-8")
     assert text.count("% marca-idempotente") == 1, text.count("% marca-idempotente")
+
+
+def write_signals(root: Path, batch: str, rows: list[dict]) -> None:
+    here = root / ".claude/workbench/translation" / batch / "iterations" / "01"
+    here.mkdir(parents=True, exist_ok=True)
+    (here / "signals.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
+                                        encoding="utf-8")
+
+
+def test_a_generic_signal_is_grouped_by_its_cause_not_by_its_name(tmp_path: Path) -> None:
+    # Plan v3: «no todo nombre duplicado es la misma causa». `compile:missing-glyph`
+    # con «（» en una nota y «张» en otra son dos causas: el paréntesis de ancho
+    # completo (memoria mecánica) y la falta de fuente CJK (xeCJK). En cambio
+    # «张» y «李» en dos notas son una sola: ningún Han tiene glifo.
+    mod = load_loop()
+    glyph = "Missing character: There is no {} (U+{:04X}) in font [lmroman10-regular]:mapping=t"
+    write_signals(tmp_path, "a", [
+        {"note": "a/n1.es-mx.tex", "signal": "compile:missing-glyph", "detail": glyph.format("（", 0xFF08)},
+        {"note": "a/n1.es-mx.tex", "signal": "compile:error",
+         "detail": "! Undefined control sequence. | l.40 ...de que \\enquote"}])
+    write_signals(tmp_path, "b", [
+        {"note": "b/n2.es-mx.tex", "signal": "compile:missing-glyph", "detail": glyph.format("张", 0x5F20)},
+        {"note": "b/n2.es-mx.tex", "signal": "compile:error",
+         "detail": "! Undefined control sequence. | l.12 el año del \\citep"}])
+    write_signals(tmp_path, "c", [
+        {"note": "c/n3.es-mx.tex", "signal": "compile:missing-glyph", "detail": glyph.format("李", 0x674E)},
+        {"note": "c/n3.es-mx.tex", "signal": "prose:english:pools", "detail": ""}])
+    memory = tmp_path / "memory.jsonl"
+    memory.write_text("", encoding="utf-8")
+    routes = mod.classify(tmp_path, memory)
+    assert routes["compile:missing-glyph:han"] == ("shared", ["b/n2.es-mx.tex", "c/n3.es-mx.tex"])
+    assert routes["compile:missing-glyph:U+FF08"][0] == "local"
+    assert routes["compile:error:Undefined control sequence.:\\enquote"][0] == "local"
+    assert routes["compile:error:Undefined control sequence.:\\citep"][0] == "local"
+    # Una señal que ya lleva su texto en el nombre no cambia de clave.
+    assert routes["prose:english:pools"][0] == "local"
+
+
+def test_measure_records_the_net_effect_of_each_decision(tmp_path: Path) -> None:
+    # Plan v3, paso 3: una causa compartida a la vez, midiendo el efecto neto
+    # (señales resueltas menos señales introducidas) antes de la siguiente.
+    dictionary = dict(DICTIONARY, **{"训练用 checkpoint。": "El throughput usa checkpoint."})
+    repo, note, runner = setup(tmp_path, dictionary)
+    loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note), runner=runner, cache=tmp_path / "c")
+    es = note.with_name("lecture01-notes.es-mx.tex")
+    # La decisión resuelve «throughput» e introduce «pools» sin querer.
+    es.write_text(es.read_text(encoding="utf-8").replace("El throughput usa", "Los pools del rendimiento usan"),
+                  encoding="utf-8")
+    result = loop(repo, "measure", "--decision", "throughput → rendimiento", cache=tmp_path / "c")
+    assert result.returncode == 0, result.stdout + result.stderr
+    table = repo / ".claude/workbench/translation/decisions.tsv"
+    header, *rows = table.read_text(encoding="utf-8").splitlines()
+    row = dict(zip(header.split("\t"), rows[-1].split("\t")))
+    assert row["decision"] == "throughput → rendimiento"
+    assert (row["resolved"], row["introduced"], row["net"]) == ("1", "1", "0"), row
+    assert "prose:english:pools" in result.stderr
+    # La siguiente medición se compara contra ésta, no contra la iteración: sin
+    # cambios da 0/0/0; contra la iteración daría 1 resuelta y 1 introducida.
+    # (La primera versión de esta prueba corregía «pools» aquí y no discriminaba:
+    # contra la iteración también daba 1 resuelta y 0 introducidas.)
+    loop(repo, "measure", "--decision", "repetición sin cambios", cache=tmp_path / "c")
+    row = dict(zip(header.split("\t"), table.read_text(encoding="utf-8").splitlines()[-1].split("\t")))
+    assert (row["resolved"], row["introduced"], row["net"], row["after"]) == ("0", "0", "0", "1"), row
+    # Un neto negativo detiene: la decisión se revierte antes de la siguiente.
+    es.write_text(es.read_text(encoding="utf-8").replace("del rendimiento", "del throughput"), encoding="utf-8")
+    result = loop(repo, "measure", "--decision", "rendimiento → throughput", cache=tmp_path / "c")
+    assert result.returncode == 4, result.stdout + result.stderr
+    assert "se revierte" in result.stderr
+    assert len(list((repo / ".claude/workbench/translation/measures").glob("*.jsonl"))) == 3
