@@ -44,6 +44,13 @@ compartidos se traducen una vez por curso (su `.es-mx.tex`), antes que las
 notas que los incluyen. Las 338 imágenes son una pista aparte: el script se
 parametriza por idioma y regenera `*.es-mx.png`.
 
+`prepare` sigue los `\input`/`\include` de cada nota, también los anidados y
+resueltos desde el directorio de la nota, que es desde donde XeLaTeX los
+resuelve. Cada archivo incluido es una unidad con su propio `.es-mx.tex`, y la
+nota apunta a él, también dentro de `\IfFileExists`. Un capítulo no pasa por
+`localize` (sus reglas de metadatos caían sobre la prosa) y no se compila solo:
+lo compila la nota que lo incluye.
+
 ## 2. Lo que se automatiza antes de traducir
 
 El traductor es la pieza cara y la única con juicio. Todo lo que es regla fija

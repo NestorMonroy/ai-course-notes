@@ -837,7 +837,6 @@ def test_a_note_one_level_deep_is_its_own_course(tmp_path: Path) -> None:
     assert row[1] == "solo-course", row
 
 
-@pytest.mark.xfail(strict=True, reason="mitad roja persistida: prepare aún no traduce capítulos incluidos")
 def test_included_chapters_are_translated_and_verified_as_units(tmp_path: Path) -> None:
     # `self-evolving-agents-2026` incluye 9 capítulos con chino; `prepare` solo
     # traducía la nota, y `\IfFileExists{x.tex}` seguía mirando el capítulo zh.
@@ -855,6 +854,10 @@ def test_included_chapters_are_translated_and_verified_as_units(tmp_path: Path) 
     es_chapter = chapter.with_name("ch01-chapter.es-mx.tex")
     assert es_chapter.is_file() and "El entrenamiento usa checkpoint." in es_chapter.read_text(encoding="utf-8")
     assert result.returncode == 0, result.stdout + result.stderr
+    # Un capítulo no compila solo (no tiene `\\documentclass`): lo compila su nota.
+    compiled = tmp_path / "k.jsonl"
+    loop(repo, "verify", "--compile", "--out", str(compiled), str(es_chapter), cache=tmp_path / "c3")
+    assert "compile:" not in compiled.read_text(encoding="utf-8")
     # Un capítulo con chino sin traducir sale en la verificación.
     es_chapter.write_text(chapter_zh, encoding="utf-8")
     out = tmp_path / "s.jsonl"

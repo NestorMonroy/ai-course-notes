@@ -79,9 +79,31 @@ def has_residual_han(text: str) -> bool:
     return any(HAN.search(PARENTHESIZED.sub("", line)) for line in text.splitlines())
 
 
+INCLUDE = re.compile(r"\\(?:input|include)\{([^}]+?)\}")
+
+
 def map_inputs(text: str) -> str:
-    return re.sub(r"\\(input|include)\{([^}]+?)(?<!\.es-mx)(\.tex)?\}",
+    text = re.sub(r"\\(input|include)\{([^}]+?)(?<!\.es-mx)(\.tex)?\}",
                   lambda m: f"\\{m.group(1)}{{{m.group(2)}.es-mx.tex}}", text)
+    # `\IfFileExists{x.tex}{\input{x.tex}}{}` miraba el capítulo zh: la condición
+    # no dependía de que existiera su traducción.
+    return re.sub(r"\\IfFileExists\{([^}]+?)(?<!\.es-mx)\.tex\}",
+                  lambda m: f"\\IfFileExists{{{m.group(1)}.es-mx.tex}}", text)
+
+
+def included_files(text: str, base: Path) -> list[Path]:
+    """Los archivos que la nota incluye con `\\input`/`\\include`, desde `base`.
+
+    XeLaTeX los resuelve desde el directorio de la nota principal, también los
+    anidados; por eso la base es siempre la de la nota, no la del capítulo.
+    """
+    found = []
+    for match in INCLUDE.finditer(text):
+        name = match.group(1)
+        path = base / (name if name.endswith(".tex") else name + ".tex")
+        if path.is_file() and not path.name.endswith(".es-mx.tex"):
+            found.append(path.resolve())
+    return found
 
 
 def split_body(body: str) -> list[str]:
@@ -123,10 +145,21 @@ def cmd_prepare(args) -> int:
     bench = args.bench
     (bench / "chunks").mkdir(parents=True, exist_ok=True)
     units, notes = [], []
-    for zh in args.notes:
-        zh = Path(zh).resolve()
+    # Cada nota con sus capítulos incluidos: un capítulo es una unidad más, con
+    # su propio `.es-mx.tex`, y la nota apunta a él por `map_inputs`.
+    queue = [(Path(zh).resolve(), Path(zh).resolve().parent) for zh in args.notes]
+    seen: set[Path] = set()
+    while queue:
+        zh, base = queue.pop(0)
+        if zh in seen:
+            continue
+        seen.add(zh)
+        original = zh.read_text(encoding="utf-8")
+        queue += [(child, base) for child in included_files(original, base)]
         note_id = rel(zh, root)[:-len(".tex")].replace("/", "__")
-        text = map_inputs(localize(zh.read_text(encoding="utf-8")))
+        # `localize` reescribe preámbulos; en un capítulo sin `\documentclass` sus
+        # reglas de metadatos caían sobre la prosa (`。` → `.` en el cuerpo).
+        text = map_inputs(localize(original) if "\\documentclass" in original else original)
         marker = "\\begin{document}"
         cut = text.find(marker)
         if cut >= 0:
@@ -153,7 +186,7 @@ def cmd_prepare(args) -> int:
             zh_chunk = out / f"{k:03d}.zh.tex"
             zh_chunk.write_text(chunk, encoding="utf-8")
             units.append("\t".join([rel(zh, root), note_id, f"{k:03d}", str(zh_chunk), str(out / f"{k:03d}.es.tex")]))
-        notes.append("\t".join([rel(zh, root), note_id, str(es_path(zh))]))
+        notes.append("\t".join([rel(zh, root), note_id, str(es_path(zh)), str(base)]))
     (bench / "units.tsv").write_text("\n".join(units) + "\n", encoding="utf-8")
     (bench / "notes.tsv").write_text("\n".join(notes) + "\n", encoding="utf-8")
     print(f"prepare: {len(notes)} nota(s), {len(units)} fragmento(s) en {bench}")
@@ -390,7 +423,7 @@ def cmd_assemble(args) -> int:
     rows = [l.split("\t") for l in (args.bench / "units.tsv").read_text(encoding="utf-8").splitlines() if l.strip()]
     notes = [l.split("\t") for l in (args.bench / "notes.tsv").read_text(encoding="utf-8").splitlines() if l.strip()]
     missing = []
-    for _zh, note_id, target in notes:
+    for _zh, note_id, target, *base in notes:
         chunks = [r for r in rows if r[1] == note_id]
         absent = [r[4] for r in chunks if not Path(r[4]).is_file()]
         if absent:
@@ -401,7 +434,9 @@ def cmd_assemble(args) -> int:
         head = head_file.read_text(encoding="utf-8")
         body = "".join(Path(r[4]).read_text(encoding="utf-8")
                        for r in sorted((r for r in chunks if r[2] != "head"), key=lambda r: r[2]))
-        Path(target).write_text(localized_figures(head + body, Path(target).parent), encoding="utf-8")
+        # Las figuras de un capítulo se resuelven desde la nota que lo incluye.
+        figures_dir = Path(base[0]) if base else Path(target).parent
+        Path(target).write_text(localized_figures(head + body, figures_dir), encoding="utf-8")
     for m in missing:
         print(f"assemble: falta el fragmento traducido {m}", file=sys.stderr)
     print(f"assemble: {len(notes) - len({Path(m).parent for m in missing})} nota(s) ensamblada(s)")
@@ -476,7 +511,8 @@ def verify_notes(notes: list[Path], compile_: bool, root: Path, lexicons) -> tup
             hits += 1
             continue
         zh_text = zh.read_text(encoding="utf-8")
-        found = compare(zh_text, es.read_text(encoding="utf-8"), DEFAULT_GLOSSARY)
+        es_text = es.read_text(encoding="utf-8")
+        found = compare(zh_text, es_text, DEFAULT_GLOSSARY)
         # El inglés que la nota zh ya escribe es término técnico que se queda
         # (`reward model`, opciones de tcolorbox); solo es defecto el que
         # introdujo la traducción.
@@ -510,7 +546,8 @@ def verify_notes(notes: list[Path], compile_: bool, root: Path, lexicons) -> tup
         if not ZH.count("readfig_strict", zh_text):
             inherited[READFIG_ERROR] = ""
         found += [(key, line) for key, line in coverage_errors(es).items() if key not in inherited]
-        if compile_:
+        if compile_ and "\\documentclass" in es_text:
+            # Un capítulo incluido no compila solo: lo compila la nota que lo incluye.
             found += compile_signal(es)
         note_rows = [{"note": rel(es, root), "signal": s, "detail": d} for s, d in found]
         cached.write_text(json.dumps(note_rows, ensure_ascii=False), encoding="utf-8")
@@ -900,7 +937,7 @@ def cmd_retranslate(args) -> int:
     units = [l.split("\t") for l in (bench / "units.tsv").read_text(encoding="utf-8").splitlines() if l.strip()]
     notes = [l.split("\t") for l in (bench / "notes.tsv").read_text(encoding="utf-8").splitlines() if l.strip()]
     root = Path.cwd()
-    note_ids = {rel(Path(target), root): note_id for _zh, note_id, target in notes}
+    note_ids = {rel(Path(target), root): note_id for _zh, note_id, target, *_base in notes}
     out, marked = [], set()
     routes = classify(root, args.memory)
     for row in rows:
