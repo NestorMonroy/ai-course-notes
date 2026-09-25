@@ -1,0 +1,111 @@
+\section{Autoaprendizaje recursivo y Agent Experience escalable}
+
+El informe de Zhang Shaokun (张少坤) divide al self-evolving Agent en dos condiciones que deben cumplirse simultáneamente: primera, que el sistema pueda mejorar recursivamente sus propios componentes aprendibles; segunda, que los datos de entrenamiento provengan de la interacción on-policy entre el Agent actual y el entorno, en lugar de copiar indiscriminadamente trayectorias de otros modelos. La primera mitad usa AgentOptimizer para mostrar que el harness también puede ser objeto de optimización; la segunda mitad usa ProRL Agent Server para discutir cómo convertir el rollout a gran escala en infraestructura reutilizable.
+
+\sourcefigure{0.93}{lecture02/slides-images/slide-003-00090s.jpg}{Las dos condiciones del self-evolving Agent: mejora recursiva y experiencia propia}{00:01:30--00:03:45}
+
+\begin{importantbox}{Por qué es necesario enfatizar la own experience}
+El mismo lote de trayectorias fuera de línea no tiene el mismo valor de aprendizaje para distintos Agents: algunas muestras ya son demasiado simples, y otras superan por mucho la capacidad actual. La on-policy experience expone de manera natural los puntos débiles de la política actual y forma un curriculum que cambia junto con la capacidad; esta es también la atracción central de Agentic RL frente a los imitation data estáticos.
+\end{importantbox}
+
+\subsection{El Agent no solo tiene model, también tiene harness}
+
+El informe escribe al Agent moderno como $\text{Agent}=\text{Model}+\text{Harness}$. El Model aporta las capacidades de lenguaje, razonamiento y decisión; el harness, en cambio, incluye el system prompt, el tool schema, la memory, el workflow, la compresión de observaciones, la recuperación de errores y la lógica de control que invoca al modelo. Aun con el mismo modelo base, harnesses distintos producen distribuciones de trayectorias completamente diferentes.
+
+\sourcefigure{0.90}{lecture02/slides-images/slide-004-00225s.jpg}{El Model y el harness determinan juntos el comportamiento del Agent}{00:03:45--00:05:15}
+
+\begin{knowledgebox}{El primer principio de la Harness Engineering}
+El harness no es código pegamento que «envuelve una API», sino el espacio de acción y el límite de información del Agent. Si no se le da al Agent de programación un shell, un editor y herramientas de prueba, no podrá completar tareas de software reales; si se le dan descripciones de herramientas ambiguas o contradictorias, la capacidad del modelo se consumirá en adivinar el protocolo.
+\end{knowledgebox}
+
+\subsection{AgentOptimizer: que el optimizador reescriba los componentes del Agent}
+
+AgentOptimizer trata a un Agent candidato como un objeto editable de forma iterable. El optimizador lee el prompt, la configuración de tool o el workflow actuales, observa la trayectoria de ejecución y la evaluación, y luego propone una nueva versión del componente. Este proceso forma una estructura recursiva en la que «el Agent optimizador reescribe al Agent de la tarea, y el nuevo desempeño del Agent de la tarea retroalimenta el criterio del optimizador».
+
+\sourcefigure{0.90}{lecture02/slides-images/slide-005-00315s.jpg}{La relación anidada entre el optimizer y el Agent optimizado dentro de AgentOptimizer}{00:05:15--00:06:45}
+
+\sourcefigure{0.92}{lecture02/slides-images/slide-007-00465s.jpg}{El ciclo cerrado de generación, ejecución, evaluación y revisión de AgentOptimizer}{00:07:45--00:09:15}
+
+Si se denota el parámetro del harness como $h$ y la función de evaluación como $R$, el proceso de optimización puede abstraerse como
+
+$$
+h_{k+1}=\mathcal{O}\!\left(h_k,\tau_k,R(\tau_k)\right),
+$$
+
+donde $\tau_k$ es la trayectoria producida en la ronda $k$ usando $h_k$, y $\mathcal{O}$ es el optimizer impulsado por un modelo de lenguaje. Aquí no se exige que $h$ sea diferenciable; puede ser un prompt en lenguaje natural, una descripción de herramientas o un flujo de control. Por ello, el optimizador puede tratar componentes discretos del sistema que el descenso de gradiente tradicional no puede actualizar directamente.
+
+\sourcefigure{0.92}{lecture02/slides-images/slide-008-00555s.jpg}{La evolución del desempeño de entrenamiento y de prueba a lo largo de las iteraciones en el proceso de optimización recursiva}{00:09:15--00:10:00}
+
+\begin{warningbox}{La mejora recursiva no garantiza un incremento monótono}
+La evaluación de trayectorias tiene ruido, y el optimizer también puede sobreajustarse a un pequeño número de tareas. Las fluctuaciones en la figura nos recuerdan que cada ronda de modificación debe conservar su versión, un conjunto de validación independiente y una ruta de reversión; no se debe sobrescribir un harness ya validado solo porque la puntuación subió una vez.
+\end{warningbox}
+
+El informe concluye que en AgentOptimizer se observan mejoras a lo largo de varias rondas incluso con modelos relativamente tempranos, lo que muestra que la modificación recursiva no depende por completo del modelo base más fuerte; pero al mismo tiempo, esto expone problemas de eficiencia de muestra y de estabilidad. Para extender este mecanismo a un Agentic RL complejo, se necesita una infraestructura de rollout con mayor rendimiento y menos invasiva.
+
+\sourcefigure{0.91}{lecture02/slides-images/slide-010-00690s.jpg}{Las principales conclusiones experimentales y limitaciones de AgentOptimizer}{00:11:30--00:13:15}
+
+\subsection{Por qué el cuello de botella de Agentic RL está en el rollout}
+
+En el RL tradicional para modelos de lenguaje, un muestreo consiste principalmente en token generation; el Agent rollout, en cambio, incluye múltiples llamadas al modelo, ejecución de herramientas, espera del entorno, reintentos por errores y contexto dinámico. La longitud de las trayectorias varía enormemente entre tareas, y un solo entorno bloqueado puede retrasar todo el lote síncrono.
+
+\sourcefigure{0.92}{lecture02/slides-images/slide-011-00795s.jpg}{El flujo de datos básico de Agentic RL, del trainer al rollout y al entorno}{00:13:15--00:14:30}
+
+\begin{knowledgebox}{El significado de Rollout}
+El rollout es el proceso de muestrear trayectorias completas de interacción a partir de la policy actual. El entrenador debe conservar, al final, el input token, el response token, el log probability, el reward y la pertenencia a la trayectoria de cada LLM call; la herramienta en sí no necesita ser diferenciable, pero su efecto sobre el prompt y el reward posteriores debe registrarse.
+\end{knowledgebox}
+
+El diseño clave de ProRL Agent Server consiste en desacoplar el agent harness del trainer. Este intercepta las llamadas estándar a la API del servicio del modelo que hace el harness, registra los tokens y los metadatos necesarios para el entrenamiento, y luego enruta la solicitud al inference engine. Así, el código del Agent existente no tiene que reescribirse como un entorno específico de algún marco de trabajo de RL.
+
+\sourcefigure{0.94}{lecture02/slides-images/slide-012-00870s.jpg}{ProRL Agent Server como capa intermedia entre el harness y la pila de entrenamiento}{00:14:30--00:17:45}
+
+\subsection{Arquitectura escalable: entornos asíncronos, inferencia centralizada y fusión de trayectorias}
+
+Los sistemas a gran escala deben resolver simultáneamente tres tipos de desequilibrio: el desequilibrio en el tiempo de ejecución del entorno, el desequilibrio en la longitud de generación del modelo y el desequilibrio en la atribución de las múltiples LLM call dentro del mismo episode. El informe adopta una service architecture que conecta al rollout worker, el inference engine, el environment y el trainer mediante una interfaz estable, de modo que un entorno lento no obligue a todas las muestras a esperar de forma síncrona.
+
+\sourcefigure{0.94}{lecture02/slides-images/slide-014-01185s.jpg}{La forma de escalar con múltiples entornos, múltiples harnesses y un servicio de inferencia compartido}{00:19:45--00:21:30}
+
+\sourcefigure{0.94}{lecture02/slides-images/slide-015-01290s.jpg}{La captura de tokens y la organización de trayectorias en la cadena de llamadas del Agent}{00:21:30--00:23:00}
+
+\begin{importantbox}{Cómo atraviesa realmente el gradiente a las herramientas}
+La sesión de preguntas y respuestas aclaró que el gradiente no necesita atravesar el shell, el navegador ni las herramientas de Python. El policy gradient solo deriva respecto al log probability de los tokens generados por el modelo; el resultado de la ejecución de la herramienta entra como observation en la siguiente llamada al modelo. Lo verdaderamente difícil es conservar correctamente la correspondencia entre cada call y el episode reward, no hacer que la herramienta sea diferenciable.
+\end{importantbox}
+
+Si una trayectoria está compuesta por múltiples llamadas al modelo, el objetivo puede escribirse como
+
+$$
+\nabla_\theta J(\theta)
+=\mathbb{E}_{\tau\sim\pi_\theta}
+\left[\sum_{t\in\mathcal{M}(\tau)} A_t\nabla_\theta\log\pi_\theta(y_t\mid x_t)\right],
+$$
+
+donde $\mathcal{M}(\tau)$ solo incluye los pasos de generación del modelo, $x_t$ es el contexto que incluye la tool observation, $y_t$ es el response token, y $A_t$ es el advantage estimado a partir del reward final o de proceso. La llamada a la herramienta modifica la trayectoria, pero no aparece directamente en los parámetros diferenciables.
+
+\sourcefigure{0.93}{lecture02/slides-images/slide-016-01380s.jpg}{Rollout paralelo, programación de la inferencia y retorno de las muestras de entrenamiento}{00:23:00--00:24:30}
+
+\subsection{Cómo deben interpretarse los resultados experimentales}
+
+El informe valida el modelo entrenado en software engineering task y en distintos Agent harnesses. Aquí, el gain no significa que «la arquitectura del servidor en sí misma haya elevado la puntuación del benchmark», sino que la infraestructura permite que el entrenamiento on-policy se ejecute de manera estable, que el model entrenado se adapte mejor a harnesses complejos y que, finalmente, supere al base model bajo el mismo harness.
+
+\sourcefigure{0.92}{lecture02/slides-images/slide-017-01470s.jpg}{Resultados de rendimiento de la infraestructura de rollout y de estabilidad del entrenamiento}{00:24:30--00:25:45}
+
+\sourcefigure{0.92}{lecture02/slides-images/slide-019-01590s.jpg}{Comparación del efecto del entrenamiento entre distintos Agent harnesses}{00:26:30--00:27:30}
+
+\begin{warningbox}{Los infra result y los algorithm result deben separarse}
+Un mayor rendimiento solo indica que se puede recolectar experiencia más rápido; la mejora del benchmark también depende del reward, la estrategia de muestreo, el algoritmo de entrenamiento y la distribución de tareas. Al evaluar el sistema conviene informar por separado la eficiencia del sistema, la eficiencia de los datos, la capacidad final y el costo, para evitar atribuir por completo la mejora de una sola capa al «Agentic RL».
+\end{warningbox}
+
+\sourcefigure{0.93}{lecture02/slides-images/slide-020-01650s.jpg}{El flujo de despliegue de ProRL y sus interfaces reutilizables}{00:27:30--00:28:45}
+
+\subsection{Resumen de la sección}
+
+Esta sección forma un ciclo cerrado entre dos extremos: «qué se automodifica» y «cómo obtener la experiencia propia a escala». AgentOptimizer muestra que el prompt, el tool y el workflow pueden actualizarse de forma recursiva mediante un optimizer no diferenciable; ProRL, por su parte, unifica las llamadas a LLM de harnesses heterogéneos en un rollout entrenable. Solo al combinar ambos, el sistema puede llegar a recolectar de manera continua la experiencia que la política actual realmente necesita, y convertir esa experiencia en la siguiente versión del modelo o del harness.
+
+\subsection{Puntos clave de la práctica de ingeniería}
+
+\begin{enumerate}
+    \item Llevar control de versiones por separado del model, el harness, el reward y el entorno, para evitar la imposibilidad de atribución;
+    \item los registros de rollout deben conservar el mapeo entre episode, LLM call, tool result y token span;
+    \item usar colas asíncronas para aislar los entornos lentos, de modo que los episodes de cola larga no bloqueen todas las GPU;
+    \item monitorear por separado el rendimiento, el costo por muestra efectiva, la estabilidad del entrenamiento y la tasa final de éxito en la tarea;
+    \item toda modificación automática del harness debe pasar por una validación independiente y un despliegue reversible.
+\end{enumerate}
