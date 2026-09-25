@@ -83,6 +83,9 @@ def compare(zh_text: str, es_text: str, glossary: Path) -> list[tuple[str, str]]
         ("urls", r"\\(?:href|url)\{([^}]+)\}"),
     ]:
         a, b = multiset(pattern, zh), multiset(pattern, es)
+        if key == "images":
+            # `x.es-mx.png` es la misma figura que `x.png`, con su texto traducido.
+            b = type(b)(re.sub(r"\.es-mx(\.\w+)$", r"\1", k) for k in b.elements())
         if a != b:
             missing = sorted((a - b).elements())[:3]
             extra = sorted((b - a).elements())[:3]
@@ -105,7 +108,9 @@ def compare(zh_text: str, es_text: str, glossary: Path) -> list[tuple[str, str]]
         out.append(("parity:residual-han", f"{len(residual)} linea(s); primera: {residual[0][1][:80]}"))
 
     for term in keep_terms(glossary):
-        pattern = re.compile(rf"(?<![A-Za-z]){re.escape(term)}(?![A-Za-z])", re.I)
+        # El plural inglés cuenta como el término: el chino no flexiona y la
+        # traducción escribe, bien, «tokens» donde el original dice «token».
+        pattern = re.compile(rf"(?<![A-Za-z]){re.escape(term)}s?(?![A-Za-z])", re.I)
         if pattern.search(zh) and not pattern.search(es):
             out.append((f"parity:keep-term:{term.lower()}", "esta en la nota zh y no en la es-MX"))
     return out

@@ -301,9 +301,9 @@ def test_usage_sums_tokens_by_component_and_measures_letters_per_han(tmp_path: P
 def test_english_the_original_already_uses_is_not_a_translation_defect(tmp_path: Path) -> None:
     # La nota zh ya escribe `reward model` en ingles: es termino tecnico que se
     # queda. `weights` no esta en el original: lo introdujo la traduccion.
-    source = NOTE.replace("小结。", "小结：reward model 和 worker 很重要。")
-    dictionary = dict(DICTIONARY, **{"小结：reward model 和 worker 很重要。":
-                                     "Resumen: el reward model y los workers importan, igual que los weights."})
+    source = NOTE.replace("小结。", "小结：reward model 和 worker 追求 precision。")
+    dictionary = dict(DICTIONARY, **{"小结：reward model 和 worker 追求 precision。":
+                                     "Resumen: el reward model y los workers buscan precision, igual que los weights."})
     repo, note, runner = setup(tmp_path, dictionary, source)
     bench = tmp_path / "bench"
     loop(repo, "prepare", "--bench", str(bench), str(note))
@@ -316,6 +316,8 @@ def test_english_the_original_already_uses_is_not_a_translation_defect(tmp_path:
     assert "prose:english:reward" not in signals and "prose:english:model" not in signals
     # El plural ingles de un termino del original sigue siendo ese termino.
     assert "prose:english:workers" not in signals
+    # `precision` en inglés viene del original: no es «precisión» sin tilde.
+    assert "prose:unaccented:precision" not in signals
 
 
 def test_compile_reports_an_error_even_when_a_pdf_comes_out(tmp_path: Path) -> None:
@@ -376,3 +378,24 @@ def test_cycle_stops_before_assembling_when_a_chunk_is_missing(tmp_path: Path) -
     # La negativa es declarada, no un traceback: un choque tambien dejaria sin nota.
     assert "falta el fragmento traducido" in result.stderr and "Traceback" not in result.stderr
     assert not note.with_name("lecture01-notes.es-mx.tex").exists()
+
+
+def test_assemble_points_to_the_es_mx_figure_when_it_exists(tmp_path: Path) -> None:
+    source = NOTE.replace("曲线。", "曲线。\n\\includegraphics[width=0.8\\linewidth]{figures/curve.png}\n"
+                                    "\\includegraphics{figures/slide.png}")
+    repo, note, runner = setup(tmp_path, source=source)
+    figures = note.parent / "figures"
+    figures.mkdir()
+    for name in ("curve.png", "curve.es-mx.png", "slide.png"):
+        (figures / name).write_bytes(b"png")
+    bench = tmp_path / "bench"
+    loop(repo, "prepare", "--bench", str(bench), str(note))
+    loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    assert loop(repo, "assemble", "--bench", str(bench)).returncode == 0
+    es = note.with_name("lecture01-notes.es-mx.tex")
+    text = es.read_text(encoding="utf-8")
+    # La figura con texto horneado tiene hermana es-MX; la captura sin ella se queda.
+    assert "{figures/curve.es-mx.png}" in text and "{figures/slide.png}" in text
+    out = bench / "signals.jsonl"
+    loop(repo, "verify", "--out", str(out), str(es), cache=tmp_path / "cache")
+    assert "parity:images" not in out.read_text(encoding="utf-8")

@@ -28,8 +28,15 @@ español de México. El `Item` al final es la ruta del fragmento en chino.
 - **Significante contra significado:** traduce lo que el texto quiere decir, no
   la forma de las palabras. Un término técnico no se sustituye por una palabra
   española que se le parece y nombra otra cosa.
-- Los términos técnicos se quedan en inglés, como ya están en la nota en chino.
+- Los términos técnicos se quedan en inglés **solo si la nota en chino ya los
+  escribe en inglés** o si el glosario dice `keep`. Si el original escribe el
+  término en chino (机器学习, 数据集), se traduce al español (aprendizaje
+  automático, conjunto de datos); no se sustituye por su nombre en inglés.
 - Nombres propios en chino: pinyin con el original entre paréntesis la primera
   vez que aparecen en el fragmento, por ejemplo `Yao Shunyu (姚顺雨)`.
 - Cifras con punto decimal y coma de millares (`2,021`, `0.5`).
-- Puntuación del español: `: ; , .` en lugar de `：；，。`.
+- Puntuación del español: `: ; , .` en lugar de `：；，。`. Las comillas del
+  original (`“ ”`, `「 」`) se escriben «así».
+- No uses comandos de paquetes que la nota no carga (`\enquote`, `\textquote`);
+  si el original no usa un comando, la traducción tampoco.
+- Escribe con todas las tildes y la eñe: `traducción`, `señal`, `también`.

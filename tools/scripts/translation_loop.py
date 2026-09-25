@@ -289,6 +289,17 @@ def cmd_usage(args) -> int:
 
 # --- assemble -------------------------------------------------------------
 
+GRAPHIC = re.compile(r"(\\includegraphics(?:\[[^\]]*\])?\{)([^}]+?)(\.png)(\})")
+
+
+def localized_figures(text: str, note_dir: Path) -> str:
+    """Apunta a `<figura>.es-mx.png` cuando existe (texto horneado traducido)."""
+    def swap(m: re.Match) -> str:
+        sibling = f"{m.group(2)}.es-mx{m.group(3)}"
+        return m.group(1) + sibling + m.group(4) if (note_dir / sibling).is_file() else m.group(0)
+    return GRAPHIC.sub(swap, text)
+
+
 def cmd_assemble(args) -> int:
     rows = [l.split("\t") for l in (args.bench / "units.tsv").read_text(encoding="utf-8").splitlines() if l.strip()]
     notes = [l.split("\t") for l in (args.bench / "notes.tsv").read_text(encoding="utf-8").splitlines() if l.strip()]
@@ -304,7 +315,7 @@ def cmd_assemble(args) -> int:
         head = head_file.read_text(encoding="utf-8")
         body = "".join(Path(r[4]).read_text(encoding="utf-8")
                        for r in sorted((r for r in chunks if r[2] != "head"), key=lambda r: r[2]))
-        Path(target).write_text(head + body, encoding="utf-8")
+        Path(target).write_text(localized_figures(head + body, Path(target).parent), encoding="utf-8")
     for m in missing:
         print(f"assemble: falta el fragmento traducido {m}", file=sys.stderr)
     print(f"assemble: {len(notes) - len({Path(m).parent for m in missing})} nota(s) ensamblada(s)")
@@ -376,6 +387,11 @@ def verify_notes(notes: list[Path], compile_: bool, root: Path, lexicons) -> tup
                 if word in inherited_english or prose.singular(word) in inherited_english:
                     continue
                 found.append((f"prose:{k}", ""))
+            elif k.startswith("unaccented:"):
+                # Una palabra inglesa del original (`precision`) no es una
+                # palabra española sin tilde (`precisión`).
+                if k.split(":", 1)[1] not in inherited_english:
+                    found.append((f"prose:{k}", ""))
             elif k.startswith("spanglish:"):
                 found.append((f"prose:{k}", ""))
             elif "::" in k:

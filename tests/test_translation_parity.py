@@ -107,6 +107,14 @@ def test_keep_term_translated_away_is_reported(tmp_path: Path) -> None:
     assert "parity:keep-term:token" in got and "parity:keep-term:embedding" in got
 
 
+def test_the_english_plural_of_a_kept_term_counts_as_the_term(tmp_path: Path) -> None:
+    # El chino no flexiona: el original dice «token» y la traducción, bien,
+    # «Cada uno de los tokens». No es un término traducido fuera.
+    es = ES.replace("Cada token tiene su embedding.", "Todos los tokens tienen sus embeddings.")
+    got = signals(check(tmp_path, es))
+    assert "parity:keep-term:token" not in got and "parity:keep-term:embedding" not in got, got
+
+
 def test_ctex_left_in_the_translation_is_reported(tmp_path: Path) -> None:
     es = ES.replace("\\usepackage{polyglossia}", "\\usepackage[fontset=fandol]{ctex}")
     assert "parity:ctex" in signals(check(tmp_path, es))

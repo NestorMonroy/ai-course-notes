@@ -186,3 +186,46 @@ def test_the_english_plural_of_a_kept_term_is_not_reported(tmp_path: Path) -> No
     result = run(str(note(tmp_path, "Se comparan varios prompts y sus weights.")), glossary=glossary)
     assert "english:prompts" not in result.stdout, result.stdout
     assert "english:weights" in result.stdout
+
+
+def test_spanish_verb_forms_that_look_english_are_not_english(tmp_path: Path) -> None:
+    body = ("Que el modelo critique, revise y compare; que complete, explore y añada el diseño "
+            "del año. Mide los outputs.")
+    result = run(str(note(tmp_path, body)))
+    for word in ("compare", "complete", "explore", "añada", "diseño", "año"):
+        assert f"english:{word}" not in result.stdout and f"spanglish:{word}" not in result.stdout, result.stdout
+    # `outputs` es inglés aunque la tabla de lemas lo lleve a `output`: el
+    # diccionario es_MX no lo acepta.
+    assert "english:outputs" in result.stdout
+
+
+def test_a_spanish_infinitive_is_not_spanglish(tmp_path: Path) -> None:
+    body = "Conviene externalizar la señal; no hay que deployear ni testear el código."
+    result = run(str(note(tmp_path, body)))
+    assert "spanglish:externalizar" not in result.stdout, result.stdout
+    assert "spanglish:deployear" in result.stdout and "spanglish:testear" in result.stdout
+
+
+def test_a_prefix_on_an_attested_word_is_not_invented(tmp_path: Path) -> None:
+    body = ("La autoverificación, el posentrenamiento, las subexpresiones y la retropropagación "
+            "de la señal; la democión no.")
+    result = run(str(note(tmp_path, body)))
+    for word in ("autoverificación", "posentrenamiento", "subexpresiones", "retropropagación"):
+        assert word not in result.stdout, result.stdout
+    assert "democión" in result.stdout
+
+
+def test_spanish_written_without_accents_or_enie_is_reported(tmp_path: Path) -> None:
+    # La prosa es-MX sin tildes ni eñe es un defecto, no una variante: el
+    # diccionario es_MX rechaza «traduccion» y «espanol» y acepta sus formas.
+    body = "La traduccion al espanol de la senal. La traducción al español de la señal."
+    result = run(str(note(tmp_path, body)))
+    for word in ("traduccion", "espanol", "senal"):
+        assert f"unaccented:{word}" in result.stdout, result.stdout
+    for word in ("traducción", "español", "señal"):
+        assert f"unaccented:{word}" not in result.stdout
+    # El léxico trae basura con tildes o símbolos (`reading→`, `model` con un
+    # carácter roto): una palabra inglesa o una letra suelta no es «sin tildes».
+    other = run(str(note(tmp_path, "El reading del model of h y p con la canción.", "otra.es-mx.tex")))
+    for word in ("reading", "model", "of", "h", "p"):
+        assert f"unaccented:{word}" not in other.stdout, other.stdout

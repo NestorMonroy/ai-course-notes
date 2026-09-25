@@ -36,8 +36,10 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
+import unicodedata
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
@@ -138,6 +140,75 @@ def attested(word: str, lexicon: dict) -> bool:
     if word.endswith("es") and word[:-2] in lexicon:
         return True
     return word.endswith("s") and word[:-1] in lexicon
+
+
+# Prefijos cultos del espanol que se unen a una palabra atestiguada sin volverla
+# inventada: `autoverificación`, `posentrenamiento`, `subexpresiones`,
+# `retropropagación` (fase 2, cs329a). Lista cerrada: `re-`, `de-`, `des-` e
+# `in-` quedan fuera porque casarian con demasiadas palabras inventadas.
+PREFIXES = ("anti", "auto", "co", "contra", "hiper", "inter", "intra", "macro", "meta", "micro",
+            "multi", "pos", "post", "pre", "retro", "semi", "sobre", "sub", "super")
+PREFIX_BASE_MIN = 5
+
+
+def prefixed_attested(word: str, es: dict) -> bool:
+    """¿Es prefijo culto + una palabra que el corpus atestigua?"""
+    return any(word.startswith(p) and len(word) - len(p) >= PREFIX_BASE_MIN and attested(word[len(p):], es)
+               for p in PREFIXES)
+
+
+# Construido desde las fuentes de RLA-ES (`tools/lang/build_hunspell_dictionary.sh`);
+# su procedencia y su commit de origen están en `tools/lang/es-mx/PROVENANCE.md`.
+HUNSPELL_DICTIONARY = LANG_DIR / "hunspell" / "es_MX"
+
+
+class SpanishDictionary:
+    """Pertenencia al español de México según hunspell es_MX (RLA-ES).
+
+    Los léxicos de spaCy dan frecuencia y lema, no pertenencia: `compare`
+    (de *comparar*) es más frecuente en inglés y `externalizar` no es clave de
+    la tabla de lemas. El diccionario de ortografía sí responde si la forma
+    existe. Se consulta en un solo proceso por escaneo (`hunspell -l`).
+    """
+
+    def __init__(self, words):
+        words = sorted({w for w in words if w})
+        if shutil.which("hunspell") is None:
+            refuse("falta hunspell; corre `bash tools/setup.sh --install`.")
+        result = subprocess.run(["hunspell", "-i", "utf-8", "-d", str(HUNSPELL_DICTIONARY), "-l"], input="\n".join(words),
+                                capture_output=True, text=True, env={**os.environ, "LANG": "C.UTF-8"})
+        self.rejected = set(result.stdout.split())
+        self.known = set(words) - self.rejected
+
+    def accepts(self, word: str) -> bool:
+        return word in self.known
+
+
+def strip_accents(word: str) -> str:
+    """`traducción` → `traduccion`, `señal` → `senal`: la forma sin tildes ni eñe."""
+    return unicodedata.normalize("NFKD", word).encode("ascii", "ignore").decode("ascii")
+
+
+_ACCENTED: dict[int, dict] = {}
+SPANISH_WORD = re.compile(r"[a-záéíóúüñ]+")
+ACCENT_MIN_LENGTH = 3
+
+
+def accented_forms(es: dict) -> dict:
+    """De la forma sin tildes a la forma acentuada más frecuente del léxico."""
+    key = id(es)
+    if key not in _ACCENTED:
+        best: dict[str, tuple[float, str]] = {}
+        for word, prob in es.items():
+            # Solo palabras españolas bien formadas: el léxico trae basura con
+            # flechas o caracteres rotos (`reading→`) y letras sueltas.
+            if len(word) < ACCENT_MIN_LENGTH or not SPANISH_WORD.fullmatch(word):
+                continue
+            bare = strip_accents(word)
+            if bare != word and (bare not in best or prob > best[bare][0]):
+                best[bare] = (prob, word)
+        _ACCENTED[key] = {bare: word for bare, (_p, word) in best.items()}
+    return _ACCENTED[key]
 
 
 def is_spanglish(word: str, es: dict, en: dict, lemmas: dict | None = None) -> bool:
@@ -251,17 +322,24 @@ def singular(word: str) -> str:
 def scan(files, es, en, forbidden, keep, root, lemmas=None):
     hits: collections.Counter = collections.Counter()
     compiled = [(form, sub, re.compile(rf"\b{re.escape(form)}\b", re.I)) for form, sub in forbidden]
-    for path in files:
-        text = prose(path.read_text(encoding="utf-8"))
+    texts = [(path, prose(path.read_text(encoding="utf-8"))) for path in files]
+    accented = accented_forms(es)
+    words = {m.group(0).lower() for _p, t in texts for m in WORD.finditer(t)}
+    dictionary = SpanishDictionary(words | {accented[w] for w in words if w in accented})
+    for path, text in texts:
         key_path = canonical_path(path, root)
         for match in WORD.finditer(text):
             raw = match.group(0)
             word = raw.lower()
-            if len(word) >= 6 and NOMINAL_SUFFIX.match(word) and word not in keep and not attested(word, es):
+            if word in accented and not dictionary.accepts(word) and dictionary.accepts(accented[word]):
+                hits[f"unaccented:{word}"] += 1
+            elif (len(word) >= 6 and NOMINAL_SUFFIX.match(word) and word not in keep and not attested(word, es)
+                    and not prefixed_attested(word, es) and not dictionary.accepts(word)):
                 hits[word] += 1
-            elif is_spanglish(word, es, en, lemmas):
+            elif not dictionary.accepts(word) and is_spanglish(word, es, en, lemmas):
                 hits[f"spanglish:{word}"] += 1
-            elif raw[0].islower() and singular(word) not in keep and word not in keep and is_english(word, es, en):
+            elif (raw[0].islower() and singular(word) not in keep and word not in keep
+                  and not dictionary.accepts(word) and is_english(word, es, en)):
                 hits[f"english:{word}"] += 1
         for form, _sub, pattern in compiled:
             found = len(pattern.findall(text))
@@ -323,11 +401,11 @@ def main(argv=None) -> int:
         print(f"{new[key]:6}  {key}")
     kinds = collections.Counter(
         "spanglish" if k.startswith("spanglish:") else "english" if k.startswith("english:")
-        else "prohibido" if "::" in k else "inventado"
+        else "sin tildes" if k.startswith("unaccented:") else "prohibido" if "::" in k else "inventado"
         for k in new
     )
     print(f"{len(new)} hallazgo(s) nuevo(s): {kinds['inventado']} inventado(s) · {kinds['prohibido']} prohibido(s) · "
-          f"{kinds['spanglish']} spanglish · {kinds['english']} en inglés sin glosario "
+          f"{kinds['spanglish']} spanglish · {kinds['sin tildes']} sin tildes o eñe · {kinds['english']} en inglés sin glosario "
           f"(alcance medido: {len(files)} archivo(s); {frozen} en baseline; léxico: {len(es)} formas es, "
           f"{len(en)} en; prohibidas: {len(forbidden)}; glosario: {len(keep)} término(s) en inglés)")
     return 1 if new else 0
