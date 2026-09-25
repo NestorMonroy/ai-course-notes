@@ -229,3 +229,10 @@ def test_spanish_written_without_accents_or_enie_is_reported(tmp_path: Path) -> 
     other = run(str(note(tmp_path, "El reading del model of h y p con la canción.", "otra.es-mx.tex")))
     for word in ("reading", "model", "of", "h", "p"):
         assert f"unaccented:{word}" not in other.stdout, other.stdout
+
+
+def test_a_prefix_doubles_the_r_of_its_base(tmp_path: Path) -> None:
+    # Ortografía: tras un prefijo que acaba en vocal, la r inicial se duplica
+    # (auto + revisión → autorrevisión). cs329a, iteración 03.
+    result = run(str(note(tmp_path, "La autorrevisión y la contrarréplica de la señal.")))
+    assert "autorrevisión" not in result.stdout and "contrarréplica" not in result.stdout, result.stdout

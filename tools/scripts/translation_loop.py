@@ -675,12 +675,19 @@ def cmd_retranslate(args) -> int:
             pattern = re.compile(re.escape(command.group(1)) + r"(?![A-Za-z])")
         else:
             text = signal[len(prefix):]
-            pattern = re.compile(rf"(?<![\w-]){re.escape(text)}(?![\w-])", re.I)
+            # La frontera es de letra, no de palabra con guion: el verificador
+            # parte «hard-coding» en `hard` y `coding` (cs329a, iteración 03).
+            pattern = re.compile(rf"(?<![^\W\d_]){re.escape(text)}(?![^\W\d_])", re.I)
+        found = False
         for unit in (u for u in units if u[1] == note_id):
             es = Path(unit[4])
             if es.is_file() and pattern.search(es.read_text(encoding="utf-8")):
                 out.append((signal, row["note"], es.name, "retranslate"))
                 marked.add(es)
+                found = True
+        if not found:
+            # Una señal que no se encuentra va a juicio: nunca desaparece de la lista.
+            out.append((signal, row["note"], "", "manual"))
     for es in marked:
         es.unlink()
     (here / "retranslate.tsv").write_text(

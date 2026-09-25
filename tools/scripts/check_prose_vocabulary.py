@@ -153,8 +153,17 @@ PREFIX_BASE_MIN = 5
 
 def prefixed_attested(word: str, es: dict) -> bool:
     """¿Es prefijo culto + una palabra que el corpus atestigua?"""
-    return any(word.startswith(p) and len(word) - len(p) >= PREFIX_BASE_MIN and attested(word[len(p):], es)
-               for p in PREFIXES)
+    for p in PREFIXES:
+        if not word.startswith(p) or len(word) - len(p) < PREFIX_BASE_MIN:
+            continue
+        base = word[len(p):]
+        # Tras un prefijo que acaba en vocal, la r inicial de la base se duplica:
+        # auto + revisión → autorrevisión.
+        if p[-1] in "aeiou" and base.startswith("rr"):
+            base = base[1:]
+        if attested(base, es):
+            return True
+    return False
 
 
 # Construido desde las fuentes de RLA-ES (`tools/lang/build_hunspell_dictionary.sh`);

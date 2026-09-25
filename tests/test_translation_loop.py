@@ -549,3 +549,23 @@ def test_prompt_cites_every_prohibited_form(tmp_path: Path) -> None:
     assert "la clave está en" in forms
     missing = [f for f in forms if f"`{f}`" not in prompt]
     assert not missing, missing[:5]
+
+
+def test_a_signal_inside_a_hyphenated_word_is_located_and_none_vanishes(tmp_path: Path) -> None:
+    # cs329a, iteración 03: `hard` y `coding` salen de «hard-coding»; el patrón
+    # no cruzaba el guion y la señal desaparecía de la lista sin ir a juicio.
+    dictionary = dict(DICTIONARY, **{"训练用 checkpoint。": "El modelo hace hard-coding del checkpoint."})
+    repo, note, runner = setup(tmp_path, dictionary)
+    loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note),
+         runner=runner, cache=tmp_path / "cache")
+    bench = repo / ".claude" / "workbench" / "translation" / "cs000"
+    signals = bench / "iterations" / "01" / "signals.jsonl"
+    rows = [json.loads(l) for l in signals.read_text(encoding="utf-8").splitlines()]
+    rows.append({"note": rows[0]["note"], "signal": "prose:english:inexistente", "detail": ""})
+    signals.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    assert loop(repo, "retranslate", "--batch", "cs000").returncode == 0
+    listed = (bench / "iterations" / "01" / "retranslate.tsv").read_text(encoding="utf-8").splitlines()[1:]
+    by_signal = {l.split("\t")[0]: l.split("\t")[3] for l in listed}
+    assert by_signal.get("prose:english:hard") == "retranslate", listed
+    assert by_signal.get("prose:english:inexistente") == "manual"
+    assert len(listed) >= len(rows)
