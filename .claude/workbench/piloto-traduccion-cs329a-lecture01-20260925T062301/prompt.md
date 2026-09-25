@@ -41,7 +41,11 @@ español de México. El `Item` al final es la ruta del fragmento en chino.
 | checkpoint | keep | — | estado guardado de los parámetros de un modelo durante o después del entrenamiento | puesto fronterizo|punto de comprobación |
 | embedding | keep | — | representación vectorial densa de un token, una palabra u otro objeto | imbibición |
 | fine-tuning | keep | — | ajuste de un modelo preentrenado con datos de una tarea específica | — |
+| iterable | translate | iterable | que puede repetirse por iteraciones; adjetivo regular de «iterar» | — |
+| observability | translate | observabilidad | capacidad de inferir el estado interno de un sistema a partir de sus salidas | — |
+| pre-training | translate | preentrenamiento | entrenamiento inicial de un modelo sobre un corpus general, antes de ajustarlo a una tarea | — |
 | prompt | keep | — | texto de entrada con el que se le indica una tarea a un modelo de lenguaje | incitador |
+| prompting | keep | — | técnica de formular el prompt para obtener una conducta del modelo | incitar |
 | token | keep | — | unidad mínima en la que el tokenizer divide el texto | criptoficha |
 | tokenization | translate | tokenización | división del texto en tokens, la operación que realiza el tokenizer | — |
 | transformer | keep | — | arquitectura de red neuronal basada en atención (Vaswani et al., 2017) | transformador de potencia|transformador |

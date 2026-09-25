@@ -30,3 +30,29 @@ que también cuentan, así que no es todavía el factor de prosa (4.38) del perf
     original o calcos que hay que revisar.
 
   Esto es la entrada de la memoria y del GATE A.
+
+## Revisión visual y lo que destapó
+
+1. **Un PDF truncado se aceptaba.** El primer PDF tenía 16 páginas con
+   XeLaTeX saliendo con 1: una coma española partía la clave `title=#1` de
+   una caja (838 definiciones en 275 archivos). `verify --compile` lo daba por
+   bueno porque existía el PDF. Se corrigió en `813c624`: los títulos van entre
+   llaves y el veredicto sale de las líneas `! ` del log. Con eso el PDF tiene
+   22 páginas y 0 errores (`qa/contact-sheet.png`).
+2. **Faltaban palabras en la portada.** El título de la portada decía «AI Agent /
+   Part 1:». El chino de `\notetitle` sobrevivía en el preámbulo y la fuente
+   latina lo omitía con un aviso (`Missing character`, 11 en el log). Se corrigió
+   en `b722031`: el preámbulo con chino es una unidad más del traductor,
+   `residual-han` cubre el documento entero y el glifo faltante es una señal.
+3. **Esperas que no terminaban.** Dos esperas de esta revisión giraron más de 6
+   minutos sin salida. Buscaban un número en la última línea del `.output` del
+   cliente, y el cliente agrega ahí `[exited with code N]` al terminar, así que
+   la condición no podía cumplirse. La compilación había terminado bien. Una
+   espera se recoge con la notificación del cliente o con `thyrox-bg`/`wait-jobs`,
+   nunca con un patrón sobre un archivo que escribe otro.
+
+La cabecera se tradujo como unidad propia (`translate-head.log`, 1 de 1) y la
+nota verifica con 0 señales, glifos incluidos (`signals-5.jsonl`).
+**Pendiente para V7:** el original escribe «AI Agent» en inglés y la
+traducción del título dice «Agentes de IA». Queda para la revisión humana si
+«Agent» entra al glosario como `keep`.
