@@ -74,6 +74,7 @@ traduzcas: sirve solo para elegir el significado correcto.
 | render | translate | renderizar renderizado renderizada renderizados renderizadas | generar una imagen a partir de un modelo de escena | — |
 | productization | translate | conversión en producto | convertir una capacidad técnica en un producto utilizable | `productización` |
 | internalize | translate | interiorizar interiorizado interiorizada interioriza interiorizan | hacer propio lo que venía de fuera (un modelo que incorpora a sus pesos lo que antes vivía en el harness) | `internalizar` |
+| solvability | translate | resoluble resolubles | que una tarea o un problema admite solución; se reescribe como «que la tarea sea resoluble» | `resolubilidad` |
 
 ## Frases fijas (se traducen siempre así, en todas las notas)
 
