@@ -26,6 +26,7 @@ de la nota zh, la es-MX y los verificadores.
 from __future__ import annotations
 
 import argparse
+import collections
 import datetime
 import fnmatch
 import hashlib
@@ -211,8 +212,32 @@ def extract_translation(result: str) -> str | None:
     return match.group(1) + "\n" if match else None
 
 
+ENVIRONMENT = re.compile(r"\\(begin|end)\{([^}]+)\}")
+
+
+def environments(text: str) -> collections.Counter:
+    """El multiconjunto de `\\begin{x}` y `\\end{x}` de un fragmento."""
+    return collections.Counter(ENVIRONMENT.findall(COMMENT_LINE.sub("", text)))
+
+
+def structure_problem(zh: str, es: str) -> str | None:
+    """Qué entornos cambió la traducción, o None si los conserva todos.
+
+    cs329a, iteración 04: un fragmento volvió sin un `\\begin{itemize}` y la
+    nota dejó de compilar. Se mide al recibir el fragmento, antes de escribirlo.
+    """
+    a, b = environments(zh), environments(es)
+    if a == b:
+        return None
+    return ", ".join(sorted({name for _kind, name in (a - b) + (b - a)}))
+
+
 def collect_results(out_dir: Path, targets: dict[str, str]) -> list[str]:
-    """Escribe cada fragmento traducido; devuelve los ítems sin marcadores."""
+    """Escribe cada fragmento traducido; devuelve los ítems rechazados.
+
+    Se rechaza el que vuelve sin marcadores y el que no conserva los entornos
+    del original; los dos quedan pendientes.
+    """
     missing = []
     index = out_dir / "index.tsv"
     rows = [l.split("\t", 1) for l in index.read_text(encoding="utf-8").splitlines() if l.strip()] if index.is_file() else []
@@ -224,6 +249,11 @@ def collect_results(out_dir: Path, targets: dict[str, str]) -> list[str]:
             result = ""
         text = extract_translation(result)
         if text is None:
+            missing.append(zh)
+            continue
+        problem = structure_problem(Path(zh).read_text(encoding="utf-8"), text)
+        if problem:
+            print(f"translate: la estructura de entornos cambió ({problem}): {zh}", file=sys.stderr)
             missing.append(zh)
             continue
         Path(targets[zh]).write_text(text, encoding="utf-8")
@@ -688,6 +718,16 @@ def cmd_retranslate(args) -> int:
         if not found:
             # Una señal que no se encuentra va a juicio: nunca desaparece de la lista.
             out.append((signal, row["note"], "", "manual"))
+    # Auditoría de estructura, con o sin señal: un fragmento ya escrito que no
+    # conserva los entornos de su original vuelve a pendientes.
+    for unit in units:
+        zh, es = Path(unit[3]), Path(unit[4])
+        if es.is_file() and es not in marked:
+            problem = structure_problem(zh.read_text(encoding="utf-8"), es.read_text(encoding="utf-8"))
+            if problem:
+                note = next((n for n, i in note_ids.items() if i == unit[1]), unit[1])
+                out.append((f"structure:{problem}", note, es.name, "retranslate"))
+                marked.add(es)
     for es in marked:
         es.unlink()
     (here / "retranslate.tsv").write_text(

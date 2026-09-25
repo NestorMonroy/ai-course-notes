@@ -48,6 +48,7 @@ español de México. El `Item` al final es la ruta del fragmento en chino.
 | checkpoint | keep | — | estado guardado de los parámetros de un modelo durante o después del entrenamiento | `puesto fronterizo`, `punto de comprobación` |
 | embedding | keep | — | representación vectorial densa de un token, una palabra u otro objeto | `imbibición` |
 | fine-tuning | keep | — | ajuste de un modelo preentrenado con datos de una tarea específica | — |
+| interpretability | translate | interpretabilidad | grado en que una persona puede entender por qué un modelo produce una salida | — |
 | iterable | translate | iterable | que puede repetirse por iteraciones; adjetivo regular de «iterar» | — |
 | observability | translate | observabilidad | capacidad de inferir el estado interno de un sistema a partir de sus salidas | — |
 | pre-training | translate | preentrenamiento | entrenamiento inicial de un modelo sobre un corpus general, antes de ajustarlo a una tarea | — |
@@ -70,3 +71,7 @@ español de México. El `Item` al final es la ruta del fragmento en chino.
 - `课堂提示` → `Nota de clase`
 - `老师强调` → `el docente enfatiza`
 - `来源` → `Fuente`
+
+## Formas prohibidas (no aparecen en la traducción)
+
+`regla de oro`, `la clave esta en`, `la clave está en`, `a ojo`, `frases hechas`, `piedra angular`, `a grandes rasgos`, `al final del dia`, `al final del día`, `en pocas palabras`, `por si las dudas`, `chamba`, `chambear`, `padrisimo`, `padrísimo`, `me fui de boca`, `darle vuelta al asunto`, `sin mas ni mas`, `sin más ni más`, `a la mala`, `de un jalon`, `de un jalón`, `corrida`, `corridas`, `tanda`, `tandas`, `agarrar`, `agarra el`, `meterle`, `sacarle`, `correr el`, `correr la`, `correr los`, `correr las`, `a correr`, `monorepo`, `librería` → biblioteca, `libreria` → biblioteca, `librerías` → bibliotecas, `librerias` → bibliotecas, `remover` → retirar, `removerse` → retirarse, `removerlo` → retirarlo, `removido` → retirado, `removidos` → retirados, `removida` → retirada, `removidas` → retiradas, `removió` → retiró, `removio` → retiró, `removieron` → retiraron, `removiendo` → retirando, `mergear`, `mergeado`, `debuguear`, `debugueo`, `loguear`, `logueo`, `chequear`, `chequeo`, `deployar`, `deployado`

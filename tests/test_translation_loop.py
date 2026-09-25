@@ -569,3 +569,35 @@ def test_a_signal_inside_a_hyphenated_word_is_located_and_none_vanishes(tmp_path
     assert by_signal.get("prose:english:hard") == "retranslate", listed
     assert by_signal.get("prose:english:inexistente") == "manual"
     assert len(listed) >= len(rows)
+
+
+def test_a_chunk_that_breaks_the_environments_is_rejected_on_arrival(tmp_path: Path) -> None:
+    # cs329a, iteración 04: un fragmento retraducido volvió sin un
+    # `\begin{itemize}` y la nota dejó de compilar. Se rechaza al recibirlo.
+    source = NOTE.replace("训练用 checkpoint。", "\\begin{itemize}\n\\item 训练用 checkpoint。\n\\end{itemize}")
+    dictionary = dict(DICTIONARY, **{"\\begin{itemize}": "", "\\item 训练用 checkpoint。": "\\item El entrenamiento usa checkpoint."})
+    repo, note, runner = setup(tmp_path, dictionary, source)
+    bench = tmp_path / "bench"
+    loop(repo, "prepare", "--bench", str(bench), str(note))
+    result = loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    assert result.returncode == 1
+    assert "estructura" in result.stderr and "itemize" in result.stderr
+    broken = [u.split("\t") for u in (bench / "units.tsv").read_text(encoding="utf-8").splitlines()
+              if "itemize" in Path(u.split("\t")[3]).read_text(encoding="utf-8")]
+    assert broken and not Path(broken[0][4]).exists()
+
+
+def test_retranslate_also_sends_back_chunks_already_written_with_a_broken_structure(tmp_path: Path) -> None:
+    # El fragmento que rompió `itemize` en cs329a se escribió antes de que
+    # `translate` revisara los entornos; su señal de compilación no nombra un
+    # comando, así que solo se encuentra comparando su estructura con el original.
+    source = NOTE.replace("训练用 checkpoint。", "\\begin{itemize}\n\\item 训练用 checkpoint。\n\\end{itemize}")
+    repo, note, runner = setup(tmp_path, DICTIONARY, source)
+    loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note), runner=runner, cache=tmp_path / "c")
+    bench = repo / ".claude" / "workbench" / "translation" / "cs000"
+    target = next(c for c in bench.rglob("*.es.tex") if "itemize" in c.read_text(encoding="utf-8"))
+    target.write_text(target.read_text(encoding="utf-8").replace("\\begin{itemize}\n", ""), encoding="utf-8")
+    assert loop(repo, "retranslate", "--batch", "cs000").returncode == 0
+    assert not target.exists()
+    listed = (bench / "iterations" / "01" / "retranslate.tsv").read_text(encoding="utf-8")
+    assert "structure:itemize" in listed
