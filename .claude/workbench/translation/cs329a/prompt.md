@@ -45,12 +45,15 @@ español de México. El `Item` al final es la ruta del fragmento en chino.
 
 | Término | Decisión | Forma es-MX | Significado | Formas prohibidas |
 |---|---|---|---|---|
+| batch | translate | lote | grupo de ejemplos que se procesa junto en un paso de entrenamiento o inferencia | — |
 | checkpoint | keep | — | estado guardado de los parámetros de un modelo durante o después del entrenamiento | `puesto fronterizo`, `punto de comprobación` |
 | embedding | keep | — | representación vectorial densa de un token, una palabra u otro objeto | `imbibición` |
+| factual | translate | factual | relativo a los hechos; «exactitud factual» | — |
 | fine-tuning | keep | — | ajuste de un modelo preentrenado con datos de una tarea específica | — |
 | interpretability | translate | interpretabilidad | grado en que una persona puede entender por qué un modelo produce una salida | — |
 | iterable | translate | iterable | que puede repetirse por iteraciones; adjetivo regular de «iterar» | — |
 | observability | translate | observabilidad | capacidad de inferir el estado interno de un sistema a partir de sus salidas | — |
+| pool | translate | conjunto | conjunto de modelos o recursos disponibles para elegir (模型池) | — |
 | pre-training | translate | preentrenamiento | entrenamiento inicial de un modelo sobre un corpus general, antes de ajustarlo a una tarea | — |
 | prompt | keep | — | texto de entrada con el que se le indica una tarea a un modelo de lenguaje | `incitador` |
 | prompting | keep | — | técnica de formular el prompt para obtener una conducta del modelo | `incitar` |
@@ -75,3 +78,9 @@ español de México. El `Item` al final es la ruta del fragmento en chino.
 ## Formas prohibidas (no aparecen en la traducción)
 
 `regla de oro`, `la clave esta en`, `la clave está en`, `a ojo`, `frases hechas`, `piedra angular`, `a grandes rasgos`, `al final del dia`, `al final del día`, `en pocas palabras`, `por si las dudas`, `chamba`, `chambear`, `padrisimo`, `padrísimo`, `me fui de boca`, `darle vuelta al asunto`, `sin mas ni mas`, `sin más ni más`, `a la mala`, `de un jalon`, `de un jalón`, `corrida`, `corridas`, `tanda`, `tandas`, `agarrar`, `agarra el`, `meterle`, `sacarle`, `correr el`, `correr la`, `correr los`, `correr las`, `a correr`, `monorepo`, `librería` → biblioteca, `libreria` → biblioteca, `librerías` → bibliotecas, `librerias` → bibliotecas, `remover` → retirar, `removerse` → retirarse, `removerlo` → retirarlo, `removido` → retirado, `removidos` → retirados, `removida` → retirada, `removidas` → retiradas, `removió` → retiró, `removio` → retiró, `removieron` → retiraron, `removiendo` → retirando, `mergear`, `mergeado`, `debuguear`, `debugueo`, `loguear`, `logueo`, `chequear`, `chequeo`, `deployar`, `deployado`
+
+## Reglas aprendidas en lotes anteriores (obligatorias)
+
+- Un término que el original escribe en chino se traduce al español; se queda en inglés solo si el original lo escribe en inglés o el glosario dice keep.
+- La plantilla cita la lista entera de prohibited_forms.txt; ninguna aparece en la traducción.
+- Sin comandos de paquetes que la nota no carga; los entornos del original se conservan (translate rechaza el fragmento que los cambia).

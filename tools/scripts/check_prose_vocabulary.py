@@ -18,12 +18,12 @@ Eje            Que busca                          Instrumento
 `spanglish`    terminación española sobre raíz    léxicos es y en
                inglesa (`deployear`)
 `english`      palabra inglesa que el glosario    léxicos es y en + glosario
-               no declara como termino técnico
+               no declara como término técnico
 =============  =================================  ==========================
 
 Lo que NO puede ver: el significado. Los cuatro ejes miden la forma. Una
 palabra española correcta usada con otro sentido, un calco de sintaxis o un
-termino traducido cuando debía quedarse en ingles (y que no este en el
+término traducido cuando debía quedarse en inglés (y que no este en el
 glosario como forma rechazada) pasan. Un cero es una cota inferior.
 """
 from __future__ import annotations
@@ -68,7 +68,7 @@ SPANGLISH_STEM_EN_MIN = -13.0
 SPANGLISH_STEM_MARGIN = 1.5
 SPANGLISH_WORD_ES_MAX = -14.0
 
-# Eje english: la palabra es inglesa si el léxico ingles la atestigua con
+# Eje english: la palabra es inglesa si el léxico inglés la atestigua con
 # margen sobre el español. Es el inverso de `spanish_by_corpus` de THYROX
 # (`check_identifier_language.py`), con su mismo margen de 3.0.
 ENGLISH_MARGIN = 3.0
@@ -249,9 +249,9 @@ def is_english(word: str, es: dict, en: dict) -> bool:
 
 
 def load_glossary(path: pathlib.Path) -> tuple[set[str], list[tuple[str, str | None]]]:
-    """Los términos que se quedan en ingles y las formas rechazadas.
+    """Los términos que se quedan en inglés y las formas rechazadas.
 
-    Cada forma rechazada entra al eje `prohibido` con el termino como
+    Cada forma rechazada entra al eje `prohibido` con el término como
     sustituto: `imbibición` por `embedding` es un falso amigo de este corpus.
     """
     if not path.is_file():
@@ -323,9 +323,18 @@ def canonical_path(path: pathlib.Path, root: pathlib.Path) -> str:
         return str(resolved)
 
 
-def singular(word: str) -> str:
-    """El singular ingles regular: `prompts` es el mismo termino que `prompt`."""
-    return word[:-1] if len(word) > 3 and word.endswith("s") and not word.endswith("ss") else word
+def singulars(word: str) -> set[str]:
+    """Los singulares ingleses posibles: `prompts` → prompt, `batches` → batch.
+
+    El sufijo no decide entre `-s` y `-es` («caches» → cache, «batches» → batch),
+    así que se devuelven los dos y compara quien tiene el original o el glosario.
+    """
+    if len(word) <= 3 or not word.endswith("s") or word.endswith("ss"):
+        return set()
+    out = {word[:-1]}
+    if word.endswith("es"):
+        out.add(word[:-2])
+    return out
 
 
 def scan(files, es, en, forbidden, keep, root, lemmas=None):
@@ -347,7 +356,7 @@ def scan(files, es, en, forbidden, keep, root, lemmas=None):
                 hits[word] += 1
             elif not dictionary.accepts(word) and is_spanglish(word, es, en, lemmas):
                 hits[f"spanglish:{word}"] += 1
-            elif (raw[0].islower() and singular(word) not in keep and word not in keep
+            elif (raw[0].islower() and not (singulars(word) & keep) and word not in keep
                   and not dictionary.accepts(word) and is_english(word, es, en)):
                 hits[f"english:{word}"] += 1
         for form, _sub, pattern in compiled:

@@ -8,6 +8,15 @@ español de México. El `Item` al final es la ruta del fragmento en chino.
    línea `ES>>>`, sin nada más dentro. No escribas archivos: el ciclo escribe
    la traducción a partir de tu respuesta.
 
+## La fuente original en inglés
+
+La nota en chino traduce una clase dada en inglés. Si junto al fragmento existe
+`source.srt` (el mismo directorio), es la transcripción original de la clase.
+Cuando dudes de qué significa un término que el original escribe en chino,
+búscalo ahí con `Grep` (por ejemplo, el nombre inglés que sospechas) para ver
+cómo lo dijo quien dio la clase. No leas la transcripción completa y no la
+traduzcas: sirve solo para elegir el significado correcto.
+
 ## Qué se traduce y qué no
 
 - Se traduce toda la prosa en chino: párrafos, títulos de sección, títulos y

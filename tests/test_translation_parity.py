@@ -2,8 +2,8 @@
 
 Traducir no puede perder ni inventar estructura: secciones, cajas, figuras,
 formulas, listings, tablas, etiquetas, referencias, enlaces. Tampoco puede
-dejar chino fuera de los originales entre paréntesis, ni traducir un termino
-que el glosario manda dejar en ingles.
+dejar chino fuera de los originales entre paréntesis, ni traducir un término
+que el glosario manda dejar en inglés.
 """
 import subprocess
 import sys

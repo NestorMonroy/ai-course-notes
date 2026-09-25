@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Propone una fila del glosario es-MX para un termino técnico en ingles.
+"""Propone una fila del glosario es-MX para un término técnico en inglés.
 
 Consulta IATE (la base terminologica de la Union Europea) y los léxicos de
 spacy-lookups-data, e imprime una fila CANDIDATA para revisar. Nunca escribe en
@@ -13,7 +13,7 @@ basta: `transformer` sigue dando `transformador` dentro de informática, y en
 estas notas Transformer es el nombre de una arquitectura.
 
 Por eso la propuesta por defecto es `keep` (la regla de redacción: los términos
-técnicos se quedan en ingles), las formas de dominios ajenos a la informática
+técnicos se quedan en inglés), las formas de dominios ajenos a la informática
 van a `rejected`, y las de informática se muestran como comentario para que
 quien revisa decida si alguna es la traducción correcta.
 
@@ -64,7 +64,7 @@ def fetch_response(term: str) -> dict:
 
 
 def iate_candidates(payload: dict, term: str) -> list[Candidate]:
-    """Las entradas cuyo termino ingles es exactamente `term`, con su dominio."""
+    """Las entradas cuyo término inglés es exactamente `term`, con su dominio."""
     wanted = term.strip().lower()
     out: list[Candidate] = []
     for item in payload.get("items", []):
@@ -90,7 +90,7 @@ def suggest_row(term: str, candidates: list[Candidate]) -> dict[str, str]:
             continue
         for form in candidate.es_terms:
             # IATE marca prestamos con HTML (`<i>token</i>`) y a veces da el
-            # propio termino como forma española: rechazarlo vetaría el termino.
+            # propio término como forma española: rechazarlo vetaría el término.
             plain = re.sub(r"<[^>]+>", "", form).strip()
             if plain and plain.lower() != term.strip().lower() and plain not in rejected:
                 rejected.append(plain)

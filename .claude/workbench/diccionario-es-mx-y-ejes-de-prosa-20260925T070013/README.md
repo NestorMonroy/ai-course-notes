@@ -58,3 +58,9 @@ comentar en español.
 `*Metrica:*` en 73 archivos, y `src/session/job_runs.py:221` lo escribe en los
 registros de trabajos de cada consumer. Corregirla es un cambio de convención
 del proveedor y queda a decisión del ejecutor.
+
+**Límite medido del gate de tildes:** los homógrafos. `ingles` (plural de
+ingle) y `termino` (del verbo terminar) son palabras válidas, así que el
+diccionario los acepta y el barrido no los vio: quedaban 15 y 17 en la rama,
+siempre por «inglés» y «término». Van en una lista declarada del gate
+(`HOMOGRAPHS`) con su prueba; otro homógrafo necesitaría la misma declaración.

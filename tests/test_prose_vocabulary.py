@@ -2,7 +2,7 @@
 
 Adaptado del gate de THYROX (`check_vocabulario_prosa.py`, palabra inventada y
 forma prohibida) y ampliado con dos ejes que el pedido exige: spanglish (raíz
-inglesa con terminación española) e ingles no declarado en el glosario.
+inglesa con terminación española) e inglés no declarado en el glosario.
 """
 import subprocess
 import sys
@@ -63,7 +63,7 @@ def test_undeclared_english_is_reported_unless_in_glossary(tmp_path: Path) -> No
     assert "english:weights" in result.stdout, result.stdout
     assert "english:pipeline" not in result.stdout
     assert "english:stanford" not in result.stdout
-    # Un titulo o nombre propio en ingles va con mayúscula y no es prosa a traducir.
+    # Un titulo o nombre propio en inglés va con mayúscula y no es prosa a traducir.
     assert "english:attention" not in result.stdout
     assert "english:año" not in result.stdout
 
@@ -236,3 +236,18 @@ def test_a_prefix_doubles_the_r_of_its_base(tmp_path: Path) -> None:
     # (auto + revisión → autorrevisión). cs329a, iteración 03.
     result = run(str(note(tmp_path, "La autorrevisión y la contrarréplica de la señal.")))
     assert "autorrevisión" not in result.stdout and "contrarréplica" not in result.stdout, result.stdout
+
+
+def test_the_english_es_plural_counts_as_its_singular() -> None:
+    # cs329a/lecture06: el original escribe «无效 batch» y la traducción, bien,
+    # «batches»; `singular` quitaba solo la s y comparaba «batche».
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("cpv", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    # «batches» → batch pero «caches» → cache: el sufijo no decide, así que se
+    # dan los dos candidatos y compara quien tiene el original o el glosario.
+    for plural, single in [("batches", "batch"), ("boxes", "box"), ("prompts", "prompt"),
+                           ("classes", "class"), ("caches", "cache")]:
+        assert single in mod.singulars(plural), (plural, mod.singulars(plural))
+    assert mod.singulars("class") == set()

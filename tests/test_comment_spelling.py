@@ -122,3 +122,14 @@ def test_english_lines_and_documents_measured_in_the_branch_are_not_judged(tmp_p
     assert "coverage.py:2: version → versión" in result.stdout
     assert "coverage.py:2: via → vía" in result.stdout
     assert "GUIDE.md" not in result.stdout
+
+
+def test_known_homographs_are_reported(tmp_path: Path) -> None:
+    # «ingles» (plural de ingle) y «termino» (verbo) son palabras válidas, así
+    # que el diccionario las acepta; en este repositorio siempre significan
+    # «inglés» y «término» (medido con grep en la rama).
+    src = tmp_path / "terms.py"
+    src.write_text("# Un termino técnico en ingles se queda así.\n", encoding="utf-8")
+    result = run(str(src))
+    assert "terms.py:1: termino → término" in result.stdout, result.stdout
+    assert "terms.py:1: ingles → inglés" in result.stdout

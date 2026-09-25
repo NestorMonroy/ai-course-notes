@@ -38,6 +38,11 @@ CITATION = re.compile(r"`[^`]*`|«[^»]*»")
 
 Span = tuple[int, int, int]  # línea (desde 1), columna inicial, columna final
 
+# Homógrafos que el diccionario acepta porque son palabras válidas con otro
+# sentido (`ingles`, plural de ingle; `termino`, del verbo terminar). Medido en
+# la rama: 15 `ingles` y 17 `termino`, siempre por «inglés» y «término».
+HOMOGRAPHS = {"ingles": "inglés", "termino": "término"}
+
 # El idioma del tramo se decide por sus palabras funcionales: una regla de
 # ortografía del español solo aplica a un tramo escrito en español. Medido en
 # el barrido de la rama: `AGENTS.md` está en inglés y el gate le proponía
@@ -143,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("files", nargs="+", type=Path)
     args = parser.parse_args(argv)
     es, _en = prose.load_lexicons()
-    accented = prose.accented_forms(es)
+    accented = {**prose.accented_forms(es), **HOMOGRAPHS}
     texts = {p: p.read_text(encoding="utf-8") for p in args.files}
     found: dict[Path, list[tuple[int, int, int, str, str]]] = {}
     words: set[str] = set()
@@ -179,7 +184,8 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"{path}:{n}: {form} (prohibida)" + (f" → {sub}" if sub else ""))
                     remaining += 1
     for path, hits in found.items():
-        hits = [h for h in hits if not dictionary.accepts(h[4]) and dictionary.accepts(accented[h[4]])]
+        hits = [h for h in hits if h[4] in HOMOGRAPHS
+                or (not dictionary.accepts(h[4]) and dictionary.accepts(accented[h[4]]))]
         if not args.fix:
             for n, _s, _e, raw, low in hits:
                 print(f"{path}:{n}: {raw} → {cased(accented[low], raw)}")

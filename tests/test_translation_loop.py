@@ -52,7 +52,7 @@ from pathlib import Path
 args = sys.argv[1:]
 assert args[0] == "headless-pool", args
 out = Path(args[args.index("--out") + 1]); out.mkdir(parents=True, exist_ok=True)
-assert args[args.index("--tools") + 1] == "Read", args
+assert args[args.index("--tools") + 1] == "Read,Grep", args
 Path(__file__).with_suffix(".args").write_text(json.dumps(args))
 table = json.loads(Path(__file__).with_suffix(".json").read_text(encoding="utf-8"))
 items = [l for l in sys.stdin.read().splitlines() if l.strip()]
@@ -299,7 +299,7 @@ def test_usage_sums_tokens_by_component_and_measures_letters_per_han(tmp_path: P
 
 
 def test_english_the_original_already_uses_is_not_a_translation_defect(tmp_path: Path) -> None:
-    # La nota zh ya escribe `reward model` en ingles: es termino técnico que se
+    # La nota zh ya escribe `reward model` en inglés: es término técnico que se
     # queda. `weights` no esta en el original: lo introdujo la traducción.
     source = NOTE.replace("小结。", "小结：reward model 和 worker 追求 precision。")
     dictionary = dict(DICTIONARY, **{"小结：reward model 和 worker 追求 precision。":
@@ -314,7 +314,7 @@ def test_english_the_original_already_uses_is_not_a_translation_defect(tmp_path:
     signals = {json.loads(l)["signal"] for l in out.read_text(encoding="utf-8").splitlines()}
     assert "prose:english:weights" in signals, signals
     assert "prose:english:reward" not in signals and "prose:english:model" not in signals
-    # El plural ingles de un termino del original sigue siendo ese termino.
+    # El plural inglés de un término del original sigue siendo ese término.
     assert "prose:english:workers" not in signals
     # `precision` en inglés viene del original: no es «precisión» sin tilde.
     assert "prose:unaccented:precision" not in signals
@@ -601,3 +601,29 @@ def test_retranslate_also_sends_back_chunks_already_written_with_a_broken_struct
     assert not target.exists()
     listed = (bench / "iterations" / "01" / "retranslate.tsv").read_text(encoding="utf-8")
     assert "structure:itemize" in listed
+
+
+def test_prepare_links_the_english_source_and_not_a_chinese_one(tmp_path: Path) -> None:
+    # Las notas zh traducen clases dadas en inglés; la transcripción original
+    # dice qué término usó quien habló. Se enlaza, no se copia: son 64.7 MB.
+    repo, note, _runner = setup(tmp_path)
+    (note.parent / "lecture01.en.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nthe model pool\n",
+                                                  encoding="utf-8")
+    other = repo / "cs001" / "lecture01" / "lecture01-notes.tex"
+    other.parent.mkdir(parents=True)
+    other.write_text(NOTE, encoding="utf-8")
+    (other.parent / "lecture01.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\n模型池的训练\n", encoding="utf-8")
+    bench = tmp_path / "bench"
+    assert loop(repo, "prepare", "--bench", str(bench), str(note), str(other)).returncode == 0
+    link = bench / "chunks" / "cs000__lecture01__lecture01-notes" / "source.srt"
+    assert link.is_symlink() and not Path(os.readlink(link)).is_absolute()
+    assert "model pool" in link.read_text(encoding="utf-8")
+    assert not (bench / "chunks" / "cs001__lecture01__lecture01-notes" / "source.srt").exists()
+
+
+def test_the_prompt_says_when_to_consult_the_english_source(tmp_path: Path) -> None:
+    repo, _note, _runner = setup(tmp_path)
+    out = tmp_path / "prompt.md"
+    loop(repo, "prompt", "--out", str(out))
+    text = out.read_text(encoding="utf-8")
+    assert "source.srt" in text and "Grep" in text

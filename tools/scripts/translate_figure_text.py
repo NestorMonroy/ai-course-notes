@@ -76,7 +76,7 @@ def introduced_english(table: dict[str, str]) -> list[tuple[str, str, list[str]]
     for zh, es in sorted(table.items()):
         original = {w.lower() for w in ENGLISH_WORD.findall(zh)}
         new = [w for w in ENGLISH_WORD.findall(es)
-               if w.lower() not in original and prose.singular(w.lower()) not in original
+               if w.lower() not in original and not (prose.singulars(w.lower()) & original)
                and not dictionary.accepts(w.lower()) and prose.is_english(w.lower(), es_lex, en_lex)]
         if new:
             out.append((zh, es, new))

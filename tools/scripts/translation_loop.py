@@ -95,6 +95,25 @@ def split_body(body: str) -> list[str]:
 
 # --- prepare --------------------------------------------------------------
 
+SOURCE_PATTERNS = ("*.en.srt", "*.en-orig.srt", "*.srt")
+
+
+def english_source(note_dir: Path) -> Path | None:
+    """La transcripción original en inglés de la clase, si la hay.
+
+    Las notas zh traducen clases dadas en inglés: la transcripción dice qué
+    término usó quien habló. Se prefiere `.en.srt`; un `.srt` sin sufijo cuenta
+    solo si su texto es inglés (los podcasts de Zhang Xiaojun son en chino).
+    """
+    for pattern in SOURCE_PATTERNS:
+        for path in sorted(note_dir.glob(pattern)):
+            text = path.read_text(encoding="utf-8", errors="ignore")[:20000]
+            letters = sum(ch.isascii() and ch.isalpha() for ch in text)
+            if letters and len(HAN.findall(text)) < letters * 0.05:
+                return path
+    return None
+
+
 def cmd_prepare(args) -> int:
     from localize_preamble import localize
     root = Path.cwd()
@@ -115,6 +134,12 @@ def cmd_prepare(args) -> int:
         out = bench / "chunks" / note_id
         out.mkdir(parents=True, exist_ok=True)
         (out / "head.tex").write_text(head, encoding="utf-8")
+        source = english_source(zh.parent)
+        link = out / "source.srt"
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        if source is not None:
+            link.symlink_to(os.path.relpath(source, out))
         if HAN.search(COMMENT_LINE.sub("", head)):
             # Lo que el script no localiza del preámbulo (`\notetitle`, que es
             # prosa y va en la portada) se traduce como una unidad mas: la
@@ -281,7 +306,7 @@ def cmd_translate(args) -> int:
     out_dir = args.bench / "translate" / stamp
     runner = os.environ.get("TRANSLATION_RUNNER", str(REPO_ROOT / "tools" / "thyrox" / "run"))
     cmd = [runner, "headless-pool", "--prompt", str(prompt), "--out", str(out_dir),
-           "--model", args.model, "--tools", "Read", "--width", str(args.width), "--memfree", args.memfree,
+           "--model", args.model, "--tools", "Read,Grep", "--width", str(args.width), "--memfree", args.memfree,
            "--timeout", str(args.timeout), "--max-turns", "4", "--cwd", str(Path.cwd())]
     print(f"translate: width={args.width} memfree={args.memfree}", file=sys.stderr)
     code = subprocess.run(cmd, input="".join(f"{row[3]}\n" for row in pending), text=True).returncode
@@ -426,7 +451,7 @@ def verify_notes(notes: list[Path], compile_: bool, root: Path, lexicons) -> tup
             continue
         zh_text = zh.read_text(encoding="utf-8")
         found = compare(zh_text, es.read_text(encoding="utf-8"), DEFAULT_GLOSSARY)
-        # El ingles que la nota zh ya escribe es termino técnico que se queda
+        # El inglés que la nota zh ya escribe es término técnico que se queda
         # (`reward model`, opciones de tcolorbox); solo es defecto el que
         # introdujo la traducción.
         inherited_english = {w.lower() for w in re.findall(r"[A-Za-z]+", zh_text)}
@@ -435,7 +460,7 @@ def verify_notes(notes: list[Path], compile_: bool, root: Path, lexicons) -> tup
                 continue
             if k.startswith("english:"):
                 word = k.split(":", 1)[1]
-                if word in inherited_english or prose.singular(word) in inherited_english:
+                if word in inherited_english or prose.singulars(word) & inherited_english:
                     continue
                 found.append((f"prose:{k}", ""))
             elif k.startswith("unaccented:"):

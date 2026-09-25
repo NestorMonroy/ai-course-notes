@@ -1,6 +1,6 @@
 """El glosario es-MX y su sugeridor de términos.
 
-El glosario decide, por termino técnico, si se queda en ingles (`keep`) o se
+El glosario decide, por término técnico, si se queda en inglés (`keep`) o se
 traduce (`translate`), con su significado y las formas rechazadas. IATE propone
 candidatos, pero compara la forma escrita, no el significado: `embedding` da
 `imbibición` (química) y `transformer` da «transformador eléctrico». Por eso
@@ -100,12 +100,12 @@ def test_prose_check_rejects_the_glossary_forms_in_a_note(tmp_path: Path) -> Non
     )
     assert "::imbibición" in result.stdout, result.stdout
     assert "english:token" not in result.stdout
-    # Un termino con guion cubre sus partes: el texto se parte en palabras por el guion.
+    # Un término con guion cubre sus partes: el texto se parte en palabras por el guion.
     assert "english:fine" not in result.stdout, result.stdout
 
 
 def test_suggestion_never_rejects_the_term_itself() -> None:
-    """IATE registra `token` como forma española de `token`: rechazarla vetaría el termino."""
+    """IATE registra `token` como forma española de `token`: rechazarla vetaría el término."""
     st = load()
     candidates = [
         st.Candidate("x", ("token",), ("token", "<i>token</i>", "testigo"), ("TRANSPORT",), False),
