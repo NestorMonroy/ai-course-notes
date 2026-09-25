@@ -146,3 +146,19 @@ def test_missing_lexicon_refuses_without_a_count(tmp_path: Path) -> None:
     assert result.returncode == 2
     assert "uv sync" in result.stderr
     assert "hallazgo" not in result.stdout
+
+
+def test_spanish_verb_forms_known_to_the_lemma_table_are_not_spanglish(tmp_path: Path) -> None:
+    """La conjugacion rara de un verbo espanol no es spanglish si spaCy le conoce lema.
+
+    Medido: `horneado`, `formateado` y `sorteado` son formas de hornear, formatear
+    y sortear, y el eje las marcaba porque la forma conjugada es rara en el
+    corpus y su raiz (`horn`, `format`, `sort`) es inglesa. La tabla de lemas de
+    spacy-lookups-data las conoce; a `testeado` o `pusheado` no.
+    """
+    body = "El pan horneado, el texto formateado y el premio sorteado. Lo testeado y lo pusheado."
+    result = run(str(note(tmp_path, body)))
+    for word in ("horneado", "formateado", "sorteado"):
+        assert f"spanglish:{word}" not in result.stdout, result.stdout
+    for word in ("testeado", "pusheado"):
+        assert f"spanglish:{word}" in result.stdout, result.stdout

@@ -119,6 +119,18 @@ def load_lexicons() -> tuple[dict, dict]:
     return table("es"), table("en")
 
 
+def load_lemmas() -> dict:
+    """La tabla de lemas del espanol de spacy-lookups-data (forma -> lema).
+
+    Una forma que la tabla conoce es una conjugacion o flexion de una palabra
+    espanola, aunque sea rara en el corpus de frecuencias.
+    """
+    import spacy_lookups_data
+    data = pathlib.Path(spacy_lookups_data.__file__).parent / "data"
+    with gzip.open(data / "es_lemma_lookup.json.gz") as handle:
+        return json.load(handle)
+
+
 def attested(word: str, lexicon: dict) -> bool:
     """¿La atestigua el corpus, en esta forma o en su singular? (de THYROX)."""
     if word in lexicon:
@@ -128,9 +140,14 @@ def attested(word: str, lexicon: dict) -> bool:
     return word.endswith("s") and word[:-1] in lexicon
 
 
-def is_spanglish(word: str, es: dict, en: dict) -> bool:
+def is_spanglish(word: str, es: dict, en: dict, lemmas: dict | None = None) -> bool:
     match = SPANGLISH_SUFFIX.match(word)
     if not match:
+        return False
+    # Si spaCy le conoce lema, es una forma de un verbo espanol: `horneado`
+    # (hornear), `formateado` (formatear), `sorteado` (sortear). Su rareza en el
+    # corpus de frecuencias y su raiz inglesa las hacian pasar por spanglish.
+    if lemmas is not None and word in lemmas:
         return False
     stem = match.group(1)
     stem_en = en.get(stem, CORPUS_ABSENT)
@@ -222,7 +239,7 @@ def canonical_path(path: pathlib.Path, root: pathlib.Path) -> str:
         return str(resolved)
 
 
-def scan(files, es, en, forbidden, keep, root):
+def scan(files, es, en, forbidden, keep, root, lemmas=None):
     hits: collections.Counter = collections.Counter()
     compiled = [(form, sub, re.compile(rf"\b{re.escape(form)}\b", re.I)) for form, sub in forbidden]
     for path in files:
@@ -233,7 +250,7 @@ def scan(files, es, en, forbidden, keep, root):
             word = raw.lower()
             if len(word) >= 6 and NOMINAL_SUFFIX.match(word) and not attested(word, es):
                 hits[word] += 1
-            elif is_spanglish(word, es, en):
+            elif is_spanglish(word, es, en, lemmas):
                 hits[f"spanglish:{word}"] += 1
             elif raw[0].islower() and word not in keep and is_english(word, es, en):
                 hits[f"english:{word}"] += 1
@@ -290,7 +307,7 @@ def main(argv=None) -> int:
                   f"contra {args.base}; no hay prosa que medir.")
             return 0
 
-    hits = scan(files, es, en, forbidden, keep, root)
+    hits = scan(files, es, en, forbidden, keep, root, load_lemmas())
     new = {k: n for k, n in hits.items() if k not in baseline}
     frozen = len(hits) - len(new)
     for key in sorted(new):
