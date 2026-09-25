@@ -70,3 +70,33 @@ def test_a_string_the_model_skipped_is_reported_and_the_rest_is_kept(tmp_path: P
     rows = table.read_text(encoding="utf-8").splitlines()
     assert "旧的\tanterior" in rows and "调用工具\tES(调用工具)" in rows
     assert not any(r.startswith("漏掉") for r in rows)
+
+
+def test_a_leading_line_number_column_is_tolerated_but_the_original_must_match(tmp_path: Path) -> None:
+    # Medido en la primera corrida: un lote volvió como `16<TAB>能力风险<TAB>…`.
+    mod_rows = "1\t调用工具\tLlamar herramientas\n2\t记 忆\tMemoria\n"
+    parsed = load().parse_result("<<<TSV\n" + mod_rows + "TSV>>>\n", {"调用工具", "记忆"})
+    assert parsed == {"调用工具": "Llamar herramientas"}  # `记 忆` no es la cadena pedida
+
+
+def test_verify_reports_english_the_row_introduced(tmp_path: Path) -> None:
+    table = tmp_path / "figure_text.tsv"
+    table.write_text("zh\tes_mx\n"
+                     "Agent 最小循环\tEl ciclo mínimo del Agent\n"
+                     "训练数据\tLos training data\n"
+                     "吞吐量\tEl throughput\n", encoding="utf-8")
+    result = run(["--verify", "--table", str(table)], dict(os.environ))
+    assert result.returncode == 1
+    assert "吞吐量" in result.stdout and "throughput" in result.stdout
+    assert "训练数据" in result.stdout and "training" in result.stdout
+    # `Agent` ya está en el original: no la introdujo la traducción.
+    assert "Agent 最小循环" not in result.stdout
+
+
+def load():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("translate_figure_text", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(SCRIPT.parent))
+    spec.loader.exec_module(mod)
+    return mod

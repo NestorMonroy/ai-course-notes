@@ -1,5 +1,12 @@
 # Piloto cs329a/lecture01, primer intento: no escribió ningún fragmento
 
+> **Resultado del piloto: ver el segundo intento**,
+> `../piloto-traduccion-cs329a-lecture01-20260925T062301/`. Este intento falló
+> por el **contrato** con el modelo, no por el modelo: `Write` bloqueado bajo
+> `.claude/` y la ruta de salida perdida en el tabulador del ítem. Con el
+> contrato corregido (`11e2e81`), el mismo modelo, `claude-sonnet-5`, tradujo
+> los 9 fragmentos en 30 s, y la nota verifica con 0 señales.
+
 Corrida del 2026-09-25 con `translation_loop.py translate --model claude-sonnet-5`,
 10 fragmentos y anchura 12 (derivada al lanzar; ese cálculo se retiró después).
 Los 10 items terminaron y **ninguno escribió su fragmento**. El `pkill` con el

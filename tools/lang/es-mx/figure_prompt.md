@@ -5,7 +5,8 @@ uno por línea, en chino (a veces mezclado con inglés). Léelo con `Read`.
 
 Responde con una tabla entre una línea `<<<TSV` y una línea `TSV>>>`: una fila
 por línea del archivo, con el texto original **exactamente igual**, un
-tabulador y su traducción. Nada más dentro de los marcadores.
+tabulador y su traducción. Sin columna de número de línea ni otra columna.
+Nada más dentro de los marcadores.
 
 - Son rótulos cortos de diagramas: la traducción tiene que ser igual de breve.
   Un título de tarjeta de dos o tres caracteres chinos queda en una o dos

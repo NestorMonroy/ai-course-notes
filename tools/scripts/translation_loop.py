@@ -5,7 +5,7 @@
     translation_loop.py prompt   [--memory M] --out P.md
     translation_loop.py translate --bench B --model <id completo> [--width N] [--memfree TAM] [--timeout S]
     translation_loop.py usage    --bench B
-    translation_loop.py cycle    --bench B --model <id> [--compile] <nota.tex>...
+    translation_loop.py cycle    --batch L --model <id> [--compile] <nota.tex>...
     translation_loop.py assemble --bench B
     translation_loop.py verify   --out S.jsonl [--compile] [--jobs N] <nota.es-mx.tex>...
     translation_loop.py sweep    --bench B --iteration N [--memory M] [--jobs N]
@@ -262,7 +262,9 @@ def cmd_usage(args) -> int:
     targets = {row[3]: row[4] for row in
                (l.split("\t") for l in (args.bench / "units.tsv").read_text(encoding="utf-8").splitlines() if l.strip())}
     rows, totals, han_sum, letter_sum = [], dict.fromkeys(COMPONENTS, 0), 0, 0
-    for index in sorted(args.bench.glob("translate/*/index.tsv")):
+    runs = getattr(args, "runs", None)
+    indexes = [r / "index.tsv" for r in runs] if runs is not None else sorted(args.bench.glob("translate/*/index.tsv"))
+    for index in (i for i in indexes if i.is_file()):
         for line in index.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
@@ -281,7 +283,7 @@ def cmd_usage(args) -> int:
             for c in COMPONENTS:
                 totals[c] += counts[c]
     header = ["chunk", "han", "letters", *COMPONENTS]
-    (args.bench / "usage.tsv").write_text("\n".join("\t".join(r) for r in [header, *rows]) + "\n", encoding="utf-8")
+    (getattr(args, "out", None) or args.bench / "usage.tsv").write_text("\n".join("\t".join(r) for r in [header, *rows]) + "\n", encoding="utf-8")
     ratio = letter_sum / han_sum if han_sum else 0.0
     print(f"items={len(rows)} " + " ".join(f"{c}={totals[c]}" for c in COMPONENTS) + f" letters_per_han={ratio:.2f}")
     return 0
@@ -465,23 +467,68 @@ def cmd_verify(args) -> int:
 
 # --- cycle ----------------------------------------------------------------
 
+REGISTRY_HEADER = ["batch", "iteration", "started", "notes", "units", "translated", "signals", "exit"]
+
+
+def batch_bench(batch: str) -> Path:
+    """El banco estable de un lote: el mismo en cada iteración, nunca uno por corrida."""
+    return Path.cwd() / ".claude" / "workbench" / "translation" / batch
+
+
+def record_iteration(registry: Path, row: dict) -> None:
+    """Agrega una fila al registro de lotes; nunca reescribe las anteriores."""
+    if not registry.is_file():
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        registry.write_text("\t".join(REGISTRY_HEADER) + "\n", encoding="utf-8")
+    with registry.open("a", encoding="utf-8") as handle:
+        handle.write("\t".join(str(row[k]) for k in REGISTRY_HEADER) + "\n")
+
+
 def cmd_cycle(args) -> int:
-    """prepare → translate → assemble → verify (+ usage) sobre un lote.
+    """prepare → translate → assemble → verify (+ usage), como una iteración del lote.
+
+    El plan (secciones 6 y 7) pide el registro de cada iteración en el banco del
+    lote, versionado. El banco es estable por lote
+    (`.claude/workbench/translation/<lote>/`), cada corrida escribe en
+    `iterations/NN/` sin tocar las anteriores y agrega una fila a
+    `translation/batches.tsv`.
 
     Si un fragmento no vuelve con marcadores, `assemble` no escribe esa nota:
     una nota a medias nunca queda junto al original. Esa es la guarda; el
-    codigo de salida de `translate` no agrega nada (anulado, nada cambia).
+    código de salida de `translate` no agrega nada (anulado, nada cambia).
     """
     ns = argparse.Namespace
-    if cmd_prepare(ns(bench=args.bench, notes=args.notes)):
+    bench = args.bench or batch_bench(args.batch)
+    batch = args.batch or bench.name
+    iterations = bench / "iterations"
+    number = f"{len([d for d in iterations.glob('[0-9][0-9]') if d.is_dir()]) + 1:02d}"
+    here = iterations / number
+    here.mkdir(parents=True, exist_ok=True)
+    started = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    before = set(bench.glob("translate/*"))
+    if cmd_prepare(ns(bench=bench, notes=args.notes)):
         return 1
-    code = cmd_translate(ns(bench=args.bench, model=args.model, width=args.width, memfree=args.memfree,
-                            timeout=args.timeout, memory=args.memory))
-    cmd_usage(ns(bench=args.bench))
-    if cmd_assemble(ns(bench=args.bench)):
-        return 1
-    notes = [l.split("\t")[2] for l in (args.bench / "notes.tsv").read_text(encoding="utf-8").splitlines() if l.strip()]
-    return cmd_verify(ns(out=args.bench / "signals.jsonl", compile=args.compile, jobs=args.jobs, notes=notes))
+    pending = len(pending_units(bench))
+    cmd_translate(ns(bench=bench, model=args.model, width=args.width, memfree=args.memfree,
+                     timeout=args.timeout, memory=args.memory))
+    cmd_usage(ns(bench=bench, runs=sorted(set(bench.glob("translate/*")) - before), out=here / "usage.tsv"))
+    notes = [l.split("\t")[2] for l in (bench / "notes.tsv").read_text(encoding="utf-8").splitlines() if l.strip()]
+    signals = here / "signals.jsonl"
+    if cmd_assemble(ns(bench=bench)):
+        signals.write_text("", encoding="utf-8")
+        code, count = 1, "sin-ensamblar"
+    else:
+        code = cmd_verify(ns(out=signals, compile=args.compile, jobs=args.jobs, notes=notes))
+        count = len([l for l in signals.read_text(encoding="utf-8").splitlines() if l.strip()])
+    units = len([l for l in (bench / "units.tsv").read_text(encoding="utf-8").splitlines() if l.strip()])
+    # El puntero al lote en curso: versionado, lo escribe el ciclo y no la shell.
+    pointer = Path.cwd() / ".claude" / "workbench" / ".last-bank"
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(rel(bench.resolve(), Path.cwd().resolve()) + "\n", encoding="utf-8")
+    record_iteration(bench.parent / "batches.tsv", {
+        "batch": batch, "iteration": number, "started": started, "notes": len(notes), "units": units,
+        "translated": pending, "signals": count, "exit": code})
+    return code
 
 
 # --- sweep ----------------------------------------------------------------
@@ -536,7 +583,8 @@ def main(argv=None) -> int:
     p.set_defaults(func=cmd_translate)
     p = sub.add_parser("usage"); p.add_argument("--bench", type=Path, required=True); p.set_defaults(func=cmd_usage)
     p = sub.add_parser("assemble"); p.add_argument("--bench", type=Path, required=True); p.set_defaults(func=cmd_assemble)
-    p = sub.add_parser("cycle"); p.add_argument("--bench", type=Path, required=True)
+    p = sub.add_parser("cycle"); p.add_argument("--batch", default=None)
+    p.add_argument("--bench", type=Path, default=None, help="por defecto .claude/workbench/translation/<lote>")
     p.add_argument("--model", required=True); p.add_argument("--width", type=int, default=DEFAULT_WIDTH)
     p.add_argument("--memfree", default=DEFAULT_MEMFREE); p.add_argument("--timeout", type=int, default=900)
     p.add_argument("--memory", type=Path, default=DEFAULT_MEMORY); p.add_argument("--compile", action="store_true")

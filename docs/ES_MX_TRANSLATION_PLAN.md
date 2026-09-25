@@ -241,7 +241,15 @@ Ese intento destapó dos defectos del contrato y se corrigieron:
 
 ## 11. Decisiones pendientes
 
-1. **Modelo** del traductor (identificador completo; `headless-pool` rehúsa alias).
+1. **Modelo** del traductor: `claude-sonnet-5`, sostenido por los pilotos.
+   - El fallo del primer intento fue del contrato, no del modelo.
+   - Fase 2: los defectos reales del traductor fueron unas 15 palabras en
+     inglés introducidas, un `\enquote` y un cliché, sobre 75 fragmentos.
+
+   **Se reabre** si, tras las reglas nuevas de la plantilla, la retraducción de
+   la fase 2 sigue introduciendo inglés donde el original escribe chino. En ese
+   caso se hace una prueba A/B con otro modelo sobre los mismos fragmentos,
+   comparando señales y tokens, antes de cambiar.
 2. **Techo de costo**, después de la fase 1. La anchura ya no es una decisión: se deriva (sección 2.1).
 3. **Orden de los cursos** en la fase 3.
 4. **Fracción de revisión humana** por lote.

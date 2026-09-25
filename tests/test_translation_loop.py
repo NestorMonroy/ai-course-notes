@@ -363,8 +363,8 @@ def test_cycle_chains_prepare_translate_assemble_and_verify(tmp_path: Path) -> N
                   runner=runner, cache=tmp_path / "cache")
     assert result.returncode == 0, result.stdout + result.stderr
     assert note.with_name("lecture01-notes.es-mx.tex").is_file()
-    assert (bench / "signals.jsonl").read_text(encoding="utf-8").strip() == ""
-    assert (bench / "usage.tsv").is_file()
+    assert (bench / "iterations" / "01" / "signals.jsonl").read_text(encoding="utf-8").strip() == ""
+    assert (bench / "iterations" / "01" / "usage.tsv").is_file()
 
 
 def test_cycle_stops_before_assembling_when_a_chunk_is_missing(tmp_path: Path) -> None:
@@ -399,3 +399,35 @@ def test_assemble_points_to_the_es_mx_figure_when_it_exists(tmp_path: Path) -> N
     out = bench / "signals.jsonl"
     loop(repo, "verify", "--out", str(out), str(es), cache=tmp_path / "cache")
     assert "parity:images" not in out.read_text(encoding="utf-8")
+
+
+def test_each_cycle_run_is_a_new_iteration_and_nothing_is_overwritten(tmp_path: Path) -> None:
+    # El plan (secciones 6 y 7) pide el registro de CADA iteración en el banco
+    # del lote, versionado: un lote se audita iteración por iteración. Un
+    # `signals.jsonl` único por banco se sobrescribía en cada corrida.
+    partial = {k: v for k, v in DICTIONARY.items() if "训练" not in k}
+    repo, note, runner = setup(tmp_path, partial)
+    workbench = repo / ".claude" / "workbench"
+    first = loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note),
+                 runner=runner, cache=tmp_path / "cache")
+    assert first.returncode == 1  # quedó chino: hay señales
+    runner.with_suffix(".json").write_text(json.dumps(DICTIONARY, ensure_ascii=False), encoding="utf-8")
+    bench = workbench / "translation" / "cs000"
+    for chunk in bench.rglob("*.es.tex"):
+        chunk.unlink()  # el paso de retraducción de este control
+    second = loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note),
+                  runner=runner, cache=tmp_path / "cache")
+    assert second.returncode == 0, second.stdout + second.stderr
+    one, two = bench / "iterations" / "01", bench / "iterations" / "02"
+    assert (one / "signals.jsonl").read_text(encoding="utf-8").strip() != ""
+    assert (two / "signals.jsonl").read_text(encoding="utf-8").strip() == ""
+    assert (one / "usage.tsv").is_file() and (two / "usage.tsv").is_file()
+    rows = (workbench / "translation" / "batches.tsv").read_text(encoding="utf-8").splitlines()
+    header = rows[0].split("\t")
+    assert header[:4] == ["batch", "iteration", "started", "notes"]
+    runs = [dict(zip(header, r.split("\t"))) for r in rows[1:]]
+    assert [(r["batch"], r["iteration"]) for r in runs] == [("cs000", "01"), ("cs000", "02")]
+    assert int(runs[0]["signals"]) > 0 and runs[1]["signals"] == "0"
+    # El puntero al lote en curso lo escribe el ciclo y se versiona: dice dónde
+    # estamos; `batches.tsv` dice cómo se llegó.
+    assert (workbench / ".last-bank").read_text(encoding="utf-8").strip() == ".claude/workbench/translation/cs000"

@@ -47,23 +47,60 @@ def parse_result(result: str, requested: set[str]) -> dict[str, str]:
     match = TSV_BLOCK.search(result or "")
     rows = {}
     for line in (match.group(1).splitlines() if match else []):
-        zh, sep, es = line.partition("\t")
-        if sep and zh in requested and es.strip():
-            rows[zh] = es.strip()
+        fields = line.split("\t")
+        # Medido en la primera corrida: un lote volvió con una columna de número
+        # de línea delante. Se tolera esa sola desviación; el original sigue
+        # teniendo que ser exactamente una cadena pedida.
+        if len(fields) == 3 and fields[0].isdigit():
+            fields = fields[1:]
+        if len(fields) == 2 and fields[0] in requested and fields[1].strip():
+            rows[fields[0]] = fields[1].strip()
     return rows
+
+
+ENGLISH_WORD = re.compile(r"[A-Za-z]{3,}")
+
+
+def introduced_english(table: dict[str, str]) -> list[tuple[str, str, list[str]]]:
+    """Filas cuya traducción trae palabras inglesas que su original no trae.
+
+    La herencia se mide fila por fila: `Agent` en «Agent 最小循环» es del
+    original; `throughput` en la traducción de «吞吐量» no.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import check_prose_vocabulary as prose
+    es_lex, en_lex = prose.load_lexicons()
+    words = {w.lower() for es in table.values() for w in ENGLISH_WORD.findall(es)}
+    dictionary = prose.SpanishDictionary(words)
+    out = []
+    for zh, es in sorted(table.items()):
+        original = {w.lower() for w in ENGLISH_WORD.findall(zh)}
+        new = [w for w in ENGLISH_WORD.findall(es)
+               if w.lower() not in original and prose.singular(w.lower()) not in original
+               and not dictionary.accepts(w.lower()) and prose.is_english(w.lower(), es_lex, en_lex)]
+        if new:
+            out.append((zh, es, new))
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--missing", type=Path, required=True)
+    parser.add_argument("--missing", type=Path)
     parser.add_argument("--table", type=Path, required=True)
-    parser.add_argument("--bench", type=Path, required=True)
-    parser.add_argument("--model", required=True)
+    parser.add_argument("--bench", type=Path)
+    parser.add_argument("--model", default="")
     parser.add_argument("--batch", type=int, default=80)
     parser.add_argument("--width", type=int, default=10)
     parser.add_argument("--memfree", default="3G")
     parser.add_argument("--timeout", type=int, default=900)
+    parser.add_argument("--verify", action="store_true", help="solo revisa la tabla: inglés introducido por fila")
     args = parser.parse_args(argv)
+    if args.verify:
+        rows = introduced_english(read_table(args.table))
+        for zh, es, new in rows:
+            print(f"{zh}\t{es}\t{', '.join(new)}")
+        print(f"translate_figure_text: {len(rows)} fila(s) con inglés que el original no trae", file=sys.stderr)
+        return 1 if rows else 0
     if not FULL_MODEL_ID.match(args.model):
         print(f"translate_figure_text: `{args.model}` no es un identificador completo.", file=sys.stderr)
         return 2
