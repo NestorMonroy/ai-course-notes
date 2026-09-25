@@ -308,7 +308,8 @@ Use the canonical PDF count command above; raw `find . -name '*-notes.pdf'` can 
   poppler, TeX Live compiling the es-MX template, hunspell); `--install`
   installs what is missing. Status marks are `[OK]`, `[..]`, `[!!]`, `[EE]`
   in colour on a terminal; no emoji.
-- Shell edits use gawk, never bare `awk` (Debian alternatives cann  point it at mawk, which has neither).
+- Shell edits use gawk, never bare `awk` (Debian alternatives can point it at mawk,
+  which has neither).
   Use `gawk -i inplace` instead of `awk f > tmp && mv tmp f`, and `gensub`
   instead of `gsub` whenever the replacement reuses a captured group:
   `gsub` prints `\\1` literally and still exits 0. A `read_text` → `re.sub`
