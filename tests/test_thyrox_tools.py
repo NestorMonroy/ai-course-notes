@@ -26,7 +26,7 @@ requires_thyrox = pytest.mark.skipif(
 def make_consumer(tmp_path: Path, env_lines: list[str] | None) -> Path:
     """Un consumer minimo: git init, tools/thyrox/ copiado y un .env opcional."""
     consumer = tmp_path / "consumer"
-    consumer.mkdir()
+    consumer.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", "-b", "es-mx"], cwd=consumer, check=True)
     shutil.copytree(TOOLS_DIR, consumer / "tools" / "thyrox")
     if env_lines is not None:
@@ -142,3 +142,21 @@ def test_prose_vocabulary_derives_scope_from_git(tmp_path: Path) -> None:
     assert scoped.returncode == 1, scoped.stderr
     assert "chamba" in scoped.stdout
     assert "democión" not in scoped.stdout
+
+
+@requires_thyrox
+def test_toolchain_keys_in_consumer_env_reach_the_preflight(tmp_path: Path) -> None:
+    """toolchain.sh lee solo el entorno: las claves del .env tienen que exportarse."""
+    probe = tmp_path / "probe.tex"
+    probe.write_text("\\documentclass{article}\\begin{document}x\\end{document}\n", encoding="utf-8")
+    declared = make_consumer(tmp_path / "a", env_lines=[
+        f"THYROX_ROOT={THYROX_ROOT}",
+        f"THYROX_TOOLCHAIN_TEXLIVE_PROBE_FILE={probe}",
+    ])
+    result = run_tool(declared, "run", "check-toolchain-ready")
+    assert "omitida · texlive" not in result.stdout, result.stdout
+    assert "texlive" in result.stdout
+
+    undeclared = make_consumer(tmp_path / "b", env_lines=[f"THYROX_ROOT={THYROX_ROOT}"])
+    result = run_tool(undeclared, "run", "check-toolchain-ready")
+    assert "omitida · texlive" in result.stdout, result.stdout

@@ -66,4 +66,16 @@ thyrox_prepare_env() {
     export THYROX_ENV_FILE="$env_file"
     export VOCAB_GATE_ROOT="$consumer"
     export VOCAB_GATE_BASELINE="$consumer/tools/thyrox/prose_vocabulary_baseline.txt"
+
+    # `src/lib/toolchain.sh` de THYROX lee sus parametros solo del entorno del
+    # proceso, no de un `.env`: sin exportarlas, las claves de la cadena de
+    # herramientas que el consumer declara (paquetes de TeX, su documento de
+    # prueba, los opt-in de instalacion) no llegan a los guards. El proceso
+    # conserva la precedencia: una clave ya exportada no se sustituye.
+    local key value
+    while IFS= read -r key; do
+        [[ -n "${!key:-}" ]] && continue
+        value="$(thyrox_env_value "$env_file" "$key")"
+        [[ -n "$value" ]] && export "$key=$value"
+    done < <(sed -nE 's/^(THYROX_TOOLCHAIN_[A-Z0-9_]+|THYROX_INSTALL_[A-Z0-9_]+)=.*/\1/p' "$env_file" | sort -u)
 }
