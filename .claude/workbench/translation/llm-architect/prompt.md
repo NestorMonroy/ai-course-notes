@@ -75,6 +75,9 @@ traduzcas: sirve solo para elegir el significado correcto.
 | productization | translate | conversión en producto | convertir una capacidad técnica en un producto utilizable | `productización` |
 | internalize | translate | interiorizar interiorizado interiorizada interioriza interiorizan | hacer propio lo que venía de fuera (un modelo que incorpora a sus pesos lo que antes vivía en el harness) | `internalizar` |
 | solvability | translate | resoluble resolubles | que una tarea o un problema admite solución; se reescribe como «que la tarea sea resoluble» | `resolubilidad` |
+| commit | keep | commit | registro de cambios de git («mensaje de commit») | — |
+| full-stack | keep | full-stack | que abarca frontend y backend | — |
+| auditability | translate | capacidad de auditoría | que el comportamiento de un sistema pueda revisarse después | `auditabilidad` |
 
 ## Frases fijas (se traducen siempre así, en todas las notas)
 
