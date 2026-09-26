@@ -406,6 +406,7 @@ def cmd_usage(args) -> int:
     targets = {row[3]: row[4] for row in
                (l.split("\t") for l in (args.bench / "units.tsv").read_text(encoding="utf-8").splitlines() if l.strip())}
     rows, totals, han_sum, letter_sum = [], dict.fromkeys(COMPONENTS, 0), 0, 0
+    peak_max, measured = 0, 0
     runs = getattr(args, "runs", None)
     indexes = [r / "index.tsv" for r in runs] if runs is not None else sorted(args.bench.glob("translate/*/index.tsv"))
     for index in (i for i in indexes if i.is_file()):
@@ -423,13 +424,24 @@ def cmd_usage(args) -> int:
             letters = len(LATIN_LETTER.findall(es.read_text(encoding="utf-8"))) if es.is_file() else 0
             if letters:
                 han_sum, letter_sum = han_sum + han, letter_sum + letters
-            rows.append([Path(zh).name, str(han), str(letters), *(str(counts[c]) for c in COMPONENTS)])
+            # GNU Time deja «%M %e %U %S» en `<n>.time` (THYROX 5f7cda74). Sin el
+            # archivo el ítem no se midió: «-», no un cero.
+            timing = (index.parent / f"{n}.time")
+            fields = timing.read_text(encoding="utf-8").split() if timing.is_file() else []
+            if len(fields) >= 4:
+                rss, wall, cpu = int(fields[0]), fields[1], f"{float(fields[2]) + float(fields[3]):.2f}"
+                peak_max, measured = max(peak_max, rss), measured + 1
+                memory = [str(rss), wall, cpu]
+            else:
+                memory = ["-", "-", "-"]
+            rows.append([Path(zh).name, str(han), str(letters), *(str(counts[c]) for c in COMPONENTS), *memory])
             for c in COMPONENTS:
                 totals[c] += counts[c]
-    header = ["chunk", "han", "letters", *COMPONENTS]
+    header = ["chunk", "han", "letters", *COMPONENTS, "peak_rss_kb", "wall_s", "cpu_s"]
     (getattr(args, "out", None) or args.bench / "usage.tsv").write_text("\n".join("\t".join(r) for r in [header, *rows]) + "\n", encoding="utf-8")
     ratio = letter_sum / han_sum if han_sum else 0.0
-    print(f"items={len(rows)} " + " ".join(f"{c}={totals[c]}" for c in COMPONENTS) + f" letters_per_han={ratio:.2f}")
+    print(f"items={len(rows)} " + " ".join(f"{c}={totals[c]}" for c in COMPONENTS) + f" letters_per_han={ratio:.2f}"
+          + f" peak_rss_max_kb={peak_max if measured else '-'} peak_rss_measured={measured}")
     return 0
 
 
@@ -978,6 +990,37 @@ def cmd_measure(args) -> int:
 LOCATABLE = ("prose:english:", "prose:spanglish:", "prose:unaccented:", "prose:invented:", "prose:forbidden:")
 
 
+def write_corrections(units: list[list[str]], failed: dict[Path, list[str]]) -> None:
+    """Deja junto a cada fragmento devuelto a pendientes lo que falló en él.
+
+    Ola 5: «antropomorfización» y «la clave está en» volvieron en la
+    retraducción porque el modelo sólo recibía la plantilla general. La nota
+    `NNN.correccion.md` nombra cada defecto y, si el glosario rechaza la
+    palabra, la forma que adopta. La de un fragmento que ya no falla se borra.
+    """
+    import check_prose_vocabulary as prose
+    from check_translation_parity import DEFAULT_GLOSSARY
+    _keep, rejected = prose.load_glossary(DEFAULT_GLOSSARY)
+    targets = {form: target for form, target in rejected if target}
+    for unit in units:
+        zh, es = Path(unit[3]), Path(unit[4])
+        note = zh.with_name(zh.name.replace(".zh.tex", ".correccion.md"))
+        if es not in failed:
+            note.unlink(missing_ok=True)
+            continue
+        lines = ["# Corrección de la traducción anterior de este fragmento", "",
+                 "La traducción anterior tuvo estos defectos. No los repitas:", ""]
+        for signal in failed[es]:
+            if signal.startswith("structure:"):
+                lines.append(f"- La estructura de entornos cambió ({signal[len('structure:'):]}): "
+                             "conserva cada `\\begin` y `\\end` del original.")
+                continue
+            kind, _sep, word = signal.partition(":")[2].partition(":")
+            target = targets.get(word.lower())
+            lines.append(f"- «{word or signal}» ({kind or signal})" + (f": usa «{target}»." if target else "."))
+        note.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def cmd_retranslate(args) -> int:
     """Devuelve a pendientes los fragmentos que llevan una señal de la última iteración.
 
@@ -998,6 +1041,7 @@ def cmd_retranslate(args) -> int:
     root = Path.cwd()
     note_ids = {rel(Path(target), root): note_id for _zh, note_id, target, *_base in notes}
     out, marked = [], set()
+    failed: dict[Path, list[str]] = {}
     routes = classify(root, args.memory)
     for row in rows:
         signal, note_id = row["signal"], note_ids.get(row["note"])
@@ -1025,6 +1069,7 @@ def cmd_retranslate(args) -> int:
             if es.is_file() and pattern.search(es.read_text(encoding="utf-8")):
                 out.append((signal, row["note"], es.name, "retranslate"))
                 marked.add(es)
+                failed.setdefault(es, []).append(signal)
                 found = True
         if not found:
             # Una señal que no se encuentra va a juicio: nunca desaparece de la lista.
@@ -1039,6 +1084,8 @@ def cmd_retranslate(args) -> int:
                 note = next((n for n, i in note_ids.items() if i == unit[1]), unit[1])
                 out.append((f"structure:{problem}", note, es.name, "retranslate"))
                 marked.add(es)
+                failed.setdefault(es, []).append(f"structure:{problem}")
+    write_corrections(units, failed)
     for es in marked:
         es.unlink()
     (here / "retranslate.tsv").write_text(

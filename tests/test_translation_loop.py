@@ -296,7 +296,8 @@ def test_usage_sums_tokens_by_component_and_measures_letters_per_han(tmp_path: P
     assert not any("cost" in k or "usd" in k for k in totals)
     assert float(totals["letters_per_han"]) > 0
     rows = (bench / "usage.tsv").read_text(encoding="utf-8").splitlines()
-    assert rows[0].split("\t") == ["chunk", "han", "letters", "input", "cache_creation", "cache_read", "output"]
+    assert rows[0].split("\t") == ["chunk", "han", "letters", "input", "cache_creation", "cache_read", "output",
+                                   "peak_rss_kb", "wall_s", "cpu_s"]
     assert len(rows) == items + 1
 
 
@@ -1169,3 +1170,42 @@ def test_a_cause_already_decided_is_retranslated_not_held_as_shared(tmp_path: Pa
     assert routes["compile:missing-glyph:U+FFFD"][0] == "local"
     # Lo que no tiene decisión sigue siendo compartido: se decide una vez.
     assert routes["prose:english:pipeline"][0] == "shared"
+
+
+def test_retranslate_leaves_each_chunk_a_correction_naming_what_failed(tmp_path: Path) -> None:
+    # Ola 5: «antropomorfización», «la clave está en» y «ortogonalización»
+    # volvieron en la retraducción porque el modelo no sabía qué había fallado
+    # en ese fragmento: sólo recibía la plantilla general. Cada fragmento
+    # devuelto a pendientes lleva su nota, con la forma que el glosario adopta.
+    dictionary = dict(DICTIONARY, **{"训练用 checkpoint。": "La auditabilidad usa checkpoint."})
+    repo, note, runner = setup(tmp_path, dictionary)
+    loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note), runner=runner, cache=tmp_path / "c")
+    loop(repo, "retranslate", "--batch", "cs000")
+    chunks = repo / ".claude/workbench/translation/cs000/chunks"
+    corrections = sorted(chunks.rglob("*.correccion.md"))
+    assert len(corrections) == 1, corrections
+    text = corrections[0].read_text(encoding="utf-8")
+    assert "auditabilidad" in text and "capacidad de auditoría" in text
+    assert corrections[0].with_name(corrections[0].name.replace(".correccion.md", ".zh.tex")).is_file()
+    # La plantilla le dice al modelo que la lea.
+    assert "correccion.md" in (REPO_ROOT / "tools/lang/es-mx/translator_prompt.md").read_text(encoding="utf-8")
+
+
+def test_usage_records_the_memory_gnu_time_measured_for_each_item(tmp_path: Path) -> None:
+    # `headless-pool` deja `<n>.time` con «%M %e %U %S» (THYROX 5f7cda74): la
+    # memoria pico en KB, la pared y la CPU de cada `claude -p`. Es la medición
+    # que reemplaza el `--memfree 3G` estimado. Un ítem sin `.time` no midió:
+    # lleva «-», no un cero que se leería como «no usó memoria».
+    repo, note, runner = setup(tmp_path)
+    bench = tmp_path / "bench"
+    loop(repo, "prepare", "--bench", str(bench), str(note))
+    loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    out = next(bench.glob("translate/*"))
+    (out / "1.time").write_text("212680 12.34 3.20 0.80\n", encoding="utf-8")
+    result = loop(repo, "usage", "--bench", str(bench))
+    totals = dict(kv.split("=") for kv in result.stdout.split())
+    assert totals["peak_rss_max_kb"] == "212680" and totals["peak_rss_measured"] == "1"
+    rows = [r.split("\t") for r in (bench / "usage.tsv").read_text(encoding="utf-8").splitlines()]
+    header, first, second = rows[0], rows[1], rows[2]
+    assert dict(zip(header, first))["peak_rss_kb"] == "212680" and dict(zip(header, first))["cpu_s"] == "4.00"
+    assert dict(zip(header, second))["peak_rss_kb"] == "-"
