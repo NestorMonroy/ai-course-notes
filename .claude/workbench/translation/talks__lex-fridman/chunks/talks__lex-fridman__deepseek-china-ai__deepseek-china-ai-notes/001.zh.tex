@@ -1,0 +1,91 @@
+\section{DeepSeek V3 与 R1：技术解析}
+
+\subsection{模型概览}
+
+DeepSeek V3 是来自中国深度求索公司的 Mixture-of-Experts (MoE) Transformer 语言模型，开放权重，指令微调版本。R1 是在 V3 基础上通过强化学习训练的推理模型，于 2025 年 1 月 20 日发布。两者共享同一个预训练基座模型，但后训练路径不同。
+
+\textit{``DeepSeek 为传播 AI 的理解做了出色的工作——他们的论文极其详细。''} (Nathan) 这种详细程度在前沿实验室中极为罕见——论文包含完整的训练 loss 曲线、超参数选择理由和架构消融实验，使得其他团队可以直接借鉴。
+
+背景：DeepSeek 的母公司是幻方量化（Highflyer），一家中国量化对冲基金，CEO 梁文锋同时领导两家公司。Dylan 将他比作\textit{``Elon/Jensen 式的人物——参与所有事情，完全的 AGI 气质''}。幻方在 2021 年出口管制之前就囤积了 10000 张 A100，这个远见为后来的 DeepSeek 提供了关键硬件基础。
+
+\begin{importantbox}{V3 vs R1 的用户体验差异}
+\textbf{V3}：标准聊天模型，生成快速，高质量 Markdown 输出。
+
+\textbf{R1}：显示扩展的 Chain-of-Thought 推理过程——模型分解问题、自我反思、回溯纠正，然后给出答案。这个可见的推理过程吸引了公众的想象力。
+
+示例：问 R1 ``关于人类的一个真正新颖的洞察''，模型推理了 157 秒，最终回答：\textit{``人类本能地将自私欲望转化为合作系统，方法是集体假装抽象规则（金钱、法律、权利）是真实的。''}
+
+Lex 对 R1 Chain-of-Thought 的诗意评价：\textit{``它的非线性，类似于 James Joyce 的《尤利西斯》——在中英文之间跳跃，出现看似乱码的片段，然后突然给出清晰的答案。''}
+
+对比测试中，O1 Pro 在哲学问题上持续最佳，R1 第二，Gemini Flash 第三。但 R1 的可见推理过程创造了独特的审美体验。Google 的 Gemini Flash Thinking 可能比 R1 更便宜且不弱，但几乎没人谈论它。
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{frame-01-open-weights.jpg}
+\caption{R1 可见 Chain-of-Thought 讨论段落\protect\footnotemark}
+\end{figure}
+\footnotetext{视频画面时间区间：00:12:00--00:12:10。}
+
+\subsection{开放权重 vs 开源}
+
+\begin{knowledgebox}{开放的光谱}
+\begin{itemize}
+    \item \textbf{开放权重}：模型权重可下载，可本地运行——你的数据留在本地
+    \item \textbf{完全开源}：权重 + 训练数据 + 训练代码（AI2 的标准）
+    \item DeepSeek R1：MIT 许可证——无下游商业限制、可用于合成数据
+    \item Llama：许可证更严格（使用场景限制、品牌要求）
+\end{itemize}
+
+\textit{``偷你数据的不是模型，而是托管模型的人。''} (Nathan)
+
+关键：DeepSeek 的论文极度详细，提供了可操作的训练细节（包括 loss 曲线），但训练数据和代码并未公开。这是``开放权重''而非``完全开源''——但即便如此，在前沿模型中已是最高开放度。
+
+DeepSeek R1 的 MIT 许可证是一次``重大重置''——第一个真正宽松许可的前沿模型。此前的选择要么是非前沿模型，要么是限制性许可（如 Llama 的品牌要求和使用限制）。\textit{``我们需要真正开放的模型……你可以用 R1 做一个便宜的副本然后假装是你自己的。Llama 做不到这点。''} (Nathan)
+\end{knowledgebox}
+
+\subsection{低训练成本的秘密}
+
+DeepSeek 声称用 2000 张 H800 GPU 训练了 V3（仅预训练阶段）。两个关键架构创新：
+
+\begin{enumerate}
+    \item \textbf{MoE (Mixture of Experts)}：总参数 671B，但每个 token 只激活约 37B（256 个专家中的 8 个）——计算量大幅降低。这不是 DeepSeek 发明的技术（Google 的 Switch Transformer 更早），但 DeepSeek 将其推到了前沿模型的极致。
+    \item \textbf{MLA (Multi-head Latent Attention)}：将注意力机制中的 Key-Value 投影到低维潜空间，节省 80-90\% 内存。这使得在有限的 H800 内存中处理更长的上下文成为可能。
+\end{enumerate}
+
+但真正的``杀手锏''在更底层——DeepSeek 在 CUDA 层之下进行修改，手动调度 SM（Streaming Multiprocessor）核心进行通信，绕过了 NVIDIA 的标准通信库 NCCL。
+
+\textit{``必要性是创新之母——他们必须这么做，因为他们的互连带宽被砍了。''} (Dylan) H800 与 H100 的唯一区别是 NVLink 互连带宽被降低，而跨节点通信正是大规模训练的瓶颈。DeepSeek 被迫在这个受限点上创新，反而开发出了比标准方案更高效的通信策略。
+
+\begin{warningbox}{``2000 张 GPU'' 的真相}
+论文声称的 2000 张 H800 \textbf{仅指 V3 预训练的一次运行}。SemiAnalysis 估计 DeepSeek 实际拥有约 50000 张 GPU——因为还需要：
+\begin{itemize}
+    \item 前期的架构搜索和小规模消融实验（ablation studies）
+    \item 后训练（SFT + RLHF）
+    \item R1 的专门 RL 训练
+    \item 推理服务部署
+\end{itemize}
+
+对比：Meta 拥有 400000+ GPU；Llama 3 在 16000 张上训练。DeepSeek 的真正优势不是``便宜''，而是\textbf{在受限硬件上的极致优化能力}。
+
+背景：DeepSeek 的母公司幻方量化（Highflyer）是中国量化对冲基金，在 2021 年出口管制之前就囤积了 10000 张 A100。CEO 梁文锋被 Dylan 比作\textit{``Elon/Jensen 式的人物——参与所有事情，完全的 AGI 气质''}。
+\end{warningbox}
+
+\subsubsection{Bitter Lesson 与训练哲学}
+
+DeepSeek 的成功体现了 Rich Sutton 的 Bitter Lesson：在学习和搜索上可扩展的方法长期获胜；最小化人类先验。创新是随时间复合的：数据、架构、后训练的小改进不断积累。
+
+训练的关键决策时刻是``YOLO run''——在小规模消融后，将所有资源投入一次大型训练运行。OpenAI 2022 年的 GPT-4 YOLO 是最大胆的：全新的 MoE 架构，所有算力投入数月。
+
+\textit{``模型只是想学习——你必须给它们简单的损失地形，把障碍清除掉。''} (Nathan)
+
+\subsubsection{训练中的 Loss Spike}
+
+训练过程中的 loss 突刺是所有实验室都面临的问题：有些来自坏数据（一个例子是``微波炉帮派''subreddit），有些来自数值不稳定。快速突刺和慢速突刺需要不同的恢复策略。
+
+工程师们在晚餐时持续监控 loss 曲线，每 10 分钟查一次手机。每家公司都有失败的训练跑——这是推进前沿的代价。FP8 训练引入了更多不稳定性。
+
+\subsection{本章小结}
+
+DeepSeek 的核心突破是在出口管制限制下的极致工程优化：MoE 减少激活参数、MLA 减少内存、CUDA 底层定制。V3 论文的详细程度为全行业提供了可操作的技术路线图。
+

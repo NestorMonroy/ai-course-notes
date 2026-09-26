@@ -1,0 +1,316 @@
+\documentclass[a4paper]{article}
+
+% Basic packages
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+\usepackage{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+% polyglossia no traduce los nombres de listings.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\usepackage{float}
+
+% Highlight boxes
+\newtcolorbox{knowledgebox}[1]{
+    enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, attach boxed title to top left={yshift=-2mm, xshift=2mm},
+    boxrule=1pt, sharp corners
+}
+
+\newtcolorbox{importantbox}[1]{
+    enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black,
+    coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+\newtcolorbox{warningbox}[1]{
+    enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+% Listings
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    stringstyle=\color{red!60!black},
+    commentstyle=\color{green!60!black},
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    captionpos=b,
+    extendedchars=true
+}
+
+% Front-page metadata
+\newcommand{\notetitle}{LightRAG avanzado: KG-based RAG y visualización de grafos de conocimiento}
+\newcommand{\noteauthors}{Elaboradas a partir de materiales públicos del curso}
+\newcommand{\notedate}{2025}
+\newcommand{\videochannel}{Wudaokou Naishi (五道口纳什)}
+\newcommand{\videopublishdate}{2025}
+\newcommand{\videoduration}{aproximadamente 12 minutos}
+\newcommand{\videourl}{}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+
+% Footer with repo info
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\thepage}
+\fancyfoot[R]{\footnotesize\color{gray}\href{\repourl}{AI Course Notes}}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}
+\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}
+\vspace{0.8cm}
+{\large \noteauthors\par}
+\vspace{0.3cm}
+{\large \notedate\par}
+\vspace{1.2cm}
+
+\ifdefempty{\videocoverpath}{
+{\small Al generar las notas, indique la ruta local de la portada del video.\par}
+}{
+\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par
+}
+
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\ifdefempty{\videourl}{}{
+\textbf{Enlace del video}: \href{\videourl}{\nolinkurl{\videourl}}\par
+}
+\par
+\textbf{Página del proyecto}: \href{\repourl}{\nolinkurl{\repourl}}\par
+\end{tcolorbox}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+%% --- Inicio del contenido --- %%
+
+\section{Introducción}
+
+Esta sesión es la continuación avanzada de LightRAG, que retoma el contenido de la sesión anterior y profundiza en los detalles del código fuente y el mecanismo de funcionamiento de LightRAG. Cubre principalmente cuatro aspectos:
+
+\begin{enumerate}
+    \item Por qué introducir un RAG basado en Knowledge Graph Base
+    \item El proceso de indexación incremental (Mode) de LightRAG
+    \item La visualización del Knowledge Graph
+    \item Una explicación detallada de los modos de recuperación Hybrid/Mix
+\end{enumerate}
+
+
+\section{Por qué se necesita KG-based RAG}
+
+\subsection{Limitaciones del Naive RAG}
+
+El RAG tradicional basado en Chunks (Naive) tiene dos limitaciones centrales:
+
+\begin{importantbox}{Los dos puntos débiles del Naive RAG}
+\begin{itemize}
+    \item \textbf{Dificultad con el razonamiento multisalto}: cuando la relación entre entidades cruza varios Chunks (A→B→C→D→E), el Naive RAG solo puede recuperar fragmentos locales y no logra enlazar la cadena de razonamiento completa
+    \item \textbf{Ausencia de búsqueda global}: al estar limitado por la recuperación TopK, si el Chunk clave no está entre los TopK, el razonamiento falla
+\end{itemize}
+\end{importantbox}
+
+\subsection{Ventajas del KG-based RAG}
+
+El RAG basado en Knowledge Graph difiere del Naive RAG de manera esencial, tanto en la forma de los datos como en la manera de razonar:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{3cm}p{5cm}p{5cm}}
+\toprule
+\textbf{Dimensión} & \textbf{Naive RAG (basado en Chunks)} & \textbf{KG-based RAG} \\
+\midrule
+Forma de los datos & Puntos (un Embedding por cada Chunk) & Red (Graph formado por entidades + relaciones) \\
+Riqueza semántica & Texto original & Las entidades/relaciones tienen descripciones detalladas y Embedding \\
+Manera de razonar & Recuperar Chunks → colocarlos en el Context → razonamiento fragmentado & Recorrido de la estructura del grafo + descubrimiento de asociaciones → agregación estructurada \\
+Alcance global & Limitado por TopK & Búsqueda global mediante el recorrido del grafo \\
+Interpretabilidad & Baja & Alta (la ruta se puede rastrear) \\
+\bottomrule
+\end{tabular}
+\caption{Comparación central entre Naive RAG y KG-based RAG}
+\end{table}
+
+\begin{knowledgebox}{La construcción del KG depende por completo del modelo de lenguaje}
+En LightRAG, la extracción de entidades/relaciones y la generación de descripciones (Profiling) se realizan enteramente mediante Prompts al modelo de lenguaje. Esto significa que la calidad del KG depende directamente de la capacidad del LLM.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El KG-based RAG transforma los documentos en un grafo de conocimiento estructurado, lo que permite el razonamiento multisalto y la búsqueda global, y compensa las carencias del RAG tradicional basado en Chunks en escenarios de razonamiento complejo.
+
+\section{Proceso de indexación incremental (Modo)}
+
+\subsection{Flujo de procesamiento de documentos nuevos}
+
+LightRAG admite la incorporación dinámica de documentos nuevos; su proceso de Modo (Upsert = Update + Insert) es el siguiente:
+
+\begin{enumerate}
+    \item \textbf{Extracción de entidades y relaciones}: con base en un modelo de lenguaje, se extraen entidades (Entity) y relaciones (Edge) del documento nuevo
+    \item \textbf{Profiling}: se genera una descripción textual detallada para cada entidad y relación
+    \item \textbf{Embedding}: se construye un índice vectorial para las descripciones de entidades, las descripciones de relaciones y el texto de los Chunks
+    \item \textbf{Fusión de subgrafos}: el subgrafo del documento nuevo se fusiona con el grafo de conocimiento global
+\end{enumerate}
+
+\subsection{Alineación de entidades y consistencia de nombres}
+
+\begin{warningbox}{La consistencia en el nombramiento de entidades es clave}
+Una misma entidad puede mencionarse de formas distintas en diferentes Chunks. LightRAG lo especifica explícitamente en el System Prompt de Entity Extraction:
+\begin{itemize}
+    \item Los nombres de entidades \textbf{no distinguen mayúsculas de minúsculas}
+    \item Cada palabra con significado debe escribirse con mayúscula inicial (por ejemplo, «Knowledge Graph» y no «knowledge graph»)
+    \item Debe garantizarse un nombramiento consistente (la misma entidad usa siempre el mismo nombre)
+\end{itemize}
+La alineación de entidades depende principalmente de la consistencia del modelo de lenguaje al generar el texto, y no de un emparejamiento posterior.
+\end{warningbox}
+
+\subsection{Estrategia de fusión de descripciones: MapReduce}
+
+Cuando una misma entidad o relación aparece en varios Chunks, cada Chunk aporta una \textbf{descripción parcial} de esa entidad o relación. La estrategia de fusión sigue el patrón MapReduce:
+
+\begin{enumerate}
+    \item \textbf{Recolección}: se reúnen todas las descripciones extraídas de los distintos Chunks
+    \item \textbf{Evaluación de longitud}:
+    \begin{itemize}
+        \item Descripción corta $\rightarrow$ se concatena directamente con un separador
+        \item Descripción larga $\rightarrow$ se comprime semánticamente (Summarization) con base en un modelo de lenguaje
+    \end{itemize}
+    \item \textbf{Actualización sincronizada}: \texttt{src\_id} también se concatena, para registrar el origen de la descripción
+\end{enumerate}
+
+\begin{importantbox}{Prompt de compresión semántica}
+En \texttt{prompts.py} de LightRAG se define el Prompt \texttt{summarize\_entity\_descriptions}, dedicado a comprimir descripciones de entidades o relaciones demasiado extensas en un resumen más conciso, conservando la información esencial.
+\end{importantbox}
+
+\subsection{Ejemplo de fusión}
+
+Tomemos dos Chunks como ejemplo:
+\begin{itemize}
+    \item \textbf{Chunk 1}: se extraen la entidad Alex (descripción A), Bob (descripción A) y la relación Alex→Bob = «colegas»
+    \item \textbf{Chunk 2}: se extraen la entidad Alex (descripción B) y la relación Alex→Bob = «amigos»
+\end{itemize}
+
+Después de la fusión:
+\begin{itemize}
+    \item Descripción de Alex = descripción A \texttt{<sep>} descripción B (superposición de descripciones parciales)
+    \item Descripción de la relación Alex→Bob = «colegas» \texttt{<sep>} «amigos»
+    \item Si la longitud total de la descripción supera el umbral, se activa la compresión semántica
+\end{itemize}
+
+\subsection{Resumen de la sección}
+
+La indexación incremental de LightRAG logra la incorporación fluida de documentos nuevos mediante tres pasos: alineación de entidades, fusión de descripciones (MapReduce) y compresión semántica. Todo el proceso depende en gran medida de la capacidad del modelo de lenguaje.
+\section{Visualización del grafo de conocimiento}
+
+LightRAG genera durante el proceso de indexación un archivo de grafo en formato GraphML. El proyecto ofrece código de visualización basado en la biblioteca \texttt{pyvis}:
+
+\begin{itemize}
+    \item Al hacer clic en un nodo se puede ver la descripción detallada de la entidad
+    \item Las aristas muestran la información descriptiva de la relación
+    \item Es adecuado para depurar y entender la estructura del KG
+\end{itemize}
+
+\begin{knowledgebox}{Formato GraphML}
+GraphML es un formato de descripción de estructuras de grafo basado en XML, ampliamente usado para almacenar e intercambiar grafos de conocimiento. LightRAG genera este archivo automáticamente en la etapa de Index, sin necesidad de configuración adicional.
+\end{knowledgebox}
+
+\section{Modos de recuperación en detalle: Naive, Hybrid, Mixed}
+
+\subsection{Los tres modos de recuperación}
+
+LightRAG admite tres modos de recuperación (Query Mode), cada uno con un caso de uso propio:
+
+\begin{importantbox}{Comparación de los tres modos de recuperación}
+\begin{itemize}
+    \item \textbf{Naive}: se basa únicamente en Vector — se calcula el Embedding de la Query, se obtiene la Cosine Similarity con el Embedding de cada Chunk y se devuelve el TopK
+    \item \textbf{Hybrid}: se basa por completo en el grafo de conocimiento — combina Local Search (vecindad de entidades) y Global Search (coincidencia de relaciones), sin consultar directamente los fragmentos de texto originales en la base vectorial
+    \item \textbf{Mixed}: Hybrid + Naive — combina el razonamiento global del KG con la recuperación vectorial tradicional para obtener los fragmentos de texto originales
+\end{itemize}
+\end{importantbox}
+
+\subsection{Extracción de palabras clave: Low-Level y High-Level}
+
+La recuperación de LightRAG primero extrae dos tipos de palabras clave de la Query del usuario:
+
+\begin{itemize}
+    \item \textbf{Palabras clave Low-Level}: nombres concretos de entidades (como nombres de personas o de productos), usadas para Local Search
+    \item \textbf{Palabras clave High-Level}: temas macro, conceptos abstractos, usadas para Global Search
+\end{itemize}
+
+Este paso también lo realiza el modelo de lenguaje, y su entrada y salida se pueden monitorear con el Trace de LangFuse.
+
+\subsection{Local Search (búsqueda local)}
+
+\begin{enumerate}
+    \item Se usan las palabras clave Low-Level para hacer Vector Search en la base vectorial de entidades
+    \item Se recuperan los nodos de entidad correspondientes
+    \item Se hace un recorrido (Traverse) de un salto en el Graph para obtener las entidades vecinas directamente relacionadas
+    \item Se devuelven las entidades y relaciones dentro de ese salto como Context
+\end{enumerate}
+
+Local Search está centrada en las entidades y es adecuada para responder preguntas detalladas sobre una entidad específica.
+
+\subsection{Global Search (búsqueda global)}
+
+\begin{enumerate}
+    \item Se usan las palabras clave High-Level para hacer Vector Search en la base vectorial de relaciones
+    \item Se recuperan las relaciones (aristas) correspondientes
+    \item Se devuelven esas relaciones junto con las entidades asociadas como Context
+\end{enumerate}
+
+Global Search est�� centrada en las relaciones, se enfoca en temas macro y es adecuada para responder preguntas integrales que abarcan varios dominios o documentos.
+
+\subsection{Resumen de la sección}
+
+LightRAG logra una recuperación multinivel, desde entidades concretas hasta temas macro, mediante la separación de palabras clave Low-Level/High-Level y la doble búsqueda Local/Global. El modo Mixed, además, incorpora los fragmentos de texto originales, con lo que ofrece la cobertura de información más completa.
+
+\section{Síntesis y ampliación}
+
+En esta entrega se analizaron a fondo cuatro detalles técnicos clave de LightRAG:
+
+\begin{enumerate}
+    \item \textbf{La necesidad de KG-based RAG}: resuelve las limitaciones fundamentales de Naive RAG en el razonamiento multisalto y las consultas globales
+    \item \textbf{Mecanismo de indexación incremental}: mediante fusión de descripciones al estilo MapReduce y compresión semántica, permite agregar documentos de forma dinámica
+    \item \textbf{Visualización del KG}: ofrece una herramienta intuitiva de exploración del grafo basada en pyvis
+    \item \textbf{Recuperación multimodo}: los tres modos Naive/Hybrid/Mixed cubren distintas necesidades de consulta
+\end{enumerate}
+
+\subsection{Lecturas adicionales}
+
+\begin{itemize}
+    \item El archivo \texttt{prompts.py} del código fuente de LightRAG: contiene todos los prompts clave (Entity Extraction, Summarization, etc.)
+    \item Despliegue local de LangFuse: para monitorear las entradas y salidas de todas las llamadas a la API de LightRAG
+    \item Microsoft GraphRAG: una solución de KG-based RAG similar a LightRAG, útil para un estudio comparativo
+\end{itemize}
+
+%% --- Fin del contenido --- %%
+
+\end{document}

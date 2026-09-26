@@ -1,0 +1,259 @@
+\documentclass[a4paper]{article}
+
+% Basic packages
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+\usepackage{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+% polyglossia no traduce los nombres de listings.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\usepackage{float}
+
+% Highlight boxes
+\newtcolorbox{knowledgebox}[1]{
+    enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, attach boxed title to top left={yshift=-2mm, xshift=2mm},
+    boxrule=1pt, sharp corners
+}
+
+\newtcolorbox{importantbox}[1]{
+    enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black,
+    coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+\newtcolorbox{warningbox}[1]{
+    enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+% Listings
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    stringstyle=\color{red!60!black},
+    commentstyle=\color{green!60!black},
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    captionpos=b,
+    extendedchars=true
+}
+
+% Front-page metadata
+\newcommand{\notetitle}{Codex, primeros pasos: inyección del prompt del sistema y Context Engineering}
+\newcommand{\noteauthors}{Elaboradas a partir de materiales públicos del curso}
+\newcommand{\notedate}{2025}
+\newcommand{\videochannel}{Wudaokou Nashi (五道口纳什)}
+\newcommand{\videopublishdate}{2025}
+\newcommand{\videoduration}{aproximadamente 8 minutos}
+\newcommand{\videourl}{}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+
+% Footer with repo info
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\thepage}
+\fancyfoot[R]{\footnotesize\color{gray}\href{\repourl}{AI Course Notes}}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}
+\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}
+\vspace{0.8cm}
+{\large \noteauthors\par}
+\vspace{0.3cm}
+{\large \notedate\par}
+\vspace{1.2cm}
+
+\ifdefempty{\videocoverpath}{
+{\small Al generar las notas, indique la ruta local de la portada del video.\par}
+}{
+\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par
+}
+
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\ifdefempty{\videourl}{}{
+\textbf{Enlace del video}: \href{\videourl}{\nolinkurl{\videourl}}\par
+}
+\par
+\textbf{Página del proyecto}: \href{\repourl}{\nolinkurl{\repourl}}\par
+\end{tcolorbox}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+%% --- Inicio del contenido --- %%
+
+\section{Objeto de análisis y método}
+
+\subsection{Análisis inverso de Codex a partir de los archivos de sesión}
+
+Esta entrega analiza de manera inversa los archivos de historial de sesión de Codex para revelar el diseño de su Context Engineering. Cuando el usuario envía una instrucción en Codex CLI, Codex guarda el historial completo de la conversación en un archivo JSONL local. Al analizar estos archivos, se puede reconstruir el mecanismo interno de gestión de mensajes de Codex.
+
+\begin{importantbox}{Inyección de prompt legítima}
+La «inyección de prompt» de la que se habla en esta entrega se refiere a la gestión \textbf{interna} del historial de mensajes que hacen herramientas de Agent modernas como Codex, Claude Code y OpenAI Codex: es decir, antes de que el usuario envíe la primera instrucción en la interfaz TUI, la herramienta ya insertó de antemano una gran cantidad de instrucciones del sistema. Se trata de una inyección legítima e intencional en el diseño, distinta de los ataques maliciosos de Prompt Injection.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Al analizar los archivos de sesión JSONL de Codex, se puede reconstruir por completo la forma en que se gestiona su historial de mensajes, lo que permite entender el diseño de Context Engineering de los Modern Agent.
+
+\section{Estructura del historial de mensajes de Codex}
+
+\subsection{Cuatro mensajes preinyectados}
+
+Antes de que el usuario emita su solicitud real, Codex ya ha implantado de antemano al menos cuatro mensajes:
+
+\begin{importantbox}{Estructura de mensajes preinyectados de Codex}
+\begin{enumerate}
+    \item \textbf{Mensaje System}: instrucción básica del sistema (System Prompt)
+    \item \textbf{Mensaje Developer (primero)}: inyección de permisos, define los límites de las facultades operativas de Codex
+    \item \textbf{Mensaje User (inyectado)}: contiene el contenido de agents.md, el resumen de Skills y el contexto del entorno
+    \item \textbf{Mensaje Developer (segundo)}: define el modo de colaboración, describe cómo debe interactuar Codex con el usuario
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Contenido detallado de cada mensaje}
+
+\subsubsection{Primero: System Instruction}
+
+El mensaje System es la instrucción de más alto nivel, define las normas básicas de conducta y los límites de las capacidades de Codex. Es un System Prompt estándar.
+
+\subsubsection{Segundo: inyección de permisos del Developer}
+
+El mensaje Developer se usa para inyectar la configuración relacionada con los permisos, define los límites de las facultades de Codex en operaciones de archivos, ejecución de comandos y otros aspectos.
+
+\subsubsection{Tercero: inyección del lado User}
+
+\begin{knowledgebox}{El contenido rico del mensaje User}
+El tercer mensaje, aunque está marcado con el rol User, en realidad es inyectado automáticamente por la herramienta Codex e incluye tres partes principales:
+\begin{itemize}
+    \item \textbf{agents.md}: archivo de configuración de Agent a nivel de sistema o de usuario, que se carga desde el directorio \texttt{.codex} o desde la raíz del proyecto de código
+    \item \textbf{Resumen de Skills}: enumera todas las Skills disponibles junto con su breve descripción (un índice de carga progresiva)
+    \item \textbf{Contexto del entorno}: el directorio de trabajo actual, información del sistema operativo, la fecha actual, la zona horaria y demás información de tiempo de ejecución
+\end{itemize}
+\end{knowledgebox}
+
+Sobre el registro de las Skills, su estructura incluye:
+\begin{itemize}
+    \item cuáles Skills están available
+    \item la breve descripción de cada Skill
+    \item las dos Skills integradas predeterminadas oficiales: Skill Creator y Skill Installer
+    \item las instrucciones sobre cómo usar cada Skill
+\end{itemize}
+
+\subsubsection{Cuarto: modo de colaboración del Developer}
+
+El cuarto mensaje Developer define cómo debe colaborar Codex con el usuario: estilo de interacción, forma de responder, gestión de Turn, etc. También mantiene una marca/contexto de Turn que se usa para dar seguimiento a los turnos de la conversación.
+
+\subsection{Resumen de la sección}
+
+Antes de que comience la interacción con el usuario, Codex ya implantó 4 mensajes que cubren la instrucción del sistema, los permisos, la configuración de Agent más Skills más entorno, y el modo de colaboración, con lo que construye un contexto completo de Agent Runtime.
+\section{Administración en tiempo de ejecución del historial de mensajes}
+
+\subsection{Administración del Context en interacciones de múltiples turnos}
+
+Después de los 4 mensajes preinyectados, Codex entra en la etapa real de interacción de múltiples turnos entre el usuario y el Agent:
+
+\begin{enumerate}
+    \item El usuario emite una Query real
+    \item El Agent Loop comienza a ejecutar una interacción de múltiples turnos (multi-turn)
+    \item Durante la interacción se incluyen llamadas a herramientas (Function Call) y sus resultados de retorno
+    \item Termina un Turn
+    \item El usuario emite una nueva Query, con lo que comienza el siguiente Turn
+\end{enumerate}
+
+\begin{importantbox}{La función de la instrucción Compact}
+Cuando el historial de mensajes se acumula en exceso, se puede ejecutar la instrucción \texttt{compact} en Codex CLI. Compact comprime el contenido de la parte del diálogo de múltiples turnos, pero conserva los mensajes de sistema preinyectados. Este es un recurso clave de la Context Engineering para administrar la ventana de contexto.
+\end{importantbox}
+
+\subsection{Carga progresiva de los Skills}
+
+\begin{knowledgebox}{El mecanismo de carga en dos etapas de los Skills}
+Los Skills adoptan una estrategia de carga progresiva (Progressive Loading):
+\begin{enumerate}
+    \item \textbf{Etapa uno (registro)}: en el mensaje de User preinyectado, solo se exponen el nombre y una breve descripción de cada Skill
+    \item \textbf{Etapa dos (carga)}: cuando el modelo remoto decide usar un Skill concreto, se ejecuta el comando \texttt{cat} mediante una Function Call, y el contenido completo del archivo skills.md correspondiente a ese Skill se carga en el Context como Function Output
+\end{enumerate}
+Este diseño evita el desperdicio de Context que resultaría de cargar todos los Skills de una sola vez.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El historial de mensajes de Codex crece de manera continua en tiempo de ejecución, y se comprime el contexto mediante la instrucción compact. Los Skills adoptan una carga progresiva: primero se expone un resumen y después se carga el contenido completo según se necesite, lo cual constituye una estrategia refinada de administración del Context.
+\section{Cómo leer el System Prompt de Codex}
+
+\subsection{Método de lectura}
+
+Para los usuarios que quieran entender a fondo las instrucciones internas de Codex, es posible:
+
+\begin{enumerate}
+    \item Localizar el archivo de sesión que guarda Codex (un archivo JSONL local)
+    \item Extraer el contenido de cada mensaje de System, Developer y User
+    \item El contenido en sí está en formato Markdown estándar, por lo que puede verse con una herramienta de renderizado de Markdown en línea
+    \item Puede usarse una herramienta de traducción para leer el contenido en inglés capa por capa
+\end{enumerate}
+
+\begin{warningbox}{Ubicación del archivo de sesión}
+El archivo de sesión de Codex se guarda en un directorio específico de la máquina local; la ruta exacta depende del sistema operativo y de la versión de Codex. Cada sesión corresponde a un archivo JSONL, en el que se registra en orden cronológico el historial completo de mensajes.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Al leer el archivo de sesión JSONL de Codex, es posible obtener el System Prompt completo, los mensajes de Developer y todo el contenido inyectado, lo cual es una vía eficaz para entender el diseño interno de un Modern Agent.
+
+\section{Síntesis y ampliación}
+
+\subsection{Repaso de los puntos centrales}
+
+Esta sesión, mediante el análisis inverso del archivo de sesión de Codex, reveló el diseño de Context Engineering del Modern Coding Agent:
+
+\begin{itemize}
+    \item Codex inyecta previamente 4 mensajes antes de la interacción del usuario (System → Developer → User → Developer)
+    \item El mensaje inyectado de tipo User contiene agents.md, un resumen de las Skills y el contexto del entorno
+    \item Las Skills se cargan de forma progresiva: primero se expone el índice, y el contenido completo se carga según se necesite
+    \item En los diálogos de varias rondas, el contexto se comprime mediante la instrucción compact
+    \item El núcleo de todo este diseño es el mantenimiento y la gestión del historial de mensajes
+\end{itemize}
+
+\begin{importantbox}{La esencia de Context Engineering}
+Ya sea Codex, Claude Code o OpenAI Codex, el trabajo central de todo Modern AI Agent puede resumirse en una sola cosa: \textbf{Context Engineering}, es decir, el diseño y la gestión cuidadosos de la lista de mensajes (Message List) que se envía a la API del modelo grande, lo que incluye las instrucciones inyectadas previamente, la forma de exponer las Skills, el registro de las herramientas y la compresión del historial de la conversación, entre otros elementos.
+\end{importantbox}
+
+\subsection{Enlace con la siguiente sesión}
+
+Esta sesión sentó las bases técnicas para la siguiente, en la que se presentarán las Superpowers Skills. Una vez que se entiende cómo Codex gestiona el historial de mensajes y cómo carga las Skills de forma progresiva, resulta más fácil comprender el concepto de diseño y el mecanismo de funcionamiento de Skills complejas como Superpowers.
+
+%% --- Fin del contenido --- %%
+
+\end{document}

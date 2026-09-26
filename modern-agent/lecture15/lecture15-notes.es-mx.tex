@@ -1,0 +1,272 @@
+\documentclass[a4paper]{article}
+
+% Basic packages
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+\usepackage{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+% polyglossia no traduce los nombres de listings.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\usepackage{float}
+
+% Highlight boxes
+\newtcolorbox{knowledgebox}[1]{
+    enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, attach boxed title to top left={yshift=-2mm, xshift=2mm},
+    boxrule=1pt, sharp corners
+}
+
+\newtcolorbox{importantbox}[1]{
+    enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black,
+    coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+\newtcolorbox{warningbox}[1]{
+    enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+% Listings
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    stringstyle=\color{red!60!black},
+    commentstyle=\color{green!60!black},
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    captionpos=b,
+    extendedchars=true
+}
+
+% Front-page metadata
+\newcommand{\notetitle}{Codex: compresión de contexto Compact y Handoff}
+\newcommand{\noteauthors}{Elaboradas a partir de materiales públicos del curso}
+\newcommand{\notedate}{2025}
+\newcommand{\videochannel}{Wudaokou Nashi (五道口纳什)}
+\newcommand{\videopublishdate}{2025}
+\newcommand{\videoduration}{aproximadamente 15 minutos}
+\newcommand{\videourl}{}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+
+% Footer with repo info
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\thepage}
+\fancyfoot[R]{\footnotesize\color{gray}\href{\repourl}{AI Course Notes}}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}
+\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}
+\vspace{0.8cm}
+{\large \noteauthors\par}
+\vspace{0.3cm}
+{\large \notedate\par}
+\vspace{1.2cm}
+
+\ifdefempty{\videocoverpath}{
+{\small Al generar las notas, indique la ruta local de la portada del video.\par}
+}{
+\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par
+}
+
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\ifdefempty{\videourl}{}{
+\textbf{Enlace del video}: \href{\videourl}{\nolinkurl{\videourl}}\par
+}
+\par
+\textbf{Página del proyecto}: \href{\repourl}{\nolinkurl{\repourl}}\par
+\end{tcolorbox}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+%% --- Inicio del contenido --- %%
+
+\section{Introducción: ¿por qué se necesita la compresión de contexto?}
+
+Cuando se usa un Coding Agent como Codex durante sesiones de desarrollo largas, el contexto de la conversación se va acumulando continuamente. Cuando la longitud del contexto se acerca al límite de la Context Window del modelo, si no se procesa, el Agent ya no podrá recibir información nueva. La \textbf{compresión de contexto} (Compact) es precisamente el mecanismo diseñado para resolver este problema: bajo la premisa de conservar la información clave, comprime el historial extenso de la conversación en un resumen conciso, de modo que el Agent pueda "continuar sin interrupciones" con el trabajo posterior.
+
+Esta entrega se basa principalmente en un análisis inverso, publicado en un conocido hilo de Twitter, del mecanismo de Compact de Codex, combinado con la lectura del código fuente de Codex.
+
+\begin{knowledgebox}{Pregunta central}
+¿Cómo funciona la compresión de contexto (Compact) de Codex? ¿Cuál es el System Prompt detrás de ella? Después de la compresión, ¿cómo se hace el traspaso (Handoff) al siguiente LM?
+\end{knowledgebox}
+
+\section{Principios básicos de Compact}
+
+\subsection{Formas de activación}
+
+Compact puede activarse de dos maneras:
+
+\begin{itemize}
+    \item \textbf{Activación manual}: el usuario ejecuta directamente el comando de compactación.
+    \item \textbf{Activación automática}: cuando la longitud del contexto alcanza el \textbf{90\%} de la Context Window, el sistema ejecuta automáticamente una compactación.
+\end{itemize}
+
+\subsection{Primero compactar, luego transferir}
+
+Sin importar la forma de activación, el proceso de Compact es siempre el mismo:
+
+\begin{importantbox}{Dos pasos: Compact + Handoff}
+\begin{enumerate}
+    \item \textbf{Compactación (Compact)}: comprime todo el historial de la conversación actual en un «resumen de transferencia» conciso.
+    \item \textbf{Transferencia (Handoff)}: inyecta el resumen compactado en el contexto de una nueva conversación, para que el LM que «recibe el relevo» pueda continuar el trabajo.
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La esencia de Compact es un «punto de control de contexto» (Context Checkpoint), que libera espacio en la Context Window sin perder la información clave.
+
+\section{La bifurcación de rutas entre el proveedor de OpenAI y los proveedores que no son de OpenAI}
+
+\subsection{Dos rutas de código distintas}
+
+En el código fuente de Codex, según el tipo de proveedor, se sigue una ruta de Compact distinta:
+
+\begin{itemize}
+    \item \textbf{Proveedor de OpenAI}: invoca la API dedicada \texttt{response.compact}, una interfaz de compresión especializada a la que basta con enviar el historial de la conversación para obtener el contenido comprimido. El System Prompt y el Handoff Prompt se mantienen en el \textbf{extremo remoto} (del lado del servidor de OpenAI).
+    \item \textbf{Proveedores que no son de OpenAI}: invocan la interfaz común \texttt{response.create}, e inyectan localmente el Compact Prompt y el Handoff Prompt.
+\end{itemize}
+
+\begin{knowledgebox}{La API response.compact}
+Es la interfaz de compresión especializada que ofrece OpenAI. Quien la invoca solo necesita enviar el historial de la conversación (messages), y la API devuelve el resumen comprimido. No hace falta mantener los prompts de compresión del lado del cliente.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El proveedor determina dónde se mantiene el prompt de compresión: con OpenAI se sigue la ruta remota de \texttt{response.compact}, mientras que con el resto se sigue la ruta local de \texttt{response.create} con inyección explícita del prompt.
+
+\section{Contenido del Compact Prompt y el Handoff Prompt}
+
+\subsection{Prompt de compresión (Compact Prompt)}
+
+En el código fuente de Codex, para los proveedores distintos de OpenAI se ofrece un prompt de compresión en texto plano (\texttt{compact.prompt.md}), cuya instrucción central es la siguiente:
+
+\begin{importantbox}{Contenido íntegro del Compact Prompt}
+«Estás ejecutando una compresión de un punto de control de contexto. Crea un resumen de traspaso para otro LM que retomará esta tarea, el cual debe incluir:
+\begin{itemize}
+    \item El progreso actual
+    \item Las decisiones clave que ya se tomaron
+    \item El contexto, las restricciones y las preferencias del usuario que sean importantes
+    \item El trabajo que aún no se ha completado
+    \item Cualquier dato, ejemplo o material clave necesario para continuar el trabajo
+\end{itemize}
+Sé conciso, estructurado y enfócate en ayudar al siguiente LM a continuar el trabajo sin interrupciones.»
+\end{importantbox}
+
+\subsection{Prompt de traspaso (Handoff Prompt / Summary Prefix)}
+
+El traspaso ocurre después de completarse la compresión; el contenido de \texttt{summary.prefix.md} es el siguiente:
+
+\begin{importantbox}{Contenido íntegro del Handoff Prompt}
+«Otro modelo de lenguaje ya comenzó a resolver este problema y generó un resumen de su proceso de razonamiento. También tienes acceso al estado de las herramientas que ese modelo de lenguaje utilizó. Usa esta información para continuar el trabajo ya realizado, sin repetir esfuerzos. A continuación está el resumen de ese modelo de lenguaje: usa la información del resumen para apoyar tu propio análisis.»
+\end{importantbox}
+
+\subsection{El proceso completo de dos pasos}
+
+\begin{enumerate}
+    \item \textbf{Paso 1 — Compresión}:
+    \begin{itemize}
+        \item Entrada: System Prompt + Compact Prompt + todo el historial de la conversación.
+        \item Salida: un «texto cifrado» estructurado (el resumen comprimido).
+    \end{itemize}
+    \item \textbf{Paso 2 — Traspaso}:
+    \begin{itemize}
+        \item Entrada: System Prompt + Handoff Prompt + el resumen comprimido + la nueva solicitud del usuario.
+        \item Salida: una respuesta normal del agente, que continúa el trabajo sin interrupciones.
+    \end{itemize}
+\end{enumerate}
+
+\subsection{Resumen de la sección}
+
+El Compact Prompt guía al modelo para que genere un «resumen de traspaso», y el Handoff Prompt guía al modelo que lo recibe para que use ese resumen y continúe el trabajo. Juntos, ambos conforman el ciclo cerrado de «comprimir $\rightarrow$ traspasar $\rightarrow$ continuar».
+
+\section{Descifrar el System Prompt de Compact remoto}
+
+\subsection{Experimento de Prompt Injection}
+
+El autor de la publicación en Twitter, mediante la técnica de Prompt Injection, intentó descifrar el System Prompt detrás de la API remota \texttt{response.compact} de OpenAI. El método experimental fue el siguiente:
+
+\begin{enumerate}
+    \item Insertar una instrucción especial (Injection) dentro del contenido que se va a comprimir.
+    \item La instrucción exige que, antes de producir el resumen comprimido, el modelo \textbf{cite íntegramente} el texto original de todas las instrucciones recibidas que mencionen palabras clave como «context checkpoint», «handoff summary» o «concise».
+    \item Disfrazar la instrucción insertada como un «paso obligatorio de aseguramiento de calidad».
+\end{enumerate}
+
+\begin{warningbox}{Los límites éticos del Prompt Injection}
+Este experimento tiene fines exclusivamente de investigación técnica, para ayudar a la comunidad a entender el mecanismo interno de Codex. En un entorno de producción, el Prompt Injection es un riesgo de seguridad que debe defenderse en lugar de aprovecharse.
+\end{warningbox}
+
+\subsection{Resultados del experimento en distintos modelos}
+
+\begin{itemize}
+    \item \textbf{GPT-4.1}: produjo directamente el texto original del System Prompt de Compact (coincidente con \texttt{compact.prompt.md} en el código fuente), pero no produjo el Handoff Prompt.
+    \item \textbf{GPT-5.2}: aunque afirmó que «no puede proporcionar el contenido completo», en los hechos produjo \textbf{al mismo tiempo} el texto original del System Prompt de Compact y del Handoff Prompt.
+    \item \textbf{GPT-5.3 (Codex)}: \textbf{se negó a responder} y resistió con éxito el Prompt Injection.
+\end{itemize}
+
+\begin{importantbox}{Conclusión clave}
+El System Prompt y el Handoff Prompt que usa la API remota \texttt{response.compact} son \textbf{básicamente idénticos} a la versión en texto plano que el código fuente de Codex ofrece a los proveedores distintos de OpenAI. Dicho de otro modo, OpenAI no emplea en el servidor remoto una estrategia de compresión más compleja.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+El experimento de Prompt Injection confirmó que el prompt de compresión remoto y el local son, en esencia, el mismo. Al mismo tiempo, se observa que los modelos más recientes (GPT-5.3) tienen una capacidad de defensa notablemente mayor frente a los ataques de Injection.
+\section{Síntesis y ampliación}
+
+Esta sesión analizó a fondo los mecanismos de compresión de contexto (Compact) y traspaso (Handoff) de Codex. Repaso de los puntos centrales:
+
+\begin{enumerate}
+    \item \textbf{Condición de activación}: manual o automática (la Context Window llega al 90\%).
+    \item \textbf{Proceso de dos pasos}: primero se usa el Compact Prompt para generar un resumen de traspaso estructurado, luego se usa el Handoff Prompt para inyectarlo en el contexto de la nueva conversación.
+    \item \textbf{Bifurcación por Provider}: OpenAI usa la API remota \texttt{response.compact}, mientras que los que no son OpenAI usan \texttt{response.create} local más la inyección explícita del prompt.
+    \item \textbf{Coincidencia entre lo remoto y lo local}: el experimento de Prompt Injection confirmó que los prompts remotos de compresión/traspaso coinciden en esencia con la versión en texto plano del código fuente.
+    \item \textbf{Evolución de la capacidad de defensa del modelo}: GPT-4.1 es fácil de vulnerar mediante inyección, GPT-5.2 filtra parte de la información, GPT-5.3 resiste con éxito.
+\end{enumerate}
+
+El diseño del mecanismo Compact refleja una idea de ingeniería importante: \textbf{bajo la restricción de una Context Window limitada, lograr la continuidad de tareas de larga duración mediante la generación estructurada de resúmenes y un protocolo de traspaso}. Esto no solo es aplicable a los Coding Agent, sino que también ofrece un paradigma de referencia para cualquier sistema de IA que necesite gestionar conversaciones de largo plazo.
+
+\subsection{Lecturas adicionales}
+
+\begin{itemize}
+    \item Repositorio de código abierto de Codex (módulos relacionados con Compact)
+    \item Documentación de la API \texttt{response.compact} de OpenAI
+    \item Publicaciones de Twitter con el análisis inverso del Compact System Prompt
+\end{itemize}
+
+%% --- Fin del contenido --- %%
+
+\end{document}

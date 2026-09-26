@@ -1,0 +1,383 @@
+\documentclass[a4paper]{article}
+
+% Basic packages
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+\usepackage{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+% polyglossia no traduce los nombres de listings.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\usepackage{float}
+
+% Highlight boxes
+\newtcolorbox{knowledgebox}[1]{
+    enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, attach boxed title to top left={yshift=-2mm, xshift=2mm},
+    boxrule=1pt, sharp corners
+}
+
+\newtcolorbox{importantbox}[1]{
+    enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black,
+    coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+\newtcolorbox{warningbox}[1]{
+    enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+% Listings
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    stringstyle=\color{red!60!black},
+    commentstyle=\color{green!60!black},
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    captionpos=b,
+    extendedchars=true
+}
+
+% Front-page metadata
+\newcommand{\notetitle}{Diseño de herramientas de uso general en Codex: Subagents y Apply\_Patch}
+\newcommand{\noteauthors}{Elaboradas a partir de materiales públicos del curso}
+\newcommand{\notedate}{2025}
+\newcommand{\videochannel}{Wudaokou Nashi (五道口纳什)}
+\newcommand{\videopublishdate}{2025}
+\newcommand{\videoduration}{aproximadamente 35 minutos}
+\newcommand{\videourl}{}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+
+% Footer with repo info
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\thepage}
+\fancyfoot[R]{\footnotesize\color{gray}\href{\repourl}{AI Course Notes}}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}
+\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}
+\vspace{0.8cm}
+{\large \noteauthors\par}
+\vspace{0.3cm}
+{\large \notedate\par}
+\vspace{1.2cm}
+
+\ifdefempty{\videocoverpath}{
+{\small Al generar las notas, indique la ruta local de la portada del video.\par}
+}{
+\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par
+}
+
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\ifdefempty{\videourl}{}{
+\textbf{Enlace del video}: \href{\videourl}{\nolinkurl{\videourl}}\par
+}
+\par
+\textbf{Página del proyecto}: \href{\repourl}{\nolinkurl{\repourl}}\par
+\end{tcolorbox}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+%% --- Inicio del contenido --- %%
+
+\section{Introducción: abrir la caja negra del Coding Agent}
+
+En esta entrega se continúa explorando Codex; después de las anteriores centradas en Context Engineering, Runtime y Harness, esta se enfoca en el diseño de las \textbf{12 herramientas predefinidas} (Tools) internas de Codex. La idea central que el docente enfatiza en repetidas ocasiones es: \textbf{no hay magia, nunca trates al Agent como una caja negra}: hay que revisar y guiar el procesamiento interno del Agent, sobre todo cuando el modelo cae en un ciclo infinito o su comportamiento no corresponde a lo esperado.
+
+\begin{knowledgebox}{Las 12 Tools predefinidas de Codex}
+\begin{enumerate}
+    \item Apply Patch (editar archivos de código)
+    \item Execute Commands (ejecutar comandos)
+    \item Write Stdin (escritura en la entrada estándar)
+    \item Update Plan (actualizar el plan)
+    \item Request User Input (solicitar entrada del usuario)
+    \item Web Search (búsqueda web)
+    \item View Image (ver imagen)
+    \item Spawn Agents (crear sub-Agents)
+    \item Send Inputs (enviar instrucciones al sub-Agent)
+    \item Wait (esperar al sub-Agent)
+    \item Close Agents (cerrar sub-Agents)
+    \item Resume (reanudar sub-Agent)
+\end{enumerate}
+\end{knowledgebox}
+
+\section{Arquitectura de tres capas de la especificación de Tool}
+
+El código fuente de Codex (principalmente en el archivo \texttt{spec.rs}) define una arquitectura de tres capas para las herramientas:
+
+\subsection{Primera capa: especificación interna (Tool Spec)}
+
+Una definición abstracta que Codex mantiene internamente, que incluye:
+\begin{itemize}
+    \item \textbf{name}: el nombre de la herramienta.
+    \item \textbf{description}: la descripción de la herramienta.
+    \item \textbf{parameters}: la definición de los parámetros de entrada.
+    \item \textbf{output\_schema}: la descripción de la estructura de salida.
+\end{itemize}
+
+\begin{warningbox}{output\_schema no se expone a la API}
+En la especificación interna se define output\_schema (que describe la estructura del valor de retorno de la herramienta), pero este campo \textbf{no} aparece en el cuerpo de la solicitud que se envía a la API remota. La percepción que tiene el modelo de la estructura de salida depende por completo de que el runtime rellene el function call output en el contexto.
+\end{warningbox}
+
+\subsection{Segunda capa: Wire Layer (capa de transmisión en la red)}
+
+«Wire», es decir, monetización o cable de red, se refiere a la definición de la herramienta en la transmisión por la red. Codex serializa el Tool Spec interno a JSON mediante la función \texttt{create\_tools\_json\_for\_response\_api} y lo coloca en el campo \texttt{tools} del cuerpo de la solicitud \texttt{response.create}.
+
+\begin{knowledgebox}{Una característica del diseño de Function Calling}
+En el protocolo estándar de Function Calling, la definición de Tool \textbf{solo tiene descripción de los parámetros de entrada, no de los de salida}. Esto significa que el modelo, antes de la llamada, no «conoce» el formato exacto del valor de retorno: aprende la estructura de salida a partir del function call output que el runtime rellena después.
+\end{knowledgebox}
+
+\subsection{Tercera capa: capa de ejecución (Handlers)}
+
+Cuando el modelo genera un Function Call, el runtime de Codex entra en los Handlers:
+\begin{enumerate}
+    \item Analiza los parámetros y los valida.
+    \item Ejecuta la operación de manera \textbf{local} (la ejecución no ocurre en el servidor remoto).
+    \item Encapsula el resultado como Function Call Output y lo coloca en la lista de mensajes del contexto.
+\end{enumerate}
+
+\subsection{Resumen de la sección}
+
+La arquitectura de tres capas logra una separación de responsabilidades: la especificación interna define la semántica completa de la herramienta, la Wire Layer se encarga de la serialización para la transmisión, y los Handlers se encargan de la ejecución local y de rellenar el resultado.
+
+
+\section{Apply Patch: edición estructurada de código}
+
+\subsection{¿Por qué no reescribir el archivo directamente?}
+
+Apply Patch es la herramienta de edición de código más central en Codex. Su idea de diseño es: \textbf{no dejar que el modelo reescriba libremente todo el archivo, sino que produzca un diff estructurado}: qué líneas se agregaron, qué líneas se eliminaron, qué archivos se agregaron, qué archivos se eliminaron.
+
+\begin{importantbox}{Patch DSL: un lenguaje específico de dominio restringido}
+Apply Patch define un DSL (Domain Specific Language) basado en la gramática de Lark:
+\begin{itemize}
+    \item Se envuelve con \texttt{*** begin patch} / \texttt{*** end patch}.
+    \item Las operaciones se marcan con \texttt{*** update file} / \texttt{*** add file} / \texttt{*** delete file}.
+    \item Obliga al modelo a expresar la intención de edición en forma de diff, en lugar de modificar el texto libremente.
+\end{itemize}
+\end{importantbox}
+
+\subsection{¿Por qué el modelo puede entender la gramática de Lark?}
+
+\begin{enumerate}
+    \item En el cuerpo de la solicitud, Codex envía al modelo el texto de la gramática de Lark como parte de la descripción de la herramienta.
+    \item La primera System Instruction también incluye las instrucciones de uso de Apply Patch.
+    \item La instrucción exige explícitamente: \textbf{la edición de un solo archivo debe hacerse con Apply Patch, sin usar Python para leer y escribir archivos}; cuando un comando de Shell sencillo o Apply Patch basta, no se debe buscar otro camino.
+\end{enumerate}
+
+\subsection{El flujo de ejecución del Patch}
+
+Al recibir el contenido del Patch, el handler no modifica el archivo de inmediato, sino que:
+\begin{enumerate}
+    \item \textbf{Valida la sintaxis}: comprueba si el Patch cumple con la gramática de Lark.
+    \item \textbf{Deduce el alcance del impacto}: determina qué archivos se modifican y qué permisos de lectura y escritura se requieren.
+    \item \textbf{Aprobación de permisos}: si hay requisitos de aprobación adicionales, primero obtiene el permiso.
+    \item \textbf{Ejecuta el Patch}: aplica el diff al sistema de archivos.
+\end{enumerate}
+
+\subsection{Resumen de la sección}
+
+Apply Patch restringe la operación de alto riesgo que es "modificar código" a un DSL de diff estructurado, lo cual ahorra contexto (no es necesario producir el archivo completo) y hace que cada edición sea auditable y verificable.
+
+\section{Execute Commands y Write Stdin}
+
+\subsection{Execute Commands}
+
+Execute Commands es una llamada de comando de una sola vez: se inicia el proceso, se ejecuta un fragmento y se obtiene la salida. También es compatible con «ejecutar código generado por el modelo»: el modelo puede generar primero un fragmento de código y luego ejecutarlo mediante Execute Commands.
+
+\begin{knowledgebox}{«Patch is All You Need»}
+El expositor citó una frase popular en la industria: una vez que se convierte una aplicación en algo interactuable por línea de comandos, todas las operaciones pueden realizarse con dos primitivas: Patch (editar) y Command (ejecutar).
+\end{knowledgebox}
+
+\subsection{Write Stdin}
+
+Write Stdin se usa para enviar entradas de manera continua a un programa que \textbf{ya está en ejecución}, es decir, para dialogar con una CLI interactiva (como iPython, Node REPL, MySQL, GDB, etc.), enviando entradas y obteniendo salidas incrementales.
+
+\begin{importantbox}{Execute Commands frente a Write Stdin}
+\begin{itemize}
+    \item \textbf{Execute Commands}: llamada de una sola vez. Inicia $\rightarrow$ ejecuta $\rightarrow$ obtiene la salida $\rightarrow$ termina.
+    \item \textbf{Write Stdin}: interacción continua. Envía nuevas instrucciones a un proceso ya en ejecución y obtiene respuestas incrementales.
+\end{itemize}
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Execute Commands cubre la gran mayoría de las necesidades de «ejecutar cierto código o comando», mientras que Write Stdin complementa el escenario de las sesiones interactivas; juntos constituyen la base de la capacidad de ejecución del agente.
+
+\section{Diseño del sistema de subagentes}
+
+\subsection{¿Por qué se necesita un subagente?}
+
+\begin{importantbox}{Tres motivaciones principales}
+\begin{enumerate}
+    \item \textbf{Aislar el contexto}: evita que toda la información se acumule en la Context Window de un solo Master Agent y provoque un desbordamiento.
+    \item \textbf{Ejecución concurrente}: varias tareas independientes pueden ser procesadas simultáneamente por distintos subagentes.
+    \item \textbf{Entregables más extensos}: el Master Agent delega el trabajo pesado a los subagentes y solo se encarga del Reduce/consolidación final.
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Las cinco operaciones de subagente}
+
+El sistema de subagentes de Codex está compuesto por cinco Function Tool:
+
+\begin{enumerate}
+    \item \textbf{Spawn Agents}: crea subagentes.
+    \item \textbf{Send Inputs}: envía nuevas instrucciones a un subagente existente.
+    \item \textbf{Wait}: bloquea la ejecución en espera de que uno o varios subagentes alcancen un estado final.
+    \item \textbf{Close Agents}: cierra o da de baja explícitamente a un subagente.
+    \item \textbf{Resume}: reanuda un subagente cerrado o finalizado, continuando el trabajo a partir de su contexto original.
+\end{enumerate}
+
+\begin{warningbox}{La comunicación con el subagente es unidireccional}
+El subagente solo produce una salida \textbf{al terminar}. En el diseño estructural actual, el subagente no cuenta con un modo para interactuar de manera activa con el Master Agent: toda la comunicación va del Master Agent hacia el subagente.
+\end{warningbox}
+
+\subsection{Mecanismo de Agent Nickname}
+
+El Codex Runtime mantiene un conjunto de Agent Nicknames, compuesto principalmente por nombres de científicos y académicos históricos. Al crear un subagente:
+\begin{enumerate}
+    \item Primero revisa si el archivo de configuración definió un nickname personalizado.
+    \item En caso contrario, elige un nombre no ocupado del conjunto de nombres integrado.
+    \item El nickname se usa para la presentación en el frontend; toda la interacción interna usa el Agent ID.
+\end{enumerate}
+
+\subsection{El valor de retorno de Spawn Agent y la percepción del contexto}
+
+\begin{knowledgebox}{¿Cómo percibe el modelo el subagente que creó?}
+La definición del Tool en el Function Calling no incluye una descripción del valor de retorno. Entonces, ¿cómo sabe el modelo qu�� subagente creó?
+
+La respuesta está en que \textbf{el valor de retorno de Spawn Agent} (que incluye agent\_id y nickname) es reincorporado por el Runtime al contexto del modelo como Function Call Output. En su razonamiento posterior, el modelo puede leer naturalmente esta información del contexto y así establecer la asociación «qué agente creé y cuál es su ID».
+\end{knowledgebox}
+
+\subsection{La semántica de Wait Agent}
+
+\begin{itemize}
+    \item Wait no es un \texttt{sleep}, sino una \textbf{suscripción} al flujo de estados del agente; se parece más a una operación \texttt{join} / \texttt{await}.
+    \item Bloquea el razonamiento posterior del Master Agent hasta que el subagente objetivo alcanza un estado final.
+    \item Cuenta con un mecanismo de tiempo de espera (de hasta aproximadamente una hora).
+    \item \textbf{Cuándo usarlo}: se activa solo cuando el siguiente paso del Master Agent depende necesariamente del resultado del subagente. Si todavía hay otras tareas que hacer, no conviene apresurarse a usar Wait.
+\end{itemize}
+
+\begin{importantbox}{Condiciones que activan Spawn Agent}
+Codex establece \textbf{dos instrucciones estrictas} para el uso de Spawn Agent:
+\begin{enumerate}
+    \item Solo se crea un subagente cuando el usuario \textbf{solicita explícitamente} la asignación a subagentes o la ejecución concurrente.
+    \item Excepción: si se trata de un \textbf{Research profundo e integral o un análisis sistemático} del Codebase, se puede crear un subagente sin necesitar el permiso del usuario.
+\end{enumerate}
+Por lo tanto, para probar el flujo de subagente, hay que mencionar explícitamente en la Query algo como «usar subagent para completarlo de forma concurrente».
+\end{importantbox}
+
+\subsection{Mecanismo de notificación al terminar el subagente}
+
+Si el Master Agent no invoca Wait, el subagente no queda «desconectado» al terminar. En segundo plano, el Runtime inyecta automáticamente el mensaje de finalización del subagente \textbf{en calidad de User} en el contexto del Master Agent, con lo que se garantiza que la información no se pierda.
+
+\subsection{Resumen de la sección}
+
+El sistema de subagentes supera las limitaciones de una única Context Window mediante el aislamiento del contexto y la ejecución concurrente. Las cinco operaciones primitivas (Spawn / Send Inputs / Wait / Close / Resume) conforman la gestión completa del ciclo de vida del subagente.
+
+\section{View Image: herramienta puente para agentes multimodales}
+
+\subsection{¿Por qué se necesita una herramienta aparte?}
+
+GPT es un modelo multimodal y, en teoría, puede procesar directamente imágenes codificadas en Base64. Pero en un sistema de agentes se necesita una herramienta específica para lograr lo siguiente:
+
+\begin{knowledgebox}{El agente decide de forma autónoma «qué imagen ver»}
+El sentido de View Image es que \textbf{el agente necesita decidir de forma autónoma cuándo ver qué imagen}. El modelo, al invocar la herramienta View Image, le indica al runtime «ahora necesito ver esta imagen»; el runtime se encarga de leer el archivo, codificarlo en Base64 e inyectarlo en el contexto como salida de una llamada a función.
+
+Este paso (Prepare Image Input) debe realizarlo el runtime, y no consistir en insertar de antemano todas las imágenes.
+\end{knowledgebox}
+
+\subsection{Flujo de trabajo}
+
+\begin{enumerate}
+    \item El usuario proporciona la ruta absoluta de una imagen (por ejemplo, «lee esta fotografía: /path/to/image.jpg»).
+    \item El modelo genera una llamada a función: \texttt{view\_image(file\_path="/path/to/image.jpg")}.
+    \item El runtime lee el archivo y lo convierte a Base64.
+    \item Se inyecta en forma de Image Content en la siguiente entrada de \texttt{response.create}.
+    \item El modelo continúa razonando con base en la comprensión visual.
+\end{enumerate}
+
+\subsection{Optimización por deduplicación}
+
+La descripción de la herramienta incluye una regla: \textbf{si esta imagen ya se vio anteriormente, no hace falta leerla de nuevo}; se puede reutilizar directamente la información visual que ya está en el contexto.
+
+\subsection{Resumen de la sección}
+
+View Image es la herramienta puente entre las imágenes locales y el modelo multimodal: hace explícita la operación de «ver una imagen» como una llamada a función, lo que permite al agente obtener información visual según la necesite.
+\section{Cómo guardar en disco el cuerpo de la solicitud y depurarlo}
+
+\subsection{Cómo ver el cuerpo completo de la solicitud}
+
+La API \texttt{response.create} de GPT no guarda en disco el cuerpo de la solicitud de manera predeterminada. Pero Codex ofrece una opción de depuración:
+
+\begin{lstlisting}[caption={Variable de entorno para habilitar el guardado en disco del cuerpo de la solicitud}, language=bash]
+export CODEX_LOG_REQUESTS=1
+# El cuerpo de la solicitud se guardará en ~/.codex/logs-1/skill-lite
+\end{lstlisting}
+
+El archivo JSON guardado en disco contiene el cuerpo completo de la solicitud: instructions, mensajes developer, mensajes user, las 12 definiciones de Tool (incluida la Lark Grammar de Apply Patch), entre otros.
+
+\subsection{Resumen de la sección}
+
+Al habilitar el guardado en disco mediante la variable de entorno, es posible examinar por completo el cuerpo de la solicitud que Codex envía a la API, lo cual es un recurso importante para depurar y entender el comportamiento del Agent.
+
+\section{Síntesis y ampliación}
+
+Esta entrega analizó a fondo, desde la perspectiva del diseño de herramientas, las 12 herramientas predefinidas de Codex; repaso de los puntos centrales:
+
+\begin{enumerate}
+    \item \textbf{Arquitectura de tres capas}: especificación interna (Tool Spec) $\rightarrow$ Wire Layer (transporte de red) $\rightarrow$ Handlers (ejecución local).
+    \item \textbf{Apply Patch}: un DSL de diffs restringido por una gramática de Lark, que estructura y hace auditables las ediciones de código.
+    \item \textbf{Execute Commands + Write Stdin}: cubre tanto la ejecución puntual como las sesiones interactivas.
+    \item \textbf{Sistema de subagentes}: gestiona el ciclo de vida de los sub-Agent mediante cinco primitivas (Spawn / Send Inputs / Wait / Close / Resume), logrando aislamiento de contexto y ejecución concurrente.
+    \item \textbf{View Image}: la herramienta de puente de imágenes del Agent multimodal, que hace explícito «ver la imagen» como una Function Call.
+    \item \textbf{El regreso de la salida de Function Call}: la percepción del modelo sobre el valor de retorno de una herramienta depende por completo de que el Runtime inyecte el resultado en el contexto, no del output\_schema definido en la herramienta.
+\end{enumerate}
+
+Al entender el diseño de estas 12 herramientas, sumado al análisis de Context Engineering de entregas anteriores, se puede formar una comprensión profunda e intuitiva del funcionamiento interno de los distintos Coding Agent. La enseñanza central es: \textbf{los límites de capacidad del Agent = la capacidad del modelo subyacente + las herramientas y el contexto que mantiene el Agent Runtime + las restricciones de proceso de la capa del Harness}.
+
+\subsection{Lecturas adicionales}
+
+\begin{itemize}
+    \item El repositorio de código abierto de Codex (los directorios \texttt{spec.rs} y \texttt{handlers/})
+    \item La documentación de Function Calling de OpenAI
+    \item La definición de gramática del parser de Lark
+    \item Patrones de diseño de sistemas Multi-Agent
+\end{itemize}
+
+%% --- Fin del contenido --- %%
+
+\end{document}
