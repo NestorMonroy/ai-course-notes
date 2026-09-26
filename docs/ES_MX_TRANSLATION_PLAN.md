@@ -215,6 +215,12 @@ después, resueltas, introducidas, neto) y guarda la medición en
 `translation/measures/NNN-<ISO>.jsonl`. Con neto negativo sale con 4: la
 decisión se revierte antes de tomar la siguiente.
 
+**Una decisión de glosario se mide después de retraducir sus fragmentos.** La
+fila no cambia la nota; hasta la retraducción, la palabra sale dos veces (como
+inventada y como forma rechazada). Medida antes, «auditability → capacidad de
+auditoría» dio −4 en la ola 3 sin que el texto cambiara. Una decisión
+mecánica, en cambio, se mide justo después del barrido que la aplica.
+
 **La primera medición es la línea base y no lleva neto**, así que se toma
 **antes** de la primera decisión: `measure --decision "línea base"`. La 2.1
 comparaba, si no había medición anterior, contra la última iteración de cada
