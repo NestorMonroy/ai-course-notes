@@ -1090,3 +1090,34 @@ def test_a_wave_stops_launching_batches_once_one_hits_the_session_limit(tmp_path
     assert runner.with_suffix(".calls").read_text() == "1"
     for batch in ("cs001", "cs002"):
         assert not (repo / f".claude/workbench/translation/{batch}/iterations").exists(), batch
+
+
+def test_a_chunk_that_brings_a_replacement_character_is_rejected_on_arrival() -> None:
+    # Ola 3: el modelo partió un carácter multibyte («est��» por «está», «qu��»
+    # por «qué») y el fragmento llegó a la nota. Si el original no trae U+FFFD,
+    # la traducción no puede traerlo.
+    mod = load_loop()
+    assert mod.structure_problem("推理。", "Global Search est\ufffd\ufffd centrada.") is not None
+    assert mod.structure_problem("推理。", "Global Search está centrada.") is None
+    assert mod.structure_problem("原文\ufffd。", "Texto con \ufffd heredado.") is None
+
+
+def test_residual_han_is_grouped_by_the_han_it_leaves(tmp_path: Path) -> None:
+    # Ola 3: `parity:residual-han` en cinco notas contaba como una causa
+    # compartida. Dos eran el mismo nombre de programa («Ungrounded 不着边际»);
+    # las otras tres, restos locales distintos («推理», «构建模型», …).
+    mod = load_loop()
+    detail = "{} linea(s); primera: {}"
+    write_signals(tmp_path, "a", [
+        {"note": "a/n1.es-mx.tex", "signal": "parity:residual-han",
+         "detail": detail.format(2, "\\newcommand{\\noteauthors}{Compilado a partir de Ungrounded 不着边际 E")},
+        {"note": "a/n2.es-mx.tex", "signal": "parity:residual-han",
+         "detail": detail.format(2, "\\newcommand{\\noteauthors}{Elaboradas a partir de Ungrounded 不着边际 y")}])
+    write_signals(tmp_path, "b", [
+        {"note": "b/n3.es-mx.tex", "signal": "parity:residual-han", "detail": detail.format(1, "\\section{Online vs. Offline 推理}")},
+        {"note": "b/n4.es-mx.tex", "signal": "parity:residual-han", "detail": detail.format(4, "# 构建模型")}])
+    memory = tmp_path / "memory.jsonl"
+    memory.write_text("", encoding="utf-8")
+    routes = mod.classify(tmp_path, memory)
+    assert routes["parity:residual-han:不着边际"] == ("shared", ["a/n1.es-mx.tex", "a/n2.es-mx.tex"])
+    assert routes["parity:residual-han:推理"][0] == "local" and routes["parity:residual-han:构建模型"][0] == "local"

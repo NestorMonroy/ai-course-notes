@@ -125,5 +125,8 @@ def test_the_spanish_preamble_can_render_the_chinese_names_in_parentheses(tmp_pa
     dst = tmp_path / "note.es-mx.tex"
     assert run(src, dst).returncode == 0
     out = dst.read_text(encoding="utf-8")
-    assert "\\usepackage{xeCJK}" in out and "\\setCJKmainfont{FandolSong-Regular.otf}" in out
-    assert out.index("\\usepackage{polyglossia}") < out.index("\\usepackage{xeCJK}")
+    assert "\\usepackage[AutoFallBack=true]{xeCJK}" in out and "\\setCJKmainfont{FandolSong-Regular.otf}" in out
+    assert out.index("\\usepackage{polyglossia}") < out.index("\\usepackage[AutoFallBack=true]{xeCJK}")
+    # Ola 3: FandolSong no tiene «珺» (U+73FA), de «张小珺»; WenQuanYi Zen Hei sí,
+    # y con ella de respaldo la compilación da 0 caracteres faltantes (medido).
+    assert "\\setCJKfallbackfamilyfont{\\CJKrmdefault}{WenQuanYi Zen Hei}" in out

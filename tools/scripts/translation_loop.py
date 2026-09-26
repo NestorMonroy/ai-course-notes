@@ -295,6 +295,9 @@ def structure_problem(zh: str, es: str) -> str | None:
     cs329a, iteración 04: un fragmento volvió sin un `\\begin{itemize}` y la
     nota dejó de compilar. Se mide al recibir el fragmento, antes de escribirlo.
     """
+    # Ola 3: el modelo partió un carácter multibyte («est��» por «está»).
+    if "\ufffd" in es and "\ufffd" not in zh:
+        return "carácter de reemplazo U+FFFD"
     a, b = environments(zh), environments(es)
     if a == b:
         return None
@@ -820,6 +823,10 @@ def cause_key(row: dict) -> str:
         glyph = GLYPH.search(detail)
         if glyph:
             return f"{signal}:han" if HAN.fullmatch(glyph.group("char")) else f"{signal}:U+{glyph.group('code')}"
+    if signal == "parity:residual-han":
+        # «Ungrounded 不着边际» en dos notas es una causa; «推理» y «构建模型», dos.
+        han = re.search(r"[\u4e00-\u9fff]+", detail.partition("primera:")[2])
+        return f"{signal}:{han.group(0)}" if han else signal
     if signal == "compile:error":
         message, _sep, context = detail.partition(" | ")
         command = re.search(r"(\\[A-Za-z]+)\s*$", context)
