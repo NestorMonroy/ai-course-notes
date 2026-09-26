@@ -1006,3 +1006,62 @@ def test_measure_records_the_net_effect_of_each_decision(tmp_path: Path) -> None
     assert result.returncode == 4, result.stdout + result.stderr
     assert "se revierte" in result.stderr
     assert len(list((repo / ".claude/workbench/translation/measures").glob("*.jsonl"))) == 4
+
+
+SESSION_LIMIT = "You've hit your session limit · resets 4am (UTC)"
+
+
+def test_a_session_limit_stops_the_batch_instead_of_retrying(tmp_path: Path) -> None:
+    # Ola 2: 105 de 117 rechazos eran esta respuesta, con `subtype: success` y
+    # sin marcadores. `advance` la tomó por un fragmento rechazado y lo reintentó
+    # tres veces más en cs146s y en zhang-xiaojun. Contra el límite de la cuenta
+    # no hay reintento útil: el lote se detiene con 5 y lo dice.
+    repo, note, runner = setup(tmp_path)
+    limited = FAKE_RUNNER.replace("for n, zh in enumerate(items, 1):",
+                                  "state = Path(__file__).with_suffix('.calls')\n"
+                                  "calls = int(state.read_text()) if state.exists() else 0\n"
+                                  "state.write_text(str(calls + 1))\n"
+                                  "for n, zh in enumerate(items, 1):")
+    limited = limited.replace('result = "SIN MARCADORES" if "OMITIR" in body else',
+                              f'result = {SESSION_LIMIT!r} if n == 1 else "SIN MARCADORES" if "OMITIR" in body else')
+    runner.write_text(limited, encoding="utf-8")
+    write_plan(repo, "cs000", [note])
+    result = loop(repo, "advance", "--batch", "cs000", "--model", "claude-sonnet-5", runner=runner, cache=tmp_path / "c")
+    assert result.returncode == 5, result.stdout + result.stderr
+    assert "límite de sesión" in result.stderr
+    assert runner.with_suffix(".calls").read_text() == "1"
+    rows = (repo / ".claude/workbench/translation/batches.tsv").read_text(encoding="utf-8").splitlines()[1:]
+    assert [(r.split("\t")[6], r.split("\t")[7]) for r in rows] == [("limite", "5")]
+
+
+def test_a_wave_stops_launching_batches_once_one_hits_the_session_limit(tmp_path: Path) -> None:
+    # Ola 2: los siete lotes siguieron lanzando `claude -p` contra el límite de
+    # la cuenta. El primero que lo encuentra deja una marca, y los siguientes
+    # no arrancan: salen con 5 sin llamar al modelo.
+    repo, note, runner = setup(tmp_path)
+    limited = FAKE_RUNNER.replace("for n, zh in enumerate(items, 1):",
+                                  "state = Path(__file__).with_suffix('.calls')\n"
+                                  "calls = int(state.read_text()) if state.exists() else 0\n"
+                                  "state.write_text(str(calls + 1))\n"
+                                  "for n, zh in enumerate(items, 1):")
+    limited = limited.replace('result = "SIN MARCADORES" if "OMITIR" in body else',
+                              f'result = {SESSION_LIMIT!r} if True else')
+    runner.write_text(limited, encoding="utf-8")
+    rows = ["order\tbatch\tbytes\tnotes\tpaths"]
+    for k in range(3):
+        course = f"cs00{k}"
+        path = repo / course / "lecture01" / "lecture01-notes.tex"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(NOTE, encoding="utf-8")
+        rows.append(f"{k + 1}\t{course}\t{k + 1}\t1\t{course}/lecture01/lecture01-notes.tex")
+    plan = repo / ".claude/workbench/translation/plan.tsv"
+    plan.parent.mkdir(parents=True, exist_ok=True)
+    plan.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    env = dict(os.environ, TRANSLATION_RUNNER=str(runner), THYROX_CACHE_DIR=str(tmp_path / "c"))
+    result = subprocess.run(["bash", str(WAVE), "--from", "1", "--to", "3", "--jobs", "1", "--model", "claude-sonnet-5"],
+                            cwd=repo, env=env, capture_output=True, text=True)
+    assert result.returncode == 5, result.stdout + result.stderr
+    assert "límite de sesión" in result.stderr
+    assert runner.with_suffix(".calls").read_text() == "1"
+    for batch in ("cs001", "cs002"):
+        assert not (repo / f".claude/workbench/translation/{batch}/iterations").exists(), batch

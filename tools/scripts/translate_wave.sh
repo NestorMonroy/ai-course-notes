@@ -50,9 +50,23 @@ if [[ ! -s "$WAVE/batches.txt" ]]; then
     exit 2
 fi
 
-parallel --will-cite -j "$jobs" --joblog "$WAVE/joblog.tsv" --results "$WAVE/salida" \
-    python3 "$LOOP" advance --batch {} --model "$model" --width "$width" --no-sweep $compile \
-    :::: "$WAVE/batches.txt"
+# Un lote que choca con el límite de la cuenta (`advance` sale con 5) deja la
+# marca `limite`, y los que aún no arrancan salen con 5 sin llamar al modelo:
+# en la ola 2 los siete lotes siguieron lanzando `claude -p` contra el límite.
+run_batch() {
+    if [[ -e "$WAVE/limite" ]]; then
+        echo "translate_wave: $1 no arranca: la ola ya chocó con el límite de sesión" >&2
+        return 5
+    fi
+    python3 "$LOOP" advance --batch "$1" --model "$model" --width "$width" --no-sweep $compile
+    local code=$?
+    (( code == 5 )) && : > "$WAVE/limite"
+    return "$code"
+}
+export -f run_batch
+export LOOP WAVE model width compile
+PARALLEL_SHELL=bash parallel --will-cite -j "$jobs" --joblog "$WAVE/joblog.tsv" --results "$WAVE/salida" \
+    run_batch {} :::: "$WAVE/batches.txt"
 
 python3 "$LOOP" sweep --bench "$WAVE" --iteration 1 > "$WAVE/sweep.log" 2>&1
 python3 "$LOOP" triage > "$WAVE/triage.log" 2>&1
@@ -62,6 +76,10 @@ cp .claude/workbench/translation/triage.tsv "$WAVE/triage.tsv"
 failed=$(awk -F'\t' 'NR > 1 && $7 != 0 && $7 != 3 {print $NF}' "$WAVE/joblog.tsv")
 awk -F'\t' 'NR > 1 {n[$7]++} END {for (c in n) printf "translate_wave: exit %s en %d lote(s)\n", c, n[c]}' \
     "$WAVE/joblog.tsv" >&2
+if [[ -e "$WAVE/limite" ]]; then
+    echo "translate_wave: la ola se detuvo por el límite de sesión de la cuenta; se reanuda cuando se restablezca" >&2
+    exit 5
+fi
 if [[ -n "$failed" ]]; then
     echo "translate_wave: lotes con falla: $failed" >&2
     exit 1

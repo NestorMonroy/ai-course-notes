@@ -301,6 +301,23 @@ def structure_problem(zh: str, es: str) -> str | None:
     return ", ".join(sorted({name for _kind, name in (a - b) + (b - a)}))
 
 
+# La respuesta de `claude -p` cuando la cuenta agotó su cuota (ola 2):
+# «You've hit your session limit · resets 4am (UTC)», con `subtype: success`.
+SESSION_LIMIT = re.compile(r"hit your (?:\w+ )?limit", re.I)
+
+
+def limit_reached(out_dir: Path) -> str | None:
+    """La respuesta de límite de la cuenta, si alguna del pool la trae."""
+    for result_file in sorted(out_dir.glob("*.json")):
+        try:
+            result = json.loads(result_file.read_text(encoding="utf-8")).get("result") or ""
+        except (OSError, ValueError, AttributeError):
+            continue
+        if SESSION_LIMIT.search(result) and "<<<ES" not in result:
+            return result.strip()[:120]
+    return None
+
+
 def collect_results(out_dir: Path, targets: dict[str, str]) -> list[str]:
     """Escribe cada fragmento traducido; devuelve los ítems rechazados.
 
@@ -359,6 +376,13 @@ def cmd_translate(args) -> int:
     print(f"translate: width={args.width} memfree={args.memfree}", file=sys.stderr)
     code = subprocess.run(cmd, input="".join(f"{row[3]}\n" for row in pending), text=True).returncode
     missing = collect_results(out_dir, {row[3]: row[4] for row in pending})
+    limit = limit_reached(out_dir)
+    if limit:
+        # Contra el límite de la cuenta no hay reintento útil: en la ola 2,
+        # 105 de 117 rechazos eran esta respuesta, reintentada tres veces.
+        print(f"translate: límite de sesión de la cuenta («{limit}»); se detiene sin reintentar",
+              file=sys.stderr)
+        return 5
     for zh in missing:
         print(f"translate: sin marcadores {BEGIN_MARK}/{END_MARK}: {zh}", file=sys.stderr)
     return 1 if missing or code else 0
@@ -698,12 +722,15 @@ def cmd_cycle(args) -> int:
     if cmd_prepare(ns(bench=bench, notes=args.notes)):
         return 1
     pending = len(pending_units(bench))
-    cmd_translate(ns(bench=bench, model=args.model, width=args.width, memfree=args.memfree,
-                     timeout=args.timeout, memory=args.memory))
+    translated = cmd_translate(ns(bench=bench, model=args.model, width=args.width, memfree=args.memfree,
+                                  timeout=args.timeout, memory=args.memory))
     cmd_usage(ns(bench=bench, runs=sorted(set(bench.glob("translate/*")) - before), out=here / "usage.tsv"))
     notes = [l.split("\t")[2] for l in (bench / "notes.tsv").read_text(encoding="utf-8").splitlines() if l.strip()]
     signals = here / "signals.jsonl"
-    if cmd_assemble(ns(bench=bench)):
+    if translated == 5:
+        signals.write_text("", encoding="utf-8")
+        code, count = 5, "limite"
+    elif cmd_assemble(ns(bench=bench)):
         signals.write_text("", encoding="utf-8")
         code, count = 1, "sin-ensamblar"
     else:
@@ -1031,7 +1058,7 @@ def cmd_advance(args) -> int:
         code = cmd_cycle(ns(batch=args.batch, bench=None, model=args.model, width=args.width, memfree=args.memfree,
                             timeout=args.timeout, memory=args.memory, compile=args.compile, jobs=args.jobs,
                             notes=notes))
-        if code in (0, 2):
+        if code in (0, 2, 5):
             return code
         last = sorted(d for d in (bench / "iterations").glob("[0-9][0-9]") if d.is_dir())[-1]
         if pending_units(bench):

@@ -318,6 +318,45 @@ Ese intento destapó dos defectos del contrato y se corrigieron:
 2. El ítem llevaba dos rutas separadas por un tabulador, y `headless-pool` parte
    el índice con `--colsep '\t'`, así que la segunda ruta se perdía.
 
+### 9.1 Lo caro no es el pool: es la conversación que lo orquesta
+
+Medido el 2026-09-26, por componente, en el transcript de la sesión que
+orquestó las olas 1 y 2 y en los `usage.tsv` de todas las iteraciones:
+
+| Fuente | Unidades | cache_read | cache_creation | output |
+|---|---|---|---|---|
+| Conversación que orquesta | 2,904 respuestas | 1,152,885,383 | 7,151,901 | 2,711,933 |
+| Pool (`claude -p`) | 696 fragmentos | 18,296,741 | 3,779,870 | 1,608,258 |
+
+Cada respuesta de la conversación relee unos 397,000 tokens de contexto; un
+fragmento traducido lee unos 26,000. Una vuelta de vigilancia («ver el log»)
+cuesta lo de unos 15 fragmentos. El pool y la conversación comparten la cuota
+de la cuenta, y la ola 2 la agotó a mitad del camino.
+
+*Métrica:* tokens por componente, sumados. *Ciega a:* el peso de cada
+componente en la cuota, que no está publicado aquí; por eso no se reduce a una
+sola cifra.
+
+De ahí tres reglas de operación:
+
+- **La ola corre sola de principio a fin** y se recoge por su notificación;
+  no se vigila turno a turno.
+- **Contra el límite de la cuenta no hay reintento.** `translate` reconoce la
+  respuesta de límite («You've hit your session limit…», que llega con
+  `subtype: success`) y sale con **5**; `cycle` registra la iteración como
+  `limite`, `advance` no reintenta, y la ola deja la marca `limite` para que
+  los lotes que aún no arrancan salgan con 5 sin llamar al modelo. En la ola 2,
+  105 de 117 rechazos eran esa respuesta, reintentada tres veces por lote.
+- **Una fase larga empieza en una conversación nueva**, con el plan y el banco
+  como estado: el contexto releído por respuesta es lo que se paga.
+
+**El caché de 1 h** (`THYROX_ENABLE_PROMPT_CACHING_1H`, del proveedor) sólo
+convierte escrituras en lecturas si el mismo prefijo vuelve a pedirse pasados
+5 minutos. En el pool, 487 de 696 ítems escriben de 5k a 10k tokens con valores
+distintos por ítem: `{ plantilla; ítem; } | claude -p` manda las dos cosas en
+un mensaje, y lo escrito incluye el fragmento. Se activa en la ola 3 y se
+compara por ítem contra la ola 2, en vez de suponer su efecto.
+
 ## 10. Riesgos
 
 | Riesgo | Mitigación |
