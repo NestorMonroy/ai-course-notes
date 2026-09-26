@@ -760,8 +760,33 @@ def test_advance_retranslates_local_signals_and_stops_bounded(tmp_path: Path) ->
                   runner=runner, cache=tmp_path / "c")
     assert result.returncode == 3, result.stdout + result.stderr
     assert "juicio" in result.stderr
+    # self-evolving-agents-2026: «resolubilidad» e «internalizar» sobrevivieron
+    # a tres retraducciones cada una y sólo cedieron a una fila del glosario.
+    # Una señal que vuelve igual tras retraducir su fragmento no es local: se
+    # detiene tras esa retraducción, no en el tope.
+    assert "sobrevive" in result.stderr and "prose:english:training" in result.stderr
     rows = (repo / ".claude/workbench/translation/batches.tsv").read_text(encoding="utf-8").splitlines()[1:]
-    assert len(rows) == 3 and all(int(r.split("\t")[5]) >= 1 for r in rows[1:])
+    assert len(rows) == 2 and int(rows[1].split("\t")[5]) >= 1
+
+
+def test_advance_keeps_retranslating_a_signal_that_changes(tmp_path: Path) -> None:
+    # La gemela: si la retraducción cambia la señal (otra palabra), el fragmento
+    # sí responde a retraducir y el lote sigue hasta quedar limpio.
+    repo, note, runner = setup(tmp_path)
+    changing = FAKE_RUNNER.replace("for n, zh in enumerate(items, 1):",
+                                   "state = Path(__file__).with_suffix('.calls')\n"
+                                   "calls = int(state.read_text()) if state.exists() else 0\n"
+                                   "state.write_text(str(calls + 1))\n"
+                                   "table['训练用 checkpoint。'] = ['El training usa checkpoint.', "
+                                   "'El throughput usa checkpoint.', 'El entrenamiento usa checkpoint.'][min(calls, 2)]\n"
+                                   "for n, zh in enumerate(items, 1):")
+    runner.write_text(changing, encoding="utf-8")
+    write_plan(repo, "cs000", [note])
+    result = loop(repo, "advance", "--batch", "cs000", "--model", "claude-sonnet-5", "--max-iterations", "4",
+                  runner=runner, cache=tmp_path / "c")
+    assert result.returncode == 0, result.stdout + result.stderr
+    rows = (repo / ".claude/workbench/translation/batches.tsv").read_text(encoding="utf-8").splitlines()[1:]
+    assert [r.split("\t")[6] for r in rows] == ["1", "1", "0"]
 
 
 def test_advance_stops_on_a_shared_cause_without_retranslating(tmp_path: Path) -> None:

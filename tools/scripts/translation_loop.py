@@ -1054,6 +1054,8 @@ def cmd_advance(args) -> int:
         print(f"advance: el lote {args.batch} no está en {args.plan}", file=sys.stderr)
         return 2
     bench = batch_bench(args.batch)
+    # Los pares (nota, causa) que la vuelta anterior mandó a retraducir.
+    retranslated: set[tuple[str, str]] = set()
     for _round in range(args.max_iterations):
         code = cmd_cycle(ns(batch=args.batch, bench=None, model=args.model, width=args.width, memfree=args.memfree,
                             timeout=args.timeout, memory=args.memory, compile=args.compile, jobs=args.jobs,
@@ -1065,13 +1067,24 @@ def cmd_advance(args) -> int:
             # Fragmentos rechazados al recibirlos (sin marcadores, estructura rota):
             # son la siguiente vuelta, no un juicio (ola 1: siete lotes paraban aquí).
             continue
-        signals = {cause_key(json.loads(l)) for l in (last / "signals.jsonl").read_text(encoding="utf-8").splitlines()
-                   if l.strip()}
+        rows_now = [json.loads(l) for l in (last / "signals.jsonl").read_text(encoding="utf-8").splitlines()
+                    if l.strip()]
+        signals = {cause_key(r) for r in rows_now}
         routes = classify(root, args.memory)
         shared = sorted(s for s in signals if routes.get(s, ("local",))[0] == "shared")
         if shared:
             print(f"advance: {len(shared)} causa(s) compartida(s); se deciden una vez (hace falta juicio): "
                   + ", ".join(shared[:10]), file=sys.stderr)
+            return 3
+        # Una señal que vuelve igual tras retraducir su fragmento no cede a
+        # retraducir: «resolubilidad» e «internalizar» sobrevivieron a tres
+        # retraducciones y sólo cedieron a una fila del glosario. Se detiene ya,
+        # no en el tope, y la nombra para decidirla una vez.
+        persistent = sorted({f"{cause_key(r)} en {r['note']}" for r in rows_now
+                             if (r["note"], cause_key(r)) in retranslated})
+        if persistent:
+            print(f"advance: {len(persistent)} señal(es) sobrevive(n) a la retraducción de su fragmento; hace "
+                  "falta juicio (glosario o regla): " + ", ".join(persistent[:10]), file=sys.stderr)
             return 3
         # En una ola (`translate_wave.sh`) varios lotes corren a la vez: el barrido
         # reescribe la memoria, así que corre una sola vez al final de la ola.
@@ -1080,6 +1093,8 @@ def cmd_advance(args) -> int:
         cmd_retranslate(ns(batch=args.batch, bench=None, memory=args.memory))
         listed = (last / "retranslate.tsv").read_text(encoding="utf-8").splitlines()[1:]
         marked = [l for l in listed if l.endswith("\tretranslate")]
+        pairs = {(l.split("\t")[0], l.split("\t")[1]) for l in marked}
+        retranslated = {(r["note"], cause_key(r)) for r in rows_now if (r["signal"], r["note"]) in pairs}
         if not marked and not any(routes.get(s, ("local",))[0] == "deterministic" for s in signals):
             print(f"advance: {len(listed)} señal(es) sin fragmento que retraducir; hace falta juicio", file=sys.stderr)
             return 3

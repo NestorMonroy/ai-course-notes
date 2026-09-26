@@ -254,8 +254,13 @@ agregar); la corrección está en el banco `linea-base-de-measure-*`.
   entradas.
 
 `advance` itera las rutas 1 y 3 por sí solo y sale con 3 cuando hace falta
-juicio: una causa compartida, señales sin fragmento que retraducir o el tope de
-iteraciones. Lo que pide juicio se decide entre olas.
+juicio: una causa compartida, señales sin fragmento que retraducir, **una
+señal que sobrevive a la retraducción de su fragmento** o el tope de
+iteraciones. La tercera viene de `self-evolving-agents-2026`: «resolubilidad»
+e «internalizar» volvieron iguales en tres retraducciones y sólo cedieron a
+una fila del glosario; ahora el lote se detiene tras la primera retraducción
+que las repite y las nombra. Sale con 5 si la cuenta llegó a su límite de
+sesión (sección 9.1). Lo que pide juicio se decide entre olas.
 
 **El registro de cada lote** vive en un banco estable,
 `.claude/workbench/translation/<lote>/`, versionado:

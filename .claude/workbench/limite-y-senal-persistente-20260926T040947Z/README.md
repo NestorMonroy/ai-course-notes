@@ -25,3 +25,16 @@ conversación que orquesta leyó 1,152,885,383 tokens de caché en 2,904
 respuestas (~397,000 por respuesta); el pool, 18,296,741 en 696 fragmentos
 (~26,000). El detalle y las reglas de operación que salen de ahí están en la
 sección 9.1 del PLAN.
+
+## La señal que sobrevive a su retraducción
+
+Concepto tomado de `self-evolving-agents-2026`: «resolubilidad» e
+«internalizar» volvieron iguales en tres retraducciones cada una y sólo
+cedieron a una fila del glosario. `advance` recuerda los pares (nota, causa)
+que mandó a retraducir; si uno reaparece en la vuelta siguiente, sale con 3 y
+lo nombra, en vez de gastar el resto de iteraciones.
+
+- `red-persistente.txt`: `advance` llegaba al tope (3 iteraciones).
+- `annul-2-summary.txt`: P1 (sin la detención) hace caer sólo la prueba
+  acotada; P2 (escalar ante cualquier retraducción previa, sin exigir la misma
+  causa) sólo su gemela, en la que la señal cambia y el lote sí queda limpio.
