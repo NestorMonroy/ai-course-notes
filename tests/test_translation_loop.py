@@ -1142,3 +1142,30 @@ def test_sweep_reaches_every_translated_file_that_measure_verifies(tmp_path: Pat
                   cache=tmp_path / "cache")
     assert result.returncode == 0, result.stderr
     assert "AutoFallBack=true" in preamble.read_text(encoding="utf-8")
+
+
+def test_a_cause_already_decided_is_retranslated_not_held_as_shared(tmp_path: Path) -> None:
+    # Ola 4: «auditabilidad» ya tenía su fila de glosario y seguía deteniendo
+    # dos lotes como causa compartida, sin que sus fragmentos se retradujeran
+    # nunca. Una forma prohibida o rechazada por el glosario ya está decidida,
+    # y un U+FFFD es daño de un fragmento: las tres van a retraducción.
+    mod = load_loop()
+    glyph = "Missing character: There is no � (U+FFFD) in font [lmroman10-regular]:mapping=t"
+    rows = lambda n: [
+        {"note": f"{n}.es-mx.tex", "signal": "prose:forbidden:la clave está en", "detail": ""},
+        {"note": f"{n}.es-mx.tex", "signal": "prose:invented:auditabilidad", "detail": ""},
+        {"note": f"{n}.es-mx.tex", "signal": "compile:missing-glyph", "detail": glyph},
+        {"note": f"{n}.es-mx.tex", "signal": "prose:english:pipeline", "detail": ""}]
+    write_signals(tmp_path, "a", rows("a/n1"))
+    write_signals(tmp_path, "b", rows("b/n2"))
+    memory = tmp_path / "memory.jsonl"
+    memory.write_text("", encoding="utf-8")
+    glossary = tmp_path / "glossary.tsv"
+    glossary.write_text("term_en\tdecision\tes_mx\tmeaning\tsource\trejected\n"
+                        "auditability\ttranslate\tcapacidad de auditoría\tx\ty\tauditabilidad\n", encoding="utf-8")
+    routes = mod.classify(tmp_path, memory, glossary)
+    assert routes["prose:forbidden:la clave está en"][0] == "local"
+    assert routes["prose:invented:auditabilidad"][0] == "local"
+    assert routes["compile:missing-glyph:U+FFFD"][0] == "local"
+    # Lo que no tiene decisión sigue siendo compartido: se decide una vez.
+    assert routes["prose:english:pipeline"][0] == "shared"

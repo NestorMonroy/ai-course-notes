@@ -834,7 +834,7 @@ def cause_key(row: dict) -> str:
     return signal
 
 
-def classify(root: Path, memory: Path) -> dict[str, tuple[str, list[str]]]:
+def classify(root: Path, memory: Path, glossary: Path | None = None) -> dict[str, tuple[str, list[str]]]:
     """Ruta de cada señal según dónde vive su causa (plan v3).
 
     - determinista: un arreglo `mechanical` de la memoria la cubre;
@@ -855,6 +855,17 @@ def classify(root: Path, memory: Path) -> dict[str, tuple[str, list[str]]]:
             texts[note] = path.read_text(encoding="utf-8") if path.is_file() else ""
         return texts[note]
 
+    import check_prose_vocabulary as prose
+    from check_translation_parity import DEFAULT_GLOSSARY
+    _keep, rejected = prose.load_glossary(glossary or DEFAULT_GLOSSARY)
+    rejected_forms = {form for form, _target in rejected}
+
+    def decided(key: str, name: str) -> bool:
+        """Una forma prohibida o rechazada ya tiene su decisión; un U+FFFD es
+        daño de un fragmento, no una causa que se decida una vez."""
+        return (name.startswith("prose:forbidden:") or key == "compile:missing-glyph:U+FFFD"
+                or key.rsplit(":", 1)[-1] in rejected_forms)
+
     notes: dict[str, set[str]] = {}
     names: dict[str, str] = {}
     for row in latest_signals(root):
@@ -867,6 +878,11 @@ def classify(root: Path, memory: Path) -> dict[str, tuple[str, list[str]]]:
         if any(fnmatch.fnmatchcase(names[key], pattern) and any(text in note_text(n) for n in where)
                for pattern, text in mechanical):
             route = "deterministic"
+        elif decided(key, names[key]):
+            # Ola 4: «auditabilidad» ya tenía su fila de glosario y seguía
+            # deteniendo lotes como compartida, sin retraducirse nunca. Lo que
+            # falta en una causa decidida es retraducir sus fragmentos.
+            route = "local"
         elif len(where) > 1:
             route = "shared"
         else:

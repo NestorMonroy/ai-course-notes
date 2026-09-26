@@ -279,3 +279,16 @@ def test_package_and_language_names_are_preamble_code_not_prose(tmp_path: Path) 
     assert "english:mexican" not in result.stdout and "english:margin" not in result.stdout
     assert "english:geometry" not in result.stdout
     assert "deployment" in result.stdout
+
+
+def test_the_unaccented_axis_skips_proper_names_and_units_after_a_number(tmp_path: Path) -> None:
+    # Ola 4: «Microsoft Research Asia», «Lin Min», «Lei Jun» y «4 h 25 min»
+    # salían como «asía», «mín» y «leí» sin tilde. Una mayúscula dentro de la
+    # oración es un nombre propio y una unidad tras un número no lleva tilde;
+    # al inicio de oración o en minúscula, la falta de tilde sigue saliendo.
+    body = ("Hizo una estancia en Microsoft Research Asia con Lin Min. La charla duró 4 h 25 min "
+            "y habló del libro de Lei Jun. Tambien dijo que la tecnica importa.")
+    result = run(str(note(tmp_path, body)))
+    for word in ("asia", "min", "lei"):
+        assert f"unaccented:{word}" not in result.stdout, result.stdout
+    assert "unaccented:tambien" in result.stdout and "unaccented:tecnica" in result.stdout

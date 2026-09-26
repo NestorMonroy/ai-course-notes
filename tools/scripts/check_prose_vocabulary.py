@@ -352,7 +352,14 @@ def scan(files, es, en, forbidden, keep, root, lemmas=None):
         for match in WORD.finditer(text):
             raw = match.group(0)
             word = raw.lower()
-            if word in accented and not dictionary.accepts(word) and dictionary.accepts(accented[word]):
+            # Una mayúscula dentro de la oración es un nombre propio («Research
+            # Asia», «Lei Jun») y una unidad tras un número no lleva tilde
+            # («25 min»); al inicio de oración sí se mide («Tambien dijo»).
+            before = text[:match.start()].rstrip()
+            named = raw[0].isupper() and before and before[-1] not in ".!?¿¡:«\"\n{"
+            unit = re.search(r"\d$", before) is not None
+            if (word in accented and not named and not unit and not dictionary.accepts(word)
+                    and dictionary.accepts(accented[word])):
                 hits[f"unaccented:{word}"] += 1
             elif (len(word) >= 6 and NOMINAL_SUFFIX.match(word) and word not in keep and not attested(word, es)
                     and not prefixed_attested(word, es) and not dictionary.accepts(word)):
