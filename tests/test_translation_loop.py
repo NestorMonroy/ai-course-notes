@@ -1121,3 +1121,24 @@ def test_residual_han_is_grouped_by_the_han_it_leaves(tmp_path: Path) -> None:
     routes = mod.classify(tmp_path, memory)
     assert routes["parity:residual-han:不着边际"] == ("shared", ["a/n1.es-mx.tex", "a/n2.es-mx.tex"])
     assert routes["parity:residual-han:推理"][0] == "local" and routes["parity:residual-han:构建模型"][0] == "local"
+
+
+def test_sweep_reaches_every_translated_file_that_measure_verifies(tmp_path: Path) -> None:
+    # Ola 3: el barrido del respaldo CJK dejó sin tocar cuatro preámbulos
+    # compartidos y dos plantillas: sólo recorría `*-notes.es-mx.tex`, mientras
+    # `measure` verifica todo `*.es-mx.tex`. El arreglo cubre lo que se mide.
+    repo, note, runner = setup(tmp_path)
+    preamble = repo / "cs000" / "cs000-preamble.es-mx.tex"
+    preamble.write_text("\\usepackage{xeCJK}\n\\setCJKmainfont{FandolSong-Regular.otf}\n", encoding="utf-8")
+    memory = tmp_path / "memory.jsonl"
+    memory.write_text(json.dumps({
+        "patron": "preámbulo sin respaldo CJK", "senal_del_verificador": "compile:missing-glyph",
+        "fix_generico": {"tipo": "mechanical", "buscar": "\\usepackage{xeCJK}\n",
+                         "reemplazar": "\\usepackage[AutoFallBack=true]{xeCJK}\n"},
+        "archivos_donde_ya_se_aplico": []}, ensure_ascii=False) + "\n", encoding="utf-8")
+    bench = tmp_path / "bench"
+    bench.mkdir()
+    result = loop(repo, "sweep", "--bench", str(bench), "--iteration", "1", "--memory", str(memory),
+                  cache=tmp_path / "cache")
+    assert result.returncode == 0, result.stderr
+    assert "AutoFallBack=true" in preamble.read_text(encoding="utf-8")

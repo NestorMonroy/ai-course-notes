@@ -56,8 +56,14 @@ def run(args):
     return result.returncode
 
 
-run(["measure", "--decision", "olas 2 y 3 (lo que cambiaron desde la medición anterior)"])
+# Reanudación: `sys.argv[2]` es la primera decisión por aplicar (base 1). Las ya
+# medidas no se repiten, ni la medición inicial.
+START = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+if START == 1:
+    run(["measure", "--decision", "olas 2 y 3 (lo que cambiaron desde la medición anterior)"])
 for number, (label, rows, entries) in enumerate(DECISIONS, 1):
+    if number < START:
+        continue
     if rows:
         with GLOSSARY.open("a", encoding="utf-8") as handle:
             handle.write("".join(r + "\n" for r in rows))
