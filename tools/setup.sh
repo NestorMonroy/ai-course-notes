@@ -45,6 +45,7 @@ fi
 log_header "Herramientas del sistema"
 check "GNU parallel" notes_toolchain_require_parallel
 check "gawk" notes_toolchain_require_gawk
+check "GNU Time (memoria de cada claude -p)" notes_toolchain_require_gnu_time
 check "poppler (pdftotext, pdftoppm)" notes_toolchain_require_poppler
 check "TeX Live con la plantilla es-MX" notes_toolchain_require_texlive
 check "hunspell es_MX (RLA-ES)" notes_toolchain_require_hunspell

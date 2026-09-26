@@ -102,6 +102,53 @@ Si hace falta una anchura automática, se mide la memoria **por ítem** (la suma
 del árbol de procesos) y los núcleos libres **al arrancar el pool**, nunca a
 partir de la carga que producen otros.
 
+### 2.2 La memoria de cada `claude -p` se mide, y la ola viva se sondea
+
+La cota de `--memfree 3G` de arriba es una estimación: nadie había medido
+cuánta memoria usa un `claude -p` del pool. Desde el merge de THYROX
+`feature/thyrox-l6` en `feature/ai-course-notes-l1` (`bc5198181`) hay dos
+instrumentos, y este plan los usa así:
+
+| Instrumento | Qué mide | Dónde queda | Proveedor |
+|---|---|---|---|
+| **GNU Time** alrededor de cada ítem | memoria pico (KB), pared y CPU, con `-f "%M %e %U %S"` | `translate/<ISO>/<n>.time`; `usage` lo suma en `iterations/NN/usage.tsv` (`peak_rss_kb`, `wall_s`, `cpu_s`) y lo resume como `peak_rss_max_kb` | `b062ea25`, `5f7cda74` |
+| **`bin/stdin_probe`** sobre cada proceso vivo | a dónde apunta su stdin (`channel`, `devnull`, `tty`, `file`, `unreadable`), cuántos escritores tiene ese canal, estado y CPU | la salida del comando; se corre a mano durante una ola | `5be11d03`, `bac5881f` |
+
+**GNU Time** se instala por la cadena de herramientas del consumidor:
+`notes_toolchain_require_gnu_time` en `tools/lib/toolchain.sh` (lo revisa
+`tools/setup.sh --check`). Se busca la marca «GNU Time», no una versión: el
+paquete de Ubuntu imprime `time (GNU Time) UNKNOWN`. Sin él el pool corre
+igual y no mide; en `usage.tsv` un ítem sin `<n>.time` lleva `-`, porque «no
+medido» no es cero.
+
+**`stdin_probe`** responde, durante una ola, si un `claude -p` está trabajando
+o esperando para siempre:
+
+```bash
+pgrep -f '[c]laude -p' | parallel -j8 -k bash /home/user/thyrox/bin/stdin_probe {}
+```
+
+Cada ítem del pool lee de `{ plantilla; ítem; } | claude -p`, una tubería cuyo
+escritor ya salió: la sonda da 0 escritores, el proceso recibió su prompt y no
+se cuelga. Un canal con escritor vivo, o un socket, sí puede esperar para
+siempre; `wait-jobs` del proveedor avisa de esos dos casos. El patrón va con
+corchetes (`[c]laude`) para que `pgrep` no case su propia línea de comando.
+
+**Lo que falta, declarado.** La ola 6 es la primera ejecución del pool con
+GNU Time instalado: sus `usage.tsv` darán la memoria pico real por ítem. Con
+esa cifra, `--memfree` pasa de estimado a derivado (la memoria pico medida más
+un margen declarado), en una decisión propia y medida, no en este párrafo.
+
+*Métrica:* memoria pico residente de cada `claude -p`, en KB, según GNU Time.
+*Ciega a:* la memoria de los procesos hijos que `claude -p` lance y no espere,
+y a la del propio `parallel`; mide el ítem, no la máquina.
+
+**Por qué aquí y no en un documento nuevo.** La cota que esto corrige
+(`--memfree 3G`) vive en la sección 2.1; un documento aparte repetiría la cifra
+en dos lugares, y la que no se actualice queda falsa. Si la operación del pool
+crece (más instrumentos, más decisiones de capacidad), se separa entonces, con
+esta sección como su origen.
+
 ## 3. Los tres papeles, adaptados
 
 | Plan 2.2.0 | Aquí | Pieza |

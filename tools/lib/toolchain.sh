@@ -70,6 +70,22 @@ function notes_toolchain_require_parallel() {
     [[ -f "$home/will-cite" ]] || { mkdir -p "$home" && : > "$home/will-cite"; }
 }
 
+# --- GNU Time ---------------------------------------------------------------------
+
+# `headless-pool` mide la memoria pico, la pared y la CPU de cada `claude -p`
+# con GNU Time (`-f "%M %e %U %S"`, adaptado de THYROX `b062ea25`/`5f7cda74`).
+# Sin él el pool corre igual y no mide; con otro `time` el formato no se
+# entiende. Se busca la marca «GNU Time», no una versión: el paquete de Ubuntu
+# imprime «time (GNU Time) UNKNOWN».
+function notes_toolchain_require_gnu_time() {
+    local bin="${NOTES_TOOLCHAIN_TIME_BIN:-/usr/bin/time}"
+    _notes_ensure "$bin" GNU_TIME "${NOTES_TOOLCHAIN_TIME_INSTALL_CMD:-sudo apt-get install -y time}" || return 2
+    if [[ "$("$bin" --version 2>&1)" != *"GNU Time"* ]]; then
+        echo "notes_toolchain: '$bin' resuelve, pero no es GNU Time; su formato -f no es el que se consume." >&2
+        return 2
+    fi
+}
+
 # --- gawk -------------------------------------------------------------------------
 
 # Un intervalo seguido de un grupo revienta el compilador de expresiones de

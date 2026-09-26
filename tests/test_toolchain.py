@@ -93,3 +93,16 @@ def test_check_mode_writes_nothing_outside_the_repository(tmp_path: Path) -> Non
                             env={**os.environ, "SKILLS_DIR": str(skills)})
     assert not skills.exists(), result.stdout
     assert "[..]" in result.stdout and "--check" in result.stdout
+
+
+def test_a_time_that_is_not_gnu_time_is_rejected_and_gnu_time_is_accepted(tmp_path: Path) -> None:
+    # `headless-pool` mide la memoria de cada `claude -p` con GNU Time
+    # (`-f "%M %e %U %S"`); otro `time` no conoce ese formato. Se busca la
+    # marca «GNU Time», no una versión: el paquete de Ubuntu imprime UNKNOWN.
+    other = fake(tmp_path / "busybox", "time", 'echo "BusyBox v1.36 multi-call binary"')
+    result = bash("notes_toolchain_require_gnu_time", [other.parent],
+                  {"NOTES_TOOLCHAIN_TIME_BIN": str(other)})
+    assert result.returncode == 2 and "no es GNU Time" in result.stderr, result.stderr
+    gnu = fake(tmp_path / "gnu", "time", 'echo "time (GNU Time) UNKNOWN"')
+    result = bash("notes_toolchain_require_gnu_time", [gnu.parent], {"NOTES_TOOLCHAIN_TIME_BIN": str(gnu)})
+    assert result.returncode == 0, result.stderr
