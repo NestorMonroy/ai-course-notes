@@ -1,0 +1,64 @@
+\section{推理时计算调度}
+
+\subsection{Token/Width/Iteration 三角调度}
+Chen 在 15 分 32 秒处用一张幻灯片将“提示 → 搜索 → 迭代”画成一个 token / width / iteration 的三角形，强调不能只加 token，还要安排多候选搜索和多轮自我修正（图 \ref{fig:compute-pipeline}）。工程上常见的做法是先用 prompt 让模型生成更长的候选，然后控制每个 step 的 branching，再为每个 candidate 预留一到两轮的 feedback loop。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{frame-pipeline.jpg}
+\caption{推理时计算的三阶段 pipeline：prompt → search → iteration。\protect\footnotemark}
+\label{fig:compute-pipeline}
+\end{figure}
+\footnotetext{视频画面时间区间：00:15:10--00:16:10，展示 token-width-iteration 的调度曲线。}
+
+\begin{knowledgebox}{三角调度的工程量化}
+1. Token：测量一次完成 response 所需的总 token budget；2. Width：记录采样生成候选的数量与 diversity；3. Iteration：评估自我改进轮数（如 trace feedback / self-correction loops）对 accuracy 的边际收益。
+\end{knowledgebox}
+
+\subsection{成本与延迟权衡}
+Chen 反复强调在可观测指标上追踪 inference-time 消耗：一条 1,000 美元的算力曲线固然令人印象深刻，但很多实际部署场景只能接受 20~50 美元的 token 预算。图 \ref{fig:cost-latency} 来自 00:10 的讲解，指出成本和 latency 之间存在明显的 tradeoff，提示在低延迟通道应优先在 search 与 verifier 上节省，而在高价值任务中可以放开 token 预算。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{frame-cost-latency.jpg}
+\caption{推理时成本与延迟的平衡选项。\protect\footnotemark}
+\label{fig:cost-latency}
+\end{figure}
+\footnotetext{视频画面时间区间：00:09:40--00:10:30，展示 $20$-$1,000$ 显著不同的预算阶梯。}
+
+\begin{warningbox}{不可控的预算膨胀}
+在没有 verifier 或搜索控制的情况下，仅靠放宽 token 预算容易造成“预算膨胀”，成本飙升且 accuracy 没有同步提升。建议用缓存、采样池与 verifier 阶段把最昂贵的候选限定在已知 high-value 任务上。
+\end{warningbox}
+
+\subsection{推理时算力分层调度}
+推理时算力必须在 prompt/sampling、search、iteration 三个阶段之间划分清晰的预算窗口。Chen 现场提到的做法是先用 task difficulty 信号设置一个总 token cap（例如 400~600 token），然后根据 search depth 与 iteration 目标倒推每个阶段的 share：prompt 预留 25	t"与 100 token 之间，search 阶段按 branch 数加宽，iteration 轮次每轮占 80~120 token，同时预留 20	t"作为 verifier scoring 的余量。这个分层机制让我们在 budget 不变的情况下，通过不同阶段的预算 reallocation 达到偏重 accuracy 或 latency 的不同策略。
+
+\begin{table}[H]
+\centering
+\caption{推理时算力分层示例}
+\begin{tabular}{p{0.25\textwidth}p{0.22\textwidth}p{0.20\textwidth}p{0.28\textwidth}}
+\toprule
+阶段 & 关键指标 & 典型预算 & 工程提示 \\
+\midrule
+Prompt / Sampling & Input tokens + example CoT & 25\%~35\% of total & 把 difficulty metadata 与 instrumentation hints embed 进 prompt，保证 sampling 能在 high temperature 下启动 \\
+Search (branching) & Width、stepwise score、branching ratio & 40\%~50\% & 用 verifier gating 控制 depth，让每次展开都能带来 score margin 准备 \\
+Iteration / Feedback & Trace iterations、consistency votes & 20\%~30\% & 迭代阶段常见 self-correction 或 verifier replay，占用 token 但能显著修正 mistakes \\
+Verifier / Logging & Score margin、drift detect & 10\%~15\% & 并行埋点，如 sampler metrics、verifier distribution，保证 latency tuned \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{knowledgebox}{算力分层的控制回路}
+1. 先设置 token cap + latency target；2. 按 stage 粗略分配比例并写入 dashboard；3. 观察运行中每条 query 的 stage 占比，若 search/iteration drift 过高就用 prompt dial-back 重新收口。
+\end{knowledgebox}
+
+\subsection{Latency-Controlled Prompting}
+在 Operations 级别，为了避免 latency 脱轨，Chen 建议把 prompt 调整为“budget-aware templates”：在 prompt 中注明“预算越过 400 token 则回退”或“请在 1~2 个 iteration 内完成推理”。同时，我们可以在 prompt 里插入 instrumentation hint（如 `Sampling policy: alt-branch`），让 dispatch 系统在 sampling 阶段就限制候选数。这些 micro-guidelines 有助于把 cost/latency tradeoff 直接暴露在 inference-time template 而非 after-the-fact 的监控警报。
+
+\begin{warningbox}{Latency guard 设计要点}
+Prompt 中的 guard rail 要具体：写清楚“最多 2 个 iteration”比简单说“控制 latency”更有效；还可以用 `If token > 400 then reply "budget exceeded"` 作为硬性限制，迫使模型提前汇报 token usage。
+\end{warningbox}
+
+\subsection{本章小结}
+推理时计算调度要求同时衡量 token 预算、candidate width、iteration depth，并把 latency guard 与多阶段算力分层纳入初始 budgeting。把这三者视为工程的三条轴线，才能在不同应用场景下实现既可靠又高效的推理。
+

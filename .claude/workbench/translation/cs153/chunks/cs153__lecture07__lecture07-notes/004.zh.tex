@@ -1,0 +1,40 @@
+\section{Incremental Indexing：只处理发生变化的代码}
+
+Codebase indexing 的第一原则是避免重复工作。Workspace 大部分文件在两次同步之间没有变化，系统应通过 content hash 和 tree summary 找出 delta，再对 changed content 解析、chunk、embedding 和 index。当前 Cursor secure indexing 文档进一步说明了 content-based embedding cache 和 index sharing，但这些是后续演化，本文只用来解释 durable mechanism。
+
+\subsection{Merkle-style sync 与 content identity}
+
+\term{Merkle tree} 是一种层次化 hash tree：叶节点表示文件或 chunk 内容，父节点 hash 由子节点决定。若两个 root hash 相同，可快速判断整个 subtree 未变；若不同，则向下定位变化。它减少同步 metadata 和全量扫描，但不自动解决 permission、rename semantics 或 semantic equivalence。
+
+\lecturefigure{04-merkle-sync.png}{Merkle-style sync 用层次 hash 定位变化，而不是重复上传完整 workspace。}{本地字幕 10:20--14:40；概念重绘。}
+
+\begin{knowledgebox}{读图：Hash 相等证明什么}
+Hash equality 证明 byte-level content identity，可以安全复用解析或 embedding；它不证明两个 path 权限相同，也不证明相似代码具有相同语义。Index key 至少要包含 content hash、embedding model/version、chunking version 和 access scope。
+\end{knowledgebox}
+
+\begin{importantbox}{Incremental work 的成本模型}
+若 workspace 有 $N$ 个 chunk，本次变化为 $\Delta N$，理想增量成本应接近
+\[
+C_{update}=O(\Delta N\cdot(C_{parse}+C_{embed}+C_{write}))
+\]
+而不是每次支付 $O(N)$。实际系统还要承担 tree comparison、deleted/renamed content、queue overhead 与 cache miss。
+\end{importantbox}
+
+\subsection{Parse、chunk、embed、store、retrieve}
+
+\term{embedding}（向量表示）把代码 chunk 映射到数值向量，使相似 query 和 content 在向量空间接近；\term{vector search}（向量检索）在大量 embedding 中寻找近邻。它不是“理解整个 repo”的同义词：chunk boundary、metadata filter、lexical search、reranking 与 context budget 都会影响结果。
+
+\lecturefigure{05-index-pipeline.png}{Secure indexing 是 parse、cache、embedding、storage 与 retrieval 组成的增量管线。}{本地字幕 10:20--15:10；Cursor secure indexing 官方资料。}
+
+\begin{knowledgebox}{读图：Freshness、security 与 recall 分开测}
+Freshness 看新 edit 多久可检索；security 看谁能 query 哪些 chunk；\term{recall}（召回率）看应返回的相关内容有多少被检索到，可写为 $\mathrm{recall}=\frac{\text{relevant retrieved}}{\text{all relevant}}$。高 recall 仍可能带来噪声，因此还要测 precision、ranking utility 与最终任务成功。
+\end{knowledgebox}
+
+\begin{warningbox}{Embedding cache 也需要版本和删除语义}
+内容相同可以复用 embedding，但 model version、chunker、language parser 或 security policy 改变时，旧 cache 可能失效。用户删除 repo 或权限变化后，系统还要撤销 index reference；content cache 可继续存在的条件必须由 retention 与隔离策略决定。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Incremental indexing 的核心是 content identity、versioned transform 和 access scope。Hash 能减少重复计算，retrieval quality 与 security 仍需要独立证据。
+

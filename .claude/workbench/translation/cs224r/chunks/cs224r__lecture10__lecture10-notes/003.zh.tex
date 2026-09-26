@@ -1,0 +1,170 @@
+\section{Part 1：经典 RL 技术用于 LLM 推理}
+
+\subsection{将推理建模为 RL 问题}
+
+\begin{importantbox}{MDP 建模}
+将数学推理问题建模为 MDP：
+\begin{itemize}
+    \item \textbf{状态} $s_t$：问题描述 + 到目前为止生成的解答前缀（token 序列）
+    \item \textbf{动作} $a_t$：下一步推理步骤（可以是一个 token 或一个推理步骤/句子）
+    \item \textbf{奖励} $r$：通常是稀疏的终端奖励，仅当完整解答生成后验证答案是否正确（outcome-based reward）
+    \item \textbf{策略} $\pi_\theta(a_t | s_t)$：语言模型本身
+\end{itemize}
+\end{importantbox}
+
+\subsection{数据扩增：扩展问题和解答数量}
+
+在最简单的设定下，收集更多的 (问题, 解答) 对来做监督微调（SFT）。Setlur et al. (NeurIPS 2024) 的实验表明：
+
+\begin{itemize}
+    \item 在 GSM8K 上，SFT 测试误差随问题数增长的收敛速率约为 $|\mathcal{D}|^{-0.15}$
+    \item 在 MATH 上更慢，约为 $|\mathcal{D}|^{-0.05}$
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-10.jpg}
+\caption{Warmup：扩展问题数和 Oracle 解答的 scaling 行为\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第 10 页。}
+
+\begin{knowledgebox}{RFT（Rejection Fine-Tuning）}
+RFT 是一种简单的利用 RL 信号改进 SFT 的方法：用当前模型采样多个解答，仅保留答案正确的解答用于微调。这等价于一种简化的 offline RL，因为它通过奖励信号过滤了训练数据。
+\end{knowledgebox}
+
+\subsection{为什么 RFT 继续堆数据会失效}
+
+讲者特别强调，RFT 不是 ``采样更多、训练更久'' 就能无限提升的策略。问题在于：这些 on-policy 正样本来自模型自己的行为分布，它们携带了当前策略已经形成的偏差。模型短期内能在训练提示上学会 ``自我修补''，但这种修补往往不是对推理规律的真正掌握，而是对特定轨迹模式的记忆。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-11.jpg}
+\caption{RFT scaling 的拐点：继续拟合 on-policy 正样本会伤害泛化\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第 11 页。}
+
+\begin{warningbox}{RFT 的核心风险是伪步骤被强化}
+如果模型在某类题目中偶然生成了能通向正确答案、但逻辑上并不稳固的中间步骤，那么 RFT 会把这些步骤也当作 ``可学习样本'' 一并放大。训练误差下降不代表推理更稳，只可能说明模型更会复述自己原本的习惯。
+\end{warningbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-12.jpg}
+\caption{伪步骤会让模型在测试时偏离正确求解轨道\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第 12 页。}
+
+\subsection{离线 RL：利用负样本的优势}
+
+关键洞察：不仅使用正确解答（正样本），还应利用\textbf{错误解答}（负样本）来提供对比信号。
+
+\begin{importantbox}{Per-Step Advantage 的概念}
+对于错误解答中的每一步推理，可以通过从该步出发多次 rollout 来估计该步的"优势"（advantage）。如果从某个中间步出发的 rollout 总是失败，说明该步是一个"错误步骤"；如果有时成功有时失败，说明该步是"尚可的步骤"。这本质上是在估计 rollout 策略的值函数。
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-15.jpg}
+\caption{负样本 on-policy 数据提供的优势信号\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第 15 页。}
+
+离线 RL 使用这些优势估计的两种方式：
+
+\begin{enumerate}
+    \item \textbf{Option 1}：仅使用估计的优势进行加权 SFT（对正确步骤加大权重，对错误步骤降低权重）
+    \item \textbf{Option 2}：使用 DPO（Direct Preference Optimization），保留来自 $\tilde{\pi}$ 的部分 rollout 进行偏好对比训练
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-20.jpg}
+\caption{利用 Advantage 进行 Offline RL (DPO)\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第 20 页。}
+
+\subsection{Advantage 到底在刻画什么}
+
+这部分是整场讲座中最值得反复消化的技术点。Aviral Kumar 把 ``每一步是否值得保留'' 明确转成了一个价值估计问题：固定某个中间步骤后，再从这里继续 rollout，多次观察最终成功率。如果某一步后续几乎总是失败，这一步就应当得到负 advantage；如果后续成功率明显更高，则说明它把搜索过程带向了更好的区域。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-17.jpg}
+\caption{Advantage 的直觉：比较做出某一步前后的价值变化\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第 17 页。}
+
+\begin{knowledgebox}{从 step filtering 到偏好学习}
+一旦拿到了 step-level advantage，就有两种非常自然的训练用法：
+\begin{enumerate}
+    \item 直接过滤：只保留 advantage 高的步骤，形成更干净的 imitation 数据。
+    \item 形成偏好对：把好步骤与坏步骤、好轨迹片段与坏轨迹片段组成 preference pair，再用 DPO 这类目标去优化。
+\end{enumerate}
+这也是本讲一直在强调的主线：\textbf{RL 的价值不只是最终 reward，更在于把稀疏结果信号变成更密的训练监督。}
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-19.jpg}
+\caption{Advantage filtering 在实验中显著缓解伪步骤问题\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第 19 页。}
+
+\begin{warningbox}{离线 RL 的局限}
+Offline RL 的关键问题在于：用来估计 advantage 的 rollout 策略 $\tilde{\pi}$ 与当前正在训练的策略 $\pi_\theta$ 之间存在分布偏移（distribution shift）。随着训练进行，$\pi_\theta$ 更新后 advantage 估计会变得不准确。
+\end{warningbox}
+
+\subsection{在线 RL：REINFORCE 和 PPO}
+
+为了解决离线 RL 的分布偏移问题，在线 RL 在训练过程中持续用当前策略采样新数据。
+
+在线 RL 的基本流程：
+\begin{enumerate}
+    \item 用当前策略 $\pi_\theta$ 对问题采样多个解答
+    \item 用奖励模型或验证器评估这些解答
+    \item 估计每步的优势（advantage）
+    \item 用策略梯度方法（如 REINFORCE 或 PPO）更新策略
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-25.jpg}
+\caption{Per-Step Advantages in Online RL\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第 25 页。}
+
+一个关键问题是：\textbf{是否应该在线实时做 rollout 来估计 advantage？}讲者提到可以训练一个参数化的过程奖励模型（Process Reward Model, PRM）来预测每步的 advantage，从而避免昂贵的在线 rollout。
+
+\subsection{PAV：把 outcome reward 变成 dense reward}
+
+如果说 offline RL 的关键是把错误轨迹也变成有价值的监督，那么 online RL 的关键就是进一步让奖励信号变密。Setlur et al. 在 ``Rewarding Progress'' 中提出的 Process Advantage Verifier（PAV）正是为此服务：它学习预测某一步推理给后续成功率带来的边际提升，从而把原本只在答案正确时出现的 0/1 奖励，改写成贯穿整条解答链的 dense bonus。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-26.jpg}
+\caption{PAV 用参数化优势验证器为每一步提供更细粒度的训练信号\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第 26 页。}
+
+\begin{importantbox}{为什么 dense reward 特别适合推理任务}
+数学与代码推理的搜索空间极大，且正确轨迹非常稀疏。仅靠最终答案 reward，相当于要求模型在几乎没有中途反馈的情况下盲目搜索；而 PAV 提供的 step-level bonus 能持续告诉模型：当前这一步是否把自己带向更可能成功的解空间。
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-27.jpg}
+\caption{Dense-reward online RL 带来更好的样本效率和性能\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第 27 页。}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-28.jpg}
+\caption{PAV 的探索价值：帮助模型找到原本难以触及的解法\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第 28 页。}
+
+\subsection{本章小结}
+
+经典 RL 技术（SFT $\to$ RFT $\to$ Offline RL $\to$ Online RL）形成了一个逐步强化的工具链。核心 takeaway 是：RL 训练可以显著提高 LLM 推理的数据效率，相比纯 SFT 可提升约 8 倍。
+

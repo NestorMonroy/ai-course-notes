@@ -1,0 +1,34 @@
+\section{事故二：PostgreSQL Storage Pressure 与迁移账单}
+
+第二段事故聚焦 PostgreSQL 存储压力。PostgreSQL 使用 MVCC（Multi-Version Concurrency Control，多版本并发控制）：update/delete 后旧 tuple 不会立即从文件移除，需要 vacuum 回收可复用空间。长事务、写入量、index 和 autovacuum lag 会造成 bloat；磁盘接近耗尽时，maintenance 自身也需要 I/O 和空间，恢复风险陡增。
+
+\subsection{Dead tuple、VACUUM 与 disk headroom}
+
+\term{dead tuple} 是不再对任何活跃 transaction 可见的旧行版本；\term{VACUUM} 标记空间可复用并维护可见性信息，常规 VACUUM 通常不把文件归还给操作系统；\term{VACUUM FULL} 重写表并可回收更多磁盘，却需要额外空间和强锁。事故处理不能在饱和时盲目运行最重 maintenance。
+
+\lecturefigure{08-postgres-pressure.png}{PostgreSQL storage pressure 来自 write workload、MVCC residue、maintenance 与 disk headroom 的耦合。}{本地字幕 25:30--32:40；PostgreSQL 官方 vacuum 文档。}
+
+\begin{knowledgebox}{读图：不是“Postgres 不可扩展”}
+先检查 transaction age、dead tuple、table/index growth、WAL、autovacuum thresholds、I/O 和 free space，再决定 tune、partition、archive、offload 或 migrate。讲者的痛苦来自特定 workload 与时点，不能推出所有 indexing 系统都应避免 PostgreSQL。
+\end{knowledgebox}
+
+\begin{warningbox}{Emergency migration 会叠加负载}
+迁移期间旧系统继续 serving，新系统要 backfill，validation 要 dual read/query，失败还会 retry。若没有独立 capacity 和 throttle，migration 本身会让原系统更难恢复。先 offload 非关键 workload 和冻结 schema，通常比立即全速搬迁更安全。
+\end{warningbox}
+
+\subsection{Cold start：重建 embedding 与 cache}
+
+\term{cold start} 在这里不仅是新 process 启动，而是新 index 缺少 embedding、segment、cache 和统计信息。重建每个 repo 需要读取 source、chunk、调用 embedding、写入新 storage，再用 query 验证。课堂提到 migration 还会消耗额外 inference capacity，这正是隐藏账单。
+
+\lecturefigure{09-cold-start.png}{Index migration 需要 backfill、dual validation、cache warming 和安全 cutover。}{本地字幕 29:30--32:40；概念重绘。}
+
+\begin{knowledgebox}{读图：Cutover 之前先定义 equivalence}
+新旧系统不一定返回完全相同 top-$k$。Validation 应比较 recall/utility、filter correctness、latency、freshness 和 cost；对关键用户可 shadow query；只有满足阈值后再按 tenant/region 渐进切流，并保留 rollback 期间的双写或源数据。
+\end{knowledgebox}
+
+\teachervoice{“最好的扩数据库方式是不要让数据库承担这份工作”是一句有用但危险的课堂口号。正确理解是：把 immutable、可重建、吞吐型数据移出 transactional hot path，而不是删除所有 database。}
+
+\subsection{本章小结}
+
+PostgreSQL 事故揭示了 MVCC maintenance、disk headroom 与 migration workload 的耦合。数据库迁移不是复制数据，而是重建派生状态、验证等价性并管理双系统风险。
+

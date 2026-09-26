@@ -1,0 +1,78 @@
+\section{RLHF：从人类偏好中强化学习}
+
+\subsection{核心框架}
+
+\begin{enumerate}
+    \item \textbf{Instruction Finetuning}：作为初始化。
+    \item \textbf{训练奖励模型}：从人类偏好比较中学习 $R_\phi(x, y)$。
+    \item \textbf{RL 优化}：用 PPO 等算法最大化奖励模型的输出。
+\end{enumerate}
+
+\subsection{奖励模型训练}
+
+人类比较两个回答并选择更好的那个。使用 Bradley-Terry 模型：
+$$p(y_w \succ y_l \mid x) = \sigma(R_\phi(x, y_w) - R_\phi(x, y_l))$$
+
+损失函数：
+$$\mathcal{L}(\phi) = -\mathbb{E}_{(x, y_w, y_l)}\left[\log \sigma(R_\phi(x, y_w) - R_\phi(x, y_l))\right]$$
+
+\begin{knowledgebox}{为什么用比较而不是评分}
+人类给绝对评分时噪声大且校准不一致。成对比较更简单、更可靠：只需判断"A 比 B 好"而不需要"A 是 7.3 分"。
+\end{knowledgebox}
+
+\subsection{Policy Gradient 用于 LLM}
+
+将 LLM 生成视为 RL 问题：
+$$\max_\theta \; \mathbb{E}_{y \sim p_\theta(y|x)} \left[R_\phi(x, y)\right]$$
+
+使用 REINFORCE / policy gradient：
+$$\theta_{t+1} := \theta_t + \alpha \frac{1}{m}\sum_{i=1}^{m} R(s_i) \nabla_{\theta_t} \log p_{\theta_t}(s_i)$$
+
+直觉：高奖励的生成增加概率，低奖励的生成降低概率。
+
+\begin{warningbox}{KL 正则化的必要性}
+不加约束地优化奖励模型，策略会 exploit 奖励模型的弱点（reward hacking）。标准做法是加入 KL 惩罚：
+$$\max_\theta \; \mathbb{E}_{y \sim p_\theta}\left[R_\phi(x, y)\right] - \beta \, D_{\mathrm{KL}}(p_\theta \| p_{\mathrm{ref}})$$
+其中 $p_{\mathrm{ref}}$ 是 SFT 模型。$\beta$ 控制策略偏离初始模型的程度。
+\end{warningbox}
+
+\subsection{奖励数据质量控制}
+
+偏好数据的质量直接决定 reward model 的泛化能力。常见的质量维度有：比较一致性、标注员经验、context diversity 以及 hard negative 比例。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.25\textwidth} p{0.62\textwidth}}
+\toprule
+维度 & 实施做法 \\
+\midrule
+一致性 & 多轮盲审，计算 Cohen's kappa；不一致条目发送给高级审查 \\
+多样性 & 故意补充 creative、factual、multi-turn prompt，避免 reward 只对某类指令上调 \\
+硬负样本 & 采集 near-miss 回答，让 reward model 区分 subtle flaws \\
+元数据 & 记录 intent、topic、difficulty，以便在训练时按人类意图分层采样 \\
+\bottomrule
+\end{tabular}
+\caption{偏好数据质量控制要素}
+\end{table}
+
+\begin{knowledgebox}{质量胜于模型大小}
+Reward model 归因链上最薄弱的一环通常是 label quality，而不是参数尺寸。构建 audit trail 并把 inconsistency 反馈给 labeler，是提升对齐稳定性的捷径。
+\end{knowledgebox}
+
+\subsection{策略正则化与采样策略}
+
+KL 不只是 regularizer，也是在 sampling 过程中维持多样性的手段：
+\begin{itemize}
+    \item 在 PPO 中用 KL constraint 监控策略 drift，如果某次 rollout 的 KL 超阈值立即恢复到 reference。
+    \item 加入 entropy bonus 让策略不会 collapse 到 deterministic 解。
+    \item 通过 temperature sweep 和 rejection sampling 评估 reward model 的 risk surface，并记录在 rollout ledger。
+\end{itemize}
+
+\begin{importantbox}{KL 作为审核机制}
+Archit 强调：\textit{``KL 让模型在走得太远之前先听到参考政策的自我批评''}，这让 reward model 与 reference policy 之间保持健康对话。
+\end{importantbox}
+
+\subsection{本章小结}
+
+RLHF 的完整 pipeline：instruction finetuning $\to$ 奖励模型训练 $\to$ PPO 优化。数据质量控制、KL 正则化与采样策略共同保障 reward model 不走偏，才能把 LM 变成可靠的助手。
+

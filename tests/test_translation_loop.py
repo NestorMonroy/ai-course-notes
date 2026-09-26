@@ -1209,3 +1209,24 @@ def test_usage_records_the_memory_gnu_time_measured_for_each_item(tmp_path: Path
     header, first, second = rows[0], rows[1], rows[2]
     assert dict(zip(header, first))["peak_rss_kb"] == "212680" and dict(zip(header, first))["cpu_s"] == "4.00"
     assert dict(zip(header, second))["peak_rss_kb"] == "-"
+
+
+def test_usage_reads_gnu_time_when_the_command_failed(tmp_path: Path) -> None:
+    # Ola 6: 710 de 786 `<n>.time` empezaban con «Command exited with
+    # non-zero status 1» (la cuenta en su límite). `usage` tomaba esa línea por
+    # números, reventaba, y el ciclo moría antes de registrar la iteración: el
+    # exit 5 del límite nunca llegó. Se lee la última línea; lo que no se
+    # entienda es «-», nunca una excepción.
+    repo, note, runner = setup(tmp_path)
+    bench = tmp_path / "bench"
+    loop(repo, "prepare", "--bench", str(bench), str(note))
+    loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    out = next(bench.glob("translate/*"))
+    (out / "1.time").write_text("Command exited with non-zero status 1\n233620 1.53 0.95 0.14\n", encoding="utf-8")
+    (out / "2.time").write_text("Command terminated by signal 9\n", encoding="utf-8")
+    result = loop(repo, "usage", "--bench", str(bench))
+    assert result.returncode == 0, result.stderr
+    rows = [r.split("\t") for r in (bench / "usage.tsv").read_text(encoding="utf-8").splitlines()]
+    header = rows[0]
+    assert dict(zip(header, rows[1]))["peak_rss_kb"] == "233620"
+    assert dict(zip(header, rows[2]))["peak_rss_kb"] == "-"

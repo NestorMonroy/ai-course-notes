@@ -1,0 +1,89 @@
+\section{Actor-Critic 框架}
+
+\subsection{用优势函数改进策略梯度}
+
+用 $A^\pi$ 替代 reward-to-go：
+$$\nabla_\theta J(\theta) \approx \frac{1}{N}\sum_{i=1}^{N}\sum_{t=1}^{T} \nabla_\theta \log \pi_\theta(a_{i,t} \mid s_{i,t}) \cdot \hat{A}^\pi(s_{i,t}, a_{i,t})$$
+
+更好的 $\hat{A}$ 估计 $\Rightarrow$ 更低噪声的梯度。
+
+\subsection{如何估计价值函数}
+
+只需拟合 $\hat{V}^\pi$ 即可，因为：
+$$\hat{A}^\pi(s_t, a_t) = r(s_t, a_t) + \gamma \hat{V}^\pi(s_{t+1}) - \hat{V}^\pi(s_t)$$
+
+这里利用了采样得到的 $s_{t+1}$ 来近似期望。
+
+\subsection{价值函数的拟合方法}
+
+\textbf{方法 1：Monte Carlo 回归}
+
+$$\min_\phi \sum_{s_t \in \mathcal{D}} \left\| \hat{V}^\pi_\phi(s_t) - \sum_{t'=t}^{T} r(s_{t'}, a_{t'}) \right\|^2$$
+
+直接用采样的累计奖励作为 target。无偏但高方差。
+
+\textbf{方法 2：Bootstrapped / TD 更新}
+
+$$\min_\phi \sum_{(s,a,s') \in \mathcal{D}} \left\| \hat{V}^\pi_\phi(s) - \left(r(s,a) + \gamma \hat{V}^\pi_{\phi'}(s')\right) \right\|^2$$
+
+用自身的估计作为 target（bootstrap）。低方差但有偏。
+
+\textbf{方法 3：n-step 回报}
+
+结合上述两者，使用 $n$ 步实际奖励 + bootstrap：
+$$y_{i,t} = \sum_{t'=t}^{t+n-1} r(s_{i,t'}, a_{i,t'}) + \gamma^n \hat{V}^\pi(s_{i,t+n})$$
+
+\begin{knowledgebox}{Bias-Variance Tradeoff}
+\begin{itemize}
+    \item Monte Carlo：无偏，高方差。
+    \item TD (1-step bootstrap)：有偏（因为 $\hat{V}$ 不精确），低方差。
+    \item n-step：在两者之间提供可调的平衡。
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{架构与数据流}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slide-03.jpg}
+\caption{Lecture slides 上的 Actor-Critic 数据流示意图：策略（Actor）输出动作，critic 提供优势估计回馈梯度。}
+\end{figure}
+
+图中可以看到一个典型的 Actor-Critic 循环：从当前策略生成动作，存入经验池；Critic 使用经验数据拟合价值函数或者 Q 值；Advantage 估计后发送回 Actor 做梯度更新。整个流程是异步的，但细粒度地保持数据一致性（fixed target network、延迟更新）是稳定性的关键。
+
+\subsection{Critic 作为 baseline 与正则项}
+
+Critic 不只是计算优势，它同时充当 baseline，并可通过正则项提升鲁棒性。例如，L2 正则化、value clipping 和 bootstrap target 的 moving average 都是避免 critic drift 的常见做法。
+
+\begin{warningbox}{critic drift 造成的训练崩溃}
+Critic 若训练过快，会把价值函数拉到高估区域，导致 advantage 始终为正，Actor 会倾向于某些动作并迅速收敛到劣化策略。控制 critic 学习率和添加 target network 是避免这种 "pessimistic collapse" 的常用招数。
+\end{warningbox}
+
+\begin{knowledgebox}{Probabilistic baseline vs learned critic}
+传统策略梯度用 episode average reward 作为 baseline，Actor-Critic 直接学一个参数化函数，更紧贴当前状态。学习式 critic 的优势在于可以处理长期依赖（如 bootstrapped n-step 回报）并主动修正偏差，提高样本效率。
+\end{knowledgebox}
+
+\subsection{Generalized Advantage Estimation}
+
+GAE 用一个指数衰减核融合多步回报，公式为：
+$$\hat{A}^\text{GAE}_{t} = \sum_{l=0}^{\infty} (\gamma \lambda)^l \delta_{t+l}, \qquad \delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)$$
+其中 $\lambda \in [0,1]$ 控制 bias-variance tradeoff。$\lambda=0$ 退化为 1-step TD，$\lambda=1$ 退化为 Monte Carlo。
+
+\begin{importantbox}{GAE 的调度思路}
+实践中逐渐 anneal $\lambda$ 从较低值走向 1，可以在训练早期保持低方差，在收敛期逐步吸收长时间依赖信息。结合 target network 和 $\gamma$ 的 decay，还能避免 critic 过拟合短期 reward。
+\end{importantbox}
+
+\subsection{Actor-Critic 完整流程}
+
+\begin{enumerate}
+    \item 运行策略收集数据
+    \item 拟合价值函数 $\hat{V}^\pi$
+    \item 估计优势 $\hat{A}^\pi$
+    \item 用策略梯度更新策略 $\pi_\theta$
+    \item 重复
+\end{enumerate}
+
+\subsection{本章小结}
+
+Actor-Critic 通过学习价值函数来估计优势，替代了策略梯度中噪声很大的采样 reward-to-go，显著降低了梯度方差。
+

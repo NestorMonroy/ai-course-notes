@@ -1,0 +1,122 @@
+\section{训练算法与技术}
+
+\subsection{推荐的 Fine-Tuning 工具库}
+
+讲者推荐了三个主流的 fine-tuning 工具库：
+
+\begin{table}[H]
+\centering
+\caption{主流 Fine-Tuning 工具库对比}
+\begin{tabular}{llp{7cm}}
+\toprule
+\textbf{工具} & \textbf{开发方} & \textbf{特点} \\
+\midrule
+TRL & Hugging Face & 基于 Transformers，算法种类最全，与最新研究保持同步 \\
+Axolotl & 社区 & 基于 TRL，YAML 配置驱动，易于分享和复现训练配置 \\
+Unsloth & 社区 & 单 GPU 优化，极高效率，内置量化等实用功能 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{SFT 的三种训练技术}
+
+\begin{importantbox}{Full Fine-Tuning vs. LoRA vs. QLoRA}
+\begin{itemize}
+    \item \textbf{Full Fine-Tuning}：全精度加载模型，训练 100\% 参数。质量最高但 VRAM 需求极大，通常需要整个 GPU 集群。
+    \item \textbf{LoRA (Low-Rank Adaptation)}：冻结原始模型权重，仅训练附加的低秩适配器矩阵 A 和 B。仅需训练约 0.5\% 的参数，速度快、VRAM 需求低，\textbf{推荐作为默认选择}。
+    \item \textbf{QLoRA (Quantized LoRA)}：先将模型量化为 4-bit 精度再加载，然后应用 LoRA。进一步降低 VRAM 需求，但训练速度更慢，性能有轻微下降（几个百分点）。
+\end{itemize}
+\end{importantbox}
+
+LoRA 的数学原理：对于原始权重矩阵 $W \in \mathbb{R}^{d \times k}$，LoRA 添加低秩分解：
+
+$$W' = W + \Delta W = W + BA$$
+
+其中：
+\begin{itemize}
+    \item $B \in \mathbb{R}^{d \times r}$，$A \in \mathbb{R}^{r \times k}$
+    \item $r \ll \min(d, k)$ 为秩（rank），通常取 8-64
+    \item 训练时仅更新 $A$ 和 $B$，原始 $W$ 被冻结
+\end{itemize}
+
+\begin{warningbox}{Full Fine-Tuning 通常是过度的}
+除非你是一家专门训练 LLM 的公司，否则 LoRA 几乎总是更好的选择。Full Fine-Tuning 可能导致过拟合，且性能提升往往不值得额外的计算开销。如果 LoRA 的 VRAM 需求仍然过高，才考虑退而使用 QLoRA。
+\end{warningbox}
+
+\subsection{Preference Alignment 算法}
+
+偏好对齐领域有超过 100 种不同算法，但讲者建议只需记住两个：
+
+\subsubsection{PPO (Proximal Policy Optimization)}
+
+PPO 是经典的 RLHF 算法，需要\textbf{三个模型}同时加载：
+
+\begin{enumerate}
+    \item \textbf{Frozen Model}（参考策略）：训练前的模型快照，用于计算 KL divergence
+    \item \textbf{Train Model}（当前策略）：接收 prompt 生成回答的模型
+    \item \textbf{Reward Model}：对生成的回答进行评分
+\end{enumerate}
+
+训练流程：Train Model 生成回答 $\rightarrow$ Reward Model 评分 $\rightarrow$ 使用 KL divergence 约束策略更新幅度 $\rightarrow$ 更新 Train Model 参数。
+
+优点是质量上限高，缺点是需要三个模型、极其昂贵且调参困难。
+
+\subsubsection{DPO (Direct Preference Optimization)}
+
+DPO 只需要\textbf{两个模型}（若使用 LoRA 则实际上只需加载一个基础模型 + 两组适配器）：
+
+$$\mathcal{L}_{\text{DPO}} = -\mathbb{E}\left[\log \sigma\left(\beta \log \frac{\pi_\theta(y_w|x)}{\pi_{\text{ref}}(y_w|x)} - \beta \log \frac{\pi_\theta(y_l|x)}{\pi_{\text{ref}}(y_l|x)}\right)\right]$$
+
+其中：
+\begin{itemize}
+    \item $y_w$ 为 chosen answer，$y_l$ 为 rejected answer
+    \item $\pi_\theta$ 为训练中的策略，$\pi_{\text{ref}}$ 为参考策略
+    \item $\beta$ 控制偏离参考策略的惩罚强度
+\end{itemize}
+
+\begin{importantbox}{实践建议：DPO 优于 PPO}
+除非拥有 OpenAI 级别的无限资源，否则推荐使用 DPO。DPO 更快、更便宜、更易调参，质量仅略低于 PPO。DPO 不需要单独的 reward model，直接在 preference data 上优化，大幅简化了训练流程。
+\end{importantbox}
+
+\subsection{关键训练超参数}
+
+\begin{table}[H]
+\centering
+\caption{Post-Training 关键超参数}
+\begin{tabular}{lll}
+\toprule
+\textbf{参数} & \textbf{推荐值} & \textbf{说明} \\
+\midrule
+Learning Rate & $1 \times 10^{-5}$ $\sim$ $5 \times 10^{-5}$ & 最关键参数，过高导致 loss spike \\
+Batch Size & 受 VRAM 限制 & 可用 gradient accumulation 模拟大 batch \\
+Max Length & 受 VRAM 限制 & 决定输入序列的最大长度 \\
+Epochs & 3$\sim$5 & 完整遍历训练集的次数 \\
+Optimizer & AdamW & 强基线，通常无需更换 \\
+Attention & Flash Attention & 高效注意力实现，尤其加速长序列处理 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{knowledgebox}{Gradient Accumulation 与 Effective Batch Size}
+当 GPU 内存不足以支持期望的 batch size 时，可以使用 gradient accumulation：在多个 forward pass 后累积梯度，再统一更新权重。这样 \textbf{effective batch size} = per-GPU batch size $\times$ accumulation steps $\times$ GPU 数量，能在不增加内存的前提下模拟更大的 batch。
+\end{knowledgebox}
+
+\subsection{训练监控}
+
+训练过程中需要监控三个核心指标：
+
+\begin{enumerate}
+    \item \textbf{Training Loss}：应平滑下降，若出现 loss spike 通常意味着 learning rate 过高
+    \item \textbf{Validation Loss}：用 1-2\% 的数据作为验证集，监控是否过拟合
+    \item \textbf{Gradient Norm}：梯度的幅值，过多 spike 可能暗示数据问题
+\end{enumerate}
+
+\begin{warningbox}{Loss Spike 诊断}
+如果训练初期 loss 平稳下降，但随后突然出现大幅跳升（spike），最可能的原因是\textbf{learning rate 过高}。解决方法是降低 learning rate，应能获得更平滑的 loss 曲线。注意不要将训练初期的微小波动误判为 spike——小幅初始波动通常是正常现象。
+\end{warningbox}
+
+\subsection{本章小结}
+
+SFT 推荐使用 LoRA 作为默认训练技术，Preference Alignment 推荐使用 DPO。关键超参数中 learning rate 最为重要，AdamW + Flash Attention 是可靠的默认选择。训练过程中应密切监控 training loss、validation loss 和 gradient norm。
+
+\newpage

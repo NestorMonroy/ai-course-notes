@@ -1,0 +1,96 @@
+\section{Apollo：把软件交付变成 Desired-State Control Loop}
+
+Apollo 之前的交付依赖人工携带介质进入客户环境，登录机器，记住服务依赖，再按经验尝试升级。这个流程在几十个服务、少量环境时尚可维持；进入 microservices 和大规模 fleet 后，人的工作记忆无法可靠处理版本兼容、schema migration、健康状态和回滚。Apollo 的核心变化是把目标、约束和观测状态放入同一个控制环，让系统持续计算当前状态如何收敛到 desired state。
+
+\subsection{Desired state、observed state 与 plan}
+
+\term{Desired state} 是期望某环境运行的软件版本、配置和策略；\term{observed state} 是系统实际报告的版本、健康和资源状态。Orchestrator 比较二者，生成 plan 并交给环境内的 deployment component 执行。执行后的新状态再次回报，形成闭环。这里的自动化不是固定 pipeline，因为不同环境可能需要不同路径、等待时间和批准条件。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{images/03-apollo-control-loop.png}
+\caption{Apollo 控制环：开发者声明、catalog 聚合、orchestrator 规划、环境执行与健康回报。}
+\figsource{依据字幕与 Palantir Apollo 官方材料重绘，`images/03-apollo-control-loop.png`。}
+\end{figure}
+
+\begin{importantbox}{读图：自动化不取消产品工程师的责任}
+讲者强调 service owner 仍然对运行负责。平台提供统一遥测、发布和 remediation，工程师则必须声明依赖、健康条件和兼容边界。若团队只把 binary 丢给“运维机器人”，却不编码软件预期，控制面无法区分安全升级和静默破坏。
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{images/official-apollo-fleet-overview.png}
+\caption{Apollo 官方产品界面展示 environments、release map、alerts 与 installation 概览。}
+\figsource{Palantir Apollo Demo Day 官方 PDF，产品截图页 8，`images/official-apollo-fleet-overview.png`。}
+\end{figure}
+
+\begin{knowledgebox}{读图：fleet overview 应回答三个操作问题}
+第一，哪些 installation 正在目标版本，哪些落后或失败；第二，问题是否集中于某个环境类别、release channel 或软件版本；第三，operator 能否从汇总状态进入具体 health 与变更历史。仪表盘的价值不是“所有格子变绿”，而是缩短从异常到可解释 remediation 的路径。
+\end{knowledgebox}
+
+\subsection{Catalog：软件自己的部署契约}
+
+官方 Apollo 材料把 catalog 描述为软件 metadata 的集合，包括版本、依赖、resource requests、schema compatibility 和外部 vulnerability scanner 结果。\term{Schema} 是数据结构及其兼容规则；存储服务若声明能读写哪些 schema version，控制面才能规划 migration，并在回滚会损坏数据时阻止操作。Catalog 因此不是软件商店目录，而是自动交付的类型系统和约束库。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{images/official-apollo-software-catalog.png}
+\caption{Apollo Software Catalog 汇总服务版本、状态与可用于编排的 metadata。}
+\figsource{Palantir Apollo Demo Day 官方 PDF，产品截图页 11，`images/official-apollo-software-catalog.png`。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Catalog 让跨团队变化可组合}
+每个团队独立发布时，单个 repository 内的 CI 只能证明本服务构建成功。Fleet upgrade 还需知道下游依赖、数据 schema、环境限制和安全发现。Catalog 将这些信息放到共享控制面，使 orchestrator 可以判断“能否升级”“先升级谁”“失败后能否回滚”，而不是让 operator 在事故中临时询问数十个团队。
+\end{knowledgebox}
+
+\subsection{Release channel：用置信度组织 rollout}
+
+\term{Release channel} 把环境按发布阶段或风险偏好组织，使同一软件版本可以先进入 canary，再逐步扩大。\term{Canary} 是小范围先行部署，用少量真实流量或环境暴露问题；健康稳定后才继续。Air-gapped 环境可能延迟接收 bundle，监管环境可能要求额外批准，因此 rollout 是非线性的状态图，不是所有服务共用的一条每周流水线。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{images/04-release-confidence.png}
+\caption{Release channel 用环境置信度和约束组织非线性 rollout。}
+\figsource{依据 Apollo 官方概念与字幕重绘，`images/04-release-confidence.png`。}
+\end{figure}
+
+\figurepair{images/official-apollo-release-channels.png}{images/official-apollo-rollout-status.png}{Apollo 官方界面中的 release channels、environment rollout 与版本状态。}{Palantir Apollo Demo Day 官方 PDF}{`images/official-apollo-release-channels.png` 与 `images/official-apollo-rollout-status.png`}
+
+\begin{importantbox}{读图：发布阶段必须有进入和退出条件}
+Canary 不是“先部署几个实例”这么简单。每个 channel 应定义等待时间、health threshold、允许的 failure budget、人工批准和自动 rollback 条件。不同环境可以停在不同版本，只要这种差异被 catalog 和安全策略显式管理。追求全 fleet 同步，反而会把一个缺陷同时扩散到所有任务环境。
+\end{importantbox}
+
+\subsection{Health、monitor 与 rollback}
+
+\term{Rollback} 指把软件恢复到已知良好版本。它只有在旧版本仍与当前数据 schema、配置和依赖兼容时才安全。官方 Demo Day 示例让 operator 定义 monitor，观察 deployment 状态，并在新版本触发失败条件后回退。真正困难的部分不是点击按钮，而是预先声明什么叫健康、怎样关联指标与版本，以及回滚后如何处理已经产生的数据和外部动作。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{images/official-apollo-monitor-definition.png}
+\caption{Apollo monitor definition：把检测条件、历史与 remediation 连接到具体软件版本。}
+\figsource{Palantir Apollo Demo Day 官方 PDF，产品截图页 9，`images/official-apollo-monitor-definition.png`。}
+\end{figure}
+
+\begin{knowledgebox}{读图：健康条件应尽量接近用户或任务结果}
+CPU、memory 和 process 存活是必要信号，却不能证明软件正确。更强的 monitor 会检查 API success、数据完整性、关键 workflow 和安全策略。对于任务系统，还要区分“服务可访问”和“决策输出可信”。指标越靠近真实结果，rollback 越能避免保留一个技术上在线、功能上错误的版本。
+\end{knowledgebox}
+
+\subsection{Software supply chain 与紧急修复}
+
+SolarWinds 和 Log4j 让 software supply chain 风险成为企业级问题。面对漏洞，组织需要知道 fleet 中运行了哪些 component、哪些版本受影响、位于哪些环境、能否立即升级，以及断网环境何时收到修复。Apollo catalog 与环境状态提供 inventory，orchestrator 执行 remediation，审计历史记录谁批准了什么变化。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{images/official-apollo-vulnerability.png}
+\caption{Apollo 官方示例把 vulnerability finding 关联到具体 component 与版本。}
+\figsource{Palantir Apollo Demo Day 官方 PDF，产品截图页 12，`images/official-apollo-vulnerability.png`。}
+\end{figure}
+
+\begin{warningbox}{漏洞响应不能只靠“全量升级”}
+紧急升级仍需考虑 schema、任务窗口、air-gap bundle 和环境 owner 的授权。某些系统无法立即停机，某些旧版本可能受其他依赖限制。可靠控制面要支持精确 inventory、风险分层、补偿控制和可追溯例外，而不是用速度掩盖未知影响。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Apollo 将软件、环境和安全 metadata 放入 desired-state 控制环。Catalog 提供可组合约束，release channel 管理置信度，monitor 将健康连接到版本，rollback 和 remediation 让 fleet 能在异常中恢复。下一步还需要一个统一运行 substrate，避免每个应用团队重新学习不同 Kubernetes 和合规细节。
+

@@ -1,0 +1,49 @@
+\section{树状探索与树级评分}
+
+\subsection{Tree-of-Thought 与分支搜索}
+Tree-of-Thought 允许在每一步展开多条分支，使用 stepwise scoring 判断哪些 branch 值得展开。如图 \ref{fig:tree-search} 所示，beam search 只保留 top-k whereas Tree-of-Thought 可以在 step-level 就过滤 promisingness。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{frame-tree-search.jpg}
+\caption{Tree-of-Thought 与 beam search、自一致性的对比示意。\protect\footnotemark}
+\label{fig:tree-search}
+\end{figure}
+\footnotetext{视频画面时间区间：01:01:24--01:04:30，展示 step evaluation 在树状搜索中的位置。}
+
+\begin{importantbox}{树状搜索的三个实践洞察}
+1. 不是所有分支都要展开，优先级排序可由 step verifier 直接给分；2. step-level scoring 可以在 branch 还未完成前淘汰低质路径，因此减小 token 成本；3. beam search 可与 sampling 组合：先用 sampling 出 diverse seed，再用 beam/tracing 筛选 promising ones。
+\end{importantbox}
+
+\begin{knowledgebox}{树状控制的操作逻辑}
+在 Tree-of-Thought 中，控制 loop 常用“branch proposal → step scoring → prune”三步：第一步是 warm-start 多个 branch，第二步用 verifier 给每个 branch 分数，第三步根据 budget 剪枝。Chen 建议在 training log 中记录每个 branch 的 token count 与 score，以便找到“哪个 step 的 score drift 最明显”。
+\end{knowledgebox}
+
+\begin{warningbox}{树状 branching 不可无限扩展}
+尽管 tree search 能在 early stage 提高 accuracy，但如果没有清晰的 pruning 策略，branch 数量会指数级增长。务必设定 token threshold（如最多探索 3 层）、引入 stepwise verifier gating，并用 logs 监控 branching ratio。
+\end{warningbox}
+
+\subsection{树状控制循环与预算自适应}
+在 Tree-of-Thought pipeline 中，必须有一个控制循环来决定什么时候拓展、什么时候 prune、什么时候 roll back。Chen 现场给出的控制逻辑是：每轮 step 结束后检查 `branch score / step token` 是否超过 threshold；若低于 threshold，则立即把该 branch push 到 aborted queue 并把剩余 token 回收到 global budget。这个 loop 通过 SLO instrumentation（如 `branching\_ratio` 与 `score\_per\_token`）曝光出 tree search 中那些掠过的无效分支。
+
+\begin{table}[H]
+\centering
+\caption{Tree search 控制指标}
+\begin{tabular}{p{0.32\textwidth}p{0.25\textwidth}p{0.32\textwidth}}
+\toprule
+指标 & 监控意义 & Pipeline action \\
+\midrule
+Branch score & 判断分支 promisingness & Score < 0.2 时 prune 并 trigger `trace replay` \\
+Branching ratio & 观察 active branches 与 token 关系 & > 28\% 时把 new branches limit 到 2 \\
+Score per token & 控制 depth 与 cost & 下滑表示 search drift，需调低 temperature 或 early stop \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{importantbox}{Tree 控制 loop 的经验}
+1. 设定 `early score check`，即在 branch 未完成前便计算 partial score；2. 用 per-branch token cap 强制分支不能无限制延伸；3. 在 control loop 异常（例如 branching ratio 突破）时，马上触发 conservative mode（降低 prompt temperature + 限制 iteration）。
+\end{importantbox}
+
+\subsection{本章小结}
+Tree-of-Thought 等树状结构在 inference-time search 中填补 beam search 与 sampling 之间的 gap，只要配上健全的 step verifier 和控制循环，就能在有限 budget 下实现 high-quality breadth exploration。
+

@@ -1,0 +1,40 @@
+\section{验证器设计深入}
+
+\subsection{Stepwise verifier 的构成}
+高质量 verifier 至少由三个子模块组成：step scoring、trace evaluation 与 metadata gating。Chen 强调不要把 verifier 当成 post-hoc 的黑盒评分器，而要把它写进 sampling/search pipeline。例如在 Trace 自生成的分支上，可以让 verifier 先打 depth score（chain-of-thought 的长度与复杂度）、再打 validity score（是否符合 problem constraint）、最后再打 confidence margin（多数投票 margin）。这三个指标构成了 stepwise verifier 的输出 tuple，在 search loop 中用作 pruning gate。
+
+\begin{table}[H]
+\centering
+\caption{Stepwise verifier 输出}
+\begin{tabular}{p{0.28\textwidth}p{0.25\textwidth}p{0.35\textwidth}}
+\toprule
+指标 & 典型计算方式 & 作用 \\
+\midrule
+Depth score & Prompt override / reasoning depth heuristic & 避免 verifier 过度偏好短 output \\
+Validity score & Constraint check + domain rules & 保证 branch 不偏离 template \\
+Confidence margin & Consistency across candidates & 为 majority vote 提供 margin base \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{knowledgebox}{Verifier 训练策略}
+1. 用 supervised trace 数据训练 validity + depth scorer；2. 在 inference-time 里把 control token `{@validator}` 赋予 higher probability；3. 结合 hashing checkpoints（如 trace hash）避免 verifier 在重复 steps 时 drift。
+\end{knowledgebox}
+
+\subsection{Verifier gating loops}
+Verifier 需要和 search 形成闭环：每当 candidate 被打开判断后，verifier 会给出 margin，并把 margin 作为 branching priority。Chen 在 36 分 10 秒展示的 gating loop 是：candidate → verifier → score queue → branch expansion/termination。这个过程可视为一个多队列 scheduler，其中 margin 越高的 branch 会被平行推入 tree，而 margin 低的会被 early stop。若某阶段 margin 全局下降，就说明 sampling 的 diversity 可能 collapse，需要立即回退到 “prompt plus trace” template 并触发 `trace replay`。
+
+\begin{warningbox}{Margin collapse 风险}
+当 verifier margin 全局下滑时，不要立刻加 token，而是先回头看 sampling diversity 与 prompt difficulty。低 margin 可能是 dataset shift，也可能是 prompt drift，先跑 `trace replay` 看是 self-correction drift 还是 prompt drift，再决定是否扩展 search。
+\end{warningbox}
+
+\subsection{Multi-verifier orchestration}
+实践中会同时部署多个 verifier：一个快速的 heuristic scorer（例如 tf-idf + regex），一个基于 LM 的 trace evaluator，以及一个 deterministic checker（如 proof verifier）。在 inference-time pipeline 里把这三层串联，让 fast verifier 先快速 trim，然后把 high-scoring branch 交给 slow-but-robust verifier 重评。Chen 强调 audit log 必须记录每层 verifier 的 decisions，这样才能在 anomaly 时定位“哪一层把 candidate 跳掉了”。
+
+\begin{knowledgebox}{多 verifier 的协同节奏}
+1. Fast verifier：低 cost，用于 early pruning；2. LM verifier：中等 latency，负责 reasoning depth；3. Deterministic checker：高成本但高信度，常用于 high-stakes query 结束时；4. 把每层 output 写在 dashboard 里，observability 团队就能看出是哪一层造成 margin drift。
+\end{knowledgebox}
+
+\subsection{本章小结}
+Verifier 设计不仅需要高质量 scoring 机制，还要和 search 形成 budgeting gating，甚至通过多 verifier orchestration 保护 high-value queries。只有把 verifier 变成 inference-time control loop，才能避免 budget race 或 drift 导致 reasoning 崩盘。
+

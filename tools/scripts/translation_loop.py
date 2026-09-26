@@ -427,12 +427,16 @@ def cmd_usage(args) -> int:
             # GNU Time deja «%M %e %U %S» en `<n>.time` (THYROX 5f7cda74). Sin el
             # archivo el ítem no se midió: «-», no un cero.
             timing = (index.parent / f"{n}.time")
-            fields = timing.read_text(encoding="utf-8").split() if timing.is_file() else []
-            if len(fields) >= 4:
+            # Si el comando falló, GNU Time antepone «Command exited with non-zero
+            # status N» (ola 6: 710 de 786): los números van en la última línea,
+            # y lo que no se entienda es «-», nunca una excepción que tumbe el ciclo.
+            lines = timing.read_text(encoding="utf-8").splitlines() if timing.is_file() else []
+            fields = lines[-1].split() if lines else []
+            try:
                 rss, wall, cpu = int(fields[0]), fields[1], f"{float(fields[2]) + float(fields[3]):.2f}"
                 peak_max, measured = max(peak_max, rss), measured + 1
                 memory = [str(rss), wall, cpu]
-            else:
+            except (IndexError, ValueError):
                 memory = ["-", "-", "-"]
             rows.append([Path(zh).name, str(han), str(letters), *(str(counts[c]) for c in COMPONENTS), *memory])
             for c in COMPONENTS:

@@ -1,0 +1,30 @@
+\section{数据模型演进：哪些状态真的需要数据库}
+
+随着索引规模增长，把 users、repos、jobs、documents、vectors 和 source artifacts 全放进同一种数据库会制造互相冲突的 workload。Transactional metadata 需要一致更新；job state 需要 lease 与 retry；向量段适合大块 immutable data；source chunks 应能重建 derived index。本节用 source-of-truth 分层替代“哪种数据库最好”的争论。
+
+\subsection{四类状态，四种存储目标}
+
+\term{source of truth}（权威数据源）是恢复时被认为正确的原始状态。Derived vector index 可以从 source artifact 和 transform version 重建，不应承担唯一 truth；job progress 若丢失可重试，却必须保证幂等；permission metadata 则需要强约束和 audit。
+
+\lecturefigure{06-storage-roles.png}{Metadata、job、vector/search 与 source artifact 需要不同的耐久性和查询模型。}{本地字幕 14:40--19:10；概念重绘。}
+
+\begin{knowledgebox}{读图：先问“丢了怎么办”}
+如果状态丢失后只能向用户道歉，它可能是 source of truth；如果可从 object 重建，它是 derived state；如果可以重复执行，关键是 idempotency；如果只为加速 query，它是 cache。这个分类比先选 PostgreSQL、MongoDB 或 vector DB 更稳定。
+\end{knowledgebox}
+
+\begin{importantbox}{重建能力是一种架构资产}
+对 derived index，恢复目标不仅是 RPO/RTO，还要记录：输入版本、embedding/chunking 版本、rebuild throughput、验证集和 cutover 方法。没有可重复 rebuild 的“索引”会逐渐变成无法迁移的第二权威数据库。
+\end{importantbox}
+
+\subsection{Backpressure、lease 与幂等}
+
+\term{backpressure}（背压）让下游饱和时上游减速或拒绝新工作，避免 queue 无限增长。Index job 应带 version 和 idempotency key；worker 通过 lease 获得有限时间所有权；超时后可安全重试；同一 repo 的新版本可以 supersede 旧版本，避免无意义地完成过期 rebuild。
+
+\begin{warningbox}{Retry 不是可靠性的免费午餐}
+没有预算、jitter、deadline 和 idempotency 的 retry 会把一次 timeout 变成重复写和连接风暴。每个 retry policy 必须说明：哪些错误可重试、最多多少次、是否消耗同一 budget、何时转入 dead-letter 或人工处理。
+\end{warningbox}
+
+\subsection{本章小结}
+
+存储架构应从 state class、source of truth 和恢复路径出发。Database brand 是实现细节；状态的可重建性、幂等、版本与背压才是长期约束。
+
