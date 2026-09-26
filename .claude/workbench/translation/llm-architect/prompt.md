@@ -78,6 +78,9 @@ traduzcas: sirve solo para elegir el significado correcto.
 | commit | keep | commit | registro de cambios de git («mensaje de commit») | — |
 | full-stack | keep | full-stack | que abarca frontend y backend | — |
 | auditability | translate | capacidad de auditoría | que el comportamiento de un sistema pueda revisarse después | `auditabilidad` |
+| pipeline | keep | pipeline | cadena de etapas de procesamiento | — |
+| pull request | keep | pull request | solicitud de integración de cambios en un repositorio | — |
+| anthropomorphization | translate | atribución de rasgos humanos | atribuir a una máquina rasgos humanos | `antropomorfización` |
 
 ## Frases fijas (se traducen siempre así, en todas las notas)
 
