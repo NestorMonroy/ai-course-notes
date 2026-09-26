@@ -1,0 +1,57 @@
+\section{Data: creación de datos y construcción de capacidades}
+
+\subsection{Nuevo Domain = nueva Capability}
+El instructor insiste en que K2.5 no consiste en poner etiquetas sobre un modelo antiguo, sino en que ``un nuevo domain significa una nueva rebanada de capacidad'': imagen y texto, API, GUI, herramientas de escritorio e incluso la consola de OpenClaw se diseñaron, cada uno, como un benchmark propio. La recolección de datos, las normas de etiquetado y los success criteria de cada domain determinan qué tipo de conducta terminará aprendiendo el agente. La primera pregunta que debemos hacernos al leer el reporte técnico es: ¿quién define los datos de este domain, cómo se sintetizan y qué tipo de salida producen?
+
+La estrategia de mezcla temprana incorporaba imágenes en menos del 10\% (1:9); a la mitad del entrenamiento, en el paso 250,000, pasó a 2:8, y al final llegó a 1:1. Pero la frase clave del instructor es: ``basta con introducir la visión desde el Step0 para que las capacidades de texto y de programación suban al mismo tiempo'', lo que muestra que la visión no es un añadido, sino una dimensión central que moldea la comprensión del lenguaje.
+
+\begin{importantbox}{La palanca de mezclar visión desde el inicio}
+En las primeras etapas del entrenamiento solo se destinaba cerca del 10\% a datos de imagen y texto (1:9); en la etapa intermedia se llegó al 20\% (2:8), y solo hacia el final se alcanzó 1:1. Los datos del instructor muestran que mezclar visión desde el Step0 mejora de manera notable las capacidades de \textbf{texto} y \textbf{programación}, lo que indica que la visión en K2.5 no es un elemento adicional, sino que inyecta continuamente una nueva señal en la representación del lenguaje.
+\end{importantbox}
+
+\subsection{Métodos de síntesis de datos}
+El sistema de datos de K2.5 es altamente reproducible: se descompone la capacidad objetivo en benchmarks (por ejemplo, instrucciones en pantalla, respuestas entre dominios, razonamiento sobre textos largos), se diseña un pipeline de generación de datos para cada benchmark y luego se entrena un baseline con la combinación de SFT + RL para verificar la calidad de los datos. El instructor insiste en que debemos dejar por escrito el ``criterio de terminación'' de cada benchmark, de modo que se pueda saber en qué momento el modelo terminó la task.
+
+El flujo habitual sigue siendo 1) definir el benchmark, 2) generar muestras con reglas o plantillas, 3) validarlas con el baseline antes de pasar a RL. Este pipeline se menciona repetidamente en la sección de la clase entre 22:00 y 32:00, sobre todo cuando, al sintetizar muestras de video-to-code o de GUI, se escriben en el prompt tanto el trace de la API como el estado de la interfaz de usuario a la vez.
+
+\begin{enumerate}
+    \item \textbf{Definir el benchmark}: especificar varios tipos de tareas (como video-to-code, operación de GUI, comprensión de textos largos) y precisar los success criteria y los indicadores visualizables.
+    \item \textbf{Diseñar el pipeline algorítmico de generación}: usar recuperación de imágenes, un tool simulator y una gramática impulsada por prompts para generar muestras sintéticas, registrando los metadatos de cada paso.
+    \item \textbf{Validación con baseline}: correr el modelo SFT sobre el benchmark y confirmar el puntaje de simulación del lado del reward antes de permitir el paso a RL.
+\end{enumerate}
+
+\begin{table}[H]
+\footnotesize
+\centering
+\begin{tabular}{p{3cm}p{4cm}p{7cm}}
+\toprule
+Etapa de entrenamiento & Proporción visión / texto & Efecto observado \\
+\midrule
+Inicial (Step0) & 1:9 & Aunque las muestras visuales son pocas, basta con mezclarlas desde el primer paso para que el desempeño en texto y en código mejore con rapidez, produciendo en poco tiempo un \textbf{refuerzo del conocimiento} en varios benchmarks. \\
+Intermedia (Step 250,000) & 2:8 & Al aumentar la proporción de visión, las capas intermedias aprenden a insertar llamadas a herramientas, operaciones de GUI y percepción de escena dentro de la secuencia, lo que alivia los conflictos de gradiente entre modalidades. \\
+Final (etapa final) & 1:1 & Visión y texto reciben el mismo peso, de modo que los critical steps de la evaluación final examinan a la vez el razonamiento visual y la ejecución del lenguaje, mejorando el agentic performance. \\
+\bottomrule
+\end{tabular}
+\caption{Proporción de mezcla de imagen y texto controlada por K2.5 en cada etapa y su efecto en el entrenamiento, con datos tomados de la curva de la Figura 9 del apéndice del instructor.}
+\end{table}
+
+\subsection{Domain-specific synthesis loops}
+Cada benchmark tiene sus propios detalles de construcción: video-to-code requiere cortar en varios cuadros y alinear con texto la UI, la landing page, los endpoints de la API y los bocetos de diseño; la comprensión de textos largos requiere un OCR consciente del layout; las muestras de GUI/CLI deben conservar el tool trace, simular clics y registrar las respuestas de la API. El instructor insiste en que estos pipelines de datos determinan de manera directa la estructura del prompt del agente y la longitud de la generación, por lo que se convierten en el eslabón clave de ``domain-to-capability''. En la clase, entre 15:40 y 18:10, vemos que el instructor usa una tabla de dos columnas, ``Tool trace + estado de la UI'', para enumerar los campos que deben registrarse en cada sample.
+
+\begin{knowledgebox}{Tres estrategias de domain-specific synthesis}
+\begin{itemize}
+    \item Descomponer el benchmark de cada domain en tres segmentos, intent, tools y output, para precisar cuándo se necesita GUI, cuándo API y cuándo basta con texto.
+    \item Usar un tool simulator y un UI mock generator para producir muestras con trace, garantizando un token budget consistente durante el entrenamiento.
+    \item Usar un uniform metadata schema para registrar timestamp, frame id y tool log, de modo que la later evaluation pueda reproducir cada critical step.
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Gobernanza de calidad e interpretabilidad}
+El instructor señala que el pipeline de datos no debe preocuparse solo por la cantidad, sino mantener la quality dentro del límite de los ``critical steps''. Cada lote de muestras se corre una vez sobre el baseline de SFT; si el puntaje de reward queda por debajo del umbral, se regresa al módulo de datos para recalibrar la prompt grammar. Además, las visual sample llevan una frame-level label adjunta, lo que facilita, en la later debugging, rastrear cada Token visual que produjo un error.
+
+\begin{importantbox}{El Guardrail automatizado de la calidad de los datos}
+K2.5 usa dos niveles de revisión de calidad: el primero es el reward gate del baseline de SFT, y el segundo es una revisión human-in-the-loop de las operaciones de GUI y del texto en pantalla. Solo las sample que pasan ambos niveles a la vez pueden entrar a RL, lo que evita el ruido explosivo del ``reward hacking''.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+La historia de datos de K2.5 es un mapeo de ``domain-to-capability'': encadena la capacidad de datos a través de tres categorías de benchmark, video-to-code, razonamiento conversacional y GUI/herramientas, y mantiene la calidad mediante el baseline de SFT más los critical steps, de modo que las muestras de entrenamiento conservan en todo momento metadata interpretable.

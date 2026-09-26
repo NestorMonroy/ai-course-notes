@@ -1,0 +1,41 @@
+\section{Training Infrastructure：稳定训练与评估}
+
+\subsection{RL 环境与评估}
+Agentic RL Training 需要一个高度异步的环境：模型在 inference 端执行 hundreds of tool calls、并发执行多个 subagent，然后把结果交给 GRM 评估。讲师指出 ``agentic RL post training 的 environment'' 里会同时运行 200--300 步工具调用、track 进度并随时在 Allcastrater 里创建新 subagent，这些调用被 critical steps 限制在可控区间，避免 compute 爆炸。每条 agent loop 都有 dedicated logging channel，便于 later 的 drift diagnosis。
+
+\begin{knowledgebox}{Critical Steps 作为训练与评估的护栏}
+\begin{itemize}
+    \item 训练和评估都在 critical steps 的 guard band 内运行，用固定步数去限制一轮 agent loop 的最大调用次数。
+    \item 这个机制让我们可以在资源有限的条件下衡量 agent swarm 是否真的 outperform 单 agent。
+    \item 也正因为如此，Allcastrater 会不断回收 subagent 结果，再决定是否 spawn 新 agent，形成一个可复现的评估流程。
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Bandmark dashboard 与观测}
+评估端通过一个 bandmark dashboard 同步多个视角：GRM 分数、工具调用成功率、critical steps 消耗量。讲师在 lecture 中展示的曲线里，每条曲线都标注 reward 的 mean/max、S mean + max 指标，方便工程师快速判断 agent loop 是否出现 drift 并及时 rerun。dashboard 里每条曲线都会附带 timestamp、subagent id、tool trace，使得 replay 某个 round 变得可复现。
+\begin{itemize}
+    \item 统一 logging schema：把 GRM logits、tool trace、GUI 状态按照 timestamp 串成 timeline，方便 replay 某个 agent loop。
+    \item 用 dashboard 观察 agent 组合：通过 visualized logs 判断 vision agent、tool agent、text agent 在一轮中的贡献。
+    \item critical steps 监控：记录每轮的 step distribution，确保资源不会因为 parallel agents 而失控。
+\end{itemize}
+
+\begin{knowledgebox}{bandmark dashboard 的三条观测线}
+\begin{itemize}
+    \item Reward line：GRM 输出的 mean/max，用于 monitor reward drift。
+    \item Tool calling line：API 成功率与 latency，帮助发现 tool agent 的 bottleneck。
+    \item Critical steps consumption：记录每次 loop 的 step distribution，与 compute 预算联动。
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{算力与缓存策略}
+算力压力在多 Agent 训练中尤为明显，因此训练前会做一次 frame preprocessing，把视频帧、界面截图、tool trace 都 cache 成 feature bundle。后续 PARL agent loop 只需从缓存中读取对应 timestamp 的 bundle，避免重复 I/O，同时保存帧到 token 的映射，便于 later evaluation（特别是在 replicating UI benchmark 里）。这个 feature cache 也服务于 Kimi code bench，在本地复现 demo 时只需 replay cache bundles 即可快速启动。
+
+\begin{importantbox}{Feature cache 的效率杠杆}
+把 video frame、tool trace、GUI state 都打包成 bundle，并用 hashed index 快速查找，让 agent loop 无需每次都解码原始视频，从而把 compute cost 降低 35\% 左右。
+\end{importantbox}
+
+\subsection{可复现训练 Pipelines}
+训练 pipeline 里除了 cache，还有 replay、bandmark、trace 三步：每个 agent loop 会把 tool calling、GUI 操作、GRM 分数写入 log；当 dashboard 报告 drift 或 critical steps 不稳定时，就可以用 replay 工具把对应 frame bundle 和 trace 重新喂给 PARL loop，检查 prompt grammar；关键段落会被标注为 ``controlled test'' 以便 later regression。
+
+\subsection{本章小结}
+K2.5 的 infra 建立在 critical steps + 异步 agent loop + bandmark dashboard 之上，让评估既可复现又可监控。即便讲师没有详述每个模块，训练曲线与 evaluation table 已经说明这套 pipeline 的成熟度。

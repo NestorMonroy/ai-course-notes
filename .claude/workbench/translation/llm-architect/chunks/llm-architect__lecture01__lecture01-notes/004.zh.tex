@@ -1,0 +1,55 @@
+\section{Sparse MoE 架构详解}
+
+\subsection{MoE 层的结构}
+
+每个 MoE 层包含以下组件：
+
+\begin{enumerate}
+  \item \textbf{Router（路由器）}：将 $d_{\text{model}}$ 维的 token embedding 映射到 128 维的 logits 向量
+  \item \textbf{Top-K 选择}：从 128 个 Expert 中选出 top-8
+  \item \textbf{Softmax Gating}：对 top-8 的 logits 做 softmax，得到加权系数
+  \item \textbf{Expert FFN}：每个 Expert 是一个两层 MLP（$W_{\text{up}}, W_{\text{gate}}, W_{\text{down}}$）
+  \item \textbf{加权求和}：将 8 个 Expert 的输出按 gating 系数线性加权求和
+\end{enumerate}
+
+\subsection{Router 机制}
+
+$$
+\text{Router}: \mathbb{R}^{d_{\text{model}}} \to \mathbb{R}^{N_{\text{experts}}}
+$$
+
+即 $W_{\text{router}} \in \mathbb{R}^{2048 \times 128}$，将每个 token 的 embedding 映射到 128 个 Expert 对应的分数。
+
+选出 top-8 后，对这 8 个分数做 softmax（由配置参数 \texttt{norm\_topk\_prob} 控制，默认为 True），得到归一化的 gating 系数 $g_1, g_2, \ldots, g_8$。
+
+\subsection{Expert 的 FFN 结构}
+
+每个 Expert 是一个带 SwiGLU 的两层 MLP：
+
+$$
+\text{Expert}(x) = W_{\text{down}} \cdot \big[ \text{SiLU}(W_{\text{up}} \cdot x) \odot (W_{\text{gate}} \cdot x) \big]
+$$
+
+其中：
+\begin{itemize}
+  \item $W_{\text{up}} \in \mathbb{R}^{2048 \times 768}$：将 $d_{\text{model}}$ 映射到中间维度
+  \item $W_{\text{gate}} \in \mathbb{R}^{2048 \times 768}$：门控分支，与 $W_{\text{up}}$ 的输出逐元素相乘
+  \item $W_{\text{down}} \in \mathbb{R}^{768 \times 2048}$：将中间维度映射回 $d_{\text{model}}$
+\end{itemize}
+
+\begin{knowledgebox}{Dense FFN vs. MoE Expert FFN}
+Dense 模型的 FFN 中间维度为 $25600 = 5 \times d_{\text{model}}$，而 MoE 每个 Expert 的中间维度仅为 $768$。虽然单个 Expert 远小于 Dense FFN，但 128 个 Expert 总参数量为 $128 \times 3 \times 2048 \times 768 \approx 604\text{M}$（仅 FFN 部分），再加上其他层，总参数量约 30B。
+\end{knowledgebox}
+
+\subsection{MoE 的最终输出}
+
+$$
+\text{MoE}(x) = \sum_{i=1}^{8} g_i \cdot \text{Expert}_i(x)
+$$
+
+每个 Expert 输出一个 2048 维的向量，通过 gating 系数加权求和，得到最终的 MoE 层输出。
+
+\subsection{本章小结}
+
+Sparse MoE 的核心思路是「路由 + 稀疏激活」：用 Router 为每个 token 选择最相关的 top-K 个 Expert，其余 Expert 不参与计算。这使得模型总参数量很大但每次推理的计算量很小。
+

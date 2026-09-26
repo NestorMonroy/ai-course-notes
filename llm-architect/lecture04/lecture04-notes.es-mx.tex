@@ -1,0 +1,187 @@
+\documentclass[a4paper]{article}
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+\usepackage{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+% polyglossia no traduce los nombres de listings.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\usepackage{float}
+\newtcolorbox{knowledgebox}[1]{enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black, coltitle=white, fonttitle=\bfseries, title={#1}, attach boxed title to top left={yshift=-2mm, xshift=2mm}, boxrule=1pt, sharp corners}
+\newtcolorbox{importantbox}[1]{enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black, coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners}
+\newtcolorbox{warningbox}[1]{enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black, coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners}
+\lstset{language=Python, basicstyle=\ttfamily\small, keywordstyle=\color{blue}, stringstyle=\color{red!60!black}, commentstyle=\color{green!60!black}, breaklines=true, frame=single, numbers=left, numberstyle=\tiny\color{gray}, captionpos=b, extendedchars=true}
+
+\newcommand{\notetitle}{Muon Optimizer: Blanqueo del gradiente y SVD}
+\newcommand{\noteauthors}{Elaboradas a partir de materiales públicos del curso}
+\newcommand{\notedate}{2025}
+\newcommand{\videochannel}{Wudaokou Naishi (五道口纳什)}
+\newcommand{\videopublishdate}{2025}
+\newcommand{\videoduration}{aproximadamente 22 minutos}
+\newcommand{\videourl}{}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+
+% Footer with repo info
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\thepage}
+\fancyfoot[R]{\footnotesize\color{gray}\href{\repourl}{AI Course Notes}}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\begin{document}
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}\vspace{0.8cm}
+{\large \noteauthors\par}\vspace{0.3cm}
+{\large \notedate\par}\vspace{1.2cm}
+\ifdefempty{\videocoverpath}{}{\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par}
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\ifdefempty{\videourl}{}{\textbf{Enlace del video}: \href{\videourl}{\nolinkurl{\videourl}}\par}\par
+\textbf{Página del proyecto}: \href{\repourl}{\nolinkurl{\repourl}}\par
+\end{tcolorbox}
+\end{titlepage}
+\tableofcontents
+\newpage
+
+\section{Introducción: ¿por qué se necesita Muon?}
+
+Muon es el optimizador clave detrás del entrenamiento de K2, propuesto por Keller Jordan. Comparado con AdamW o SGD con momento, tiene una eficiencia de entrenamiento mayor: se necesita menos cantidad de datos o cómputo para alcanzar la misma pérdida. Keller Jordan obtuvo precisamente gracias a este trabajo una oferta de OpenAI, lo cual muestra el alto reconocimiento de la industria hacia este optimizador.
+
+\begin{importantbox}{La observación central de Muon}
+\begin{itemize}
+  \item Las matrices de parámetros 2D de las redes neuronales suelen tener un \textbf{número de condición muy alto} (rango bajo)
+  \item Las actualizaciones del gradiente están dominadas por unas pocas direcciones dominantes (dominant directions)
+  \item \textbf{Ortogonalizar/blanquear} la matriz del gradiente permite amplificar la escala de las direcciones poco frecuentes
+  \item Estas direcciones poco frecuentes son fundamentales para el aprendizaje
+\end{itemize}
+\end{importantbox}
+\section{Blanqueo del gradiente (Gradient Whitening)}
+
+\subsection{Contexto del problema}
+
+Al optimizar redes neuronales con SGD o AdamW, la observación empírica es que la mayoría de las matrices de parámetros 2D (pesos de las capas ocultas) tienen un número de condición alto, es decir, la matriz es de rango bajo. Esto hace que la actualización del gradiente tenga una magnitud muy grande en unas pocas direcciones, mientras que en una gran cantidad de «direcciones raras» la señal es sumamente débil.
+
+\subsection{La operación central del blanqueo}
+
+\begin{importantbox}{El núcleo de Muon: el blanqueo del gradiente}
+Se aplica un blanqueo a la matriz del gradiente, \textbf{eliminando la magnitud/escala del gradiente y conservando solo la dirección}. Esto logra que:
+\begin{itemize}
+  \item se atenúe la influencia excesiva de las direcciones dominantes
+  \item se amplifique la señal débil de las direcciones raras
+  \item todas las direcciones obtengan una escala de actualización equitativa
+\end{itemize}
+\end{importantbox}
+
+La operación de blanqueo se realiza mediante la SVD (descomposición en valores singulares):
+
+$$
+G = U \Sigma V^T \quad \xrightarrow{\text{blanqueo}} \quad \hat{G} = U V^T
+$$
+
+Es decir, se elimina la matriz de valores singulares $\Sigma$ y se conserva únicamente la parte de rotación $U$ y $V^T$.
+
+\subsection{El significado geométrico de la SVD}
+
+Para la matriz de gradiente $G$:
+\begin{itemize}
+  \item $U$: los vectores singulares izquierdos, que representan las direcciones del espacio de salida
+  \item $\Sigma$: los valores singulares, que representan el «grado de importancia» (escala) de cada dirección
+  \item $V^T$: los vectores singulares derechos, que representan las direcciones del espacio de entrada
+\end{itemize}
+
+Al eliminar $\Sigma$, $\hat{G} = UV^T$ resulta ser una \textbf{matriz ortogonal}, lo que garantiza que la magnitud de la actualización sea uniforme en todas las direcciones.
+
+\subsection{Resumen de la sección}
+
+El blanqueo del gradiente es la operación central de Muon: mediante la SVD se eliminan los valores singulares y se ortogonaliza la matriz de gradiente. Esto permite amplificar las señales raras que antes quedaban dominadas por las direcciones principales, lo que acelera el aprendizaje del modelo.
+\section{Ámbito de aplicación de Muon}
+
+\subsection{¿En qué parámetros se usa Muon?}
+
+\begin{warningbox}{Muon no es un sustituto universal}
+Muon solo se usa para optimizar \textbf{las matrices de parámetros 2D de las capas ocultas}. Los siguientes parámetros siguen usando el optimizador estándar (AdamW o SGD con momento):
+\begin{itemize}
+  \item La capa de Input Embedding
+  \item La capa Output (LM Head)
+  \item Los parámetros escalares (Scalar)
+  \item Los parámetros vectoriales unidimensionales (como el $\gamma$ de RMSNorm)
+\end{itemize}
+\end{warningbox}
+
+En el entrenamiento real, Muon se usa \textbf{en combinación} con AdamW/SGD: las matrices de las capas ocultas pasan por Muon y el resto pasa por el optimizador estándar.
+
+\subsection{Consideración especial para la capa de salida}
+
+Para la capa de salida (la capa de clasificación), queremos que las distintas características aprendidas contribuyan con pesos diferentes a la clasificación final. Si también se blanquea la capa de salida, se borra esta diferencia de escala significativa. Por eso Muon no es adecuado para la capa de salida.
+
+\subsection{Resumen de la sección}
+
+El ámbito de aplicación de Muon se limita estrictamente a los parámetros de las matrices 2D de las capas ocultas, y se usa de manera complementaria con el optimizador estándar.
+
+\section{Entender la baja rango a través del número de condición}
+
+\subsection{El significado del número de condición}
+
+El número de condición de una matriz se define como la razón entre el valor singular máximo y el valor singular mínimo:
+
+$$
+\kappa(A) = \frac{\sigma_{\max}}{\sigma_{\min}}
+$$
+
+Cuanto mayor es el número de condición, más «mal condicionada» está la matriz (ill-conditioned), lo que significa que la información se concentra en unas cuantas direcciones.
+
+\subsection{El efecto sobre el entrenamiento}
+
+Un número de condición alto provoca:
+\begin{itemize}
+  \item El gradiente es grande en las direcciones dominantes y pequeño en las direcciones raras
+  \item Los optimizadores estándar (como SGD) necesitan muchos pasos para acumular una actualización suficiente en las direcciones raras
+  \item Una eficiencia de entrenamiento baja
+\end{itemize}
+
+Muon, mediante el blanqueamiento, empareja la «importancia» de todas las direcciones, con lo que acelera la convergencia.
+
+\subsection{Resumen de la sección}
+
+Un número de condición alto es una característica generalizada de las matrices de parámetros de las redes neuronales, y provoca que los optimizadores estándar converjan lentamente en las direcciones raras. La operación de blanqueamiento de Muon resuelve esencialmente este problema.
+
+\section{Síntesis y ampliación}
+
+\begin{enumerate}
+  \item Muon acelera el entrenamiento de redes neuronales mediante el blanqueo del gradiente (eliminación de valores singulares con SVD)
+  \item Idea central: un número de condición alto en la matriz de la capa oculta $\Rightarrow$ señal débil en las direcciones raras $\Rightarrow$ el blanqueo la amplifica
+  \item Se usa solo en los parámetros 2D de la capa oculta, combinado con AdamW/SGD
+  \item Los datos y el cómputo necesarios para alcanzar el mismo loss se reducen de forma significativa
+\end{enumerate}
+
+\subsection{Lecturas adicionales}
+\begin{itemize}
+  \item Blog oficial de Muon de Keller Jordan
+  \item Sección sobre el optimizador en el informe técnico de K2
+  \item El optimizador «Shampoo»: otro método basado en el precondicionamiento de matrices
+\end{itemize}
+
+\end{document}

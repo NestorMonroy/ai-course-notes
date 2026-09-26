@@ -1,0 +1,43 @@
+\section{Agent Swarm：多 Agent 协作}
+
+\subsection{调度者与 subagent 编排}
+这部分训练的核心并不是 subagents 自身，而是 Allcastrater（调度器和任务分解者）的学习，讲师强调 ``我们训练的是调度者分解器''。Allcastrater 负责调用 \texttt{createSubagents}、\texttt{assignTask}，按照不同的 system prompt 分配任务、收集结果，然后继续生成新的 subagents。它的行为会在每个轮次之间同步信息，并在内部周期里并行调度 subagents，还会不断观察 GRM 给出的 reward，调整 scheduling policy。
+
+\begin{knowledgebox}{Allcastrater：可学习的调度者}
+\begin{itemize}
+    \item Allcastrater 会根据当前任务和资源，构造多个 system prompt，保证每个 subagent 专注于特定子任务（例如图像推理、文本生成、工具调用）。
+    \item 它使用 \texttt{createSubagents} 生成新 agent、\texttt{assignTask} 分配工作、\texttt{collectResults} 组合答案，保持上游任务的连续性。
+    \item Allcastrater 的训练目标是调度质量而非各 subagent 的细节，因此整体系统可以通过 GRM 统一评估，并在 parallel loop 中动态调整 compute budget。
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{任务分解与工具流水线}
+Allcastrater 在训练中把任务不断拆得更细：首先识别 high-level intent（如 ``重建 Apple iPad Air 主页''），再用不同的 subagent 生成分析、布局、代码块、测试。每个 subagent 都会调用对应的工具（图像渲染器、HTML 编辑器、数据库查询），把结果反馈给 scheduler，再由 scheduler 决定下一步的 prompt 修订。由于每个 subagent 都有 own prompt template，还要记录 tool calling 的 parameters 和 timestamp。
+
+\begin{knowledgebox}{Tool pipeline 的三个维度}
+\begin{itemize}
+    \item 分析 agent：阅读需求、校验业务约束、决定下游 subagent 类型，并把 intent 以 structured JSON 传给 scheduler。
+    \item 生成 agent：构造解释性文本、API 调用、代码片段甚至界面 mock。
+    \item 验证 agent：用 GUI agents 或 CLI agents 读取工具反馈，判断是否满足 critical steps，再把状态上报给 Allcastrater。
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Agent swarm 评估案例}
+在讲师列出的 evaluation list 里有 replicating Apple iPad Air site、视频描述、GUI 操作等任务，所有任务都被拆成多个 subagent：视觉 agent 提取界面信息、文本 agent 撰写说明、工具 agent 执行 API。每个 agent loop 结束后，Allcastrater 会用 GRM 给整套答案打分，并决定是否继续 spawn 新 subagent 来进一步打磨输出；如果 GRM 发现某类 tool calling reward 始终较低，会在 next loop 里将这个 action 暂停，直至 prompt grammar 调整完毕。
+
+\subsection{并行轮次与 S mean + max}
+每个轮次内部的 subagents 并行执行，轮次之间则严格按 trainable 的 Allcastrater 进行同步：完成一批任务后收集结果，再分配新任务或者 spawn 新的 subagent。正如讲师在训练监控里展示的那样，S mean + max 被用来汇总一个轮次的表现，整套 agent swarm 比起单一 agent 展示出 4.5 倍的 critical steps 效率。
+
+\begin{importantbox}{4.5 倍效率与 Vision-Agentic Capability}
+\textit{``Activate the Vision-Agentic Capability''} 不是一个口号，而是说明每轮 agent loop 必须同时感知视觉、语言和工具调用后再决定下一步。这样就可以让 set of subagents 通过 \texttt{S mean + max} 聚合分数，以 4.5 倍的资源节省率完成原本 single agent 才能达到的步骤数。
+\end{importantbox}
+
+\subsection{Critical Steps 与 agent loop}
+为了约束 agent swarm 的 compute，训练与评估都用 ``Critical Steps'' 线去限制每轮的调度次数，保持 resource constraint 下的稳态。讲师在讲解时提到 VRL agent loop、GUI agents，还有 tool calling 的 workflow：agent loop 先决定 intent、再调用工具、最后回到 Allcastrater。GUI agents 的任务就是把界面交互步骤编排进这个 loop，使模型在跨界任务中依然具备控制界面、拿到工具返回值的能力。
+
+\begin{warningbox}{不要把 critical steps 当作固定预算}
+讲师提醒我们，critical steps 不是静态的阈值，而是一个可调的 guard band：一旦模型在某个 benchmark 上比较稳定，就可以把剩余 budget 投入新的 subagent；反之，如果 GRM 发现整轮 reward 下降，就应该马上收缩 steps 而不是盲目加时间。
+\end{warningbox}
+
+\subsection{本章小结}
+Agent swarm 的关键在于可学习的 Allcastrater、parallel 的 subagents 与 Critical Steps 这套资源控制机制。只要保持 \texttt{createSubagents} \& \texttt{assignTask} 闭环、及时记录 tool trace，K2.5 就能用更少的 compute 产出更多的 agentic output。

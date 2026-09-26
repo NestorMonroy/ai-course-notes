@@ -1,0 +1,323 @@
+\documentclass[a4paper]{article}
+
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+\usepackage{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+% polyglossia no traduce los nombres de listings.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\usepackage{float}
+
+\newtcolorbox{knowledgebox}[1]{
+    enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, attach boxed title to top left={yshift=-2mm, xshift=2mm},
+    boxrule=1pt, sharp corners
+}
+
+\newtcolorbox{importantbox}[1]{
+    enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black,
+    coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+\newtcolorbox{warningbox}[1]{
+    enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    stringstyle=\color{red!60!black},
+    commentstyle=\color{green!60!black},
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    captionpos=b,
+    extendedchars=true
+}
+
+\newcommand{\notetitle}{Qwen3 Dense vs. MoE: comparación profunda de ancho equivalente y RMSNorm}
+\newcommand{\noteauthors}{Elaboradas a partir de materiales públicos del curso}
+\newcommand{\notedate}{2025}
+\newcommand{\videochannel}{Wudaokou Nash (五道口纳什)}
+\newcommand{\videopublishdate}{2025}
+\newcommand{\videoduration}{aproximadamente 19 minutos}
+\newcommand{\videourl}{}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+
+% Footer with repo info
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\thepage}
+\fancyfoot[R]{\footnotesize\color{gray}\href{\repourl}{AI Course Notes}}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}
+\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}
+\vspace{0.8cm}
+{\large \noteauthors\par}
+\vspace{0.3cm}
+{\large \notedate\par}
+\vspace{1.2cm}
+
+\ifdefempty{\videocoverpath}{
+{\small Al generar las notas, indique la ruta local de la portada del video.\par}
+}{
+\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par
+}
+
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\ifdefempty{\videourl}{}{
+\textbf{Enlace del video}: \href{\videourl}{\nolinkurl{\videourl}}\par
+}
+\par
+\textbf{Página del proyecto}: \href{\repourl}{\nolinkurl{\repourl}}\par
+\end{tcolorbox}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+\section{Introducción}
+
+En esta sesión continuamos explorando la comparación profunda entre Qwen3-30B-A3B (MoE) y Qwen3-32B (Dense). La sesión anterior partió de la configuración y del cálculo del número de parámetros; esta sesión se centra en tres temas más profundos: el \textbf{ancho equivalente} (Effective Width), los \textbf{parámetros de RMSNorm}, y la diferencia fundamental en el papel computacional entre FFN/MoE y Attention.
+
+\begin{knowledgebox}{La familia completa de Qwen3}
+Qwen3 ofrece una matriz completa de modelos: distintos tamaños (de 0.6B a 235B), variantes Dense y MoE, VR Model y modelos de conversación comunes. Se ha convertido en el modelo de código abierto de referencia que usa el mundo académico para hacer post-entrenamiento (Post-training).
+\end{knowledgebox}
+
+\section{Repaso y complementos de la configuración Dense vs. MoE}
+
+\subsection{La naturaleza de $d_{\text{model}}$}
+
+$d_{\text{model}}$ (es decir, \texttt{hidden\_size}) es la dimensión central que atraviesa todo el modelo:
+\begin{itemize}
+  \item La dimensión del token embedding de entrada de cada capa es $d_{\text{model}}$
+  \item La dimensión del token embedding de salida de cada capa sigue siendo $d_{\text{model}}$
+  \item La consistencia de $d_{\text{model}}$ garantiza la viabilidad de la \textbf{conexión residual} (las dimensiones antes y después de la transformación son iguales, por lo que se pueden sumar directamente)
+\end{itemize}
+
+\subsection{Dimensión intermedia y estructura de la FFN}
+
+\begin{table}[H]
+\centering
+\caption{Comparación de la dimensión intermedia de FFN/MoE}
+\begin{tabular}{lcc}
+\toprule
+& \textbf{Dense (32B)} & \textbf{MoE (30B-A3B)} \\
+\midrule
+Dimensión intermedia $d_{\text{ff}}$ & 25600 ($5 \times d_{\text{model}}$) & 768 (por cada Expert) \\
+Dirección del mapeo & $5120 \to 25600$ (up) & $2048 \to 768$ (down!) \\
+Número de Experts & --- & 128 \\
+Número de Experts activados & --- & 8 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{warningbox}{La dimensión intermedia del Expert de MoE no es de ``up''}
+En el modelo Dense, la dimensión intermedia de la FFN es $25600 > d_{\text{model}} = 5120$, un proceso de «aumento de dimensión». Pero la dimensión intermedia de cada Expert en MoE es $768 < d_{\text{model}} = 2048$, lo que en realidad es un proceso de «reducción de dimensión». Aunque en el código se sigue usando el nombre $W_{\text{up}}$, en esencia cada Expert es más «delgado».
+\end{warningbox}
+
+\subsection{Configuración del Decoder Sparse Stack}
+
+En la configuración de Qwen3-30B-A3B hay dos parámetros clave:
+\begin{itemize}
+  \item \texttt{decoder\_sparse\_step}: controla cada cuántas capas se usa una MLP Dense (cuando el residuo del módulo es 0, se usa MLP Dense)
+  \item \texttt{mlp\_only\_layers}: especifica qué capas usan la MLP Dense estándar
+\end{itemize}
+
+En la configuración actual, \textbf{la parte de FFN de las 48 capas usa MoE}, sin que ninguna capa recurra a la MLP Dense.
+
+\subsection{Resumen de la sección}
+
+El modelo MoE se «reduce» en todas las dimensiones ($d_{\text{model}}$, número de cabezas, número de capas), y compensa la capacidad expresiva mediante 128 Experts independientes. La FFN de cada Expert es «angosta» (768 dimensiones), pero, al combinar varios Experts, el ancho equivalente puede llegar a 6144.
+
+\section{Ancho efectivo (Effective Width)}
+
+\subsection{Comprensión desde la perspectiva de los FLOPs}
+
+\begin{importantbox}{Definición del ancho efectivo}
+El ancho efectivo de MoE = número de Experts activados $\times$ dimensión intermedia de cada Expert:
+$$
+d_{\text{ff}}^{\text{eff}} = k \times m = 8 \times 768 = 6144 = 3 \times d_{\text{model}}
+$$
+mientras que el ancho de la FFN del modelo Dense es $25600 = 5 \times d_{\text{model}}$.
+\end{importantbox}
+
+Cálculo de los FLOPs de las dos arquitecturas:
+
+\textbf{FFN Dense} (con las tres matrices up/gate/down de SwiGLU):
+$$
+\text{FLOPs}_{\text{Dense}} = 3 \times d_{\text{model}} \times d_{\text{ff}}
+$$
+
+\textbf{MoE} ($k$ Experts, cada uno ejecuta una vez up/gate/down):
+$$
+\text{FLOPs}_{\text{MoE}} = k \times 3 \times d_{\text{model}} \times m = 3 \times d_{\text{model}} \times (k \cdot m)
+$$
+
+Al igualar los FLOPs de ambos: $d_{\text{ff}} = k \cdot m$, y este es el ancho efectivo.
+
+\subsection{Suma ponderada vs. Concat: comprensión desde la perspectiva del rango}
+
+\begin{warningbox}{La salida de MoE no es una concatenación, sino una suma ponderada}
+Las salidas de los 8 Experts no se concatenan en un vector de $8 \times 768 = 6144$ dimensiones; en su lugar se hace una \textbf{suma ponderada} en el espacio de $d_{\text{model}} = 2048$, y la salida final sigue siendo de 2048 dimensiones.
+\end{warningbox}
+
+¿Por qué una suma ponderada puede seguir siendo equivalente a un ancho de 6144? Hay dos perspectivas:
+
+\textbf{Perspectiva 1: equivalencia de FLOPs}. Ya sea que haya concatenación o no, la cantidad total de multiplicaciones de matrices que participan en el cálculo real es la misma.
+
+\textbf{Perspectiva 2: equivalencia del rango de la matriz}. La suma ponderada puede reescribirse como:
+
+$$
+\sum_{i=1}^{k} \alpha_i \cdot v_i = \begin{bmatrix} \alpha_1 I_d & \alpha_2 I_d & \cdots & \alpha_k I_d \end{bmatrix} \begin{bmatrix} v_1 \\ v_2 \\ \vdots \\ v_k \end{bmatrix}
+$$
+
+donde $I_d$ es la matriz identidad de $d \times d$. Esto equivale a multiplicar una matriz dispersa por bloques diagonales de $d \times kd$ por un vector concatenado de $kd$ dimensiones. Desde la perspectiva del rango de la matriz, la capacidad expresiva (diversidad) es equivalente:
+\begin{itemize}
+  \item La capacidad expresiva de un solo Expert se reduce (la dimensión se adelgaza)
+  \item Varios Experts en conjunto sostienen una diversidad suficiente
+\end{itemize}
+
+\subsection{Resumen de la sección}
+
+El ancho efectivo $k \times m$ es el concepto clave para comprender la cantidad de cómputo y la capacidad expresiva de MoE. El ancho efectivo de Qwen3-30B-A3B es $3 \times d_{\text{model}}$, menor que el $5 \times d_{\text{model}}$ de Dense, pero mediante la cantidad total de parámetros de sus 128 Experts mantiene una capacidad de modelo enorme.
+
+\section{FFN/MoE vs. Attention: diferencia esencial de los roles de cómputo}
+
+\subsection{Dos paradigmas de cómputo}
+
+\begin{importantbox}{Diferencia esencial entre Attention y FFN}
+\begin{itemize}
+  \item \textbf{Attention}: describe la interacción (interaction) \textbf{entre} tokens, es causal (causal mask); la query actual solo puede ver las key pasadas
+  \item \textbf{FFN/MoE}: es una proyección (projection) a \textbf{nivel de token}, no hay interacción entre tokens; cada token pasa de forma independiente por la transformación FFN
+\end{itemize}
+\end{importantbox}
+
+Esta diferencia tiene una implicación de ingeniería importante: como MoE/FFN es una operación token-level, entonces:
+\begin{itemize}
+  \item El enrutamiento es \textbf{per-token}: cada token elige de forma independiente sus top-K Expert
+  \item Se pueden agrupar los tokens por Expert (grouping): los tokens enrutados al mismo Expert se agregan y se calculan en lote
+  \item No involucra dependencias entre tokens, por lo que es naturalmente adecuado para la paralelización
+\end{itemize}
+
+\subsection{Análisis de la proporción de parámetros}
+
+\begin{table}[H]
+\centering
+\caption{Proporción de parámetros: GQA vs. MoE/FFN}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Modelo} & \textbf{Proporción de GQA} & \textbf{Proporción de FFN/MoE} & \textbf{Nota} \\
+\midrule
+Qwen3-30B-A3B (128 Expert totales) & 2.9\% & 94\% & Parámetros totales: 30.5B \\
+Qwen3-30B-A3B (8 Expert activados) & 27\% & 54\% & Parámetros activados: 3.3B \\
+Qwen3-32B (Dense) & 18\% & 76\% & Parámetros totales: 32B \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{knowledgebox}{FFN/MoE siempre concentra la mayor parte de los parámetros}
+Ya sea Dense o MoE, la parte de FFN siempre ocupa la gran mayoría de los parámetros. En los parámetros totales de MoE, los 128 Expert aportan el 94\% de los parámetros. Incluso si solo se consideran los parámetros activados (8 Expert), FFN sigue representando el 54\%.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Attention se encarga de la interacción de información entre tokens, mientras que FFN/MoE se encarga de la transformación de características dentro de cada token. Ambas funciones son complementarias, pero la distribución de parámetros es sumamente desigual: FFN/MoE concentra la mayor parte, sin lugar a dudas.
+\section{Parámetros adicionales de RMSNorm}
+
+\subsection{Estructura de RMSNorm}
+
+RMSNorm (Root Mean Square Normalization) es el método de normalización introducido por LLaMA 2, más simple que LayerNorm: solo hace escalamiento, sin centrado de la media:
+
+$$
+\text{RMSNorm}(x) = \frac{x}{\sqrt{\frac{1}{d}\sum_{i=1}^d x_i^2 + \epsilon}} \odot \gamma
+$$
+
+donde $\gamma \in \mathbb{R}^{d_{\text{model}}}$ es el parámetro de escalamiento entrenable.
+
+\subsection{Distribución de RMSNorm}
+
+Cada Transformer Layer contiene \textbf{2} RMSNorm:
+\begin{enumerate}
+  \item la Norm antes de GQA Attention
+  \item la Norm antes de FFN/MoE
+\end{enumerate}
+
+Sumando el \textbf{1} Final Norm al final del modelo, en total:
+
+$$
+P_{\text{RMSNorm}} = (2 \times L + 1) \times d_{\text{model}}
+$$
+
+Para Dense 32B: $(2 \times 64 + 1) \times 5120 = 660{,}480$ parámetros. Aunque es despreciable frente a los 32B, no debe omitirse conceptualmente.
+
+\subsection{Resumen de la sección}
+
+RMSNorm es «estándar» en cada capa: su número de parámetros es pequeño pero indispensable. Garantiza la estabilidad numérica de la entrada de cada capa y es uno de los componentes clave para entrenar Transformers profundos.
+
+\section{Exploración del código fuente: HuggingFace Transformers}
+
+En el directorio \texttt{models/} de la biblioteca HuggingFace Transformers, la serie Qwen3 incluye cuatro variantes:
+\begin{itemize}
+  \item \texttt{qwen3}: modelo Dense de solo lenguaje
+  \item \texttt{qwen3\_moe}: modelo MoE de solo lenguaje
+  \item \texttt{qwen3\_vl}: modelo Dense de lenguaje visual
+  \item \texttt{qwen3\_vl\_moe}: modelo MoE de lenguaje visual
+\end{itemize}
+
+\begin{knowledgebox}{Diferencias del forward entre entrenamiento e inferencia}
+El código del forward de MoE de \texttt{qwen3\_moe} no distingue entre el modo de entrenamiento y el de inferencia, porque el MoE es una operación a nivel de token, y siempre se calcula agrupando por cubetas de Expert. Pero la parte de Expert del MoE de \texttt{qwen3\_vl\_moe} sí distingue entre entrenamiento e inferencia: durante el entrenamiento sigue la lógica de agrupamiento por cubetas, y durante la inferencia usa la lógica de BMM (Batched Matrix Multiplication, multiplicación de matrices por lotes). La razón concreta de esta diferencia merece investigarse más a fondo.
+\end{knowledgebox}
+\section{Síntesis y ampliación}
+
+Los aprendizajes clave de esta sesión:
+
+\begin{enumerate}
+  \item El \textbf{ancho equivalente} $k \times m = 6144$ es la clave para entender el costo computacional del MoE: equivale a un FFN Dense de ancho $3 \times d_{\text{model}}$
+  \item La suma ponderada y la concatenación son equivalentes en FLOPs y en el rank de la matriz; el MoE aporta diversidad mediante varios Expert «delgados»
+  \item La atención es la interacción causal entre tokens, mientras que el FFN/MoE es un mapeo independiente dentro de cada token: los papeles de ambos son, en esencia, distintos
+  \item Ya sea Dense o MoE, la parte del FFN sigue siendo, con mucho, la que concentra la mayor cantidad de parámetros
+  \item RMSNorm aporta 2 por capa más 1 al final; el número de parámetros es pequeño, pero conceptualmente no se puede pasar por alto
+\end{enumerate}
+
+\subsection{Lecturas adicionales}
+
+\begin{itemize}
+  \item Código fuente de HuggingFace Transformers: \texttt{models/qwen3\_moe/}
+  \item Switch Transformer (Fedus et al., 2021): una aplicación clásica del MoE en el Transformer
+  \item Informe técnico de DeepSeek MoE: un diseño de Expert de grano más fino
+\end{itemize}
+
+\end{document}

@@ -1,0 +1,87 @@
+\section{训练稳定性：Entropy与Mismatch}
+
+\subsection{Entropy：从Collapse到Explode}
+
+Entropy（熵）是RL训练中一个被广泛关注的指标。崔干曲介绍了对Entropy认知的演变：
+
+\textbf{早期关注Entropy Collapse}（2024年中）：RL训练初期Entropy会快速下降（collapse），导致模型丧失探索能力。当时的应对措施包括Clip Higher（DAPO中的做法）以及推导Entropy变化公式来指导干预。
+
+\textbf{现在更关注Entropy Explode}（2025年下半年）：在大规模MoE模型上进行RL训练时，Entropy的急剧升高往往伴随着训练失败。
+
+\begin{importantbox}{Entropy的双面性}
+\begin{itemize}
+    \item Entropy是Exploration的\textbf{必要条件}（但非充分条件）：没有Entropy就不可能探索新轨迹
+    \item 但Entropy急剧升高同样危险：这往往意味着模型状态变得不稳定（如Language Mixing——英文Query下冒出大量中文回复）
+    \item \textbf{理想状态}：给定固定的Prompt集合和生成长度，Entropy应呈现平稳或缓慢下降的趋势（因为模型逐渐收敛）
+\end{itemize}
+\end{importantbox}
+
+\subsection{Entropy是"结果"而非"原因"}
+
+郑楚杰和李英儒都强调了一个重要观点：Entropy是模型学习的\textbf{结果}，而不是原因。
+
+\begin{knowledgebox}{基于Entropy做调整可能并不本质}
+郑楚杰认为：与其直接干预Entropy，不如去解决导致Entropy异常的根本原因。例如：
+\begin{itemize}
+    \item Entropy急剧上升 $\rightarrow$ 可能是Language Mixing等模型状态不稳定的结果
+    \item Entropy下降过快 $\rightarrow$ 可以通过扩大Exploration Space（增大Batch Size、增加Prompt多样性、增加生成长度）来自然缓解
+\end{itemize}
+从优化理论的角度（李英儒）：Policy在词表维度的Simplex上做优化，Entropy反映了优化Iterate距离Simplex内部的远近。收敛时Entropy自然下降。但使用Interior Point Method等手段可以让优化过程在Simplex内部移动，从而保持较高的Entropy。
+\end{knowledgebox}
+
+\subsection{MoE模型的Entropy控制}
+
+崔干曲分享了在大规模MoE模型上控制Entropy的实战经验：
+
+\begin{enumerate}
+    \item \textbf{冻结Router}：不训练Router是一种比较轻量但有效的方式
+    \item \textbf{控制Entropy在稳定值附近}：借鉴之前的Entropy控制方法，将Entropy稳定在合理范围
+    \item 尝试过Routing Replay、R3等方法，发现它们只能\textbf{延缓}而非\textbf{根治}稳定性问题
+\end{enumerate}
+
+胡建补充了他的实践方案：
+
+\begin{importantbox}{MoE RL训练的轻量方案}
+\begin{enumerate}
+    \item \textbf{纯Online Learning}：每次做一个更新，IS始终为1，从根本上避免Expert选择变化的问题
+    \item \textbf{TIS + Mask}：对偏离程度较高的Token进行Mask
+    \item \textbf{Sequence Level Filter}：通过IS的几何均值，将偏离过大的整条轨迹直接Filter掉（与GSPO思路一致）
+    \item 在Online Learning下，不用Clip Higher，Entropy也能保持稳定
+\end{enumerate}
+\end{importantbox}
+
+\subsection{训推不一致（Train-Inference Mismatch）}
+
+训推不一致是2025年下半年被广泛认识到的关键问题。其核心是：\textbf{训练引擎和推理引擎由于精度实现不同，对同一个Token的概率计算存在差异，这个差异会在训练过程中累积放大。}
+
+\begin{warningbox}{Mismatch的动态特性}
+李英儒指出一个关键观察：Mismatch不是从一开始就很高的——如果它纯粹是Infra层面的精度问题，应该从一开始就存在且保持恒定。但实际上，Mismatch会在训练后期突然急剧增大。这说明Mismatch是一个\textbf{动态现象}，与优化过程密切相关：
+\begin{itemize}
+    \item 精度差异在不同引擎上产生微小的Gradient Noise
+    \item 这个Noise在训练过程中累积，将模型推向精度容易放大的参数区域
+    \item 到达该区域后，Mismatch从微小变为显著，训练随之崩溃
+\end{itemize}
+\end{warningbox}
+
+郑楚杰补充了对Mismatch的实践观点：完全消除Mismatch在当前Infra条件下几乎不可能（且会严重降低推理速度），因此\textbf{实际应做的是将Mismatch控制在合理范围内}，防止其突然急剧增大。他还观察到，Mismatch的突然增大可能与Overfitting相关。
+
+\subsection{关键监控指标总结}
+
+\begin{importantbox}{RL训练中需要密切监控的指标}
+\begin{enumerate}
+    \item \textbf{Entropy}：监控模型的探索/收敛状态，关注异常的急升或急降
+    \item \textbf{PPO KL}：Policy更新的步幅控制
+    \item \textbf{vLLM KL}：推理引擎与训练引擎之间的Mismatch程度
+    \item \textbf{Reference Model KL}：训练模型与参考模型之间的距离
+    \item \textbf{Grad Norm}：梯度的范数，反映优化稳定性
+    \item \textbf{TIS（Truncated Importance Sampling）}：Off-Policy程度
+    \item \textbf{Response Length}：生成长度变化
+\end{enumerate}
+当任何一个指标出现异常抖动，"基本上这个模型就被砍了一刀，可能要炸了。"（胡建）
+\end{importantbox}
+
+\subsection{本章小结}
+
+训练稳定性是大模型RL的核心工程挑战。Entropy作为结果指标，反映了模型的探索-收敛状态，但直接干预Entropy可能不是本质解法。MoE模型的RL训练尤其困难，冻结Router和Online Learning是目前较为有效的轻量方案。训推不一致是一个动态累积的现象，需要从Infra精度对齐和优化稳定性两个维度联合解决。
+
+

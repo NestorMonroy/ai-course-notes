@@ -1,0 +1,85 @@
+\section{Estabilidad del entrenamiento: Entropy y Mismatch}
+
+\subsection{Entropy: de Collapse a Explode}
+
+Entropy (entropía) es un indicador ampliamente observado en el entrenamiento de RL. Cui Ganqu (崔干曲) presentó la evolución del entendimiento sobre Entropy:
+
+\textbf{La preocupación temprana por Entropy Collapse} (mediados de 2024): en las primeras etapas del entrenamiento de RL, Entropy caía rápidamente (collapse), lo que hacía que el modelo perdiera capacidad de exploración. Las medidas de entonces incluían Clip Higher (la práctica de DAPO) y derivar la fórmula del cambio de Entropy para guiar la intervención.
+
+\textbf{La preocupación actual por Entropy Explode} (segunda mitad de 2025): al entrenar con RL modelos MoE a gran escala, un aumento brusco de Entropy suele acompañar el fracaso del entrenamiento.
+
+\begin{importantbox}{La doble cara de Entropy}
+\begin{itemize}
+    \item Entropy es una \textbf{condición necesaria} de Exploration (pero no suficiente): sin Entropy es imposible explorar nuevas trayectorias
+    \item Pero un aumento brusco de Entropy es igual de peligroso: suele significar que el estado del modelo se vuelve inestable (como Language Mixing, cuando bajo un Query en inglés surgen grandes cantidades de respuestas en chino)
+    \item \textbf{El estado ideal}: dado un conjunto fijo de Prompts y una longitud de generación fija, Entropy debería mostrar una tendencia estable o de descenso lento (porque el modelo converge de manera gradual)
+\end{itemize}
+\end{importantbox}
+
+\subsection{Entropy es un «resultado», no una «causa»}
+
+Zheng Chujie (郑楚杰) y Li Yingru (李英儒) enfatizaron un punto importante: Entropy es el \textbf{resultado} del aprendizaje del modelo, no la causa.
+
+\begin{knowledgebox}{Ajustar en función de Entropy tal vez no sea la solución de fondo}
+Zheng Chujie considera que, en lugar de intervenir directamente sobre Entropy, es mejor resolver la causa de fondo que provoca la anomalía en Entropy. Por ejemplo:
+\begin{itemize}
+    \item Un aumento brusco de Entropy $\rightarrow$ puede ser el resultado de una inestabilidad del estado del modelo, como Language Mixing
+    \item Una caída demasiado rápida de Entropy $\rightarrow$ puede aliviarse de manera natural ampliando el Exploration Space (aumentando el Batch Size, incrementando la diversidad de Prompts y aumentando la longitud de generación)
+\end{itemize}
+Desde la perspectiva de la teoría de optimización (Li Yingru): la Policy se optimiza sobre el Simplex de la dimensión del vocabulario, y Entropy refleja qué tan lejos está el Iterate de optimización del interior del Simplex. Al converger, Entropy desciende de manera natural. Pero usar métodos como el Interior Point Method permite que el proceso de optimización se desplace dentro del Simplex, con lo cual se mantiene una Entropy más alta.
+\end{knowledgebox}
+
+\subsection{El control de Entropy en modelos MoE}
+
+Cui Ganqu compartió su experiencia práctica al controlar Entropy en modelos MoE a gran escala:
+
+\begin{enumerate}
+    \item \textbf{Congelar el Router}: no entrenar el Router es una manera relativamente ligera pero eficaz
+    \item \textbf{Mantener Entropy cerca de un valor estable}: apoyándose en métodos previos de control de Entropy, para estabilizarla dentro de un rango razonable
+    \item Se probaron métodos como Routing Replay y R3, y se descubrió que solo pueden \textbf{retrasar} el problema de estabilidad, no \textbf{resolverlo de raíz}
+\end{enumerate}
+
+Hu Jian (胡建) añadió su propuesta práctica:
+
+\begin{importantbox}{Una propuesta ligera para el entrenamiento de RL en MoE}
+\begin{enumerate}
+    \item \textbf{Online Learning puro}: se hace una actualización cada vez, IS siempre vale 1, lo que evita de raíz el problema del cambio en la selección de Expert
+    \item \textbf{TIS + Mask}: se aplica Mask a los Tokens con un grado de desviación alto
+    \item \textbf{Sequence Level Filter}: mediante la media geométrica de IS, se hace Filter directamente de las trayectorias completas con una desviación excesiva (coherente con la idea de GSPO)
+    \item Bajo Online Learning, incluso sin usar Clip Higher, Entropy también puede mantenerse estable
+\end{enumerate}
+\end{importantbox}
+
+\subsection{La inconsistencia entre entrenamiento e inferencia (Train-Inference Mismatch)}
+
+La inconsistencia entre entrenamiento e inferencia es un problema clave ampliamente reconocido en la segunda mitad de 2025. Su núcleo es: \textbf{debido a que el motor de entrenamiento y el motor de inferencia implementan la precisión de manera distinta, existe una diferencia en el cálculo de la probabilidad de un mismo Token, y esta diferencia se acumula y amplifica durante el entrenamiento.}
+
+\begin{warningbox}{La naturaleza dinámica de Mismatch}
+Li Yingru señaló una observación clave: Mismatch no es alto desde el inicio; si fuera puramente un problema de precisión a nivel de Infra, debería existir desde el inicio y mantenerse constante. Pero en la práctica, Mismatch aumenta de manera brusca y repentina en las etapas finales del entrenamiento. Esto indica que Mismatch es un \textbf{fenómeno dinámico}, estrechamente relacionado con el proceso de optimización:
+\begin{itemize}
+    \item La diferencia de precisión entre los distintos motores produce un Gradient Noise diminuto
+    \item Este Noise se acumula durante el entrenamiento y empuja al modelo hacia regiones de parámetros donde la precisión se amplifica con facilidad
+    \item Al llegar a esa región, Mismatch pasa de ser diminuto a significativo, y el entrenamiento se colapsa en consecuencia
+\end{itemize}
+\end{warningbox}
+
+Zheng Chujie añadió su punto de vista práctico sobre Mismatch: eliminarlo por completo es casi imposible en las condiciones actuales de Infra (y además reduciría gravemente la velocidad de inferencia); por lo tanto, \textbf{lo que en realidad se debe hacer es mantener Mismatch dentro de un rango razonable}, para evitar que aumente de manera brusca y repentina. También observó que el aumento repentino de Mismatch podría estar relacionado con Overfitting.
+
+\subsection{Resumen de los indicadores clave de monitoreo}
+
+\begin{importantbox}{Indicadores que deben monitorearse de cerca en el entrenamiento de RL}
+\begin{enumerate}
+    \item \textbf{Entropy}: monitorea el estado de exploración/convergencia del modelo; hay que prestar atención a los aumentos o descensos bruscos anómalos
+    \item \textbf{PPO KL}: controla el tamaño del paso de actualización de la Policy
+    \item \textbf{vLLM KL}: el grado de Mismatch entre el motor de inferencia y el motor de entrenamiento
+    \item \textbf{Reference Model KL}: la distancia entre el modelo en entrenamiento y el modelo de referencia
+    \item \textbf{Grad Norm}: la norma del gradiente, que refleja la estabilidad de la optimización
+    \item \textbf{TIS (Truncated Importance Sampling)}: el grado de Off-Policy
+    \item \textbf{Response Length}: el cambio en la longitud de generación
+\end{enumerate}
+Cuando cualquiera de estos indicadores muestra una oscilación anómala, «básicamente el modelo ya recibió un tajo, es probable que esté por explotar» (Hu Jian).
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La estabilidad del entrenamiento es el reto de ingeniería central de RL en modelos grandes. Entropy, como indicador de resultado, refleja el estado de exploración-convergencia del modelo, pero intervenir directamente sobre Entropy tal vez no sea la solución de fondo. El entrenamiento de RL en modelos MoE es especialmente difícil; congelar el Router y usar Online Learning son, por ahora, las propuestas ligeras más eficaces. La inconsistencia entre entrenamiento e inferencia es un fenómeno dinámico y acumulativo que debe resolverse de manera conjunta desde dos dimensiones: la alineación de precisión a nivel de Infra y la estabilidad de la optimización.

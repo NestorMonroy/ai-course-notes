@@ -1,0 +1,55 @@
+\section{Algorithm：开放式能力的强化培训}
+
+\subsection{General Reward Model (GRM)}
+GRM 是 K2.5 全流程的通用判分器，它要负责写作、图像推理、工具调用、API 调度等所有 open-ended 输出。讲师把它比作 ``在任意任务里评判一个回答像不像人类判断''，换句话说：GRM 本质是在多 modality 的 token 之后再对答案做一层人类级打分，以便 RL post-training 能把所有 modality 一起优化。
+
+\begin{knowledgebox}{GRM 让 reward 更像人类判断}
+\begin{itemize}
+    \item 统一跨域评价：不需要手写每个 benchmark 的规则，由 GRM 预测评分尺度。
+    \item 支持 open-ended 任务：写作、对话、视频推理、图文生成都用同一个 network 评分。
+    \item 兼容多模态输入：图像帧、界面截图、工具输出都被 tokenizer 编码后输入 GRM。
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{多阶段训练流程}
+K2.5 把训练分成三大阶段：先是大规模多模态预训练（以图文 + 长上下文为主），再用高质量人工标注数据做 SFT，最后用 GRM 搭配 PARL（Parallel RL）式的 agent loop 做 RL post-training。多阶段训练的想法在 lecture 12:20~14:30 里反复提到，特别强调前两阶段要准备出 ``稳定的 prompt schema''，否则 RL 阶段会被 deg \& recover 拉偏。
+
+\subsection{PARL Agent Loop 的构造}
+PARL 代表 Parallel RL：每个 iteration 里会采样海量的 task，调用 Allcastrater 创建若干 subagent（visual、code、tool、GUI），每个 subagent 在 agent loop 里执行 \texttt{assignTask}、调用工具并生成候选答案，再通过 \texttt{collectResults} 交给 scheduler。循环结束后，GRM 对这批答案打分，gradient 回传给 actor-critic 层，让 Allcastrater 学到如何以最小的 compute 达成最多的 critical steps。此过程既保留了 agent swarm 的并行性，又让 RL 训练有明确的 reward supervision。
+\begin{itemize}
+    \item 采样 task \& state：把视频、UI 状态、partial tool log 组合成当前环境。
+    \item 创建 subagents：基于 system prompt 生成专门处理图像/代码/工具的 agent。
+    \item assignTask \& tool calling：由 RL actor 发起 actions，subagent 则调用 API、执行工具并生成多模态回答。
+    \item 收集 + GRM 评估：Allcastrater 汇总多个 subagent 的输出，用 GRM 打分，再决定是否产生新 subagent。
+    \item 迭代更新：critic 与 scheduler 更新，以 critical steps 作为 gating 继续下轮。
+\end{itemize}
+
+\subsection{Prompt orchestration 与 Tool gating}
+讲师特别强调 prompt orchestration 的重要性：Allcastrater 要在 prompt 里明确指派视觉 agent、工具 agent、语言 agent 各自的责任，并记录 tool calling 的概率。为了不让 tool agent 调用过多 expensive API，训练过程里还会对每个 action 加一层 gating：如果 GRM 给出的 reward 低于阈值，就会暂停该 action 的调用，等到 high-level intent 更新后再重新发起。
+
+\begin{knowledgebox}{Prompt orchestration 的三步}
+\begin{itemize}
+    \item 用 meta prompt 预设 agent branching 逻辑：例如 ``先从视觉流提取 intent，再调用仪表板''。
+    \item 对 tool calling 加 soft gate：若 API call 连续两次 reward 低于阈值，暂停并用新的 prompt 修订。
+    \item 记录 tool trace：把每个 action、参数、返回一次写入 metadata，便于 later replay。
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{GRM 指标的调校}
+GRM 输出要兼顾文本、图像、工具调用三类信号，因此需要多尺度 calibration：讲师分享的方法是先用 high-quality SFT 结果校准 GRM 的 logits，再用 paraphrase data、tool trace log 让 network 识别不同 modality 的 reward distribution。这样在 RL 里，模型就可以把 ``语义串联''（如影响 text reasoning）与 ``工具执行''（如 API 返回）统一到 0~1 的分数，而不用再为每个 task 写一道特定 reward。此 calibration 也便于 later evaluation，帮助我们看出 GRM 是否偏好某一种 modality。
+
+\begin{knowledgebox}{GRM calibration 的三核心}
+\begin{itemize}
+    \item 以 SFT baseline human gold answer 作为 anchor，校准 GRM logits 的平均值与 variance。
+    \item 将 tool calling trace 作为 additional feature，防止 GRM 只看 language reward。
+    \item 对长上下文 output（如 multi-step GUI 操作）加权，使 reward signal 捕捉多个 step 的 cumulated impact。
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{训练中的 deg \& recover}
+\begin{warningbox}{别对 deg \& recover 过度反应}
+讲师在训练中看到一个 ``deg and recover'' 的周期：模型性能会在中后段往下探，再快速上升，再下探再上升；尤其是 coding 与 text knowledge 会出现多轮下探。这个不是 bug，而是 GRM 与 agent loop 重新同步的自然行为，保持 critical steps 并继续训练就会收敛。
+\end{warningbox}
+
+\subsection{本章小结}
+K2.5 的算法层面等于把 GRM 设为通用 reward，PARL agent loop 在 critical steps 控制下进行多轮并行，prompt orchestration + tool gating 保证 multi-agent 在有限 latency 下还能探索，而 calibration 机制则让不同 modality 的 reward 互相可比较。任何短期的 deg 都可能是 recovery 的前奏，只要保持 loop 继续训练就能收敛。

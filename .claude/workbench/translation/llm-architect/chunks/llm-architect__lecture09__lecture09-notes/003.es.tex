@@ -1,0 +1,55 @@
+\section{Algorithm: entrenamiento por refuerzo de capacidades abiertas}
+
+\subsection{General Reward Model (GRM)}
+GRM es el calificador universal de todo el proceso de K2.5; es responsable de la escritura, el razonamiento con imágenes, las llamadas a herramientas, la programación de API y el resto de las salidas open-ended. El docente lo comparó con «evaluar en cualquier tarea si una respuesta se parece al juicio humano»; dicho de otro modo: GRM consiste, en esencia, en aplicar sobre los tokens de múltiples modality una capa adicional de puntuación de nivel humano, de manera que el RL post-training pueda optimizar todas las modality a la vez.
+
+\begin{knowledgebox}{GRM hace que la reward se parezca más al juicio humano}
+\begin{itemize}
+    \item Unificar la evaluación entre dominios: no hace falta escribir a mano las reglas de cada benchmark, pues GRM predice la escala de puntuación.
+    \item Da soporte a tareas open-ended: la escritura, la conversación, el razonamiento con video y la generación de texto e imagen se puntúan todas con la misma network.
+    \item Es compatible con entradas multimodales: los fotogramas de imagen, las capturas de pantalla de la interfaz y las salidas de las herramientas se codifican con el tokenizer antes de introducirse en GRM.
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Flujo de entrenamiento en varias etapas}
+K2.5 divide el entrenamiento en tres grandes etapas: primero un preentrenamiento multimodal a gran escala (centrado en texto e imagen más contexto largo), después un SFT con datos anotados manualmente de alta calidad y, por último, un RL post-training con GRM combinado con un agent loop de tipo PARL (Parallel RL). La idea del entrenamiento en varias etapas se repite en la clase entre los minutos 12:20~14:30, donde se insiste en que las dos primeras etapas deben dejar listo un «prompt schema estable»; de lo contrario, la etapa de RL se verá desviada por el deg \& recover.
+
+\subsection{Construcción del PARL Agent Loop}
+PARL significa Parallel RL: en cada iteration se muestrea una cantidad masiva de tasks y se llama a Allcastrater para crear varios subagent (visual, code, tool, GUI); cada subagent, dentro del agent loop, ejecuta \texttt{assignTask}, llama a herramientas y genera respuestas candidatas, que después se entregan al scheduler mediante \texttt{collectResults}. Al terminar el ciclo, GRM puntúa ese lote de respuestas y el gradient se retropropaga hacia la capa actor-critic, de modo que Allcastrater aprende a lograr el máximo de critical steps con el mínimo de compute. Este proceso conserva el paralelismo del agent swarm y, a la vez, le da al entrenamiento de RL una reward supervision explícita.
+\begin{itemize}
+    \item Muestrear task \& state: se combinan el video, el estado de la UI y el partial tool log para formar el entorno actual.
+    \item Crear subagents: a partir del system prompt se generan agent especializados en imagen, código o herramientas.
+    \item assignTask \& tool calling: el RL actor inicia las actions, y el subagent llama a la API, ejecuta la herramienta y genera una respuesta multimodal.
+    \item Recopilación + evaluación con GRM: Allcastrater reúne las salidas de varios subagent, las puntúa con GRM y luego decide si genera un nuevo subagent.
+    \item Actualización iterativa: el critic y el scheduler se actualizan, y los critical steps sirven de gating para continuar con la siguiente ronda.
+\end{itemize}
+
+\subsection{Prompt orchestration y Tool gating}
+El docente insiste especialmente en la importancia del prompt orchestration: Allcastrater debe asignar con claridad, dentro del prompt, las responsabilidades del agent visual, el agent de herramientas y el agent de lenguaje, y registrar la probabilidad del tool calling. Para evitar que el tool agent llame en exceso a expensive API, durante el entrenamiento también se añade una capa de gating a cada action: si la reward que otorga GRM cae por debajo del umbral, se suspende la llamada a esa action, y solo se reinicia después de que el high-level intent se actualice.
+
+\begin{knowledgebox}{Los tres pasos del prompt orchestration}
+\begin{itemize}
+    \item Predefinir con un meta prompt la lógica de agent branching: por ejemplo, «primero extraer el intent del flujo visual y después llamar al panel».
+    \item Añadir un soft gate al tool calling: si dos API call consecutivas obtienen una reward por debajo del umbral, se suspende y se corrige con un nuevo prompt.
+    \item Registrar el tool trace: cada action, sus parámetros y su retorno se escriben una vez en el metadata, para facilitar el later replay.
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{El ajuste de las métricas de GRM}
+La salida de GRM debe atender a la vez tres tipos de señales: texto, imagen y tool calling, por lo que necesita una calibration a varias escalas. El método que compartió el docente consiste en calibrar primero los logits de GRM con resultados de SFT de alta calidad y luego usar paraphrase data y tool trace log para que la network reconozca la reward distribution de las distintas modality. Así, en el RL, el modelo puede unificar el «encadenamiento semántico» (que afecta al text reasoning) y la «ejecución de herramientas» (por ejemplo, el retorno de la API) en una puntuación entre 0~1, sin necesidad de escribir una reward específica para cada task. Esta calibration también facilita la later evaluation y nos ayuda a ver si GRM favorece alguna modality en particular.
+
+\begin{knowledgebox}{Los tres elementos centrales de la calibration de GRM}
+\begin{itemize}
+    \item Usar el SFT baseline human gold answer como anchor para calibrar la media y la variance de los logits de GRM.
+    \item Tomar el tool calling trace como additional feature, para evitar que GRM solo atienda a la language reward.
+    \item Ponderar el output de contexto largo (como las operaciones de GUI multi-step), de modo que la reward signal capture el cumulated impact de varios step.
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{El deg \& recover durante el entrenamiento}
+\begin{warningbox}{No reaccionar de más ante el deg \& recover}
+Durante el entrenamiento, el docente observó un ciclo de «deg and recover»: el desempeño del modelo cae en la parte media y final, luego sube con rapidez, vuelve a caer y vuelve a subir; en particular, coding y text knowledge presentan varias rondas de caída. Esto no es un bug, sino un comportamiento natural de resincronización entre GRM y el agent loop; si se mantienen los critical steps y se continúa entrenando, el modelo converge.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+En el plano algorítmico, K2.5 consiste en establecer GRM como reward universal; el PARL agent loop realiza varias rondas en paralelo bajo el control de los critical steps; el prompt orchestration junto con el tool gating garantiza que el multi-agent pueda seguir explorando con una latency limitada, y el mecanismo de calibration hace que las reward de las distintas modality sean comparables entre sí. Cualquier deg de corto plazo puede ser el preludio de una recovery; basta con mantener el loop y continuar entrenando para que converja.

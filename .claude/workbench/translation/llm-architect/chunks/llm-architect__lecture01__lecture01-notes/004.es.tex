@@ -1,0 +1,54 @@
+\section{Arquitectura Sparse MoE en detalle}
+
+\subsection{Estructura de la capa MoE}
+
+Cada capa MoE contiene los siguientes componentes:
+
+\begin{enumerate}
+  \item \textbf{Router (enrutador)}: mapea el embedding de $d_{\text{model}}$ dimensiones de un token a un vector de logits de 128 dimensiones
+  \item \textbf{Selección Top-K}: de los 128 Expert se eligen los top-8
+  \item \textbf{Softmax Gating}: se aplica softmax a los logits de los top-8, obteniendo los coeficientes de ponderación
+  \item \textbf{Expert FFN}: cada Expert es un MLP de dos capas ($W_{\text{up}}, W_{\text{gate}}, W_{\text{down}}$)
+  \item \textbf{Suma ponderada}: las salidas de los 8 Expert se suman de forma lineal, ponderadas por los coeficientes de gating
+\end{enumerate}
+
+\subsection{Mecanismo del Router}
+
+$$
+\text{Router}: \mathbb{R}^{d_{\text{model}}} \to \mathbb{R}^{N_{\text{experts}}}
+$$
+
+Es decir, $W_{\text{router}} \in \mathbb{R}^{2048 \times 128}$, que mapea el embedding de cada token a los puntajes correspondientes a los 128 Expert.
+
+Después de elegir los top-8, se aplica softmax a esos 8 puntajes (controlado por el parámetro de configuración \texttt{norm\_topk\_prob}, cuyo valor predeterminado es True), obteniendo los coeficientes de gating normalizados $g_1, g_2, \ldots, g_8$.
+
+\subsection{Estructura de la FFN del Expert}
+
+Cada Expert es un MLP de dos capas con SwiGLU:
+
+$$
+\text{Expert}(x) = W_{\text{down}} \cdot \big[ \text{SiLU}(W_{\text{up}} \cdot x) \odot (W_{\text{gate}} \cdot x) \big]
+$$
+
+donde:
+\begin{itemize}
+  \item $W_{\text{up}} \in \mathbb{R}^{2048 \times 768}$: mapea $d_{\text{model}}$ a la dimensión intermedia
+  \item $W_{\text{gate}} \in \mathbb{R}^{2048 \times 768}$: la rama de gating, multiplicada elemento a elemento con la salida de $W_{\text{up}}$
+  \item $W_{\text{down}} \in \mathbb{R}^{768 \times 2048}$: mapea la dimensión intermedia de vuelta a $d_{\text{model}}$
+\end{itemize}
+
+\begin{knowledgebox}{Dense FFN vs. MoE Expert FFN}
+En el modelo Dense, la dimensión intermedia de la FFN es $25600 = 5 \times d_{\text{model}}$, mientras que en MoE la dimensión intermedia de cada Expert es apenas $768$. Aunque un solo Expert es mucho más pequeño que la FFN Dense, la cantidad total de parámetros de los 128 Expert es $128 \times 3 \times 2048 \times 768 \approx 604\text{M}$ (solo la parte de FFN); sumando las demás capas, el total de parámetros es de aproximadamente 30B.
+\end{knowledgebox}
+
+\subsection{Salida final de MoE}
+
+$$
+\text{MoE}(x) = \sum_{i=1}^{8} g_i \cdot \text{Expert}_i(x)
+$$
+
+Cada Expert produce un vector de 2048 dimensiones; estos se suman de forma ponderada según los coeficientes de gating para obtener la salida final de la capa MoE.
+
+\subsection{Resumen de la sección}
+
+La idea central de Sparse MoE es «enrutamiento + activación dispersa»: el Router elige, para cada token, los top-K Expert más relevantes, y el resto de los Expert no participan en el cómputo. Esto permite que el modelo tenga una cantidad total de parámetros muy grande mientras el cómputo de cada inferencia es reducido.

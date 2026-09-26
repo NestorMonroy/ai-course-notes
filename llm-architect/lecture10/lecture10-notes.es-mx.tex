@@ -1,0 +1,278 @@
+\documentclass[a4paper]{article}
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+\usepackage{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+% polyglossia no traduce los nombres de listings.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\usepackage{float}
+\newtcolorbox{knowledgebox}[1]{enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black, coltitle=white, fonttitle=\bfseries, title={#1}, attach boxed title to top left={yshift=-2mm, xshift=2mm}, boxrule=1pt, sharp corners}
+\newtcolorbox{importantbox}[1]{enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black, coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners}
+\newtcolorbox{warningbox}[1]{enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black, coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners}
+\lstset{language=Python, basicstyle=\ttfamily\small, keywordstyle=\color{blue}, stringstyle=\color{red!60!black}, commentstyle=\color{green!60!black}, breaklines=true, frame=single, numbers=left, numberstyle=\tiny\color{gray}, captionpos=b, extendedchars=true}
+
+\newcommand{\notetitle}{Prefill vs Decode, KV-Cache, GEMM vs GEMV}
+\newcommand{\noteauthors}{Elaboradas a partir de materiales públicos del curso}
+\newcommand{\notedate}{2025}
+\newcommand{\videochannel}{Wudaokou Nash (五道口纳什)}
+\newcommand{\videopublishdate}{2025}
+\newcommand{\videoduration}{aproximadamente 36 minutos}
+\newcommand{\videourl}{}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+
+% Footer with repo info
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\thepage}
+\fancyfoot[R]{\footnotesize\color{gray}\href{\repourl}{AI Course Notes}}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\begin{document}
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}\vspace{0.8cm}
+{\large \noteauthors\par}\vspace{0.3cm}
+{\large \notedate\par}\vspace{1.2cm}
+\ifdefempty{\videocoverpath}{}{\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par}
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\ifdefempty{\videourl}{}{\textbf{Enlace del video}: \href{\videourl}{\nolinkurl{\videourl}}\par}\par
+\textbf{Página del proyecto}: \href{\repourl}{\nolinkurl{\repourl}}\par
+\end{tcolorbox}
+\end{titlepage}
+\tableofcontents
+\newpage
+
+\section{Introducción}
+
+Prefill y Decode son el par de conceptos más básico y también más central en el despliegue de la inferencia de modelos grandes. Con los avances de rendimiento del chip Apple M5 Max en estas dos etapas, así como el uso extendido de marcos de inferencia como SGLang, entender a fondo las características de cómputo de estas dos etapas se vuelve especialmente importante.
+
+\begin{knowledgebox}{¿Por qué entender a fondo Prefill vs. Decode?}
+\begin{itemize}
+  \item Al desplegar VLM se encuentran con frecuencia cuellos de botella de rendimiento en estas dos etapas
+  \item La configuración de marcos como SGLang debe optimizarse por separado para cada una de las dos etapas
+  \item Hardware nuevo como el Apple M5 Max se optimizó específicamente para estas dos etapas
+  \item Muchos análisis e introducciones carecen de profundidad; esta entrega busca una comprensión más esencial
+\end{itemize}
+\end{knowledgebox}
+
+\section{Análisis dimensional de Attention}
+
+\subsection{Dimensiones de Q, K, V}
+
+Repasemos la fórmula básica de Attention:
+$$
+\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right) V
+$$
+
+Análisis dimensional:
+\begin{itemize}
+  \item $Q$: longitud de secuencia $N$, dimensión $d_k$
+  \item $K, V$: longitud de secuencia $M$, dimensión $d_k$ ($K$) y $d_v$ ($V$)
+  \item La longitud de secuencia de $K$ y $V$ debe coincidir (porque los pesos, tras el softmax, se multiplican por $V$)
+  \item La dimensión de $Q$ debe coincidir con la de $K$ (porque hay que calcular el producto interno)
+\end{itemize}
+
+\subsection{La diferencia entre $N$ y $M$}
+
+En la atención autorregresiva estándar $N = M$. Pero existen dos escenarios en los que $N \neq M$:
+\begin{enumerate}
+  \item \textbf{Atención cruzada} (Cross Attention): $Q$ proviene de una secuencia y $K, V$ de otra
+  \item \textbf{Fase de Decode}: $Q$ solo tiene el token actual ($N=1$), mientras que $K, V$ contienen todos los tokens históricos ($M$ es grande)
+\end{enumerate}
+
+\subsection{Resumen de la sección}
+
+El análisis dimensional es la base para entender la diferencia entre Prefill y Decode. La diferencia clave está en la longitud de secuencia de $Q$: en Prefill, $N$ es grande; en Decode, $N = 1$.
+
+\section{Etapa de Prefill}
+
+\subsection{¿Qué es Prefill?}
+
+\begin{importantbox}{Prefill = procesar el prompt de entrada}
+Después de que el usuario envía el prompt, el modelo necesita procesar todos los tokens de entrada de una sola vez. Esta etapa se llama \textbf{Prefill}:
+\begin{itemize}
+  \item la longitud de $Q$ = longitud del prompt $N$ (normalmente de cientos a miles)
+  \item la longitud de $K, V$ también es $N$ (porque es autoatención)
+  \item es una \textbf{multiplicación de matriz por matriz} (GEMM) a gran escala
+  \item \textbf{intensivo en cómputo} (Compute-bound)
+\end{itemize}
+\end{importantbox}
+
+\subsection{Características de cómputo}
+
+El cómputo central de la etapa de Prefill es $Q \times K^T$, una multiplicación de matrices de $N \times d_k$ por $d_k \times N$, cuyo resultado es $N \times N$.
+
+\begin{itemize}
+  \item Cantidad de cómputo: $O(N^2 \cdot d_k)$
+  \item Cantidad de datos: $O(N \cdot d_k)$
+  \item la relación cómputo/memoria (Arithmetic Intensity) es muy alta $\Rightarrow$ \textbf{intensivo en cómputo}
+  \item el cuello de botella es la capacidad de cómputo de la GPU, no el ancho de banda de memoria
+\end{itemize}
+
+\subsection{Resumen de la sección}
+
+Prefill es una multiplicación de matrices grande (GEMM), intensiva en cómputo, cuyo cuello de botella está en la capacidad de cómputo y no en el ancho de banda de memoria.
+\section{Fase de decodificación}
+
+\subsection{¿Qué es la decodificación?}
+
+\begin{importantbox}{Decode = generación token por token}
+Una vez terminado el prefill, el modelo comienza a generar la salida token por token. Cada paso genera un solo token nuevo:
+\begin{itemize}
+  \item La longitud de $Q$ = 1 (solo el token actual)
+  \item La longitud de $K, V$ = longitud histórica $M$ (incluye todos los tokens anteriores)
+  \item Es una \textbf{multiplicación vector-matriz} (GEMV)
+  \item Es \textbf{intensiva en ancho de banda de memoria} (Memory-bound)
+\end{itemize}
+\end{importantbox}
+
+\subsection{Características de cómputo}
+
+El cálculo central de la fase de decodificación es $q \times K^T$ ($1 \times d_k$ multiplicado por $d_k \times M$), cuyo resultado es un vector de $1 \times M$.
+
+\begin{itemize}
+  \item Cantidad de cómputo: $O(M \cdot d_k)$
+  \item Pero se necesita cargar desde memoria toda la matriz $K$: un volumen de datos de $O(M \cdot d_k)$
+  \item La razón cómputo/memoria $\approx 1$ $\Rightarrow$ \textbf{intensiva en ancho de banda de memoria}
+  \item El ancho de banda de memoria es el cuello de botella; la capacidad de cómputo de la GPU queda muy subutilizada
+\end{itemize}
+
+\subsection{Resumen de la sección}
+
+La decodificación es una multiplicación vector-matriz (GEMV), intensiva en ancho de banda de memoria; el cuello de botella está en el ancho de banda de memoria y no en la capacidad de cómputo.
+
+\section{KV-Cache}
+
+\subsection{¿Por qué se necesita el KV-Cache?}
+
+\begin{importantbox}{Motivación central del KV-Cache}
+En la generación autorregresiva, cada token nuevo necesita calcular la atención con \textbf{todos los tokens históricos}. Si en cada paso se recalculan todos los $K, V$, el costo computacional es de $O(M \cdot d_k)$ (donde $M$ crece continuamente). El KV-Cache almacena los vectores $K, V$ históricos en la memoria de la GPU, evitando el cálculo repetido.
+\end{importantbox}
+
+\subsection{Consumo de memoria del KV-Cache}
+
+Tamaño del KV-Cache por token en cada capa:
+$$
+\text{Per-token KV} = 2 \times n_{\text{kv\_heads}} \times d_h \times \text{bytes}
+$$
+
+KV-Cache total:
+$$
+\text{Total KV} = L \times M \times 2 \times n_{\text{kv\_heads}} \times d_h \times \text{bytes}
+$$
+
+donde $L$ es el número de capas y $M$ es la longitud de la secuencia. Por esto GQA (reducir el número de KV heads) es tan importante para la eficiencia de la inferencia.
+
+\subsection{Resumen de la sección}
+
+El KV-Cache es la optimización central de la inferencia autorregresiva, pues evita recalcular $K, V$. Su consumo de memoria crece linealmente con la longitud de la secuencia y es el principal cuello de botella de la inferencia con contexto largo.
+\section{GEMM vs. GEMV}
+
+\begin{table}[H]
+\centering
+\caption{Comparación de las características de cómputo entre Prefill y Decode}
+\begin{tabular}{lcc}
+\toprule
+& \textbf{Prefill} & \textbf{Decode} \\
+\midrule
+Operación central & GEMM (matriz $\times$ matriz) & GEMV (vector $\times$ matriz) \\
+Longitud de Q & $N$ (longitud del prompt) & 1 \\
+Tipo de cuello de botella & Intensivo en cómputo & Intensivo en ancho de banda de memoria \\
+Uso de la GPU & Aprovechamiento pleno del cómputo & Cómputo ocioso en gran medida \\
+Dirección de optimización & Más FLOPs & Mayor ancho de banda de memoria \\
+Característica de latencia & TTFT (latencia del primer token) & TPS (tokens por segundo) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{warningbox}{El dilema de eficiencia de la fase de Decode}
+En la fase de Decode se genera solo un token por paso, pero es necesario cargar todo el peso del modelo y el KV-Cache. El cómputo de la GPU queda ocioso en gran medida y el ancho de banda de memoria se convierte en el cuello de botella. Por eso la arquitectura de memoria unificada del Apple M5 Max (de alto ancho de banda) destaca en la fase de Decode.
+\end{warningbox}
+\section{Ajuste del sistema: métricas, hardware y estrategias de servicio}
+
+\subsection{Los distintos objetivos de optimización de TTFT y TPS}
+Desde la perspectiva del servicio, Prefill y Decode corresponden a dos tipos de métricas de experiencia de usuario completamente distintos. Prefill afecta más directamente la latencia del primer token (TTFT), que determina «si el usuario siente que el sistema responde con suficiente rapidez»; Decode afecta más directamente la velocidad de salida por segundo (TPS), que determina la fluidez percibida en respuestas largas. Solo al entender esta diferencia se pueden configurar correctamente el procesamiento por lotes, el grado de concurrencia y el presupuesto de hardware.
+
+\begin{table}[H]
+\centering
+\caption{Los dos tipos de objetivos más comunes en el servicio de inferencia}
+\begin{tabular}{p{3.2cm}p{4.8cm}p{4.5cm}}
+\toprule
+Métrica & Etapa que más la afecta & Medios de optimización típicos \\
+\midrule
+TTFT & Prefill & Aumentar el rendimiento de GEMM, reducir la redundancia del prompt, compilar el kernel de antemano \\
+TPS & Decode & Mejorar el ancho de banda de memoria, optimizar la KV cache, aumentar el procesamiento por lotes de decode \\
+Relación costo/rendimiento & Efecto conjunto de ambas & Ajustar la concurrencia, el tamaño de lote, la longitud del contexto y la estrategia de cuantización \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Por qué el mismo hardware muestra «dos caras»}
+Una GPU puede comportarse como un «monstruo de cómputo» durante la etapa de Prefill, y sin embargo, en la etapa de Decode, parecer un «transportista limitado por el ancho de banda». Esto no significa que el hardware se haya vuelto peor de repente, sino que la estructura de la carga de trabajo cambió. La verdadera enseñanza del curso es esta: al evaluar el hardware de inferencia, no basta con mirar un solo indicador de FLOPs; también hay que revisar si el ancho de banda, la jerarquía de la caché y el patrón de acceso corresponden a las características de uso intensivo de memoria propias de Decode.
+
+\begin{knowledgebox}{Lo que más se pasa por alto al desplegar}
+Muchos equipos solo miran el rendimiento promedio del benchmark y pasan por alto la distribución de longitudes de los prompts y el tipo de solicitudes de los usuarios. Si el negocio se basa principalmente en prompts largos con respuestas cortas, Prefill puede ser el cuello de botella principal; si se basa principalmente en prompts cortos con respuestas largas, el cuello de botella de ancho de banda de Decode se vuelve más pronunciado.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+La diferencia entre Prefill y Decode no es solo conocimiento algorítmico, sino conocimiento de diseño de arquitectura de servicio. Solo al considerar en conjunto las métricas, el hardware y el tipo de carga de trabajo, el ajuste de la inferencia no se desviará del rumbo.
+
+\newpage
+\section{Lista de verificación de despliegue}
+Para llevar realmente el análisis del curso al lado del servicio, los equipos suelen tener que responder varias preguntas antes de salir a producción: ¿cuál es la distribución de longitud de los prompts del negocio actual? ¿se optimiza principalmente el TTFT o el TPS? ¿el KV cache provocará fluctuaciones en la memoria de video con alta concurrencia? Si estas preguntas no se resuelven de antemano, suele ocurrir que el sistema, bajo tráfico real, muestre cuellos de botella completamente distintos a los del benchmark.
+
+\begin{importantbox}{Antes de salir a producción, verificar al menos estas cuatro cosas}
+\begin{itemize}
+  \item Si las solicitudes de los usuarios consisten sobre todo en prompts largos o en respuestas largas
+  \item Si el cuello de botella actual del hardware está más del lado del cómputo o del ancho de banda
+  \item Si el KV cache y la estrategia de lotes corresponden a la concurrencia objetivo
+  \item Si el panel de monitoreo cubre a la vez el TTFT, el TPS y el uso de memoria de video
+\end{itemize}
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+Las diferencias teóricas entre Prefill y Decode terminan por reducirse a la lista de verificación de despliegue. Solo cuando la carga de trabajo, el hardware y las métricas se integran en un mismo proceso de verificación, la optimización de la inferencia resulta realmente ejecutable.
+
+\newpage
+\section{Síntesis y ampliación}
+
+\begin{enumerate}
+  \item Prefill = GEMM = intensivo en cómputo; Decode = GEMV = intensivo en ancho de banda de memoria
+  \item KV-Cache evita recalcular $K, V$ repetidamente durante Decode, pero consume una gran cantidad de memoria de video
+  \item GQA comprime el KV-Cache al reducir las KV heads, y es clave para la eficiencia de la inferencia
+  \item Más adelante se presentarán MHA (Massive Head Attention) y trabajos nuevos como Attention Allocation, publicado por KiMi
+\end{enumerate}
+
+\subsection{Lecturas adicionales}
+\begin{itemize}
+  \item El impacto de la arquitectura de memoria unificada del Apple M5 Max en la inferencia de LLM
+  \item SGLang: un framework eficiente de inferencia de LLM
+  \item FlashAttention: aceleración del cómputo de Attention en la etapa de Prefill
+  \item Paged Attention: optimización de la gestión de memoria de video del KV-Cache
+\end{itemize}
+
+\end{document}

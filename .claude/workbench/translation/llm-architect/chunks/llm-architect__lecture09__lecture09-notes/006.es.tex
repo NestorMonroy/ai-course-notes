@@ -1,0 +1,41 @@
+\section{Training Infrastructure: entrenamiento estable y evaluación}
+
+\subsection{Entorno de RL y evaluación}
+Agentic RL Training necesita un entorno altamente asíncrono: el modelo ejecuta hundreds of tool calls en el lado de inference, ejecuta varios subagent de forma concurrente y luego entrega los resultados al GRM para su evaluación. El docente señala que en el ``environment de agentic RL post training'' se ejecutan simultáneamente 200--300 pasos de llamadas a herramientas, se hace track del progreso y en cualquier momento se puede crear un nuevo subagent en Allcastrater; estas llamadas quedan limitadas a una zona controlable por los critical steps, para evitar una explosión de compute. Cada agent loop cuenta con un dedicated logging channel, que facilita el drift diagnosis posterior.
+
+\begin{knowledgebox}{Critical Steps como barrera de contención para el entrenamiento y la evaluación}
+\begin{itemize}
+    \item Tanto el entrenamiento como la evaluación se ejecutan dentro del guard band de critical steps, usando un número fijo de pasos para limitar el número máximo de llamadas de una ronda de agent loop.
+    \item Este mecanismo permite medir, con recursos limitados, si un agent swarm realmente logra outperform a un agente único.
+    \item Precisamente por eso, Allcastrater recicla continuamente los resultados de los subagent y luego decide si hace spawn de un nuevo agent, con lo que se forma un flujo de evaluación reproducible.
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Bandmark dashboard y observación}
+El lado de evaluación sincroniza varias perspectivas mediante un bandmark dashboard: puntuación de GRM, tasa de éxito de las llamadas a herramientas y consumo de critical steps. En las curvas que el docente muestra en la lecture, cada curva marca los indicadores mean/max de reward y S mean + max, lo que permite a los ingenieros determinar rápidamente si el agent loop presenta drift y hacer rerun a tiempo. Cada curva del dashboard va acompañada de timestamp, subagent id y tool trace, lo cual hace que el replay de un round determinado sea reproducible.
+\begin{itemize}
+    \item logging schema unificado: encadena GRM logits, tool trace y estado de GUI por timestamp para formar un timeline, lo que facilita el replay de un agent loop determinado.
+    \item usar el dashboard para observar la combinación de agent: mediante visualized logs se determina la contribución de vision agent, tool agent y text agent en una ronda.
+    \item monitoreo de critical steps: registra la step distribution de cada ronda, para garantizar que los recursos no se descontrolen por los parallel agents.
+\end{itemize}
+
+\begin{knowledgebox}{Las tres líneas de observación del bandmark dashboard}
+\begin{itemize}
+    \item Reward line: mean/max de la salida del GRM, se usa para monitor el reward drift.
+    \item Tool calling line: tasa de éxito de la API y latency, ayuda a detectar el bottleneck del tool agent.
+    \item Critical steps consumption: registra la step distribution de cada loop, vinculada con el presupuesto de compute.
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Capacidad de cómputo y estrategia de caché}
+La presión de cómputo resulta especialmente evidente en el entrenamiento con múltiples Agent, por lo que antes del entrenamiento se hace un frame preprocessing que cachea los cuadros de video, las capturas de la interfaz y el tool trace en un feature bundle. Después, el PARL agent loop solo necesita leer del caché el bundle correspondiente al timestamp, evitando I/O repetido, mientras conserva el mapeo de cuadro a token para facilitar la later evaluation (sobre todo en replicating UI benchmark). Este feature cache también sirve al Kimi code bench: al reproducir la demo localmente, basta con hacer replay de los cache bundles para arrancar rápidamente.
+
+\begin{importantbox}{La palanca de eficiencia del feature cache}
+Empaqueta video frame, tool trace y GUI state en un bundle, y usa un hashed index para hacer búsquedas rápidas, de modo que el agent loop no necesita decodificar el video original cada vez, lo que reduce el compute cost en alrededor de un 35\%.
+\end{importantbox}
+
+\subsection{Pipelines de entrenamiento reproducible}
+En el pipeline de entrenamiento, además del cache, hay tres pasos: replay, bandmark y trace. Cada agent loop escribe en el log el tool calling, las operaciones de GUI y la puntuación del GRM; cuando el dashboard reporta drift o inestabilidad en los critical steps, se puede usar la herramienta de replay para volver a alimentar el frame bundle y el trace correspondientes al PARL loop, y así revisar la prompt grammar. Los fragmentos clave se marcan como ``controlled test'' para la later regression.
+
+\subsection{Resumen de la sección}
+La infra de K2.5 se construye sobre critical steps + agent loop asíncrono + bandmark dashboard, lo que hace que la evaluación sea a la vez reproducible y monitoreable. Aunque el docente no detalló cada módulo, las curvas de entrenamiento y la evaluation table ya muestran la madurez de este pipeline.
