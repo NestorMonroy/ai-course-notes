@@ -1,0 +1,63 @@
+\section{Programación del cómputo en tiempo de inferencia}
+
+\subsection{Programación triangular Token/Width/Iteration}
+Chen, en el minuto 15:32, usa una diapositiva que dibuja «prompt → búsqueda → iteración» como un triángulo de token / width / iteration, y enfatiza que no basta con agregar tokens, sino que también hay que organizar la búsqueda con múltiples candidatos y varias rondas de autocorrección (figura \ref{fig:compute-pipeline}). En la práctica de ingeniería, lo habitual es usar primero el prompt para que el modelo genere candidatos más largos, después controlar el branching de cada step, y por último reservar una o dos rondas de feedback loop para cada candidate.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{frame-pipeline.jpg}
+\caption{El pipeline de tres etapas del cómputo en tiempo de inferencia: prompt → search → iteration.\protect\footnotemark}
+\label{fig:compute-pipeline}
+\end{figure}
+\footnotetext{Intervalo de tiempo en el video: 00:15:10--00:16:10, muestra la curva de programación de token-width-iteration.}
+
+\begin{knowledgebox}{Cuantificación de ingeniería de la programación triangular}
+1. Token: medir el token budget total necesario para completar una response; 2. Width: registrar la cantidad y la diversity de los candidatos generados por muestreo; 3. Iteration: evaluar el beneficio marginal en accuracy de las rondas de automejora (como los trace feedback / self-correction loops).
+\end{knowledgebox}
+
+\subsection{Balance entre costo y latencia}
+Chen insiste repetidamente en dar seguimiento al consumo de inference-time con métricas observables: una curva de cómputo de 1,000 dólares resulta impresionante, pero muchos escenarios de despliegue reales solo pueden asumir un presupuesto de tokens de 20 a 50 dólares. La figura \ref{fig:cost-latency}, tomada de la explicación del minuto 00:10, señala que existe un tradeoff evidente entre costo y latency, y sugiere que en los canales de baja latencia conviene priorizar el ahorro en search y verifier, mientras que en las tareas de alto valor se puede ampliar el presupuesto de tokens.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{frame-cost-latency.jpg}
+\caption{Opciones de balance entre costo y latencia en tiempo de inferencia.\protect\footnotemark}
+\label{fig:cost-latency}
+\end{figure}
+\footnotetext{Intervalo de tiempo en el video: 00:09:40--00:10:30, muestra la escalera de presupuestos claramente distintos de $20 a $1,000.}
+
+\begin{warningbox}{Expansión incontrolada del presupuesto}
+Sin un verifier o un control de búsqueda, ampliar el presupuesto de tokens por sí solo tiende a producir una «expansión del presupuesto»: el costo se dispara sin que la accuracy mejore de forma correspondiente. Se recomienda usar caché, un conjunto de muestreo y una etapa de verifier para limitar los candidatos más costosos a las tareas de valor alto ya identificadas.
+\end{warningbox}
+
+\subsection{Programación por capas del cómputo en tiempo de inferencia}
+El cómputo en tiempo de inferencia debe dividirse en ventanas de presupuesto claramente delimitadas entre las tres etapas de prompt/sampling, search e iteration. El procedimiento que Chen presenta en clase consiste en usar primero la señal de task difficulty para fijar un token cap total (por ejemplo, entre 400 y 600 tokens), y después derivar en sentido inverso la participación de cada etapa a partir de la search depth y la meta de iteration: reservar entre el 25\% y el 100 token para el prompt, ampliar la etapa de search según el número de branch, dedicar entre 80 y 120 tokens a cada ronda de iteration, y reservar además un 20\% como margen para el scoring del verifier. Este mecanismo por capas permite que, con el mismo budget, la reallocation del presupuesto entre las distintas etapas produzca estrategias diferentes que privilegien la accuracy o la latency.
+
+\begin{table}[H]
+\centering
+\caption{Ejemplo de programación por capas del cómputo en tiempo de inferencia}
+\begin{tabular}{p{0.25\textwidth}p{0.22\textwidth}p{0.20\textwidth}p{0.28\textwidth}}
+\toprule
+Etapa & Indicador clave & Presupuesto típico & Sugerencia de ingeniería \\
+\midrule
+Prompt / Sampling & Input tokens + example CoT & 25\%~35\% of total & Incrustar (embed) la difficulty metadata y las instrumentation hints en el prompt, para garantizar que el sampling pueda arrancar con high temperature \\
+Search (branching) & Width, stepwise score, branching ratio & 40\%~50\% & Usar verifier gating para controlar la depth, de modo que cada expansión aporte un score margin \\
+Iteration / Feedback & Trace iterations, consistency votes & 20\%~30\% & En la etapa de iteración es común el self-correction o el verifier replay, que consume tokens pero corrige errores de forma notable \\
+Verifier / Logging & Score margin, drift detect & 10\%~15\% & Instrumentación en paralelo, como sampler metrics y verifier distribution, para mantener la latency ajustada \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{knowledgebox}{Bucle de control de la programación por capas}
+1. Fijar primero el token cap y el latency target; 2. Asignar de forma aproximada la proporción por stage y registrarla en el dashboard; 3. Observar la proporción de cada stage por query durante la ejecución y, si el drift de search/iteration es demasiado alto, corregirlo con un dial-back del prompt.
+\end{knowledgebox}
+
+\subsection{Latency-Controlled Prompting}
+A nivel de Operations, para evitar que la latency se salga de control, Chen recomienda ajustar el prompt como «budget-aware templates»: indicar en el prompt «si el presupuesto supera los 400 tokens, retroceder» o «completar el razonamiento en 1 a 2 iteration». Al mismo tiempo, podemos insertar en el prompt una instrumentation hint (como `Sampling policy: alt-branch`) para que el sistema de dispatch limite el número de candidatos desde la etapa de sampling. Estas micro-guidelines ayudan a exponer el tradeoff de cost/latency directamente en el template de inference-time, en lugar de dejarlo a alertas de monitoreo after-the-fact.
+
+\begin{warningbox}{Puntos clave del diseño del latency guard}
+Los guard rail en el prompt deben ser concretos: escribir «máximo 2 iteration» es más eficaz que decir simplemente «controlar la latency»; también se puede usar `If token > 400 then reply "budget exceeded"` como límite estricto, para obligar al modelo a reportar de antemano el token usage.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+La programación del cómputo en tiempo de inferencia exige medir a la vez el presupuesto de tokens, el candidate width y la iteration depth, e incorporar desde el diseño inicial del budgeting tanto el latency guard como la programación por capas del cómputo en varias etapas. Solo al tratar estos tres elementos como los ejes de la ingeniería es posible lograr una inferencia confiable y eficiente en los distintos escenarios de aplicación.

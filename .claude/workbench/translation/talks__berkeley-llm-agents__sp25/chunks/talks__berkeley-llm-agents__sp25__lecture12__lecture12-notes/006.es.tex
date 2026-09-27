@@ -1,0 +1,48 @@
+\section{Exploración en árbol y evaluación a nivel de árbol}
+
+\subsection{Tree-of-Thought y búsqueda por ramas}
+Tree-of-Thought permite abrir varias ramas en cada paso, y usa stepwise scoring para decidir qué branch vale la pena expandir. Como se muestra en la figura \ref{fig:tree-search}, beam search solo conserva los top-k, mientras que Tree-of-Thought puede filtrar la promisingness ya en el step-level.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{frame-tree-search.jpg}
+\caption{Esquema comparativo entre Tree-of-Thought, beam search y autoconsistencia. \protect\footnotemark}
+\label{fig:tree-search}
+\end{figure}
+\footnotetext{Intervalo de tiempo en el video: 01:01:24--01:04:30, muestra la posición de step evaluation dentro de la búsqueda en árbol.}
+
+\begin{importantbox}{Tres perspectivas prácticas de la búsqueda en árbol}
+1. No todas las ramas deben expandirse; el orden de prioridad puede asignarlo directamente el step verifier; 2. step-level scoring puede descartar rutas de baja calidad antes de que el branch termine, lo que reduce el costo de tokens; 3. beam search puede combinarse con sampling: primero se usa sampling para generar diverse seed, y luego beam/tracing para filtrar promising ones.
+\end{importantbox}
+
+\begin{knowledgebox}{Lógica operativa del control en árbol}
+En Tree-of-Thought, el control loop suele usar tres pasos: «branch proposal → step scoring → prune»: el primer paso es hacer warm-start de varios branch, el segundo usa un verifier para dar una puntuación a cada branch, y el tercero poda según el budget. Chen recomienda registrar en el training log el token count y el score de cada branch, para poder identificar «en qué step el score drift es más marcado».
+\end{knowledgebox}
+
+\begin{warningbox}{El branching en árbol no puede expandirse sin límite}
+Aunque tree search puede mejorar el accuracy en early stage, si no hay una estrategia de pruning clara, el número de branch crecerá de forma exponencial. Es indispensable establecer un token threshold (por ejemplo, explorar como máximo 3 niveles), incorporar stepwise verifier gating y usar logs para monitorear el branching ratio.
+\end{warningbox}
+
+\subsection{Lazo de control en árbol y autoadaptación del presupuesto}
+En el pipeline de Tree-of-Thought debe existir un lazo de control que decida cuándo expandir, cuándo hacer prune y cuándo hacer roll back. La lógica de control que Chen presentó en vivo es: al terminar cada ronda de step se revisa si `branch score / step token` supera el threshold; si está por debajo del threshold, el branch se envía de inmediato a la aborted queue y los token restantes se recuperan para el global budget. Este loop, mediante SLO instrumentation (como `branching\_ratio` y `score\_per\_token`), expone las ramas inválidas de tree search que pasaban inadvertidas.
+
+\begin{table}[H]
+\centering
+\caption{Indicadores de control de tree search}
+\begin{tabular}{p{0.32\textwidth}p{0.25\textwidth}p{0.32\textwidth}}
+\toprule
+Indicador & Significado del monitoreo & Pipeline action \\
+\midrule
+Branch score & Determina la promisingness de la rama & Cuando Score < 0.2, se hace prune y se dispara `trace replay` \\
+Branching ratio & Observa la relación entre active branches y token & Cuando > 28\% se limitan los new branches a 2 \\
+Score per token & Controla depth y cost & Una caída indica search drift; hay que bajar la temperature o hacer early stop \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{importantbox}{Lecciones del control loop de Tree}
+1. Se establece `early score check`, es decir, calcular el partial score antes de que el branch termine; 2. se usa per-branch token cap para obligar a que las ramas no se extiendan sin límite; 3. cuando el control loop presenta una anomalía (por ejemplo, cuando branching ratio se dispara), se activa de inmediato conservative mode (bajar el prompt temperature + limitar iteration).
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+Estructuras en árbol como Tree-of-Thought llenan, dentro de inference-time search, el gap entre beam search y sampling; basta con combinarlas con un step verifier sólido y un lazo de control para lograr, con un budget limitado, high-quality breadth exploration.

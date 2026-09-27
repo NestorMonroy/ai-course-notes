@@ -1,0 +1,40 @@
+\section{Profundización en el diseño del verificador}
+
+\subsection{Composición del stepwise verifier}
+Un verifier de alta calidad se compone de al menos tres submódulos: step scoring, trace evaluation y metadata gating. Chen enfatiza que no hay que tratar al verifier como un evaluador de caja negra post-hoc, sino que hay que escribirlo dentro del pipeline de sampling/search. Por ejemplo, en una rama autogenerada de Trace, se puede hacer que el verifier asigne primero un depth score (la longitud y complejidad del chain-of-thought), luego un validity score (si cumple con el problem constraint) y, por último, un confidence margin (el margin del voto mayoritario). Estos tres indicadores constituyen la tupla de salida del stepwise verifier, que se usa como pruning gate dentro del search loop.
+
+\begin{table}[H]
+\centering
+\caption{Salida del stepwise verifier}
+\begin{tabular}{p{0.28\textwidth}p{0.25\textwidth}p{0.35\textwidth}}
+\toprule
+Indicador & Forma de cálculo típica & Función \\
+\midrule
+Depth score & Prompt override / reasoning depth heuristic & Evita que el verifier favorezca en exceso los outputs cortos \\
+Validity score & Constraint check + domain rules & Garantiza que la branch no se desvíe de la template \\
+Confidence margin & Consistency across candidates & Provee la base del margin para el majority vote \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{knowledgebox}{Estrategia de entrenamiento del verifier}
+1. Entrenar el validity + depth scorer con datos de supervised trace; 2. en inference-time, asignarle una higher probability al control token `{@validator}`; 3. combinar hashing checkpoints (como el trace hash) para evitar que el verifier haga drift al repetir steps.
+\end{knowledgebox}
+
+\subsection{Verifier gating loops}
+El verifier necesita formar un ciclo cerrado con el search: cada vez que se abre y evalúa un candidate, el verifier entrega un margin y lo usa como branching priority. El gating loop que Chen muestra en el minuto 36:10 es: candidate → verifier → score queue → branch expansion/termination. Este proceso puede verse como un scheduler de múltiples colas, en el que las branches con mayor margin se empujan en paralelo hacia el tree, mientras que las de menor margin reciben early stop. Si en alguna etapa el margin cae de manera global, eso indica que la diversity del sampling podría estar en collapse, y hay que retroceder de inmediato a la template «prompt plus trace» y activar `trace replay`.
+
+\begin{warningbox}{Riesgo de margin collapse}
+Cuando el margin del verifier cae de manera global, no hay que agregar tokens de inmediato, sino revisar primero la sampling diversity y la prompt difficulty. Un margin bajo puede deberse a un dataset shift o a un prompt drift; conviene ejecutar primero `trace replay` para ver si se trata de self-correction drift o de prompt drift, y solo después decidir si se amplía el search.
+\end{warningbox}
+
+\subsection{Multi-verifier orchestration}
+En la práctica se despliegan varios verifiers al mismo tiempo: un heuristic scorer rápido (por ejemplo, tf-idf + regex), un trace evaluator basado en LM y un deterministic checker (como un proof verifier). Dentro del inference-time pipeline se encadenan estas tres capas: primero el fast verifier hace un trim rápido y después entrega la high-scoring branch al slow-but-robust verifier para que la reevalúe. Chen enfatiza que el audit log debe registrar las decisions de cada capa de verifier, de modo que, ante una anomaly, se pueda ubicar «qué capa descartó al candidate».
+
+\begin{knowledgebox}{Ritmo de coordinación de los múltiples verifiers}
+1. Fast verifier: bajo cost, se usa para el early pruning; 2. LM verifier: latency media, se encarga de la reasoning depth; 3. Deterministic checker: alto costo pero alta confiabilidad, se usa con frecuencia al final de una high-stakes query; 4. registrar el output de cada capa en el dashboard, para que el equipo de observability pueda identificar qué capa provocó el margin drift.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+El diseño del verifier no solo requiere un mecanismo de scoring de alta calidad, sino que también debe formar un budgeting gating junto con el search, e incluso proteger las high-value queries mediante multi-verifier orchestration. Solo al convertir al verifier en un inference-time control loop se puede evitar que un budget race o un drift provoquen el colapso del reasoning.
+
