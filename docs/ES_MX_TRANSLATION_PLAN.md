@@ -343,9 +343,63 @@ Antes de aceptar un lote, en su banco y no en el conteo de señales:
 |---|---|---|
 | 0. Herramientas | `localize_preamble.py`, paridad, gates A/B/C, plantilla, figuras por idioma, ciclo | **cerrada**; cada pieza con prueba y control de anulación |
 | 1. Piloto de una nota | `cs329a/lecture01` | **cerrada**: 0 señales, 22 páginas, QA visual; el primer intento falló por el contrato (banco `piloto-…-061536`) |
-| 2. Piloto de curso | `cs329a`, lecciones 02 a 09, en `translation/cs329a/` | **en curso**: 36 → 23 → 8 → 6 → 3 señales en cinco iteraciones |
-| 3. Escalado | un lote por curso según `translation/plan.tsv`, de menor a mayor | gate C por lote |
+| 2. Piloto de curso | `cs329a`, lecciones 02 a 09, en `translation/cs329a/` | **cerrada** (gates A/B/C, README del lote) |
+| 3. Escalado | un lote por curso según `translation/plan.tsv`, de menor a mayor | **en curso**: 131 de 370 notas tras la ola 8; filas 1 a 25 abiertas, 26 a 35 sin abrir |
 | 4. Cierre | sitio es-MX (`generate_site.py --lang es-mx`), conteos del README, `TRACKING.md` | sitio compila en `--strict` |
+
+### 8.1 Cómo se retoma la fase 3 (para una conversación nueva)
+
+Todo el estado vive en el repositorio; una conversación nueva no necesita el
+historial. Se lee, en este orden: este plan (secciones 6, 9.1 y ésta),
+`.claude/workbench/translation/batches.tsv` (última fila de cada lote) y
+`triage.tsv`.
+
+**Estado al cerrar la ola 8 (2026-09-27, commit `d4943e2`).**
+
+| Filas | Lotes | Estado |
+|---|---|---|
+| 1 a 9 | ola 1 y `self-evolving-agents-2026` | cerrados, 0 señales |
+| 10 a 25 | 16 lotes | cerrados: `agentic-rl`, `llm-architect`, `interviews__ungrounded`, `talks__aitime`, `talks__lex-fridman`, `talks__qingke`; con 1 a 13 señales para juicio: `cs146s`, `cs329a`, `interviews__whynot-tv`, `interviews__zhang-xiaojun`, `modern-agent` y los dos de Berkeley (`sp25`, 13); detenidos por el límite: `6s191` (108 de 109 fragmentos) y `cs224r` (110 de 221) |
+| 26 a 35 | `kaist-cs492d`, `cs25-v6`, `articles`, `talks__berkeley-llm-agents__f25`, `cs231n`, `cs224n`, `cs336`, `cs336-2026`, `youtube__zhangxiaojun` (37 notas, con 338 figuras por idioma), `cs25` (41) | sin abrir |
+
+**Una ola, de principio a fin, sin vigilarla.**
+
+```bash
+uv run --locked bash tools/scripts/translate_wave.sh --from N --to M --jobs 2 --model claude-sonnet-5 --compile \
+    > .claude/cache/ola/ola-K-$(date -u +%Y%m%dT%H%M%SZ).log 2>&1   # como tarea en segundo plano del cliente
+```
+
+Se lanza como tarea en segundo plano del cliente y se recoge por su
+notificación, nunca con un bucle de `pgrep` (sección 9.1 y THYROX
+`detect_self_matching_pgrep`). Al terminar, un solo commit con todo lo que la
+ola escribió.
+
+**Qué hacer con cada código de salida del lote** (`joblog.tsv`, columna 7):
+
+| Código | Significa | Siguiente paso |
+|---|---|---|
+| 0 | lote limpio | nada |
+| 3 | pide juicio | `triage`; cada causa compartida se decide una vez (glosario con fuente de RLA-ES o regla con prueba y anulación) y se mide con `measure --decision`; las locales las retraduce la siguiente ola con su `NNN.correccion.md` |
+| 5 | límite de la cuenta | esperar el reinicio que dice la respuesta (`resets …` en `translate/<ISO>/<n>.json`) y relanzar las mismas filas; los fragmentos hechos no se repiten |
+| 1 o 2 | falla o verificación incompleta | es un defecto del ciclo, no del texto: se reproduce en una prueba antes de tocar nada |
+
+**Orden de las filas pendientes.** Primero se cierran las 10 a 25 (la ola 8,
+relanzada tras el reinicio). Después, las 26 a 35 de una o dos por ola, en el
+orden del plan (de menor a mayor). `youtube__zhangxiaojun` y `cs25` van al
+final: son las más grandes, y la primera depende además de las 2,531 cadenas
+de `figure_text.tsv` (fase 0).
+
+**Decisiones abiertas, por tomar con medición:**
+
+- `--memfree`: GNU Time midió 607 `claude -p` (pico 270 MB, media 241 MB)
+  contra la cota estimada de 3G (sección 2.2). Derivarla es una decisión
+  propia, con su prueba.
+- El costo fijo por ítem (unos 19,000 tokens de caché leídos por
+  `claude -p`, casi todo contexto y no fragmento): juntar secciones cortas en
+  un ítem lo pagaría menos veces. Sin implementar.
+- `translate_wave.sh` recibe un rango de filas, no una lista, y no ordena
+  por fragmentos pendientes; la regla «primero el lote más cercano a
+  terminar» se aproxima con `--jobs 2`.
 
 ## 9. Costo: se mide en tokens, no se estima
 
