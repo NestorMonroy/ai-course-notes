@@ -408,6 +408,29 @@ De ahí tres reglas de operación:
 - **Una fase larga empieza en una conversación nueva**, con el plan y el banco
   como estado: el contexto releído por respuesta es lo que se paga.
 
+**Se terminan los lotes abiertos antes de abrir otros.** Medido en la ola 7:
+cuatro lotes nuevos y grandes (cs224r, 6s191 y los dos de Berkeley, 644
+fragmentos) corrieron a la vez y la cuota se acabó con 318 fragmentos hechos.
+Ninguna nota se armó, porque `assemble` escribe una nota sólo cuando están
+todos sus fragmentos. El trabajo no se perdió: cada fragmento aceptado vive
+en `chunks/<nota>/NNN.es.tex`, versionado, y `translate` sólo manda al modelo
+los que faltan. Pero el contador de notas no se movió (97 de 370). Desde
+entonces:
+
+- una ola cubre sólo filas del plan ya abiertas hasta que todas cierran
+  (0 señales) o piden juicio; las filas nuevas esperan;
+- los lotes grandes corren con `--jobs 2` o menos, para que alguno termine y
+  arme sus notas antes del límite de la cuenta;
+- el orden es por lo que falta: primero el lote al que menos fragmentos le
+  quedan.
+
+**`.claude/cache` ahorra trabajo a los procesos, no a la conversación.**
+Guarda los veredictos del verificador (una nota sin cambios no se vuelve a
+verificar) y los registros de cada ola. El costo de la conversación que
+orquesta es otro: cada respuesta relee todo su contexto (unos 460,000 tokens
+en la sesión de las olas 1 a 7), y ningún archivo del repositorio lo reduce.
+Lo reducen menos turnos por ola y una conversación nueva por fase.
+
 **El caché de 1 h** (`THYROX_ENABLE_PROMPT_CACHING_1H`, del proveedor) sólo
 convierte escrituras en lecturas si el mismo prefijo vuelve a pedirse pasados
 5 minutos. En el pool, 487 de 696 ítems escriben de 5k a 10k tokens con valores
