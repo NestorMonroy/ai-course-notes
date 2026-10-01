@@ -49,3 +49,18 @@ verificador del ciclo.
   de unos 126,029 tokens: a 21 tokens/s, unos 100 minutos de lectura por
   turno. Usarlo exigiría que `translate` llame a Ollama directo, con el
   fragmento dentro del prompt y sin el harness.
+
+## Calificación por el mecanismo del proveedor (2026-10-01)
+
+1. `local-models-qualify ... --context 32768` → EINTERNAL «owner.id inválido:
+   model-coordinator@vm». Defecto del proveedor: el id del dueño llevaba «@»
+   y `requireValidOwner` lo rehúsa en cualquier anfitrión. Corregido en
+   thyrox `420171b2e` (TDD, rojo antes del cambio).
+2. Segunda corrida → «falló la admisión en prepare: ENOENT»: la unidad sube
+   el GGUF desde la caché de artefactos de thyrox, y `catalog declare` sobre
+   un `ollama pull` no lo pone ahí.
+3. `local-models-ensure` → `not_materializable`: ningún artefacto permanente
+   contiene el blob 2bada8a7… (sólo existe en el volumen de Ollama).
+4. `local-models-import` pide un único `--file` del autor; Qwen publica su
+   Q4_K_M en dos partes (`-00001-of-00002`, `-00002-of-00002`, revisión
+   bb5d59e0). Bloqueado ahí: decisión pendiente del ejecutor.
