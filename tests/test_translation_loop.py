@@ -184,6 +184,7 @@ def test_translate_asks_the_pool_for_units_under_the_consumer_policy(tmp_path: P
     assert value("--work-reference").startswith("ai-course-notes:es-mx/bench/translate/")
     assert value("--model-policy") == str(REPO_ROOT / "tools" / "lang" / "es-mx" / "model-policy.json")
     assert value("--task-class") == "analisis"
+    assert value("--context-tokens") == "32768"
     assert "--model" not in args
 
 

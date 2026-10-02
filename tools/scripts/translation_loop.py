@@ -283,6 +283,12 @@ DEFAULT_MEMFREE = "3G"
 MAX_TURNS = 8
 DEFAULT_WIDTH = 10
 BEGIN_MARK, END_MARK = "<<<ES", "ES>>>"
+# El contexto que cada ítem necesita por turno, declarado al pool para que el
+# recomendador no exija su piso de subagente (126 029 tokens), que ningún modelo
+# local de 32k alcanza. Medido en 400 ítems de olas anteriores: p50 8 906, p90
+# 13 406, máximo 20 984 tokens por turno. 32 768 es el máximo de Qwen 2.5 7B, y
+# la cualificación de la clase se mide con ese contexto.
+CONTEXT_TOKENS = 32768
 
 
 def extract_translation(result: str) -> str | None:
@@ -385,6 +391,7 @@ def cmd_translate(args) -> int:
     runner = os.environ.get("TRANSLATION_RUNNER", str(REPO_ROOT / "tools" / "thyrox" / "run"))
     cmd = [runner, "headless-pool", "--prompt", str(prompt), "--out", str(out_dir),
            "--task-class", args.task_class, "--model-policy", str(args.model_policy),
+           "--context-tokens", str(CONTEXT_TOKENS),
            "--execution", "unit", "--work-reference", f"{CONSUMER}:es-mx/{Path(args.bench).name}/translate/{stamp}",
            "--tools", "Read,Grep", "--width", str(args.width), "--memfree", args.memfree,
            "--timeout", str(args.timeout), "--max-turns", str(MAX_TURNS), "--cwd", str(Path.cwd())]
