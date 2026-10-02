@@ -871,7 +871,7 @@ def test_a_wave_runs_batches_with_gnu_parallel_then_one_sweep_and_triage(tmp_pat
                     "1\tcs000\t1\t1\tcs000/lecture01/lecture01-notes.tex\n"
                     "2\tcs001\t2\t1\tcs001/lecture01/lecture01-notes.tex\n", encoding="utf-8")
     env = dict(os.environ, TRANSLATION_RUNNER=str(runner), THYROX_CACHE_DIR=str(tmp_path / "c"))
-    result = subprocess.run(["bash", str(WAVE), "--from", "1", "--to", "2", "--jobs", "2", "--model", "claude-sonnet-5"],
+    result = subprocess.run(["bash", str(WAVE), "--from", "1", "--to", "2", "--jobs", "2"],
                             cwd=repo, env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
     wave = next((repo / ".claude/workbench/translation/waves").iterdir())
