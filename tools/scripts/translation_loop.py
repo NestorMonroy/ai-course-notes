@@ -27,7 +27,7 @@ repartidos con GNU Parallel. El modelo no se nombra aquí: lo elige el
 recomendador de THYROX dentro de la política del proyecto
 (`tools/lang/es-mx/model-policy.json`: sólo Qwen 2.5 7B Q4_K_M, sin respaldo al
 proveedor; el oficial de Hugging Face o el de la biblioteca de Ollama, éste con
-su equivalencia al oficial sin verificar, H-THYROX-312). `TRANSLATION_RUNNER` lo sustituye en las pruebas. La verificación reparte las notas con GNU Parallel y guarda
+su equivalencia al oficial sin verificar, H-THYROX-315). `TRANSLATION_RUNNER` lo sustituye en las pruebas. La verificación reparte las notas con GNU Parallel y guarda
 cada veredicto en `$THYROX_CACHE_DIR/translation/`, con clave en el contenido
 de la nota zh, la es-MX y los verificadores.
 """
@@ -58,7 +58,7 @@ CHUNK_LIMIT = 12000  # caracteres; una sección mas larga se parte por \subsecti
 HAN = re.compile(r"[\u4e00-\u9fff]")
 COMMENT_LINE = re.compile(r"(?<!\\)%.*$", re.M)
 PARENTHESIZED = re.compile(r"[(（][^()（）\n]*[)）]")
-# El ejecutor (TASK-THYROX-0757/0758/0759): la política de modelo del proyecto,
+# El ejecutor (TASK-THYROX-0772/0758/0759): la política de modelo del proyecto,
 # la clase con que el recomendador busca un modelo cualificado y el consumidor
 # con que THYROX cita cada ítem. Ninguna nombra un modelo.
 DEFAULT_MODEL_POLICY = Path(__file__).resolve().parents[2] / "tools" / "lang" / "es-mx" / "model-policy.json"

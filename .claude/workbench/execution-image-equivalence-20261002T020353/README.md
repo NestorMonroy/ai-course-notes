@@ -54,7 +54,7 @@ Ninguna: el encargo se ejecutó tal como se pidió.
 ## Los resultados
 
 Identidad: `ai-course-notes:es-mx/execution-image` (referencia de trabajo del
-consumidor). Proveedor: `build-image --work` (TASK-THYROX-0760).
+consumidor). Proveedor: `build-image --work` (TASK-THYROX-0775).
 
 ## Toolchain derivado del call path de V0–V6 (`tools/thyrox/execution-image/Containerfile`)
 

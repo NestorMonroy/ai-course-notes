@@ -49,7 +49,7 @@ Ninguna: el encargo se ejecutó tal como se pidió.
 ## Los resultados
 
 Identidad: `ai-course-notes:es-mx/executor-qwen` (referencia de trabajo del
-consumidor, TASK-THYROX-0756); no es una TASK de THYROX. Sólo cambia el punto
+consumidor, TASK-THYROX-0771); no es una TASK de THYROX. Sólo cambia el punto
 de ejecución de `ES_MX_TRANSLATION_PLAN.md`; glosario, memoria, prompt,
 marcadores, V0–V7, triage, sweep, retranslate y measure no se tocan.
 
