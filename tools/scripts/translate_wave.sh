@@ -3,7 +3,7 @@
 # translate_wave.sh: una ola de lotes del plan, en paralelo con GNU Parallel
 # =============================================================================
 #
-#   uv run --locked bash tools/scripts/translate_wave.sh --from N --to M [--jobs J] --model <id> [--compile]
+#   uv run --locked bash tools/scripts/translate_wave.sh --from N --to M [--jobs J] [--compile]
 #
 # Con `uv run`: el `python3` de la ola tiene que ser el del proyecto, porque el
 # verificador usa los léxicos de spaCy.
@@ -21,19 +21,18 @@
 # =============================================================================
 set -uo pipefail
 
-from="" to="" jobs=3 model="" compile=""
+from="" to="" jobs=3 compile=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --from) from="$2"; shift 2 ;;
         --to) to="$2"; shift 2 ;;
         --jobs) jobs="$2"; shift 2 ;;
-        --model) model="$2"; shift 2 ;;
         --compile) compile="--compile"; shift ;;
         *) echo "translate_wave: opción desconocida: $1" >&2; exit 2 ;;
     esac
 done
-if [[ -z "$from" || -z "$to" || -z "$model" ]]; then
-    echo "uso: $0 --from N --to M [--jobs J] --model <id> [--compile]" >&2
+if [[ -z "$from" || -z "$to" ]]; then
+    echo "uso: $0 --from N --to M [--jobs J] [--compile]" >&2
     exit 2
 fi
 
@@ -58,13 +57,13 @@ run_batch() {
         echo "translate_wave: $1 no arranca: la ola ya chocó con el límite de sesión" >&2
         return 5
     fi
-    python3 "$LOOP" advance --batch "$1" --model "$model" --width "$width" --no-sweep $compile
+    python3 "$LOOP" advance --batch "$1" --width "$width" --no-sweep $compile
     local code=$?
     (( code == 5 )) && : > "$WAVE/limite"
     return "$code"
 }
 export -f run_batch
-export LOOP WAVE model width compile
+export LOOP WAVE width compile
 PARALLEL_SHELL=bash parallel --will-cite -j "$jobs" --joblog "$WAVE/joblog.tsv" --results "$WAVE/salida" \
     run_batch {} :::: "$WAVE/batches.txt"
 

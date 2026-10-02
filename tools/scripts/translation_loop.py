@@ -3,14 +3,14 @@
 
     translation_loop.py prepare  --bench B <nota.tex>...
     translation_loop.py prompt   [--memory M] --out P.md
-    translation_loop.py translate --bench B --model <id completo> [--width N] [--memfree TAM] [--timeout S]
+    translation_loop.py translate --bench B [--model-policy P] [--task-class C] [--width N] [--memfree TAM] [--timeout S]
     translation_loop.py usage    --bench B
     translation_loop.py plan     --out P.tsv
-    translation_loop.py advance  --batch L --model <id> [--compile] [--max-iterations N]
+    translation_loop.py advance  --batch L [--model-policy P] [--task-class C] [--compile] [--max-iterations N]
     translation_loop.py triage   [--memory M]
     translation_loop.py measure  --decision D [--compile] [--jobs N]
     translation_loop.py retranslate --batch L
-    translation_loop.py cycle    --batch L --model <id> [--compile] <nota.tex>...
+    translation_loop.py cycle    --batch L [--model-policy P] [--task-class C] [--compile] <nota.tex>...
     translation_loop.py assemble --bench B
     translation_loop.py verify   --out S.jsonl [--compile] [--jobs N] <nota.es-mx.tex>...
     translation_loop.py sweep    --bench B --iteration N [--memory M] [--jobs N]
@@ -20,9 +20,13 @@ La unidad del traductor es el FRAGMENTO: el cuerpo de la nota partido por
 no depende de lo que una conversación alcanza a escribir de una vez, y solo se
 retraduce el fragmento que falla.
 
-El traductor es `headless-pool` de THYROX vía `tools/thyrox/run` (un `claude -p`
-por fragmento, repartidos con GNU Parallel); `TRANSLATION_RUNNER` lo sustituye
-en las pruebas. La verificación reparte las notas con GNU Parallel y guarda
+El traductor es `headless-pool` de THYROX vía `tools/thyrox/run`: un `thyrox -p`
+por fragmento, cada uno en una ExecutionUnit (`--execution unit`) autorizada por
+la identidad de trabajo de este proyecto (`ai-course-notes:es-mx/<lote>/translate/<sello>/<n>`),
+repartidos con GNU Parallel. El modelo no se nombra aquí: lo elige el
+recomendador de THYROX dentro de la política del proyecto
+(`tools/lang/es-mx/model-policy.json`: sólo el Qwen oficial, sin respaldo al
+proveedor). `TRANSLATION_RUNNER` lo sustituye en las pruebas. La verificación reparte las notas con GNU Parallel y guarda
 cada veredicto en `$THYROX_CACHE_DIR/translation/`, con clave en el contenido
 de la nota zh, la es-MX y los verificadores.
 """
@@ -53,7 +57,12 @@ CHUNK_LIMIT = 12000  # caracteres; una sección mas larga se parte por \subsecti
 HAN = re.compile(r"[\u4e00-\u9fff]")
 COMMENT_LINE = re.compile(r"(?<!\\)%.*$", re.M)
 PARENTHESIZED = re.compile(r"[(（][^()（）\n]*[)）]")
-FULL_MODEL_ID = re.compile(r"^claude-[a-z]+-\d")
+# El ejecutor (TASK-THYROX-0757/0758/0759): la política de modelo del proyecto,
+# la clase con que el recomendador busca un modelo cualificado y el consumidor
+# con que THYROX cita cada ítem. Ninguna nombra un modelo.
+DEFAULT_MODEL_POLICY = Path(__file__).resolve().parents[2] / "tools" / "lang" / "es-mx" / "model-policy.json"
+DEFAULT_TASK_CLASS = "analisis"
+CONSUMER = "ai-course-notes"
 VERIFIERS = ["check_translation_parity.py", "check_prose_vocabulary.py", "check_note_coverage.py",
              "note_language.py", "translation_loop.py"]
 
@@ -354,9 +363,9 @@ def collect_results(out_dir: Path, targets: dict[str, str]) -> list[str]:
 
 
 def cmd_translate(args) -> int:
-    if not FULL_MODEL_ID.match(args.model):
-        print(f"translate: `{args.model}` no es un identificador completo (claude-<familia>-<version>); "
-              "headless-pool rechaza alias.", file=sys.stderr)
+    if not Path(args.model_policy).is_file():
+        print(f"translate: la política de modelo no se puede leer: {args.model_policy}; sin ella no se traduce "
+              "(no hay modelo por defecto)", file=sys.stderr)
         return 2
     pending = pending_units(args.bench)
     # Un fragmento sin chino (la portada ya localizada por script) se copia: el
@@ -374,7 +383,9 @@ def cmd_translate(args) -> int:
     out_dir = args.bench / "translate" / stamp
     runner = os.environ.get("TRANSLATION_RUNNER", str(REPO_ROOT / "tools" / "thyrox" / "run"))
     cmd = [runner, "headless-pool", "--prompt", str(prompt), "--out", str(out_dir),
-           "--model", args.model, "--tools", "Read,Grep", "--width", str(args.width), "--memfree", args.memfree,
+           "--task-class", args.task_class, "--model-policy", str(args.model_policy),
+           "--execution", "unit", "--work-reference", f"{CONSUMER}:es-mx/{Path(args.bench).name}/translate/{stamp}",
+           "--tools", "Read,Grep", "--width", str(args.width), "--memfree", args.memfree,
            "--timeout", str(args.timeout), "--max-turns", str(MAX_TURNS), "--cwd", str(Path.cwd())]
     print(f"translate: width={args.width} memfree={args.memfree}", file=sys.stderr)
     code = subprocess.run(cmd, input="".join(f"{row[3]}\n" for row in pending), text=True).returncode
@@ -741,7 +752,8 @@ def cmd_cycle(args) -> int:
     if cmd_prepare(ns(bench=bench, notes=args.notes)):
         return 1
     pending = len(pending_units(bench))
-    translated = cmd_translate(ns(bench=bench, model=args.model, width=args.width, memfree=args.memfree,
+    translated = cmd_translate(ns(bench=bench, model_policy=args.model_policy, task_class=args.task_class,
+                                  width=args.width, memfree=args.memfree,
                                   timeout=args.timeout, memory=args.memory))
     cmd_usage(ns(bench=bench, runs=sorted(set(bench.glob("translate/*")) - before), out=here / "usage.tsv"))
     notes = [l.split("\t")[2] for l in (bench / "notes.tsv").read_text(encoding="utf-8").splitlines() if l.strip()]
@@ -1131,7 +1143,8 @@ def cmd_advance(args) -> int:
     # Los pares (nota, causa) que la vuelta anterior mandó a retraducir.
     retranslated: set[tuple[str, str]] = set()
     for _round in range(args.max_iterations):
-        code = cmd_cycle(ns(batch=args.batch, bench=None, model=args.model, width=args.width, memfree=args.memfree,
+        code = cmd_cycle(ns(batch=args.batch, bench=None, model_policy=args.model_policy, task_class=args.task_class,
+                            width=args.width, memfree=args.memfree,
                             timeout=args.timeout, memory=args.memory, compile=args.compile, jobs=args.jobs,
                             notes=notes))
         if code in (0, 2, 5):
@@ -1246,7 +1259,8 @@ def main(argv=None) -> int:
     p = sub.add_parser("prompt"); p.add_argument("--memory", type=Path, default=DEFAULT_MEMORY)
     p.add_argument("--out", type=Path, required=True); p.set_defaults(func=cmd_prompt)
     p = sub.add_parser("translate"); p.add_argument("--bench", type=Path, required=True)
-    p.add_argument("--model", required=True); p.add_argument("--width", type=int, default=DEFAULT_WIDTH)
+    p.add_argument("--model-policy", type=Path, default=DEFAULT_MODEL_POLICY)
+    p.add_argument("--task-class", default=DEFAULT_TASK_CLASS); p.add_argument("--width", type=int, default=DEFAULT_WIDTH)
     p.add_argument("--memfree", default=DEFAULT_MEMFREE)
     p.add_argument("--timeout", type=int, default=900); p.add_argument("--memory", type=Path, default=DEFAULT_MEMORY)
     p.set_defaults(func=cmd_translate)
@@ -1255,7 +1269,8 @@ def main(argv=None) -> int:
     p = sub.add_parser("plan"); p.add_argument("--out", type=Path, required=True); p.set_defaults(func=cmd_plan)
     p = sub.add_parser("advance"); p.add_argument("--batch", required=True)
     p.add_argument("--plan", type=Path, default=Path(".claude/workbench/translation/plan.tsv"))
-    p.add_argument("--model", required=True); p.add_argument("--width", type=int, default=DEFAULT_WIDTH)
+    p.add_argument("--model-policy", type=Path, default=DEFAULT_MODEL_POLICY)
+    p.add_argument("--task-class", default=DEFAULT_TASK_CLASS); p.add_argument("--width", type=int, default=DEFAULT_WIDTH)
     p.add_argument("--memfree", default=DEFAULT_MEMFREE); p.add_argument("--timeout", type=int, default=900)
     p.add_argument("--memory", type=Path, default=DEFAULT_MEMORY); p.add_argument("--compile", action="store_true")
     p.add_argument("--jobs", type=int, default=os.cpu_count() or 2)
@@ -1271,7 +1286,8 @@ def main(argv=None) -> int:
     p.add_argument("--bench", type=Path, default=None); p.set_defaults(func=cmd_retranslate)
     p = sub.add_parser("cycle"); p.add_argument("--batch", default=None)
     p.add_argument("--bench", type=Path, default=None, help="por defecto .claude/workbench/translation/<lote>")
-    p.add_argument("--model", required=True); p.add_argument("--width", type=int, default=DEFAULT_WIDTH)
+    p.add_argument("--model-policy", type=Path, default=DEFAULT_MODEL_POLICY)
+    p.add_argument("--task-class", default=DEFAULT_TASK_CLASS); p.add_argument("--width", type=int, default=DEFAULT_WIDTH)
     p.add_argument("--memfree", default=DEFAULT_MEMFREE); p.add_argument("--timeout", type=int, default=900)
     p.add_argument("--memory", type=Path, default=DEFAULT_MEMORY); p.add_argument("--compile", action="store_true")
     p.add_argument("--jobs", type=int, default=os.cpu_count() or 2)

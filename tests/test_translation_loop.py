@@ -111,7 +111,7 @@ def test_full_cycle_with_the_fake_translator_is_clean(tmp_path: Path) -> None:
     repo, note, runner = setup(tmp_path)
     bench = tmp_path / "bench"
     assert loop(repo, "prepare", "--bench", str(bench), str(note)).returncode == 0
-    result = loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    result = loop(repo, "translate", "--bench", str(bench), runner=runner)
     assert result.returncode == 0, result.stderr
     assert loop(repo, "assemble", "--bench", str(bench)).returncode == 0
     es = note.with_name("lecture01-notes.es-mx.tex")
@@ -128,7 +128,7 @@ def test_verify_reports_untranslated_chunks_and_uses_the_cache(tmp_path: Path) -
     repo, note, runner = setup(tmp_path, partial)
     bench = tmp_path / "bench"
     loop(repo, "prepare", "--bench", str(bench), str(note))
-    loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    loop(repo, "translate", "--bench", str(bench), runner=runner)
     loop(repo, "assemble", "--bench", str(bench))
     es = note.with_name("lecture01-notes.es-mx.tex")
     cache = tmp_path / "cache"
@@ -151,7 +151,7 @@ def test_coverage_reports_only_what_the_translation_broke(tmp_path: Path) -> Non
     repo, note, runner = setup(tmp_path, dictionary, source)
     bench = tmp_path / "bench"
     loop(repo, "prepare", "--bench", str(bench), str(note))
-    loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    loop(repo, "translate", "--bench", str(bench), runner=runner)
     loop(repo, "assemble", "--bench", str(bench))
     es = note.with_name("lecture01-notes.es-mx.tex")
     out = bench / "signals.jsonl"
@@ -166,24 +166,54 @@ def test_translate_skips_chunks_already_clean(tmp_path: Path) -> None:
     repo, note, runner = setup(tmp_path)
     bench = tmp_path / "bench"
     loop(repo, "prepare", "--bench", str(bench), str(note))
-    loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
-    again = loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    loop(repo, "translate", "--bench", str(bench), runner=runner)
+    again = loop(repo, "translate", "--bench", str(bench), runner=runner)
     assert "0 fragmento(s) por traducir" in again.stderr, again.stderr
 
 
-def test_translate_refuses_a_model_alias(tmp_path: Path) -> None:
+def test_translate_asks_the_pool_for_units_under_the_consumer_policy(tmp_path: Path) -> None:
+    """El ejecutor es thyrox: cada ítem en una ExecutionUnit, con la identidad de
+    trabajo de este proyecto y su política de modelo; ningún `--model`."""
     repo, note, runner = setup(tmp_path)
     bench = tmp_path / "bench"
     loop(repo, "prepare", "--bench", str(bench), str(note))
-    result = loop(repo, "translate", "--bench", str(bench), "--model", "sonnet", runner=runner)
-    assert result.returncode == 2 and "identificador completo" in result.stderr
+    loop(repo, "translate", "--bench", str(bench), runner=runner)
+    args = json.loads(runner.with_suffix(".args").read_text())
+    value = lambda flag: args[args.index(flag) + 1]
+    assert value("--execution") == "unit"
+    assert value("--work-reference").startswith("ai-course-notes:es-mx/bench/translate/")
+    assert value("--model-policy") == str(REPO_ROOT / "tools" / "lang" / "es-mx" / "model-policy.json")
+    assert value("--task-class") == "analisis"
+    assert "--model" not in args
+
+
+def test_translate_refuses_without_a_readable_policy(tmp_path: Path) -> None:
+    repo, note, runner = setup(tmp_path)
+    bench = tmp_path / "bench"
+    loop(repo, "prepare", "--bench", str(bench), str(note))
+    result = loop(repo, "translate", "--bench", str(bench), "--model-policy", str(tmp_path / "no-existe.json"), runner=runner)
+    assert result.returncode == 2 and "política" in result.stderr
+    assert not runner.with_suffix(".args").exists()
+
+
+def test_the_model_flag_is_gone(tmp_path: Path) -> None:
+    repo, note, runner = setup(tmp_path)
+    bench = tmp_path / "bench"
+    loop(repo, "prepare", "--bench", str(bench), str(note))
+    assert loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner).returncode == 2
+
+
+def test_the_shipped_policy_allows_only_the_official_qwen_without_fallback() -> None:
+    policy = json.loads((REPO_ROOT / "tools" / "lang" / "es-mx" / "model-policy.json").read_text(encoding="utf-8"))
+    assert policy["fallback"] == {"enabled": False}
+    assert policy["allowed"] == [{"runtime": "ollama", "repository": "Qwen/Qwen2.5-7B-Instruct-GGUF", "quantization": "Q4_K_M"}]
 
 
 def test_sweep_applies_a_mechanical_fix_everywhere_and_records_it(tmp_path: Path) -> None:
     repo, note, runner = setup(tmp_path)
     bench = tmp_path / "bench"
     loop(repo, "prepare", "--bench", str(bench), str(note))
-    loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    loop(repo, "translate", "--bench", str(bench), runner=runner)
     loop(repo, "assemble", "--bench", str(bench))
     es = note.with_name("lecture01-notes.es-mx.tex")
     es.write_text(es.read_text(encoding="utf-8").replace("Resumen.", "La regla de oro."), encoding="utf-8")
@@ -233,7 +263,7 @@ def test_memory_is_bounded_by_memfree_and_width_is_only_a_ceiling(tmp_path: Path
     repo, note, runner = setup(tmp_path)
     bench = tmp_path / "bench"
     loop(repo, "prepare", "--bench", str(bench), str(note))
-    result = loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    result = loop(repo, "translate", "--bench", str(bench), runner=runner)
     assert result.returncode == 0, result.stderr
     args = json.loads(runner.with_suffix(".args").read_text())
     # La memoria la hace cumplir GNU Parallel mientras el pool corre; la
@@ -242,7 +272,7 @@ def test_memory_is_bounded_by_memfree_and_width_is_only_a_ceiling(tmp_path: Path
     assert args[args.index("--width") + 1] == "10"
     other = tmp_path / "bench2"
     loop(repo, "prepare", "--bench", str(other), str(note))
-    loop(repo, "translate", "--bench", str(other), "--model", "claude-sonnet-5", "--width", "2",
+    loop(repo, "translate", "--bench", str(other), "--width", "2",
          "--memfree", "1G", runner=runner)
     args = json.loads(runner.with_suffix(".args").read_text())
     assert args[args.index("--width") + 1] == "2" and args[args.index("--memfree") + 1] == "1G"
@@ -253,7 +283,7 @@ def test_a_result_without_markers_leaves_the_chunk_pending(tmp_path: Path) -> No
     repo, note, runner = setup(tmp_path, dictionary)
     bench = tmp_path / "bench"
     loop(repo, "prepare", "--bench", str(bench), str(note))
-    result = loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    result = loop(repo, "translate", "--bench", str(bench), runner=runner)
     assert result.returncode == 1
     assert "sin marcadores" in result.stderr
     written = sorted(p.name for p in bench.rglob("*.es.tex"))
@@ -267,7 +297,7 @@ def test_a_chunk_without_han_is_copied_without_the_model(tmp_path: Path) -> None
     bench = tmp_path / "bench"
     loop(repo, "prepare", "--bench", str(bench), str(note))
     units = (bench / "units.tsv").read_text(encoding="utf-8").splitlines()
-    result = loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    result = loop(repo, "translate", "--bench", str(bench), runner=runner)
     assert result.returncode == 0, result.stderr
     items = (next(bench.rglob("index.tsv"))).read_text(encoding="utf-8").splitlines()
     plain = [u for u in units if not any("\u4e00" <= ch <= "\u9fff" for ch in Path(u.split("\t")[3]).read_text())]
@@ -283,7 +313,7 @@ def test_usage_sums_tokens_by_component_and_measures_letters_per_han(tmp_path: P
     repo, note, runner = setup(tmp_path)
     bench = tmp_path / "bench"
     loop(repo, "prepare", "--bench", str(bench), str(note))
-    loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    loop(repo, "translate", "--bench", str(bench), runner=runner)
     items = len(next(bench.rglob("index.tsv")).read_text(encoding="utf-8").splitlines())
     result = loop(repo, "usage", "--bench", str(bench))
     assert result.returncode == 0, result.stderr
@@ -310,7 +340,7 @@ def test_english_the_original_already_uses_is_not_a_translation_defect(tmp_path:
     repo, note, runner = setup(tmp_path, dictionary, source)
     bench = tmp_path / "bench"
     loop(repo, "prepare", "--bench", str(bench), str(note))
-    loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    loop(repo, "translate", "--bench", str(bench), runner=runner)
     loop(repo, "assemble", "--bench", str(bench))
     out = bench / "signals.jsonl"
     loop(repo, "verify", "--out", str(out), str(note.with_name("lecture01-notes.es-mx.tex")), cache=tmp_path / "cache")
@@ -344,7 +374,7 @@ def test_chinese_in_the_head_is_translated_as_its_own_unit(tmp_path: Path) -> No
     bench = tmp_path / "bench"
     loop(repo, "prepare", "--bench", str(bench), str(note))
     assert any("\thead\t" in l for l in (bench / "units.tsv").read_text(encoding="utf-8").splitlines())
-    loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    loop(repo, "translate", "--bench", str(bench), runner=runner)
     assert loop(repo, "assemble", "--bench", str(bench)).returncode == 0
     text = note.with_name("lecture01-notes.es-mx.tex").read_text(encoding="utf-8")
     assert "\\newcommand{\\notetitle}{Notas de tokenización}" in text and "分词" not in text
@@ -362,7 +392,7 @@ def test_compile_reports_glyphs_the_font_does_not_have(tmp_path: Path) -> None:
 def test_cycle_chains_prepare_translate_assemble_and_verify(tmp_path: Path) -> None:
     repo, note, runner = setup(tmp_path)
     bench = tmp_path / "bench"
-    result = loop(repo, "cycle", "--bench", str(bench), "--model", "claude-sonnet-5", str(note),
+    result = loop(repo, "cycle", "--bench", str(bench), str(note),
                   runner=runner, cache=tmp_path / "cache")
     assert result.returncode == 0, result.stdout + result.stderr
     assert note.with_name("lecture01-notes.es-mx.tex").is_file()
@@ -374,7 +404,7 @@ def test_cycle_stops_before_assembling_when_a_chunk_is_missing(tmp_path: Path) -
     dictionary = dict(DICTIONARY, **{"训练用 checkpoint。": "OMITIR"})
     repo, note, runner = setup(tmp_path, dictionary)
     bench = tmp_path / "bench"
-    result = loop(repo, "cycle", "--bench", str(bench), "--model", "claude-sonnet-5", str(note),
+    result = loop(repo, "cycle", "--bench", str(bench), str(note),
                   runner=runner, cache=tmp_path / "cache")
     assert result.returncode == 1
     assert "sin marcadores" in result.stderr
@@ -393,7 +423,7 @@ def test_assemble_points_to_the_es_mx_figure_when_it_exists(tmp_path: Path) -> N
         (figures / name).write_bytes(b"png")
     bench = tmp_path / "bench"
     loop(repo, "prepare", "--bench", str(bench), str(note))
-    loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    loop(repo, "translate", "--bench", str(bench), runner=runner)
     assert loop(repo, "assemble", "--bench", str(bench)).returncode == 0
     es = note.with_name("lecture01-notes.es-mx.tex")
     text = es.read_text(encoding="utf-8")
@@ -411,14 +441,14 @@ def test_each_cycle_run_is_a_new_iteration_and_nothing_is_overwritten(tmp_path: 
     partial = {k: v for k, v in DICTIONARY.items() if "训练" not in k}
     repo, note, runner = setup(tmp_path, partial)
     workbench = repo / ".claude" / "workbench"
-    first = loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note),
+    first = loop(repo, "cycle", "--batch", "cs000", str(note),
                  runner=runner, cache=tmp_path / "cache")
     assert first.returncode == 1  # quedó chino: hay señales
     runner.with_suffix(".json").write_text(json.dumps(DICTIONARY, ensure_ascii=False), encoding="utf-8")
     bench = workbench / "translation" / "cs000"
     for chunk in bench.rglob("*.es.tex"):
         chunk.unlink()  # el paso de retraducción de este control
-    second = loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note),
+    second = loop(repo, "cycle", "--batch", "cs000", str(note),
                   runner=runner, cache=tmp_path / "cache")
     assert second.returncode == 0, second.stdout + second.stderr
     one, two = bench / "iterations" / "01", bench / "iterations" / "02"
@@ -441,7 +471,7 @@ def test_retranslate_marks_only_the_chunks_that_carry_the_signal(tmp_path: Path)
     # los fragmentos que llevan la señal y ningún otro.
     dictionary = dict(DICTIONARY, **{"训练用 checkpoint。": "El training usa checkpoint."})
     repo, note, runner = setup(tmp_path, dictionary)
-    first = loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note),
+    first = loop(repo, "cycle", "--batch", "cs000", str(note),
                  runner=runner, cache=tmp_path / "cache")
     assert first.returncode == 1
     bench = repo / ".claude" / "workbench" / "translation" / "cs000"
@@ -488,7 +518,7 @@ def test_an_undefined_command_is_located_in_its_chunk(tmp_path: Path) -> None:
     (signal, detail), = mod.compile_signal(broken)
     assert signal == "compile:error" and "\\enquote" in detail, detail
     repo, note, runner = setup(tmp_path / "loop")
-    loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note),
+    loop(repo, "cycle", "--batch", "cs000", str(note),
          runner=runner, cache=tmp_path / "cache")
     bench = repo / ".claude" / "workbench" / "translation" / "cs000"
     chunks = sorted(bench.rglob("*.es.tex"))
@@ -514,7 +544,7 @@ def test_a_readfig_error_is_inherited_when_the_original_has_no_strict_marker(tmp
                                      for i in range(3)},
                       **{"本讲建立了完整图景，说明了方法。": "La clase construyó el panorama completo y explicó el método."})
     repo, note, runner = setup(tmp_path, dictionary, source)
-    loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note),
+    loop(repo, "cycle", "--batch", "cs000", str(note),
          runner=runner, cache=tmp_path / "cache")
     signals = (repo / ".claude/workbench/translation/cs000/iterations/01/signals.jsonl").read_text(encoding="utf-8")
     assert "figures-present-but-no-readfig-explanation" not in signals, signals
@@ -524,7 +554,7 @@ def test_a_verifier_that_dies_is_an_incomplete_verdict_not_a_clean_one(tmp_path:
     # cs329a, iteración 02: un `verify-one` murió y `run_verify` leyó «sin
     # filas» como «sin señales». Una nota sin veredicto nunca cuenta como limpia.
     repo, note, runner = setup(tmp_path)
-    loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note),
+    loop(repo, "cycle", "--batch", "cs000", str(note),
          runner=runner, cache=tmp_path / "cache")
     es = note.with_name("lecture01-notes.es-mx.tex")
     orphan = repo / "cs001" / "lecture01" / "lecture01-notes.es-mx.tex"
@@ -559,7 +589,7 @@ def test_a_signal_inside_a_hyphenated_word_is_located_and_none_vanishes(tmp_path
     # no cruzaba el guion y la señal desaparecía de la lista sin ir a juicio.
     dictionary = dict(DICTIONARY, **{"训练用 checkpoint。": "El modelo hace hard-coding del checkpoint."})
     repo, note, runner = setup(tmp_path, dictionary)
-    loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note),
+    loop(repo, "cycle", "--batch", "cs000", str(note),
          runner=runner, cache=tmp_path / "cache")
     bench = repo / ".claude" / "workbench" / "translation" / "cs000"
     signals = bench / "iterations" / "01" / "signals.jsonl"
@@ -582,7 +612,7 @@ def test_a_chunk_that_breaks_the_environments_is_rejected_on_arrival(tmp_path: P
     repo, note, runner = setup(tmp_path, dictionary, source)
     bench = tmp_path / "bench"
     loop(repo, "prepare", "--bench", str(bench), str(note))
-    result = loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    result = loop(repo, "translate", "--bench", str(bench), runner=runner)
     assert result.returncode == 1
     assert "estructura" in result.stderr and "itemize" in result.stderr
     broken = [u.split("\t") for u in (bench / "units.tsv").read_text(encoding="utf-8").splitlines()
@@ -596,7 +626,7 @@ def test_retranslate_also_sends_back_chunks_already_written_with_a_broken_struct
     # comando, así que solo se encuentra comparando su estructura con el original.
     source = NOTE.replace("训练用 checkpoint。", "\\begin{itemize}\n\\item 训练用 checkpoint。\n\\end{itemize}")
     repo, note, runner = setup(tmp_path, DICTIONARY, source)
-    loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note), runner=runner, cache=tmp_path / "c")
+    loop(repo, "cycle", "--batch", "cs000", str(note), runner=runner, cache=tmp_path / "c")
     bench = repo / ".claude" / "workbench" / "translation" / "cs000"
     target = next(c for c in bench.rglob("*.es.tex") if "itemize" in c.read_text(encoding="utf-8"))
     target.write_text(target.read_text(encoding="utf-8").replace("\\begin{itemize}\n", ""), encoding="utf-8")
@@ -638,7 +668,7 @@ def test_a_mechanical_fix_lands_in_the_chunks_and_survives_the_next_assemble(tmp
     # fuente de verdad: un arreglo solo en la nota lo deshacía el siguiente ensamblado.
     dictionary = dict(DICTIONARY, **{"小结。": "Resumen （breve）: la clave está en los datos."})
     repo, note, runner = setup(tmp_path, dictionary)
-    loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note), runner=runner, cache=tmp_path / "c")
+    loop(repo, "cycle", "--batch", "cs000", str(note), runner=runner, cache=tmp_path / "c")
     memory = tmp_path / "memory.jsonl"
     memory.write_text("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in [
         {"patron": "paréntesis de ancho completo", "senal_del_verificador": "compile:missing-glyph",
@@ -670,7 +700,7 @@ def test_triage_routes_signals_and_retranslate_only_takes_the_local_ones(tmp_pat
     other.parent.mkdir(parents=True)
     other.write_text(NOTE.replace("小结。", "小结。\n权重。"), encoding="utf-8")
     for batch, path in (("cs000", note), ("cs001", other)):
-        loop(repo, "cycle", "--batch", batch, "--model", "claude-sonnet-5", str(path), runner=runner, cache=tmp_path / "c")
+        loop(repo, "cycle", "--batch", batch, str(path), runner=runner, cache=tmp_path / "c")
     memory = tmp_path / "memory.jsonl"
     memory.write_text(json.dumps({"patron": "cliché", "senal_del_verificador": "prose:forbidden:la clave está en",
                                   "fix_generico": {"tipo": "mechanical", "buscar": "la clave está en",
@@ -719,7 +749,7 @@ def test_the_sweep_never_touches_evidence_under_dot_claude(tmp_path: Path) -> No
     # El barrido buscaba `*-notes.es-mx.tex` en todo el árbol y corrigió una
     # copia de evidencia en `.claude/workbench/`: contaba 10 notas en un lote de 9.
     repo, note, runner = setup(tmp_path)
-    loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note), runner=runner, cache=tmp_path / "c")
+    loop(repo, "cycle", "--batch", "cs000", str(note), runner=runner, cache=tmp_path / "c")
     evidence = repo / ".claude" / "workbench" / "old" / "copy-notes.es-mx.tex"
     evidence.parent.mkdir(parents=True)
     evidence.write_text("title=#1\n", encoding="utf-8")
@@ -745,7 +775,7 @@ def write_plan(repo: Path, batch: str, notes: list[Path]) -> Path:
 def test_advance_runs_a_clean_batch_in_one_iteration(tmp_path: Path) -> None:
     repo, note, runner = setup(tmp_path)
     write_plan(repo, "cs000", [note])
-    result = loop(repo, "advance", "--batch", "cs000", "--model", "claude-sonnet-5", runner=runner, cache=tmp_path / "c")
+    result = loop(repo, "advance", "--batch", "cs000", runner=runner, cache=tmp_path / "c")
     assert result.returncode == 0, result.stdout + result.stderr
     rows = (repo / ".claude/workbench/translation/batches.tsv").read_text(encoding="utf-8").splitlines()[1:]
     assert len(rows) == 1 and rows[0].split("\t")[6] == "0"
@@ -757,7 +787,7 @@ def test_advance_retranslates_local_signals_and_stops_bounded(tmp_path: Path) ->
     dictionary = dict(DICTIONARY, **{"训练用 checkpoint。": "El training usa checkpoint."})
     repo, note, runner = setup(tmp_path, dictionary)
     write_plan(repo, "cs000", [note])
-    result = loop(repo, "advance", "--batch", "cs000", "--model", "claude-sonnet-5", "--max-iterations", "3",
+    result = loop(repo, "advance", "--batch", "cs000", "--max-iterations", "3",
                   runner=runner, cache=tmp_path / "c")
     assert result.returncode == 3, result.stdout + result.stderr
     assert "juicio" in result.stderr
@@ -783,7 +813,7 @@ def test_advance_keeps_retranslating_a_signal_that_changes(tmp_path: Path) -> No
                                    "for n, zh in enumerate(items, 1):")
     runner.write_text(changing, encoding="utf-8")
     write_plan(repo, "cs000", [note])
-    result = loop(repo, "advance", "--batch", "cs000", "--model", "claude-sonnet-5", "--max-iterations", "4",
+    result = loop(repo, "advance", "--batch", "cs000", "--max-iterations", "4",
                   runner=runner, cache=tmp_path / "c")
     assert result.returncode == 0, result.stdout + result.stderr
     rows = (repo / ".claude/workbench/translation/batches.tsv").read_text(encoding="utf-8").splitlines()[1:]
@@ -799,7 +829,7 @@ def test_advance_stops_on_a_shared_cause_without_retranslating(tmp_path: Path) -
     other.parent.mkdir(parents=True)
     other.write_text(NOTE, encoding="utf-8")
     write_plan(repo, "cs000", [note, other])
-    result = loop(repo, "advance", "--batch", "cs000", "--model", "claude-sonnet-5", runner=runner, cache=tmp_path / "c")
+    result = loop(repo, "advance", "--batch", "cs000", runner=runner, cache=tmp_path / "c")
     assert result.returncode == 3
     assert "prose:english:training" in result.stderr and "compartida" in result.stderr
     rows = (repo / ".claude/workbench/translation/batches.tsv").read_text(encoding="utf-8").splitlines()[1:]
@@ -820,7 +850,7 @@ def test_advance_no_sweep_never_writes_the_memory(tmp_path: Path) -> None:
                                   "fix_generico": {"tipo": "mechanical", "buscar": "training", "reemplazar": "entrenamiento"},
                                   "archivos_donde_ya_se_aplico": ["x"]}) + "\n", encoding="utf-8")
     before = memory.read_bytes()
-    result = loop(repo, "advance", "--batch", "cs000", "--model", "claude-sonnet-5", "--memory", str(memory),
+    result = loop(repo, "advance", "--batch", "cs000", "--memory", str(memory),
                   "--no-sweep", "--max-iterations", "2", runner=runner, cache=tmp_path / "c")
     # Que corrió de verdad: sin esto, un `--no-sweep` desconocido aprobaba sin ejecutar nada.
     assert result.returncode == 3, result.stderr
@@ -873,7 +903,7 @@ def test_included_chapters_are_translated_and_verified_as_units(tmp_path: Path) 
     chapter = note.parent / "ch01" / "ch01-chapter.tex"
     chapter.parent.mkdir()
     chapter.write_text(chapter_zh, encoding="utf-8")
-    result = loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note),
+    result = loop(repo, "cycle", "--batch", "cs000", str(note),
                   runner=runner, cache=tmp_path / "c")
     es_note = note.with_name("lecture01-notes.es-mx.tex").read_text(encoding="utf-8")
     assert "\\IfFileExists{ch01/ch01-chapter.es-mx.tex}{\\input{ch01/ch01-chapter.es-mx.tex}}{}" in es_note
@@ -900,7 +930,7 @@ def test_translate_allows_the_measured_turn_tail_and_names_the_rejection(tmp_pat
                                           'result = "" if "OMITIR" in body else'), encoding="utf-8")
     bench = tmp_path / "bench"
     loop(repo, "prepare", "--bench", str(bench), str(note))
-    result = loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    result = loop(repo, "translate", "--bench", str(bench), runner=runner)
     args = json.loads(runner.with_suffix(".args").read_text())
     assert args[args.index("--max-turns") + 1] == "8"
     # Un ítem sin marcadores nombra su causa si la salida de `claude -p` la trae.
@@ -931,7 +961,7 @@ def test_advance_retries_chunks_that_were_rejected(tmp_path: Path) -> None:
                           'result = "" if (calls == 0 and n == 1) else "SIN MARCADORES" if "OMITIR" in body else')
     runner.write_text(flaky, encoding="utf-8")
     write_plan(repo, "cs000", [note])
-    result = loop(repo, "advance", "--batch", "cs000", "--model", "claude-sonnet-5", runner=runner, cache=tmp_path / "c")
+    result = loop(repo, "advance", "--batch", "cs000", runner=runner, cache=tmp_path / "c")
     assert result.returncode == 0, result.stdout + result.stderr
     rows = (repo / ".claude/workbench/translation/batches.tsv").read_text(encoding="utf-8").splitlines()[1:]
     assert [r.split("\t")[6] for r in rows] == ["sin-ensamblar", "0"]
@@ -941,7 +971,7 @@ def test_a_mechanical_fix_that_extends_its_own_text_is_idempotent(tmp_path: Path
     # Llevar xeCJK a las notas ya traducidas es «…{spanish}» → «…{spanish}\n\usepackage{xeCJK}»:
     # el reemplazo contiene lo buscado y cada ola lo volvería a duplicar.
     repo, note, runner = setup(tmp_path)
-    loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note), runner=runner, cache=tmp_path / "c")
+    loop(repo, "cycle", "--batch", "cs000", str(note), runner=runner, cache=tmp_path / "c")
     # Ancla propia: el preámbulo localizado ya trae xeCJK con sus comentarios.
     anchor = "\\begin{document}\n"
     memory = tmp_path / "memory.jsonl"
@@ -997,7 +1027,7 @@ def test_measure_records_the_net_effect_of_each_decision(tmp_path: Path) -> None
     # (señales resueltas menos señales introducidas) antes de la siguiente.
     dictionary = dict(DICTIONARY, **{"训练用 checkpoint。": "El throughput usa checkpoint."})
     repo, note, runner = setup(tmp_path, dictionary)
-    loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note), runner=runner, cache=tmp_path / "c")
+    loop(repo, "cycle", "--batch", "cs000", str(note), runner=runner, cache=tmp_path / "c")
     es = note.with_name("lecture01-notes.es-mx.tex")
     table = repo / ".claude/workbench/translation/decisions.tsv"
     # Sin medición anterior no hay neto: la primera es la línea base. Comparar
@@ -1052,7 +1082,7 @@ def test_a_session_limit_stops_the_batch_instead_of_retrying(tmp_path: Path) -> 
                               f'result = {SESSION_LIMIT!r} if n == 1 else "SIN MARCADORES" if "OMITIR" in body else')
     runner.write_text(limited, encoding="utf-8")
     write_plan(repo, "cs000", [note])
-    result = loop(repo, "advance", "--batch", "cs000", "--model", "claude-sonnet-5", runner=runner, cache=tmp_path / "c")
+    result = loop(repo, "advance", "--batch", "cs000", runner=runner, cache=tmp_path / "c")
     assert result.returncode == 5, result.stdout + result.stderr
     assert "límite de sesión" in result.stderr
     assert runner.with_suffix(".calls").read_text() == "1"
@@ -1084,7 +1114,7 @@ def test_a_wave_stops_launching_batches_once_one_hits_the_session_limit(tmp_path
     plan.parent.mkdir(parents=True, exist_ok=True)
     plan.write_text("\n".join(rows) + "\n", encoding="utf-8")
     env = dict(os.environ, TRANSLATION_RUNNER=str(runner), THYROX_CACHE_DIR=str(tmp_path / "c"))
-    result = subprocess.run(["bash", str(WAVE), "--from", "1", "--to", "3", "--jobs", "1", "--model", "claude-sonnet-5"],
+    result = subprocess.run(["bash", str(WAVE), "--from", "1", "--to", "3", "--jobs", "1"],
                             cwd=repo, env=env, capture_output=True, text=True)
     assert result.returncode == 5, result.stdout + result.stderr
     assert "límite de sesión" in result.stderr
@@ -1179,7 +1209,7 @@ def test_retranslate_leaves_each_chunk_a_correction_naming_what_failed(tmp_path:
     # devuelto a pendientes lleva su nota, con la forma que el glosario adopta.
     dictionary = dict(DICTIONARY, **{"训练用 checkpoint。": "La auditabilidad usa checkpoint."})
     repo, note, runner = setup(tmp_path, dictionary)
-    loop(repo, "cycle", "--batch", "cs000", "--model", "claude-sonnet-5", str(note), runner=runner, cache=tmp_path / "c")
+    loop(repo, "cycle", "--batch", "cs000", str(note), runner=runner, cache=tmp_path / "c")
     loop(repo, "retranslate", "--batch", "cs000")
     chunks = repo / ".claude/workbench/translation/cs000/chunks"
     corrections = sorted(chunks.rglob("*.correccion.md"))
@@ -1199,7 +1229,7 @@ def test_usage_records_the_memory_gnu_time_measured_for_each_item(tmp_path: Path
     repo, note, runner = setup(tmp_path)
     bench = tmp_path / "bench"
     loop(repo, "prepare", "--bench", str(bench), str(note))
-    loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    loop(repo, "translate", "--bench", str(bench), runner=runner)
     out = next(bench.glob("translate/*"))
     (out / "1.time").write_text("212680 12.34 3.20 0.80\n", encoding="utf-8")
     result = loop(repo, "usage", "--bench", str(bench))
@@ -1220,7 +1250,7 @@ def test_usage_reads_gnu_time_when_the_command_failed(tmp_path: Path) -> None:
     repo, note, runner = setup(tmp_path)
     bench = tmp_path / "bench"
     loop(repo, "prepare", "--bench", str(bench), str(note))
-    loop(repo, "translate", "--bench", str(bench), "--model", "claude-sonnet-5", runner=runner)
+    loop(repo, "translate", "--bench", str(bench), runner=runner)
     out = next(bench.glob("translate/*"))
     (out / "1.time").write_text("Command exited with non-zero status 1\n233620 1.53 0.95 0.14\n", encoding="utf-8")
     (out / "2.time").write_text("Command terminated by signal 9\n", encoding="utf-8")

@@ -153,7 +153,7 @@ esta sección como su origen.
 
 | Plan 2.2.0 | Aquí | Pieza |
 |---|---|---|
-| Agente | **Traductor**: una conversación `claude -p` por fragmento, con `--tools Read,Grep`. Lee el fragmento zh y **devuelve** la traducción entre `<<<ES` y `ES>>>`; el ciclo la escribe | `headless-pool` de THYROX vía `tools/thyrox/run`. `Write` quedó fuera porque `claude -p` lo bloquea bajo `.claude/` (primer intento del piloto) |
+| Agente | **Traductor**: un `thyrox -p` por fragmento, con `--tools Read,Grep`, cada uno en una ExecutionUnit de THYROX autorizada por la identidad de trabajo de este proyecto (`ai-course-notes:es-mx/<lote>/translate/<sello>/<n>`). Lee el fragmento zh y **devuelve** la traducción entre `<<<ES` y `ES>>>`; el ciclo la escribe | `headless-pool --execution unit --model-policy tools/lang/es-mx/model-policy.json` de THYROX vía `tools/thyrox/run`. El modelo lo elige el recomendador dentro de esa política: sólo el Qwen oficial cualificado, sin respaldo al proveedor; sin él, el pool rehúsa. Claude no participa |
 | Fuente original | la **transcripción en inglés** de la clase (`source.srt`, enlazada junto al fragmento): el traductor la consulta con `Grep` cuando duda de qué significa un término que el original escribe en chino | `english_source()` en `prepare`; 320 de las 370 notas tienen una |
 | Verificador | **Batería determinista** por nota (sección 4) | `tools/scripts/` |
 | Memoria | **Dos memorias persistentes**, versionadas | `tools/lang/es-mx/glossary.tsv` (decisiones por término, con fuente) y `tools/lang/es-mx/translation_memory.jsonl` (patrones) |
@@ -365,7 +365,7 @@ historial. Se lee, en este orden: este plan (secciones 6, 9.1 y ésta),
 **Una ola, de principio a fin, sin vigilarla.**
 
 ```bash
-uv run --locked bash tools/scripts/translate_wave.sh --from N --to M --jobs 2 --model claude-sonnet-5 --compile \
+uv run --locked bash tools/scripts/translate_wave.sh --from N --to M --jobs 2 --compile \
     > .claude/cache/ola/ola-K-$(date -u +%Y%m%dT%H%M%SZ).log 2>&1   # como tarea en segundo plano del cliente
 ```
 
@@ -507,11 +507,14 @@ compara por ítem contra la ola 2, en vez de suponer su efecto.
 
 ## 11. Decisiones
 
-1. **Modelo del traductor:** `claude-sonnet-5`, sostenido por los pilotos. El
-   fallo del primer intento fue del contrato, no del modelo. **Se reabre** si la
-   retraducción sigue introduciendo inglés donde el original escribe chino; en
-   ese caso, A/B con otro modelo sobre los mismos fragmentos, midiendo señales
-   y tokens.
+1. **Modelo del traductor:** `qwen2.5:7b-instruct` desde los artefactos
+   oficiales de Qwen, cualificado y ejecutado por THYROX (directiva del
+   ejecutor 2026-10-02). La política vive en `tools/lang/es-mx/model-policy.json`
+   (`fallback.enabled: false`): si Qwen no está cualificado o no arranca, la
+   ola se detiene; no cae a Claude. Antes, `claude-sonnet-5`. Al desbloquearse
+   la materialización real, A/B mínima sobre fragmentos ya aceptados
+   (estructura, V0–V6, señales introducidas, glosario, tokens, tiempo) antes
+   de continuar desde el estado persistido.
 2. **Orden de los cursos:** decidido. Lo deriva `plan` por tamaño.
 3. **Anchura:** no es una decisión. `--memfree` acota la memoria y `--width`
    solo la concurrencia contra la API (sección 2.1).
