@@ -25,8 +25,9 @@ por fragmento, cada uno en una ExecutionUnit (`--execution unit`) autorizada por
 la identidad de trabajo de este proyecto (`ai-course-notes:es-mx/<lote>/translate/<sello>/<n>`),
 repartidos con GNU Parallel. El modelo no se nombra aquí: lo elige el
 recomendador de THYROX dentro de la política del proyecto
-(`tools/lang/es-mx/model-policy.json`: sólo el Qwen oficial, sin respaldo al
-proveedor). `TRANSLATION_RUNNER` lo sustituye en las pruebas. La verificación reparte las notas con GNU Parallel y guarda
+(`tools/lang/es-mx/model-policy.json`: sólo Qwen 2.5 7B Q4_K_M, sin respaldo al
+proveedor; el oficial de Hugging Face o el de la biblioteca de Ollama, éste con
+su equivalencia al oficial sin verificar, H-THYROX-312). `TRANSLATION_RUNNER` lo sustituye en las pruebas. La verificación reparte las notas con GNU Parallel y guarda
 cada veredicto en `$THYROX_CACHE_DIR/translation/`, con clave en el contenido
 de la nota zh, la es-MX y los verificadores.
 """
