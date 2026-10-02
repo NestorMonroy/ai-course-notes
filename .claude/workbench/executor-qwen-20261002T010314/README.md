@@ -1,5 +1,53 @@
 # El traductor es-MX pasa al ejecutor de THYROX con Qwen (trabajo del consumidor)
 
+## El encargo
+
+<!-- verbatim, sin parafrasear -->
+
+> ```
+> --model qwen2.5:7b-instruct
+> ```
+>
+> como excepción.
+> Necesitamos una política declarativa que pueda expresar:
+>
+> ```
+> model_policy:
+>   allowed:
+>     - local:qwen2.5:7b-instruct
+>
+>   fallback:
+>     enabled: false
+>
+>   claude:
+>     enabled: false
+> ```
+>
+> o el equivalente que encaje con las abstracciones existentes.
+> La propiedad necesaria es:
+>
+> ```
+> qualified Qwen available
+>         ↓
+> use Qwen
+>
+> Qwen unavailable
+>         ↓
+> hard_block
+> ```
+
+## La premisa, si se corrigio al primer comando
+
+Ninguna: el encargo se ejecutó tal como se pidió.
+
+## Las piezas
+
+| archivo | que hace |
+|---|---|
+| `outputs/` | 6 salidas: rojos, verdes y anulaciones |
+
+## Los resultados
+
 Identidad: `ai-course-notes:es-mx/executor-qwen` (referencia de trabajo del
 consumidor, TASK-THYROX-0756); no es una TASK de THYROX. Sólo cambia el punto
 de ejecución de `ES_MX_TRANSLATION_PLAN.md`; glosario, memoria, prompt,
@@ -24,3 +72,6 @@ conjuntos está en la salida del commit). Las nuevas y la de la ola: verdes.
 | política legible obligatoria | «refuses without a readable policy» |
 
 Mitad roja: `outputs/red.txt` (46 fallos: `--model` obligatorio).
+
+*Metrica:* aserciones rojas antes y las que caen al retirar la guarda.
+*Ciega a:* una traducción real: Qwen no está cualificado y la política bloquea.
