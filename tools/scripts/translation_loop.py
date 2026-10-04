@@ -270,13 +270,13 @@ def pending_units(bench: Path) -> list[list[str]]:
     return pending
 
 
-# La memoria del pool la hace cumplir GNU Parallel mientras corre (`--memfree`
+# La memoria del pool la hace cumplir GNU Parallel mientras se ejecuta (`--memfree`
 # de headless-pool, THYROX bfb4eb15): no lanza un ítem bajo la cota y reencola
 # el mas joven si la memoria baja de la mitad. 3G deja lugar a un `tsc` de 2 GB
 # en paralelo. La anchura NO se deriva de la carga —la carga a un minuto mide a
 # los otros procesos, no al pool—: solo acota la concurrencia contra la API,
 # cuyos limites de tasa no se ven desde el contenedor. 10 es lo que el piloto
-# corrió sin un 429; si aparece uno, se baja con `--width`.
+# ejecutó sin un 429; si aparece uno, se baja con `--width`.
 DEFAULT_MEMFREE = "3G"
 # Con `Grep` sobre `source.srt`, la ola 1 midió 46 ítems en 2 turnos, 19 en 3,
 # 10 en 4 y 18 que agotaron el tope de 4 (`error_max_turns`): el doble cubre esa cola.
@@ -1181,8 +1181,8 @@ def cmd_advance(args) -> int:
             print(f"advance: {len(persistent)} señal(es) sobrevive(n) a la retraducción de su fragmento; hace "
                   "falta juicio (glosario o regla): " + ", ".join(persistent[:10]), file=sys.stderr)
             return 3
-        # En una ola (`translate_wave.sh`) varios lotes corren a la vez: el barrido
-        # reescribe la memoria, así que corre una sola vez al final de la ola.
+        # En una ola (`translate_wave.sh`) varios lotes se ejecutan a la vez: el barrido
+        # reescribe la memoria, así que se ejecuta una sola vez al final de la ola.
         if not args.no_sweep and any(routes.get(s, ("local",))[0] == "deterministic" for s in signals):
             cmd_sweep(ns(bench=bench, iteration=int(last.name), memory=args.memory, jobs=args.jobs))
         cmd_retranslate(ns(batch=args.batch, bench=None, memory=args.memory))

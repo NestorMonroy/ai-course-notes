@@ -71,7 +71,7 @@ original.
 
 ### 2.1 Memoria y anchura del pool: dos cotas distintas
 
-**La memoria la hace cumplir GNU Parallel mientras el pool corre.**
+**La memoria la hace cumplir GNU Parallel mientras el pool se ejecuta.**
 `translate` pasa `--memfree 3G` a `headless-pool` (THYROX `bfb4eb15`), que tiene
 dos efectos:
 
@@ -85,7 +85,7 @@ no se usa.
 
 **La anchura (`--width`, 10 por defecto) solo acota la concurrencia contra la
 API.** Sus límites de tasa (429) no se ven desde el contenedor, y 10 es lo que
-el piloto corrió sin ningún 429. Si aparece uno, se baja con `--width` y se
+el piloto ejecutó sin ningún 429. Si aparece uno, se baja con `--width` y se
 registra en el banco.
 
 La anchura **no** se deriva de la carga. Una primera versión lo hacía y tenía
@@ -117,7 +117,7 @@ instrumentos, y este plan los usa así:
 **GNU Time** se instala por la cadena de herramientas del consumidor:
 `notes_toolchain_require_gnu_time` en `tools/lib/toolchain.sh` (lo revisa
 `tools/setup.sh --check`). Se busca la marca «GNU Time», no una versión: el
-paquete de Ubuntu imprime `time (GNU Time) UNKNOWN`. Sin él el pool corre
+paquete de Ubuntu imprime `time (GNU Time) UNKNOWN`. Sin él el pool se ejecuta
 igual y no mide; en `usage.tsv` un ítem sin `<n>.time` lleva `-`, porque «no
 medido» no es cero.
 
@@ -302,7 +302,7 @@ agregar); la corrección está en el banco `linea-base-de-measure-*`.
 
 - la anchura contra la API se reparte entre los trabajos (`10 // J`);
 - el `--joblog` de Parallel es el registro de la ola;
-- el barrido (ruta 1) y el triage (ruta 2) corren **una sola vez** al final de
+- el barrido (ruta 1) y el triage (ruta 2) se ejecutan **una sola vez** al final de
   la ola, porque el barrido reescribe la memoria y dos en paralelo perderían
   entradas.
 
@@ -334,7 +334,7 @@ Antes de aceptar un lote, en su banco y no en el conteo de señales:
    `retranslate` indica que se saltó la clasificación.
 3. **Iteraciones contra unidades.** `batches.tsv` da, por iteración, cuántos
    fragmentos se tradujeron y cuántas señales quedaron. Si las iteraciones se
-   acercan al número de fragmentos con señal, el ciclo corrió en modo reactivo
+   acercan al número de fragmentos con señal, el ciclo se ejecutó en modo reactivo
    (`translation_gate.py report`).
 
 ## 8. Fases
@@ -451,7 +451,7 @@ sola cifra.
 
 De ahí tres reglas de operación:
 
-- **La ola corre sola de principio a fin** y se recoge por su notificación;
+- **La ola se ejecuta sola de principio a fin** y se recoge por su notificación;
   no se vigila turno a turno.
 - **Contra el límite de la cuenta no hay reintento.** `translate` reconoce la
   respuesta de límite («You've hit your session limit…», que llega con
@@ -464,7 +464,7 @@ De ahí tres reglas de operación:
 
 **Se terminan los lotes abiertos antes de abrir otros.** Medido en la ola 7:
 cuatro lotes nuevos y grandes (cs224r, 6s191 y los dos de Berkeley, 644
-fragmentos) corrieron a la vez y la cuota se acabó con 318 fragmentos hechos.
+fragmentos) se ejecutaron a la vez y la cuota se acabó con 318 fragmentos hechos.
 Ninguna nota se armó, porque `assemble` escribe una nota sólo cuando están
 todos sus fragmentos. El trabajo no se perdió: cada fragmento aceptado vive
 en `chunks/<nota>/NNN.es.tex`, versionado, y `translate` sólo manda al modelo
@@ -473,7 +473,7 @@ entonces:
 
 - una ola cubre sólo filas del plan ya abiertas hasta que todas cierran
   (0 señales) o piden juicio; las filas nuevas esperan;
-- los lotes grandes corren con `--jobs 2` o menos, para que alguno termine y
+- los lotes grandes se ejecutan con `--jobs 2` o menos, para que alguno termine y
   arme sus notas antes del límite de la cuenta;
 - el orden es por lo que falta: primero el lote al que menos fragmentos le
   quedan.

@@ -270,7 +270,7 @@ def test_memory_is_bounded_by_memfree_and_width_is_only_a_ceiling(tmp_path: Path
     result = loop(repo, "translate", "--bench", str(bench), runner=runner)
     assert result.returncode == 0, result.stderr
     args = json.loads(runner.with_suffix(".args").read_text())
-    # La memoria la hace cumplir GNU Parallel mientras el pool corre; la
+    # La memoria la hace cumplir GNU Parallel mientras el pool se ejecuta; la
     # anchura no depende de la carga, que mide a otros procesos.
     assert args[args.index("--memfree") + 1] == "3G"
     assert args[args.index("--width") + 1] == "10"
@@ -844,7 +844,7 @@ WAVE = REPO_ROOT / "tools" / "scripts" / "translate_wave.sh"
 
 
 def test_advance_no_sweep_never_writes_the_memory(tmp_path: Path) -> None:
-    # En una ola, varios lotes corren a la vez: un barrido por lote reescribiría
+    # En una ola, varios lotes se ejecutan a la vez: un barrido por lote reescribiría
     # la memoria en paralelo y perdería entradas. `--no-sweep` la deja intacta.
     dictionary = dict(DICTIONARY, **{"训练用 checkpoint。": "El training usa checkpoint."})
     repo, note, runner = setup(tmp_path, dictionary)
@@ -856,7 +856,7 @@ def test_advance_no_sweep_never_writes_the_memory(tmp_path: Path) -> None:
     before = memory.read_bytes()
     result = loop(repo, "advance", "--batch", "cs000", "--memory", str(memory),
                   "--no-sweep", "--max-iterations", "2", runner=runner, cache=tmp_path / "c")
-    # Que corrió de verdad: sin esto, un `--no-sweep` desconocido aprobaba sin ejecutar nada.
+    # Que se ejecutó de verdad: sin esto, un `--no-sweep` desconocido aprobaba sin ejecutar nada.
     assert result.returncode == 3, result.stderr
     rows = (repo / ".claude/workbench/translation/batches.tsv").read_text(encoding="utf-8").splitlines()[1:]
     assert len(rows) == 2

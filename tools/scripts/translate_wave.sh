@@ -14,8 +14,8 @@
 # porque el techo de concurrencia es uno solo. El registro de la ola (joblog de
 # Parallel, barrido y triage) queda en `translation/waves/<fecha>/`.
 #
-# El barrido (ruta 1) y el triage (ruta 2) corren una sola vez al final: el
-# barrido reescribe la memoria y es para todo el corpus, así que no puede correr
+# El barrido (ruta 1) y el triage (ruta 2) se ejecutan una sola vez al final: el
+# barrido reescribe la memoria y es para todo el corpus, así que no puede ejecutarse
 # por lote en paralelo. Un lote que sale con 3 pide juicio y es lo esperado; la
 # ola falla solo si un lote sale con otro código (verificación incompleta o error).
 # =============================================================================
