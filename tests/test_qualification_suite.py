@@ -86,5 +86,5 @@ def test_selection_is_deterministic_and_skips_unusable_fragments(tmp_path: Path)
 
 def test_the_suite_declares_its_id_and_class(tmp_path: Path) -> None:
     built = suite.build_suite([fragment(tmp_path, "000")], "PROMPT", FORBIDDEN)
-    assert built["id"] == suite.SUITE_ID and built["taskClass"] == "analisis"
+    assert built["id"] == suite.SUITE_ID and built["taskClass"] == "analysis"
     assert json.loads(json.dumps(built, ensure_ascii=False)) == built

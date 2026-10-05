@@ -13,7 +13,7 @@ escribe con el trabajo real del ciclo:
 - sólo se exige lo que la traducción aceptada de ese fragmento cumple, para que
   una traducción correcta pueda aprobar.
 
-La cualificación es de la clase ``analisis``, la que ``translate`` pide, y se
+La cualificación es de la clase ``analysis``, la que ``translate`` pide, y se
 escribe en el archivo de cualificaciones de ESTE proyecto: aprueba el modelo para
 este trabajo, no para el de otro consumidor.
 
@@ -34,7 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 SUITE_ID = "es-mx-translation@1"
-TASK_CLASS = "analisis"
+TASK_CLASS = "analysis"
 BEGIN_MARK, END_MARK = "<<<ES", "ES>>>"
 #: El mismo rango que ``translation_loop.HAN``: lo que el ciclo cuenta como chino residual.
 HAN_PATTERN = "[\\u4e00-\\u9fff]"

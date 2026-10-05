@@ -62,7 +62,7 @@ PARENTHESIZED = re.compile(r"[(（][^()（）\n]*[)）]")
 # la clase con que el recomendador busca un modelo cualificado y el consumidor
 # con que THYROX cita cada ítem. Ninguna nombra un modelo.
 DEFAULT_MODEL_POLICY = Path(__file__).resolve().parents[2] / "tools" / "lang" / "es-mx" / "model-policy.json"
-DEFAULT_TASK_CLASS = "analisis"
+DEFAULT_TASK_CLASS = "analysis"
 CONSUMER = "ai-course-notes"
 VERIFIERS = ["check_translation_parity.py", "check_prose_vocabulary.py", "check_note_coverage.py",
              "note_language.py", "translation_loop.py"]
