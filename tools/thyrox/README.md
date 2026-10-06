@@ -18,7 +18,7 @@ wrappers que preparan el entorno del consumer y delegan en
    | `THYROX_ROOT` | la raíz del clon de THYROX |
    | `THYROX_CONSUMER` | la raíz de este repositorio |
    | `THYROX_WORKBENCH_DIR` | `<consumer>/.claude/workbench` |
-   | `THYROX_MODEL_QUALIFICATIONS` | `<consumer>/.claude/models/qualifications.json`: las cualificaciones que midió ESTE proyecto, con su suite (`tools/lang/es-mx/qualification/`) |
+   | `THYROX_MODEL_QUALIFICATIONS` | `<consumer>/.thyrox/models/qualifications.json`: las cualificaciones que midió ESTE proyecto (el catálogo y los GGUF son de la instalación y siguen en `<thyrox>/.thyrox/models/`), con su suite (`tools/lang/es-mx/qualification/`) |
    | `THYROX_BACKGROUND_LOG_DIR` | `<consumer>/.claude/build-logs` |
    | `THYROX_JOBS_DIR` | `<consumer>/.claude/jobs` |
    | `THYROX_JOBS_LEDGER_DIR` | `<consumer>/.claude/jobs-ledger` (cada sesión recibe su subdirectorio) |
