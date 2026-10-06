@@ -1,0 +1,65 @@
+\section{DDPM 回顾}
+
+本节课的主题是 Score-Based Models（基于分数的模型），但在展开新内容之前，讲者首先回顾了上节课介绍的 DDPM（Denoising Diffusion Probabilistic Models）的核心思想，为后续理解 score function 与扩散模型之间的深层联系打下基础。
+
+\subsection{扩散模型的基本框架}
+
+扩散模型的基本思路是将数据的生成过程定义为一个\textbf{序列化的过程}（sequential process）。与传统的 VAE 等模型只有单一隐变量不同，扩散模型将数据点 $x_0$ 逐步映射到一系列隐变量 $x_1, x_2, \ldots, x_T$，使得最终的隐变量 $x_T$ 服从一个已知的分布（通常是标准高斯分布）。生成过程则是这个前向过程的逆过程：从标准高斯样本 $x_T$ 出发，逐步还原到数据点 $x_0$。
+
+\begin{importantbox}{扩散模型的两个关键特征}
+\begin{enumerate}
+    \item \textbf{马尔可夫性}：前向过程中 $x_t$ 的采样仅依赖于 $x_{t-1}$，逆向过程中 $x_{t-1}$ 的采样仅依赖于 $x_t$。
+    \item \textbf{高斯前向转移}：前向转移分布被定义为特定形式的高斯分布，由参数 $\beta_t$ 控制：
+    $$q(x_t \mid x_{t-1}) = \mathcal{N}(x_t; \sqrt{1-\beta_t}\, x_{t-1},\; \beta_t I)$$
+\end{enumerate}
+\end{importantbox}
+
+\subsection{前向跳跃分布与训练}
+
+由于前向转移分布是带有线性均值的高斯分布，我们可以推导出\textbf{前向跳跃分布}（forward jump distribution）的解析形式，即直接从 $x_0$ 采样任意中间时刻 $x_t$ 的分布：
+
+$$q(x_t \mid x_0) = \mathcal{N}(x_t;\; \sqrt{\bar{\alpha}_t}\, x_0,\; (1-\bar{\alpha}_t) I)$$
+
+其中 $\bar{\alpha}_t = \prod_{s=1}^{t}(1-\beta_s)$。这意味着在训练时我们不需要逐步运行前向过程，可以直接``跳跃''采样 $x_t$。
+
+\begin{knowledgebox}{前向跳跃 vs. 逆向跳跃}
+在前向过程中，由于转移分布的均值是条件变量的线性函数，多步高斯分布的复合仍然是高斯分布，因此可以得到闭式的跳跃分布。但在逆向过程中，由于逆向转移分布的均值是神经网络输出的\textbf{非线性}函数，多步迭代的复合分布\textbf{不再是高斯}分布，因此逆向过程不能跳过中间步骤，必须逐步迭代采样。
+\end{knowledgebox}
+
+\subsection{三种预测目标}
+
+DDPM 框架中，训练神经网络有三种等价的预测目标：
+
+\begin{enumerate}
+    \item \textbf{均值预测器}（Mean Predictor）：直接预测逆向转移分布的均值 $\mu_\theta(x_t, t)$。
+    \item \textbf{干净样本预测器}（Clean Sample Predictor / $x_0$-prediction）：预测给定 $x_t$ 时原始数据点 $x_0$ 的期望值 $\hat{x}_\theta(x_t, t) \approx \mathbb{E}[x_0 \mid x_t]$。
+    \item \textbf{噪声预测器}（Noise Predictor / $\epsilon$-prediction）：预测从 $x_0$ 采样 $x_t$ 时使用的标准高斯噪声 $\epsilon_\theta(x_t, t) \approx \mathbb{E}[\epsilon_t \mid x_t]$。
+\end{enumerate}
+
+\begin{knowledgebox}{三种预测器之间的等价关系}
+已知 $x_t = \sqrt{\bar{\alpha}_t}\, x_0 + \sqrt{1-\bar{\alpha}_t}\, \epsilon_t$，其中 $\epsilon_t \sim \mathcal{N}(0, I)$，则从任一预测器的输出都可以计算出其他两个的值，三者只是参数化方式不同。最终的训练损失在去掉时间步权重后都可以简化为形如 $\|f_\theta(x_t, t) - f_{\text{target}}\|^2$ 的简单 L2 损失。
+\end{knowledgebox}
+
+无论选择哪种预测目标，DDPM 的训练过程都是：采样 $x_0 \sim p_{\text{data}}$，采样 $t \sim \text{Uniform}(1,T)$，采样 $\epsilon \sim \mathcal{N}(0,I)$，计算 $x_t = \sqrt{\bar{\alpha}_t}\, x_0 + \sqrt{1-\bar{\alpha}_t}\, \epsilon$，然后最小化对应的 L2 损失。
+
+\subsection{生成模型的必要性}
+
+讲者提出了一个发人深省的问题：如果我们已经拥有50亿张图片的数据集，为什么还需要生成模型？为什么不直接从中采样一张？
+
+\begin{importantbox}{生成模型相比直接检索的优势}
+\begin{enumerate}
+    \item \textbf{压缩}：一个预训练的扩散模型可能只有数百 MB，却编码了数十亿张图片中的分布信息，压缩比极高。
+    \item \textbf{新颖性与多样性}：生成模型能产生全新的、数据集中不存在的图片，而非简单复制。
+    \item \textbf{隐私保护}：生成模型有可能（虽然无法完全保证）不直接输出训练数据中的原始图片，在一定程度上保护数据隐私。
+    \item \textbf{条件生成}：生成模型可以根据输入条件（如文本描述）生成与条件对齐的新数据，这是简单检索难以做到的。
+\end{enumerate}
+\end{importantbox}
+
+\begin{warningbox}{隐私保护并非绝对}
+讲者明确指出，扩散模型\textbf{不能保证}不生成训练数据中的原始图片。实际上已有研究表明，某些预训练模型确实会生成几乎可在互联网上搜索到的图片。因此，隐私保护只是``潜力''，而非``保证''。
+\end{warningbox}
+
+\subsection{本章小结}
+
+DDPM 通过定义高斯马尔可夫前向过程和可学习的逆向过程，将复杂的数据分布建模问题转化为简单的去噪任务。前向跳跃分布的闭式解使训练高效，三种等价的预测目标为实现提供了灵活性。但噪声预测器（$\epsilon$-prediction）的\textbf{物理含义}是什么？这正是本节课 Score-Based Models 要回答的核心问题。
+

@@ -1,0 +1,89 @@
+\section{Noise-Conditioned Score Networks (NCSN)}
+
+\subsection{低密度区域的 Score 估计问题}
+
+直接用 score matching 学习原始数据分布 $p_{\text{data}}(x)$ 的 score function 存在一个严重的问题。
+
+\begin{warningbox}{低密度区域的 Score 不准确}
+在多模态分布中，不同模式之间存在\textbf{低概率密度区域}（low density regions）。在这些区域：
+\begin{enumerate}
+    \item 训练数据极少，因此 score 的估计非常不准确。
+    \item 然而，Langevin dynamics 的采样起点往往落在这些低密度区域（因为初始分布通常是均匀的或高斯的）。
+    \item 不准确的 score 会导致采样过程的初始阶段充满噪声，粒子在低密度区域``乱跑''，难以有效到达高密度区域。
+\end{enumerate}
+\end{warningbox}
+
+讲者通过一个二维分布的动画生动地说明了这个问题：当从均匀分布的采样点出发，如果低密度区域的 score 不准确，粒子在采样初期会做随机运动而非有方向地向高密度区域移动。
+
+\subsection{多尺度噪声的解决方案}
+
+解决低密度区域 score 不准确问题的核心思想是：对数据添加\textbf{不同级别的高斯噪声}，从而``填充''低密度区域。
+
+当噪声方差 $\sigma^2$ 较大时，加噪后的分布 $q_\sigma(x)$ 变得更加``平滑''：
+\begin{itemize}
+    \item 原本的低密度区域被噪声``填充''，不再有近零概率密度的区域。
+    \item Score function 在整个空间上都能被准确估计。
+    \item 但代价是分布变得模糊，丧失了细节信息。
+\end{itemize}
+
+当噪声方差 $\sigma^2$ 较小时：
+\begin{itemize}
+    \item 加噪后的分布更接近原始数据分布，包含精细的结构信息。
+    \item 但低密度区域的 score 仍然不准确。
+\end{itemize}
+
+\begin{importantbox}{NCSN 的核心思想：多尺度 Score 学习}
+NCSN（Noise-Conditioned Score Networks）的核心思想是同时学习多个噪声级别下的 score function：
+$$s_\theta(x, \sigma) \approx \nabla_x \log q_\sigma(x)$$
+其中 $\sigma$ 取一系列递减的值 $\sigma_1 > \sigma_2 > \cdots > \sigma_L$。网络以 $x$ 和 $\sigma$ 为输入，输出对应噪声级别下的 score。
+\end{importantbox}
+
+\subsection{退火 Langevin Dynamics}
+
+有了多尺度的 score function，采样时使用\textbf{退火 Langevin dynamics}（Annealed Langevin Dynamics）：
+
+\begin{importantbox}{退火 Langevin Dynamics 采样算法}
+\begin{enumerate}
+    \item 从高方差（$\sigma_1$ 大，分布模糊）开始：score 在整个空间上都较准确，引导粒子从初始位置向高密度区域移动。
+    \item 逐步降低噪声级别（$\sigma_2, \sigma_3, \ldots$）：score 变得越来越精确，引导粒子向真实分布的高密度区域细化。
+    \item 在最低噪声级别（$\sigma_L$ 小，接近原始分布）收敛：粒子位于原始分布的高密度区域。
+\end{enumerate}
+在每个噪声级别上运行若干步 Langevin dynamics，然后切换到下一个（更低的）噪声级别。
+\end{importantbox}
+
+\begin{knowledgebox}{退火 Langevin Dynamics 的物理类比}
+这个过程类似于金属退火（annealing）：
+\begin{itemize}
+    \item 高温阶段（大噪声）：分子可以自由移动，跨越势垒，探索能量全景。
+    \item 缓慢冷却（逐步减噪）：分子逐渐稳定在能量最低的构型。
+    \item 低温阶段（小噪声）：分子被锁定在精确的低能量状态。
+\end{itemize}
+类似于模拟退火（simulated annealing）中的温度调度。
+\end{knowledgebox}
+
+\subsection{与扩散模型逆向过程的联系}
+
+退火 Langevin dynamics 的多尺度降噪过程，实际上与扩散模型的逆向过程有着深刻的联系：
+
+\begin{importantbox}{Score-Based Model 与 DDPM 的对应关系}
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{概念} & \textbf{DDPM 视角} & \textbf{Score-Based 视角} \\
+\midrule
+前向过程 & 逐步加噪（方差递增） & 数据分布逐步模糊 \\
+逆向过程 & 逐步去噪 & 退火 Langevin dynamics \\
+网络输出 & 噪声 $\epsilon_\theta$ & Score $s_\theta$ \\
+训练目标 & 噪声预测 L2 & Denoising score matching \\
+$\sigma_t$ 大 & 前向过程早期 & 退火初期（粗导航） \\
+$\sigma_t$ 小 & 前向过程后期 & 退火末期（精细化） \\
+\bottomrule
+\end{tabular}
+\end{center}
+DDPM 中前向过程的方差递增恰好对应 score-based 模型中从小噪声到大噪声的多尺度分布；DDPM 的逆向去噪过程恰好对应退火 Langevin dynamics 中从大噪声到小噪声的逐步精化。
+\end{importantbox}
+
+\subsection{本章小结}
+
+NCSN 通过引入多尺度噪声来解决 score function 在低密度区域估计不准确的问题。退火 Langevin dynamics 从高噪声（粗导航）开始逐步降低到低噪声（精细化），使采样过程既能有效跨越低密度区域，又能在最终收敛到准确的目标分布。这个框架与 DDPM 的逆向去噪过程在数学上完全等价，只是提供了不同的视角和直觉。
+

@@ -1,0 +1,86 @@
+\section{条件流匹配（Conditional Flow Matching）}
+
+\subsection{条件设定的动机}
+
+边际分布 $p_t(x)$ 和边际向量场 $v_t(x)$ 都没有解析表达式，因为它们依赖于未知的数据分布。为了解决这个问题，Flow Matching 引入了\textbf{条件版本}的各个量。
+
+核心思想是：给定一个具体的数据点 $x_1$，将数据分布"简化"为一个集中在 $x_1$ 附近的高斯分布 $\mathcal{N}(x_1, \sigma_{\min}^2 I)$（其中 $\sigma_{\min}$ 极小）。这样，所有条件量都有了解析表达式。
+
+\begin{knowledgebox}{条件设定与扩散模型的前向过程}
+这个条件设定与扩散模型中的前向跳跃分布（forward transition kernel）有着深刻的联系。在扩散模型中，给定一个数据点 $x_0$（注意扩散模型的符号约定），前向过程定义了每个时间步的条件分布 $q(x_t | x_0) = \mathcal{N}(\alpha_t x_0, \sigma_t^2 I)$。
+
+在 Flow Matching 中，我们做了类似的事情：给定数据点 $x_1$，定义条件概率路径 $p_t(x | x_1)$。两者的数学结构完全相同，只是时间方向相反。
+\end{knowledgebox}
+
+\subsection{条件概率路径}
+
+给定数据样本 $x_1$，条件概率路径定义为：
+
+$$p_t(x | x_1) = \mathcal{N}(x; \mu_t(x_1), \sigma_t^2(x_1) I)$$
+
+其中 $\mu_t$ 和 $\sigma_t$ 必须满足\textbf{边界条件}：
+\begin{itemize}
+    \item $t = 0$ 时：$\mu_0(x_1) = 0$，$\sigma_0(x_1) = 1$，使得 $p_0(x | x_1) = \mathcal{N}(0, I)$
+    \item $t = 1$ 时：$\mu_1(x_1) \approx x_1$，$\sigma_1(x_1) \approx \sigma_{\min} \to 0$，使得 $p_1(x | x_1) \approx \delta(x - x_1)$
+\end{itemize}
+
+边际概率路径通过对所有数据点积分恢复：
+
+$$p_t(x) = \int p_t(x | x_1) \, p_{\text{data}}(x_1) \, dx_1$$
+
+\subsection{条件流映射}
+
+\begin{importantbox}{线性条件流映射——Flow Matching 的简洁之美}
+Flow Matching 的一个关键设计选择是将条件流映射定义为\textbf{线性函数}：
+$$\phi_t(x_0 | x_1) = \mu_t(x_1) + \sigma_t(x_1) \cdot x_0$$
+这意味着，给定数据点 $x_1$ 和噪声样本 $x_0$，从 $x_0$ 到 $x_1$ 的轨迹是一条\textbf{直线}（在 $\mu_t$ 和 $\sigma_t$ 为线性函数时）。
+
+必须满足边界条件：
+\begin{itemize}
+    \item $\phi_0(x_0 | x_1) = x_0$（$t=0$ 时，输出就是噪声样本）
+    \item $\phi_1(x_0 | x_1) \approx x_1$（$t=1$ 时，输出接近数据样本）
+\end{itemize}
+\end{importantbox}
+
+线性条件流映射的好处是：
+\begin{enumerate}
+    \item 条件概率路径自然成为高斯分布
+    \item 条件向量场有解析表达式
+    \item 采样过程简单高效
+\end{enumerate}
+
+\subsection{条件向量场}
+
+从条件流映射的定义出发，条件向量场可以通过对时间求导获得：
+
+$$u_t(x | x_1) = \frac{d\phi_t(x_0 | x_1)}{dt} = \mu_t'(x_1) + \sigma_t'(x_1) \cdot x_0$$
+
+其中 $\mu_t'$ 和 $\sigma_t'$ 分别是 $\mu_t$ 和 $\sigma_t$ 对时间 $t$ 的导数。
+
+由于 $x_0 = (\phi_t^{-1}(x | x_1)) = \frac{x - \mu_t(x_1)}{\sigma_t(x_1)}$，条件向量场可以写成关于 $x$ 的函数：
+
+$$u_t(x | x_1) = \mu_t'(x_1) + \frac{\sigma_t'(x_1)}{\sigma_t(x_1)} \left( x - \mu_t(x_1) \right)$$
+
+\begin{warningbox}{不要混淆条件量和边际量}
+条件向量场 $u_t(x | x_1)$ 依赖于具体的数据点 $x_1$，而我们最终需要的是不依赖于 $x_1$ 的\textbf{边际向量场} $v_t(x)$。条件向量场本身不能直接用于生成（因为生成时我们不知道目标 $x_1$），但它是训练过程中的关键中间量。
+\end{warningbox}
+
+\subsection{从条件量到边际量}
+
+边际向量场可以通过条件向量场和条件概率路径的加权平均得到：
+
+$$v_t(x) = \frac{\int u_t(x | x_1) \, p_t(x | x_1) \, p_{\text{data}}(x_1) \, dx_1}{p_t(x)}$$
+
+\begin{importantbox}{Conditional Flow Matching 的核心定理}
+Flow Matching 的关键理论结果是：使用条件向量场训练的损失函数——
+$$\mathcal{L}_{\text{CFM}}(\theta) = \mathbb{E}_{t, \, x_1 \sim p_{\text{data}}, \, x_0 \sim p_0} \left\| v_\theta(t, \phi_t(x_0 | x_1)) - u_t(\phi_t(x_0 | x_1) | x_1) \right\|^2$$
+——与原始的 Flow Matching 损失函数 $\mathcal{L}_{\text{FM}}(\theta)$ 具有\textbf{相同的梯度}（关于参数 $\theta$）。
+
+这意味着我们可以用条件损失来等价地训练边际向量场，而条件损失中的所有量都有解析表达式！
+\end{importantbox}
+
+\subsection{本章小结}
+
+Conditional Flow Matching 通过引入条件设定，将不可解析的边际量转化为有解析形式的条件量。关键的理论保证是：条件损失函数和边际损失函数具有相同的梯度，因此训练效果等价。这就是 Flow Matching 能够避免 ODE 求解的根本原因。
+
+

@@ -1,0 +1,84 @@
+\section{加速生成：减少采样步数}
+
+\subsection{子序列采样策略}
+
+DDIM 的另一个核心贡献是提出了\textbf{步数跳跃}（stride / subsequence sampling）策略。在训练时，模型可能使用了 $T=1000$ 个时间步。但在采样时，我们不必遍历所有时间步，而是选择一个子序列。
+
+具体来说，设原始时间步集合为 $\{1, 2, \ldots, T\}$，我们选择一个大小为 $S < T$ 的子序列 $\tau = \{\tau_1, \tau_2, \ldots, \tau_S\}$，其中 $\tau_S = T$。采样时只在子序列 $\tau$ 的时间步上执行逆过程更新。
+
+\begin{importantbox}{步数跳跃的数学合理性}
+DDIM 的采样公式只依赖于 $\bar{\alpha}_t$ 和 $\bar{\alpha}_{t-1}$ 的值，而不要求时间步必须是连续的整数。因此我们可以将公式中的 $t \to \tau_i$，$t-1 \to \tau_{i-1}$ 进行替换：
+$$
+\mathbf{x}_{\tau_{i-1}} = \sqrt{\bar{\alpha}_{\tau_{i-1}}}\,\hat{\mathbf{x}}_0(\mathbf{x}_{\tau_i}) + \sqrt{1-\bar{\alpha}_{\tau_{i-1}}-\sigma_{\tau_i}^2}\cdot\frac{\mathbf{x}_{\tau_i} - \sqrt{\bar{\alpha}_{\tau_i}}\,\hat{\mathbf{x}}_0(\mathbf{x}_{\tau_i})}{\sqrt{1-\bar{\alpha}_{\tau_i}}} + \sigma_{\tau_i}\boldsymbol{\epsilon}
+$$
+这本质上是在一个更粗粒度的噪声调度上执行 DDIM 更新，数学上完全合法。
+\end{importantbox}
+
+例如，从 $T=1000$ 步的模型中，我们可以均匀选取 $S=50$ 步：
+$$
+\tau = \{20, 40, 60, \ldots, 980, 1000\}
+$$
+这将采样步数从 1000 减少到 50，加速 20 倍。
+
+\subsection{确定性采样在步数减少时的优势}
+
+讲者展示了 DDIM 论文中的实验结果，揭示了一个重要的经验规律：
+
+\begin{importantbox}{确定性采样对步数减少更鲁棒}
+实验表明（以 CIFAR-10 上的 FID 分数为例）：
+\begin{itemize}
+    \item 当使用完整的 1000 步时，DDPM（$\eta=1$，随机采样）和 DDIM（$\eta=0$，确定性采样）性能相当
+    \item 当步数减少到 50-100 步时，确定性 DDIM 的质量退化明显小于随机 DDPM
+    \item 当步数进一步减少到 10-20 步时，确定性 DDIM 仍能保持可接受的质量，而随机采样的质量急剧下降
+\end{itemize}
+直观解释：随机采样中每步注入的噪声在步数较少时会累积更大的误差；而确定性采样不注入额外噪声，误差累积更可控。
+\end{importantbox}
+
+\subsection{FID 评估指标}
+
+讲者在展示实验结果时介绍了 FID（Fr\'{e}chet Inception Distance）指标：
+
+\begin{knowledgebox}{FID 指标简介}
+FID 衡量生成图像分布与真实图像分布之间的距离。具体步骤：
+\begin{enumerate}
+    \item 用预训练的 Inception 网络提取真实图像和生成图像的特征向量
+    \item 分别拟合两组特征的高斯分布（均值 $\boldsymbol{\mu}$、协方差 $\boldsymbol{\Sigma}$）
+    \item 计算两个高斯分布之间的 Fr\'{e}chet 距离
+\end{enumerate}
+FID \textbf{越低越好}，表示生成分布越接近真实分布。FID 同时衡量了样本质量（保真度）和多样性。
+\end{knowledgebox}
+
+\subsection{加速采样的里程碑}
+
+讲者提到了扩散模型加速采样的发展路线：
+
+\begin{table}[H]
+\centering
+\caption{扩散模型加速采样的发展历程}
+\begin{tabular}{lcl}
+\toprule
+\textbf{方法} & \textbf{典型步数} & \textbf{策略} \\
+\midrule
+DDPM (2020) & $\sim$1000 & 马尔可夫随机采样 \\
+DDIM (2021) & $\sim$50 & 非马尔可夫确定性/半确定性采样 \\
+DPM-Solver (2022) & $\sim$10-20 & 高阶 ODE 求解器 \\
+Consistency Models / 蒸馏 & $\sim$1-4 & 蒸馏 + 一致性约束 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{knowledgebox}{从 1000 步到 1 步：开放问题}
+讲者指出，如果能在无需微调的前提下实现单步高质量生成，将具有巨大的商业和学术价值。目前的现状是：
+\begin{itemize}
+    \item 从 1000 步降到 10-50 步可以仅通过改变采样策略实现（如 DDIM、DPM-Solver）
+    \item 进一步降到 1-4 步则需要额外的蒸馏训练（如 Consistency Distillation、Progressive Distillation）
+    \item 单阶段训练就能实现单步高质量生成仍是一个开放问题
+\end{itemize}
+以 Flux 模型为例，其标准版本使用约 20 步，而 Schnell 版本通过蒸馏实现了 1-4 步生成。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+DDIM 通过子序列采样策略，可以在不重新训练的前提下将采样步数从 1000 降低到约 50。确定性采样模式（$\eta=0$）在步数减少时表现出更强的鲁棒性。这一方法是扩散模型加速采样领域的开创性工作，后续的 DPM-Solver、一致性模型等方法在此基础上进一步将步数降低到了个位数。
+
+

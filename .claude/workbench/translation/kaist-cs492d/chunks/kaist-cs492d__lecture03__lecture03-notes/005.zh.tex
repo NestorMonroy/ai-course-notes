@@ -1,0 +1,117 @@
+\section{三种等价的预测目标}
+
+由于真实后验均值 $\tilde{\mu}_t(x_t, x_0)$ 是 $x_t$ 和 $x_0$ 的线性函数，而 $x_0$、$x_t$ 和噪声 $\epsilon$ 之间存在确定性关系，我们可以将均值预测重新参数化为三种等价的预测目标。
+
+\subsection{方式一：均值预测（Mean Prediction）}
+
+最直接的方式——直接让神经网络预测反向转移的均值：
+
+$$\mu_\theta(x_t, t) \approx \tilde{\mu}_t(x_t, x_0)$$
+
+网络接受 $x_t$ 和 $t$ 作为输入，输出一个与 $x_t$ 同维的均值向量。
+
+训练损失为：
+
+$$L_{\text{mean}} = \mathbb{E}_{t, x_0, x_t}\left[\left\| \tilde{\mu}_t(x_t, x_0) - \mu_\theta(x_t, t) \right\|^2\right]$$
+
+\begin{knowledgebox}{均值预测的特点}
+均值预测是最自然的参数化方式，它直接对应 ELBO 推导中的优化目标。然而，均值 $\tilde{\mu}_t$ 的尺度会随时间步 $t$ 变化（因为它是 $x_t$ 和 $x_0$ 的加权组合，权重依赖 $t$），这可能导致训练不够稳定。
+\end{knowledgebox}
+
+\subsection{方式二：干净样本预测（Clean Sample Prediction / $x_0$-Prediction）}
+
+由于 $\tilde{\mu}_t(x_t, x_0)$ 是 $x_t$ 和 $x_0$ 的线性函数，而 $x_t$ 在推理时已知，我们可以让网络预测 $x_0$ 而非直接预测均值：
+
+$$\hat{x}_0 = f_\theta(x_t, t)$$
+
+然后通过公式计算均值：
+
+$$\mu_\theta(x_t, t) = \frac{\sqrt{\bar{\alpha}_{t-1}}\, \beta_t}{1 - \bar{\alpha}_t}\, f_\theta(x_t, t) + \frac{\sqrt{\alpha_t}\, (1 - \bar{\alpha}_{t-1})}{1 - \bar{\alpha}_t}\, x_t$$
+
+等价的训练损失（忽略权重项）为：
+
+$$L_{x_0} = \mathbb{E}_{t, x_0, \epsilon}\left[\left\| x_0 - f_\theta(x_t, t) \right\|^2\right]$$
+
+\begin{importantbox}{$x_0$-预测的独特视角}
+$x_0$-预测提供了一种引人入胜的采样直觉：在反向过程的每个中间步骤 $t$，网络都会\textbf{预测最终输出 $x_0$ 的期望值}，然后据此决定下一步 $x_{t-1}$ 如何采样。这意味着扩散模型的采样过程是一个\textbf{迭代精化}（iterative refinement）过程——每一步都预测最终结果，然后逐步修正预测，而不是简单地直接输出。
+\end{importantbox}
+
+\begin{warningbox}{$x_0$ 预测不是一步生成}
+虽然每一步都预测了 $x_0$，但我们并不直接使用这个预测作为最终输出。相反，我们用 $\hat{x}_0$ 来计算反向转移的均值，然后采样 $x_{t-1}$，接着在 $x_{t-1}$ 上重新预测 $\hat{x}_0$，如此迭代直到 $x_0$。每一步的 $\hat{x}_0$ 预测会逐渐变得更加精确。
+\end{warningbox}
+
+\subsection{方式三：噪声预测（Noise Prediction / $\epsilon$-Prediction）}
+
+这是 DDPM 论文中采用的参数化方式，也是实践中最常用的方式。
+
+回忆前向跳跃分布的重参数化：
+
+$$x_t = \sqrt{\bar{\alpha}_t}\, x_0 + \sqrt{1 - \bar{\alpha}_t}\, \epsilon, \quad \epsilon \sim \mathcal{N}(0, I)$$
+
+由此可以将 $x_0$ 表示为 $x_t$ 和 $\epsilon$ 的函数：
+
+$$x_0 = \frac{x_t - \sqrt{1 - \bar{\alpha}_t}\, \epsilon}{\sqrt{\bar{\alpha}_t}}$$
+
+将其代入 $\tilde{\mu}_t$ 的表达式，可以得到以 $x_t$ 和 $\epsilon$ 表示的均值：
+
+$$\tilde{\mu}_t(x_t, \epsilon) = \frac{1}{\sqrt{\alpha_t}}\left(x_t - \frac{\beta_t}{\sqrt{1 - \bar{\alpha}_t}}\, \epsilon\right)$$
+
+因此，我们可以让网络预测噪声 $\epsilon$ 而非均值或 $x_0$：
+
+$$\hat{\epsilon} = \epsilon_\theta(x_t, t)$$
+
+然后通过公式计算均值：
+
+$$\mu_\theta(x_t, t) = \frac{1}{\sqrt{\alpha_t}}\left(x_t - \frac{\beta_t}{\sqrt{1 - \bar{\alpha}_t}}\, \epsilon_\theta(x_t, t)\right)$$
+
+\begin{importantbox}{DDPM 的简化训练目标}
+Ho et al.（2020）的核心发现：去掉权重项后，噪声预测的训练目标简化为极其简洁的形式：
+$$L_{\text{simple}} = \mathbb{E}_{t, x_0, \epsilon}\left[\left\| \epsilon - \epsilon_\theta(x_t, t) \right\|^2\right]$$
+其中 $t \sim \text{Uniform}(\{1, \dots, T\})$，$x_0 \sim q(x_0)$，$\epsilon \sim \mathcal{N}(0, I)$，$x_t = \sqrt{\bar{\alpha}_t}\, x_0 + \sqrt{1 - \bar{\alpha}_t}\, \epsilon$。
+
+这就是：\textbf{给含噪图像，预测添加的噪声，最小化 L2 误差}。
+\end{importantbox}
+
+\subsection{三种参数化的等价性与选择}
+
+三种参数化在数学上是完全等价的，因为它们之间可以互相转换：
+
+\begin{itemize}
+    \item 从 $\hat{x}_0$ 可计算 $\hat{\epsilon} = \frac{x_t - \sqrt{\bar{\alpha}_t}\, \hat{x}_0}{\sqrt{1-\bar{\alpha}_t}}$
+    \item 从 $\hat{\epsilon}$ 可计算 $\hat{x}_0 = \frac{x_t - \sqrt{1-\bar{\alpha}_t}\, \hat{\epsilon}}{\sqrt{\bar{\alpha}_t}}$
+    \item 从 $\hat{x}_0$ 或 $\hat{\epsilon}$ 都可计算 $\hat{\mu}$
+\end{itemize}
+
+\begin{table}[H]
+\centering
+\caption{三种预测目标的对比}
+\begin{tabular}{llll}
+\toprule
+\textbf{参数化方式} & \textbf{预测目标} & \textbf{损失函数} & \textbf{备注} \\
+\midrule
+均值预测 & $\tilde{\mu}_t$ & $\|\tilde{\mu}_t - \mu_\theta\|^2$ & 最自然但尺度依赖 $t$ \\
+$x_0$ 预测 & $x_0$ & $\|x_0 - f_\theta(x_t,t)\|^2$ & 迭代精化直觉 \\
+$\epsilon$ 预测 & $\epsilon$ & $\|\epsilon - \epsilon_\theta(x_t,t)\|^2$ & DDPM 默认，最稳定 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{importantbox}{为什么噪声预测最常用？}
+实践中噪声预测 ($\epsilon$-prediction) 是最广泛使用的参数化方式，主要原因在于\textbf{训练稳定性}：
+\begin{enumerate}
+    \item \textbf{目标值的归一化}：噪声 $\epsilon \sim \mathcal{N}(0,I)$ 是标准正态分布的样本，天然具有零均值、单位方差的良好尺度特性。而 $x_0$ 的尺度取决于数据集，$\tilde{\mu}_t$ 的尺度随 $t$ 变化。
+    \item \textbf{梯度尺度一致}：由于噪声目标在所有时间步都具有相同的统计特性，梯度的尺度在不同时间步之间更加一致，这有利于训练稳定。
+    \item \textbf{无需额外归一化}：对于数据 $x_0$，通常需要归一化到特定范围；而噪声 $\epsilon$ 本身就是归一化的。
+\end{enumerate}
+\end{importantbox}
+
+\begin{warningbox}{不同参数化适用于不同场景}
+虽然噪声预测在大多数场景中表现最好，但 $x_0$ 预测在某些特定应用中更有优势，例如：图像编辑（需要直接估计干净图像）、视频生成（需要保持时序一致性）等。后续的 v-prediction 参数化则结合了两者的优点。选择参数化方式时需考虑具体任务需求。
+\end{warningbox}
+
+\subsection{本章小结}
+
+三种预测目标在数学上等价，但在实际训练中表现不同。噪声预测因其良好的归一化特性和训练稳定性成为默认选择。干净样本预测提供了直观的迭代精化视角。三种方式可以互相转换，实际实现中常在推理时利用这种转换关系。
+
+%% ========== 第六节：训练算法 ==========
+

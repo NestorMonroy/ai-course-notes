@@ -1,0 +1,117 @@
+\section{DDIM 的核心思想：非马尔可夫前向过程}
+
+\subsection{DDPM 前向过程的回顾}
+
+在 DDPM 中，前向过程被定义为一个\textbf{马尔可夫链}：
+
+$$
+q(\mathbf{x}_{1:T} | \mathbf{x}_0) = \prod_{t=1}^{T} q(\mathbf{x}_t | \mathbf{x}_{t-1})
+$$
+
+其中每一步的转移分布为：
+$$
+q(\mathbf{x}_t | \mathbf{x}_{t-1}) = \mathcal{N}(\mathbf{x}_t; \sqrt{1-\beta_t}\,\mathbf{x}_{t-1},\, \beta_t \mathbf{I})
+$$
+
+由此可以推导出两个关键分布：
+\begin{itemize}
+    \item \textbf{跳跃分布}（marginal）：$q(\mathbf{x}_t | \mathbf{x}_0) = \mathcal{N}(\mathbf{x}_t; \sqrt{\bar{\alpha}_t}\,\mathbf{x}_0, (1-\bar{\alpha}_t)\mathbf{I})$
+    \item \textbf{后验分布}（posterior）：$q(\mathbf{x}_{t-1} | \mathbf{x}_t, \mathbf{x}_0)$，也是高斯分布（闭式可解）
+\end{itemize}
+
+\begin{importantbox}{ELBO 中真正需要的分布}
+在推导变分下界（ELBO）时，我们需要的并不是前向转移分布 $q(\mathbf{x}_t|\mathbf{x}_{t-1})$ 本身，而是：
+\begin{enumerate}
+    \item 跳跃分布 $q(\mathbf{x}_t | \mathbf{x}_0)$——用于采样训练数据
+    \item 后验分布 $q(\mathbf{x}_{t-1} | \mathbf{x}_t, \mathbf{x}_0)$——逆过程的匹配目标
+\end{enumerate}
+这一观察是 DDIM 的关键出发点：既然 ELBO 只依赖这两个分布，我们是否可以跳过定义前向转移分布，直接定义这两个分布？
+\end{importantbox}
+
+\subsection{DDIM 的思路：直接定义跳跃与后验分布}
+
+DDIM 的核心创新在于\textbf{颠倒了推导顺序}：
+
+\begin{table}[H]
+\centering
+\caption{DDPM 与 DDIM 的推导顺序对比}
+\begin{tabular}{ll}
+\toprule
+\textbf{DDPM} & \textbf{DDIM} \\
+\midrule
+先定义 $q(\mathbf{x}_t|\mathbf{x}_{t-1})$ & 直接定义 $q(\mathbf{x}_t|\mathbf{x}_0)$ \\
+推导 $q(\mathbf{x}_t|\mathbf{x}_0)$ & 直接定义 $q(\mathbf{x}_{t-1}|\mathbf{x}_t, \mathbf{x}_0)$ \\
+推导 $q(\mathbf{x}_{t-1}|\mathbf{x}_t, \mathbf{x}_0)$ & 前向转移分布由上述两个隐含确定 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+具体来说，DDIM 做了以下设定：
+
+\paragraph{保持跳跃分布不变。} 对于所有 $t$，DDIM 要求：
+$$
+q(\mathbf{x}_t | \mathbf{x}_0) = \mathcal{N}(\mathbf{x}_t; \sqrt{\bar{\alpha}_t}\,\mathbf{x}_0,\, (1-\bar{\alpha}_t)\mathbf{I})
+$$
+这与 DDPM 完全相同。
+
+\paragraph{重新定义后验分布。} DDIM 将后验分布参数化为：
+$$
+q_\sigma(\mathbf{x}_{t-1} | \mathbf{x}_t, \mathbf{x}_0) = \mathcal{N}\left(\mathbf{x}_{t-1};\, \sqrt{\bar{\alpha}_{t-1}}\,\mathbf{x}_0 + \sqrt{1-\bar{\alpha}_{t-1}-\sigma_t^2}\cdot\frac{\mathbf{x}_t - \sqrt{\bar{\alpha}_t}\,\mathbf{x}_0}{\sqrt{1-\bar{\alpha}_t}},\, \sigma_t^2\mathbf{I}\right)
+$$
+
+其中 $\sigma_t$ 是一个可自由选择的超参数，控制每步逆过程中注入噪声的程度。
+
+\begin{warningbox}{非马尔可夫性的含义}
+在 DDIM 的前向过程中，$\mathbf{x}_{t-1}$ 的采样依赖于 $\mathbf{x}_t$ \textbf{和} $\mathbf{x}_0$（而不仅仅是 $\mathbf{x}_t$）。这打破了马尔可夫假设——当前状态不仅依赖于前一步，还依赖于原始数据。这就是 ``Implicit'' 一词的来源：前向转移分布 $q(\mathbf{x}_t|\mathbf{x}_{t-1})$ 不再被显式定义，而是由跳跃分布和后验分布隐式（implicitly）确定。
+\end{warningbox}
+
+\subsection{推导过程：归纳法确定系数}
+
+讲者详细展示了如何通过数学归纳法确定后验分布中的系数。
+
+\paragraph{核心约束。} 我们需要满足：对于所有 $t$，通过后验分布 $q(\mathbf{x}_{t-1}|\mathbf{x}_t, \mathbf{x}_0)$ 和跳跃分布 $q(\mathbf{x}_t|\mathbf{x}_0)$ 导出的 $q(\mathbf{x}_{t-1}|\mathbf{x}_0)$ 必须与 DDPM 中的跳跃分布一致。
+
+\paragraph{高斯分布的闭式合成。} 讲者利用了一个关键的数学事实：
+
+\begin{knowledgebox}{高斯分布的边缘化性质}
+如果先验分布 $p(\mathbf{z})$ 和似然分布 $p(\mathbf{x}|\mathbf{z})$ 都是高斯分布，且似然的均值是 $\mathbf{z}$ 的线性函数，那么边缘分布 $p(\mathbf{x}) = \int p(\mathbf{x}|\mathbf{z})\,p(\mathbf{z})\,d\mathbf{z}$ 也是高斯分布，且均值和方差可以通过闭式表达计算。这是整个推导能够进行的数学基础。
+\end{knowledgebox}
+
+假设后验分布的均值为 $\mathbf{x}_0$ 和 $\mathbf{x}_t$ 的线性组合：
+$$
+\mu_{t-1}(\mathbf{x}_t, \mathbf{x}_0) = w_0 \cdot \mathbf{x}_0 + w_t \cdot \mathbf{x}_t
+$$
+
+通过匹配 $q(\mathbf{x}_{t-1}|\mathbf{x}_0)$ 的均值和方差，可以解出：
+$$
+w_0 = \sqrt{\bar{\alpha}_{t-1}} - \sqrt{\bar{\alpha}_t} \cdot \frac{\sqrt{1-\bar{\alpha}_{t-1}-\sigma_t^2}}{\sqrt{1-\bar{\alpha}_t}}, \quad
+w_t = \frac{\sqrt{1-\bar{\alpha}_{t-1}-\sigma_t^2}}{\sqrt{1-\bar{\alpha}_t}}
+$$
+
+\begin{warningbox}{方差约束：$\sigma_t$ 不能任意大}
+由于方差必须非负，$\sigma_t^2$ 有一个上界：
+$$
+\sigma_t^2 \leq 1 - \bar{\alpha}_{t-1}
+$$
+当 $\sigma_t^2$ 取到上界时，后验分布的方差部分恰好与 DDPM 的后验分布一致。这表明 DDPM 是 DDIM 在特定方差选择下的特殊情况。
+\end{warningbox}
+
+\subsection{ELBO 的不变性}
+
+\begin{importantbox}{训练目标保持不变——无需重新训练}
+由于 DDIM 保持了跳跃分布 $q(\mathbf{x}_t|\mathbf{x}_0)$ 与 DDPM 完全一致，两者的 ELBO（变分下界）在相差一个与模型参数无关的常数因子下是等价的。这意味着：
+\begin{enumerate}
+    \item 用 DDPM 目标训练的噪声预测网络 $\boldsymbol{\epsilon}_\theta$ 可以直接用于 DDIM 的采样过程
+    \item 不需要任何额外的微调或重新训练
+    \item 仅通过改变推理时的采样策略即可获得加速
+\end{enumerate}
+这是 DDIM 最具实用价值的特性：\textbf{训练一次，多种方式推理}。
+\end{importantbox}
+
+这一点在深度学习中是相当罕见的——通常我们训练一个模型后，推理方式是固定的。但对于扩散模型，由于其迭代采样的特殊结构，我们可以在推理阶段灵活选择采样策略（马尔可夫 vs 非马尔可夫、随机 vs 确定性），而不需要修改训练过程。
+
+\subsection{本章小结}
+
+DDIM 的核心思想是：直接定义跳跃分布和后验分布（而非前向转移分布），由此构建一个非马尔可夫的前向过程。通过数学归纳法和高斯分布的闭式合成性质，可以推导出后验分布中系数的解析表达式。关键在于，DDIM 的跳跃分布与 DDPM 完全一致，因此 ELBO 不变，已训练的 DDPM 模型可以直接用于 DDIM 采样。
+
+

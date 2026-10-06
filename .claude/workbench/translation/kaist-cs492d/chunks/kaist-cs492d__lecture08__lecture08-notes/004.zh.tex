@@ -1,0 +1,62 @@
+\section{DPM-Solver 的推导}
+
+\subsection{PF-ODE 的半线性结构}
+
+回到扩散模型的 PF-ODE。利用噪声预测网络 $\boldsymbol{\epsilon}_\theta$ 和变分扩散模型的参数化，PF-ODE 可以写成：
+$$\frac{d\mathbf{x}}{dt} = \underbrace{f(t) \cdot \mathbf{x}(t)}_{\text{线性部分}} + \underbrace{g(t) \cdot \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t)}_{\text{非线性部分}}$$
+
+其中：
+\begin{itemize}
+    \item $f(t)$：可由 $\alpha_t, \sigma_t$ 解析计算的漂移系数
+    \item $g(t)$：可由 $\alpha_t, \sigma_t$ 解析计算的扩散相关系数
+    \item $\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t)$：噪声预测网络，是唯一的非线性（需要神经网络评估的）部分
+\end{itemize}
+
+\begin{importantbox}{DPM-Solver 的核心观察}
+PF-ODE 具有半线性结构：线性部分 $f(t) \cdot \mathbf{x}$ 可以通过指数积分器\textbf{精确}求解，唯一需要数值近似的只有涉及 $\boldsymbol{\epsilon}_\theta$ 的非线性积分。这意味着我们可以最大限度地减少数值误差。
+\end{importantbox}
+
+\subsection{利用指数积分器求解}
+
+应用上一节的半线性 ODE 精确解，并将 $\lambda_t$ 作为积分变量（替换时间 $t$），可以得到：
+$$\mathbf{x}_t = \frac{\alpha_t}{\alpha_s} \mathbf{x}_s - \alpha_t \int_{\lambda_s}^{\lambda_t} e^{-\lambda}\, \hat{\boldsymbol{\epsilon}}_\theta(\lambda)\, d\lambda$$
+
+其中：
+\begin{itemize}
+    \item $\frac{\alpha_t}{\alpha_s} \mathbf{x}_s$：线性部分的精确解
+    \item $\hat{\boldsymbol{\epsilon}}_\theta(\lambda) = \boldsymbol{\epsilon}_\theta(\mathbf{x}_{\tau(\lambda)}, \tau(\lambda))$：将噪声预测视为 $\lambda$ 的函数
+    \item 积分区间 $[\lambda_s, \lambda_t]$：对应时间 $[s, t]$
+\end{itemize}
+
+\begin{knowledgebox}{变量替换 $t \to \lambda$ 的意义}
+将积分变量从时间 $t$ 替换为 log-SNR $\lambda$ 有两个好处：(1) 化简了系数中复杂的 $\alpha_t, \sigma_t$ 表达式，使得积分核变为简单的 $e^{-\lambda}$；(2) $\lambda$ 在噪声调度空间中均匀分布，是更自然的积分变量。讲者强调这一步化简使得原本复杂的 ODE 变得出人意料地简洁。
+\end{knowledgebox}
+
+进一步化简后，DPM-Solver 的核心公式为：
+$$\mathbf{x}_t = \frac{\alpha_t}{\alpha_s} \mathbf{x}_s - \sigma_t \int_{\lambda_s}^{\lambda_t} e^{\lambda - \lambda_t}\, \boldsymbol{\epsilon}_\theta(\mathbf{x}_\lambda, \lambda)\, d\lambda$$
+
+这个公式将求解 ODE 的问题转化为：如何近似噪声预测的加权积分。不同阶次的近似对应不同阶次的 DPM-Solver。
+
+\subsection{一阶近似：DPM-Solver-1 即 DDIM}
+
+最简单的近似是假设在积分区间 $[\lambda_s, \lambda_t]$ 内，噪声预测 $\boldsymbol{\epsilon}_\theta$ 为常数（零阶泰勒展开）：
+$$\boldsymbol{\epsilon}_\theta(\mathbf{x}_\lambda, \lambda) \approx \boldsymbol{\epsilon}_\theta(\mathbf{x}_s, s) \quad \forall \lambda \in [\lambda_s, \lambda_t]$$
+
+代入积分公式并计算 $e^{-\lambda}$ 的定积分，可得：
+$$\mathbf{x}_t = \frac{\alpha_t}{\alpha_s} \mathbf{x}_s - \sigma_t (e^{h} - 1) \boldsymbol{\epsilon}_\theta(\mathbf{x}_s, s)$$
+
+其中 $h = \lambda_t - \lambda_s$。
+
+\begin{importantbox}{DDIM 就是 DPM-Solver-1}
+将上式用 $\alpha_t, \sigma_t$ 展开，可以验证这恰好就是 DDIM 的确定性采样公式！也就是说，DDIM 并非对 PF-ODE 做\textbf{整体}欧拉离散化，而是利用了半线性结构做\textbf{指数积分}——线性部分精确处理，仅对噪声预测做零阶近似。这解释了为什么 DDIM 比直接欧拉法效果更好。
+\end{importantbox}
+
+\begin{warningbox}{常见误解：DDIM 不等于朴素欧拉法}
+很多人认为 DDIM 就是对 PF-ODE 做欧拉离散化。实际上，DDIM 是对 PF-ODE 做一阶\textbf{指数积分}——它精确处理了线性部分，只对非线性噪声预测做了零阶近似。这种微妙的区别在精度上有本质差异，特别是在步数较少时。
+\end{warningbox}
+
+\subsection{本章小结}
+
+DPM-Solver 的推导利用了 PF-ODE 的半线性结构，通过指数积分器精确处理线性部分，将数值近似限定在噪声预测的积分上。一阶 DPM-Solver 等价于 DDIM。
+
+

@@ -1,0 +1,84 @@
+\section{VP-SDE：方差保持型 SDE}
+
+\subsection{从 DDPM 到 VP-SDE}
+
+DDPM 的前向转移分布定义为：
+
+$$
+q(\mathbf{x}_t \mid \mathbf{x}_{t-1}) = \mathcal{N}\!\left(\mathbf{x}_t;\, \sqrt{1-\beta_t}\,\mathbf{x}_{t-1},\, \beta_t \mathbf{I}\right)
+$$
+
+对应的跳跃分布为：
+
+$$
+q(\mathbf{x}_t \mid \mathbf{x}_0) = \mathcal{N}\!\left(\mathbf{x}_t;\, \sqrt{\bar{\alpha}_t}\,\mathbf{x}_0,\, (1 - \bar{\alpha}_t)\mathbf{I}\right)
+$$
+
+其中 $\bar{\alpha}_t = \prod_{s=1}^{t}(1-\beta_s)$。
+
+\begin{warningbox}{DDPM 与 SMLD 的关键区别}
+SMLD 只增加方差（均值不变），而 DDPM 同时\textbf{缩小均值}并增加方差——$\sqrt{1-\beta_t}$ 因子使得均值逐步衰减向零。这意味着 DDPM 中数据点同时在"被拉向原点"和"被噪声扰动"，最终收敛到标准高斯分布 $\mathcal{N}(0, \mathbf{I})$。
+\end{warningbox}
+
+\subsection{VP-SDE 的推导}
+
+定义连续时间的 $\beta(t)$（通过 $\beta_t^{\text{discrete}} = \beta(t) \cdot \Delta t$ 关联），则 DDPM 的离散 Markov 链变为：
+
+$$
+\mathbf{x}_{t+\Delta t} = \sqrt{1 - \beta(t)\Delta t}\;\mathbf{x}_t + \sqrt{\beta(t)\Delta t}\;\boldsymbol{\epsilon}
+$$
+
+利用一阶 Taylor 近似 $\sqrt{1 - \beta(t)\Delta t} \approx 1 - \frac{1}{2}\beta(t)\Delta t$，取极限 $\Delta t \to 0$：
+
+$$
+\mathrm{d}\mathbf{x} = -\frac{1}{2}\beta(t)\,\mathbf{x}\,\mathrm{d}t + \sqrt{\beta(t)}\,\mathrm{d}\mathbf{w}
+$$
+
+这就是 \textbf{VP-SDE}（Variance Preserving SDE）。对应的系数为：
+
+\begin{itemize}
+    \item \textbf{漂移系数}：$f(\mathbf{x}, t) = -\frac{1}{2}\beta(t)\,\mathbf{x}$（线性漂移，将 $\mathbf{x}$ 拉向原点）
+    \item \textbf{扩散系数}：$g(t) = \sqrt{\beta(t)}$
+\end{itemize}
+
+\begin{importantbox}{VP-SDE 的名称由来}
+如果初始数据的协方差为单位阵 $\mathbf{I}$（即 $\mathrm{Cov}(\mathbf{x}_0) = \mathbf{I}$），那么在 VP-SDE 下，对于所有中间时刻 $t$，协方差始终保持为 $\mathbf{I}$：
+
+$$
+\mathrm{Cov}(\mathbf{x}_t) = \mathbf{I}, \quad \forall\, t
+$$
+
+这就是"方差保持"（Variance Preserving）的含义。漂移项中的 $-\frac{1}{2}\beta(t)\mathbf{x}$ 恰好与扩散项注入的方差相抵消，使得总方差不变。
+\end{importantbox}
+
+\subsection{VP-SDE 中的 $\alpha_t$ 和 $\sigma_t$}
+
+在 Variational Diffusion Models 框架下，VP-SDE 对应：
+
+$$
+\alpha_t = e^{-\frac{1}{2}\int_0^t \beta(s)\,\mathrm{d}s}, \qquad \sigma_t^2 = 1 - \alpha_t^2 = 1 - e^{-\int_0^t \beta(s)\,\mathrm{d}s}
+$$
+
+\begin{knowledgebox}{离散 $\bar{\alpha}_t$ 与连续 $\alpha_t$ 的关系}
+在离散 DDPM 中，$\bar{\alpha}_t = \prod_{s=1}^t (1-\beta_s)$，这是一个乘积形式。在连续极限下，它变为指数形式 $\alpha_t = e^{-\frac{1}{2}\int_0^t \beta(s)\,\mathrm{d}s}$。这两者是等价的近似：利用 $\ln(1-x) \approx -x$（当 $x$ 很小时），$\prod(1-\beta_s) \approx e^{-\sum \beta_s} \approx e^{-\int \beta(s)\,\mathrm{d}s}$。但注意乘积中的指数为 $-\sum \beta_s$，而连续版本的指数含有 $\frac{1}{2}$ 因子，两者的差异源于 $\sqrt{1-\beta}$ 和 $1-\frac{\beta}{2}$ 近似的细节。
+\end{knowledgebox}
+
+\subsection{SNR 的单调递减性}
+
+VP-SDE 的信噪比为：
+
+$$
+\mathrm{SNR}(t) = \frac{\alpha_t^2}{\sigma_t^2} = \frac{e^{-\int_0^t \beta(s)\,\mathrm{d}s}}{1 - e^{-\int_0^t \beta(s)\,\mathrm{d}s}}
+$$
+
+由于 $\beta(t) > 0$，积分 $\int_0^t \beta(s)\,\mathrm{d}s$ 关于 $t$ 严格递增，因此分子单调递减、分母单调递增，SNR 单调递减。这验证了 DDPM 是 Variational Diffusion Models 的一个特例。
+
+\begin{warningbox}{$\beta(t)$ 必须为正}
+在 DDPM 和 VP-SDE 中，$\beta(t) > 0$ 是一个基本约束。如果 $\beta(t)$ 在某个时刻为负，SNR 可能不再单调递减，前向过程就不再是一个有效的"加噪"过程。在实际实现中，$\beta_t$ 通常被定义为一个线性或余弦调度，确保始终为正。
+\end{warningbox}
+
+\subsection{本章小结}
+
+VP-SDE 是 DDPM 在连续时间域的推广：漂移项将数据拉向原点，扩散项注入噪声，两者精心平衡使得方差保持不变。与 VE-SDE 不同的是，VP-SDE 有非零漂移。
+
+

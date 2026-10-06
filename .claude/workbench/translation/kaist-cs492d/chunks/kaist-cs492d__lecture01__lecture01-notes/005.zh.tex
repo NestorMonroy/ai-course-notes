@@ -1,0 +1,198 @@
+\section{VAE：变分自编码器}
+
+\subsection{从 GAN 到 VAE 的动机}
+
+GAN 的核心困难在于 minimax 优化。VAE 的思路是：\textbf{能否不用对抗训练，而是通过更稳定的方式学习从 latent distribution 到 data distribution 的映射？}
+
+VAE 的关键创新在于：不再学习一个确定性的映射函数 $G_\theta(z)$，而是学习一个\textbf{条件概率分布} $p_\theta(x|z)$，即给定 latent 变量 $z$ 后，数据 $x$ 的分布。
+
+\subsection{VAE 的概率框架}
+
+\subsubsection{生成过程（Generative Process）}
+
+VAE 定义了以下生成过程：
+
+\begin{enumerate}
+    \item 从先验分布采样：$z \sim p(z) = \mathcal{N}(\mathbf{0}, \mathbf{I})$
+    \item 从 likelihood 分布采样：$x \sim p_\theta(x|z) = \mathcal{N}(\mu_\theta(z), \sigma^2 \mathbf{I})$
+\end{enumerate}
+
+其中 $\mu_\theta(z)$ 是 decoder 神经网络的输出（给定 $z$ 预测 $x$ 的均值），$\sigma^2$ 是固定的方差超参数。
+
+\begin{importantbox}{VAE 的概率生成模型}
+$$p_\theta(x, z) = p_\theta(x|z) \cdot p(z)$$
+其中：
+\begin{itemize}
+    \item $p(z) = \mathcal{N}(\mathbf{0}, \mathbf{I})$：先验分布（prior），已知
+    \item $p_\theta(x|z) = \mathcal{N}(\mu_\theta(z), \sigma^2 \mathbf{I})$：似然分布（likelihood），由 decoder 参数化
+    \item $p_\theta(x) = \int p_\theta(x|z) p(z) \, dz$：边际似然（marginal likelihood），对 $z$ 积分得到
+\end{itemize}
+\end{importantbox}
+
+\subsubsection{训练目标：最大化边际似然}
+
+理想情况下，我们希望最大化数据的边际对数似然：
+
+$$\max_\theta \; \mathbb{E}_{x \sim p_{\text{data}}} [\log p_\theta(x)] = \max_\theta \; \mathbb{E}_{x \sim p_{\text{data}}} \left[\log \int p_\theta(x|z) p(z) \, dz \right]$$
+
+\begin{warningbox}{边际似然不可计算}
+积分 $p_\theta(x) = \int p_\theta(x|z) p(z) \, dz$ 在高维空间中\textbf{无法精确计算}。直觉上：latent 空间的维度可能是数百维，对所有可能的 $z$ 做积分是不现实的。这就是为什么我们需要变分推断（Variational Inference）。
+\end{warningbox}
+
+\subsection{概率论回顾：VAE 所需的数学工具}
+
+\subsubsection{边际化（Marginalization）}
+
+给定联合分布 $p(x, z)$，通过对一个变量积分（或求和），可以得到另一个变量的边际分布：
+
+$$p(x) = \int p(x, z) \, dz = \int p(x|z) p(z) \, dz$$
+
+\subsubsection{贝叶斯定理（Bayes' Rule）}
+
+$$p(z|x) = \frac{p(x|z) p(z)}{p(x)}$$
+
+各项的术语约定：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ll}
+\toprule
+符号 & 名称 \\
+\midrule
+$p(z)$ & Prior（先验）：关于 $z$ 的先验知识 \\
+$p(x|z)$ & Likelihood（似然）：给定 $z$，观测到 $x$ 的可能性 \\
+$p(z|x)$ & Posterior（后验）：观测到 $x$ 后，关于 $z$ 的更新信念 \\
+$p(x)$ & Evidence / Marginal Likelihood（证据）：数据的边际概率 \\
+\bottomrule
+\end{tabular}
+\caption{贝叶斯定理中各项的术语}
+\end{table}
+
+\subsubsection{KL 散度（Kullback-Leibler Divergence）}
+
+KL 散度衡量两个概率分布之间的``距离''（注意：它不是对称的，因此不是严格意义上的距离度量）：
+
+$$D_{\mathrm{KL}}(p \| q) = \mathbb{E}_{x \sim p} \left[\log \frac{p(x)}{q(x)}\right] = \int p(x) \log \frac{p(x)}{q(x)} \, dx$$
+
+\begin{importantbox}{KL 散度的关键性质}
+\begin{itemize}
+    \item \textbf{非负性}：$D_{\mathrm{KL}}(p \| q) \geq 0$，当且仅当 $p = q$ 几乎处处相等时取等
+    \item \textbf{非对称性}：一般 $D_{\mathrm{KL}}(p \| q) \neq D_{\mathrm{KL}}(q \| p)$
+    \item \textbf{两个高斯分布之间的 KL 散度有封闭形式}
+\end{itemize}
+\end{importantbox}
+
+\begin{knowledgebox}{两个多元高斯分布的 KL 散度}
+设 $p = \mathcal{N}(\boldsymbol{\mu}_1, \boldsymbol{\Sigma}_1)$，$q = \mathcal{N}(\boldsymbol{\mu}_2, \boldsymbol{\Sigma}_2)$，则：
+$$D_{\mathrm{KL}}(p \| q) = \frac{1}{2}\left[\log\frac{|\boldsymbol{\Sigma}_2|}{|\boldsymbol{\Sigma}_1|} - d + \mathrm{tr}(\boldsymbol{\Sigma}_2^{-1}\boldsymbol{\Sigma}_1) + (\boldsymbol{\mu}_2 - \boldsymbol{\mu}_1)^T \boldsymbol{\Sigma}_2^{-1} (\boldsymbol{\mu}_2 - \boldsymbol{\mu}_1)\right]$$
+其中 $d$ 是维度。特别地，当 $q = \mathcal{N}(\mathbf{0}, \mathbf{I})$ 时：
+$$D_{\mathrm{KL}}(\mathcal{N}(\boldsymbol{\mu}, \boldsymbol{\Sigma}) \| \mathcal{N}(\mathbf{0}, \mathbf{I})) = \frac{1}{2}\left[-\log|\boldsymbol{\Sigma}| - d + \mathrm{tr}(\boldsymbol{\Sigma}) + \boldsymbol{\mu}^T\boldsymbol{\mu}\right]$$
+这个公式在 VAE 训练中直接使用。
+\end{knowledgebox}
+
+\subsection{Jensen 不等式与 ELBO 的推导}
+
+\subsubsection{凸函数与 Jensen 不等式}
+
+\textbf{凸函数（Convex Function）}的定义：对任意点 $x_1, \ldots, x_n$ 和权重 $t_1, \ldots, t_n$（$t_i \geq 0$, $\sum t_i = 1$），满足：
+
+$$f\left(\sum_i t_i x_i\right) \leq \sum_i t_i f(x_i)$$
+
+直觉上，凸函数的图形``向下弯曲''，任意两点之间的线段都在函数图形之上。
+
+\textbf{凹函数（Concave Function）}是凸函数的相反：函数图形``向上弯曲''，$-f$ 为凸函数。$\log$ 函数是一个重要的凹函数。
+
+\begin{importantbox}{Jensen 不等式}
+设 $f$ 为凸函数，$X$ 为随机变量，则：
+$$f(\mathbb{E}{[}X{]}) \leq \mathbb{E}{[}f(X){]}$$
+若 $f$ 为凹函数（如 $\log$），不等式方向反转：
+$$f(\mathbb{E}{[}X{]}) \geq \mathbb{E}{[}f(X){]}$$
+即 $\log(\mathbb{E}{[}X{]}) \geq \mathbb{E}{[}\log X{]}$。
+\end{importantbox}
+
+\subsubsection{ELBO 的推导}
+
+ELBO（Evidence Lower Bound）是 VAE 训练的核心目标。以下是完整推导过程。
+
+\textbf{出发点}：我们想最大化边际对数似然 $\log p_\theta(x)$，但它不可直接计算。引入一个近似后验分布 $q_\phi(z|x)$（encoder），我们有：
+
+\begin{align}
+\log p_\theta(x) &= \log \int p_\theta(x, z) \, dz \nonumber \\
+&= \log \int \frac{p_\theta(x, z)}{q_\phi(z|x)} q_\phi(z|x) \, dz \nonumber \\
+&= \log \mathbb{E}_{z \sim q_\phi(z|x)} \left[\frac{p_\theta(x, z)}{q_\phi(z|x)}\right] \nonumber \\
+&\geq \mathbb{E}_{z \sim q_\phi(z|x)} \left[\log \frac{p_\theta(x, z)}{q_\phi(z|x)}\right] \quad \text{(Jensen 不等式，$\log$ 为凹函数)}
+\end{align}
+
+最后一行就是 ELBO：
+
+$$\text{ELBO}(\theta, \phi; x) = \mathbb{E}_{z \sim q_\phi(z|x)} \left[\log \frac{p_\theta(x, z)}{q_\phi(z|x)}\right]$$
+
+\begin{importantbox}{ELBO 的分解}
+将 $p_\theta(x, z) = p_\theta(x|z)p(z)$ 代入，ELBO 可以分解为两项：
+\begin{align}
+\text{ELBO} &= \mathbb{E}_{z \sim q_\phi(z|x)} \left[\log p_\theta(x|z)\right] - D_{\mathrm{KL}}(q_\phi(z|x) \| p(z)) \nonumber
+\end{align}
+\begin{itemize}
+    \item \textbf{重建项}（Reconstruction Term）：$\mathbb{E}_{z \sim q_\phi(z|x)} {[}\log p_\theta(x|z){]}$ ——衡量 decoder 从 $z$ 重建 $x$ 的能力。当 $p_\theta(x|z) = \mathcal{N}(\mu_\theta(z), \sigma^2 I)$ 时，这一项等价于负的均方误差（MSE）。
+    \item \textbf{正则项}（Regularization / KL Term）：$-D_{\mathrm{KL}}(q_\phi(z|x) \| p(z))$ ——鼓励 encoder 的输出分布接近先验 $p(z) = \mathcal{N}(\mathbf{0}, \mathbf{I})$，从而使 latent 空间结构化。
+\end{itemize}
+\end{importantbox}
+
+\subsubsection{ELBO 与边际似然的关系}
+
+实际上，可以更精确地写出：
+
+$$\log p_\theta(x) = \text{ELBO}(\theta, \phi; x) + D_{\mathrm{KL}}(q_\phi(z|x) \| p_\theta(z|x))$$
+
+\begin{warningbox}{ELBO 是下界而非等式}
+由于 $D_{\mathrm{KL}}(q_\phi(z|x) \| p_\theta(z|x)) \geq 0$，ELBO 始终小于等于真实的边际对数似然 $\log p_\theta(x)$。差距（gap）等于近似后验 $q_\phi(z|x)$ 与真实后验 $p_\theta(z|x)$ 之间的 KL 散度。当 $q_\phi(z|x) = p_\theta(z|x)$ 时（近似后验恰好等于真实后验），ELBO 等于 $\log p_\theta(x)$，gap 为零。
+\end{warningbox}
+
+\subsection{VAE 的网络架构}
+
+在实现层面，VAE 包括：
+
+\begin{itemize}
+    \item \textbf{Encoder 网络} $q_\phi(z|x)$：输入 $x$，输出 $\mu_\phi(x)$ 和 $\sigma_\phi(x)$（latent 分布的均值和标准差）
+    \item \textbf{Decoder 网络} $p_\theta(x|z)$：输入 $z$，输出 $\mu_\theta(z)$（重建 $x$ 的均值）
+    \item \textbf{采样过程}：通过 reparameterization trick 采样 $z = \mu_\phi(x) + \sigma_\phi(x) \odot \epsilon$，$\epsilon \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$
+\end{itemize}
+
+\begin{knowledgebox}{Reparameterization Trick 在 VAE 中的关键作用}
+直接从 $q_\phi(z|x) = \mathcal{N}(\mu_\phi(x), \sigma^2_\phi(x) \mathbf{I})$ 采样 $z$ 的操作不可微分，无法通过反向传播优化 $\phi$。Reparameterization trick 将采样写为 $z = \mu_\phi(x) + \sigma_\phi(x) \odot \epsilon$（其中 $\epsilon \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$ 与参数无关），使得梯度可以流过 $\mu_\phi$ 和 $\sigma_\phi$，实现端到端训练。
+\end{knowledgebox}
+
+\subsection{VAE 的损失函数}
+
+综合以上推导，VAE 的训练目标是最大化 ELBO，等价于最小化以下损失函数：
+
+$$\mathcal{L}_{\text{VAE}}(\theta, \phi; x) = -\text{ELBO} = -\mathbb{E}_{z \sim q_\phi(z|x)}{[}\log p_\theta(x|z){]} + D_{\mathrm{KL}}(q_\phi(z|x) \| p(z))$$
+
+当 $p_\theta(x|z) = \mathcal{N}(\mu_\theta(z), \sigma^2 \mathbf{I})$ 且 $p(z) = \mathcal{N}(\mathbf{0}, \mathbf{I})$ 时：
+
+$$\mathcal{L}_{\text{VAE}} = \frac{1}{2\sigma^2}\|x - \mu_\theta(z)\|^2 + D_{\mathrm{KL}}(\mathcal{N}(\mu_\phi(x), \text{diag}(\sigma^2_\phi(x))) \| \mathcal{N}(\mathbf{0}, \mathbf{I}))$$
+
+\begin{importantbox}{VAE 损失函数的直觉}
+VAE 的损失由两部分组成：
+\begin{enumerate}
+    \item \textbf{重建误差}（MSE）：迫使模型准确重建输入数据
+    \item \textbf{KL 惩罚}：迫使 latent 分布接近标准高斯，使 latent 空间平滑、连续、可采样
+\end{enumerate}
+两项之间存在张力：重建误差希望 latent 编码尽可能保留信息（可能导致各数据点的 latent 分布互不重叠），KL 项则迫使所有 latent 分布向标准高斯靠拢（可能导致信息丢失）。找到好的平衡点是 VAE 调参的核心。
+\end{importantbox}
+
+\subsection{VAE 与 Diffusion Model 的联系}
+
+授课教师在讲解 VAE 时多次预示：\textbf{VAE 的思想与 Diffusion Model 直接相关}。具体而言：
+
+\begin{itemize}
+    \item Diffusion Model 可以理解为一种``层次化''的 VAE，其 latent 变量是一系列逐步加噪的中间状态
+    \item ELBO 的推导方法可以直接推广到 Diffusion Model
+    \item VAE 中的 reparameterization trick 在 Diffusion Model 中同样不可或缺
+\end{itemize}
+
+\subsection{本章小结}
+
+VAE 通过变分推断规避了 GAN 的 minimax 优化难题。它引入 encoder（近似后验）和 decoder（likelihood），通过最大化 ELBO（边际对数似然的下界）来训练。ELBO 自然分解为重建项和 KL 正则项，两者的平衡决定了生成质量和 latent 空间的结构化程度。VAE 的训练比 GAN 稳定得多，且其概率框架为后续的 Diffusion Model 奠定了理论基础。
+
+\newpage

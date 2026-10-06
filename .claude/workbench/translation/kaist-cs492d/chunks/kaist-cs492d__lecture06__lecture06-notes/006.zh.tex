@@ -1,0 +1,74 @@
+\section{ControlNet：高效条件控制微调}
+
+\subsection{问题设定：利用预训练模型实现新条件}
+
+当我们拥有一个在数十亿图像上预训练的扩散模型（如 Stable Diffusion），想让它接受新的条件输入（如边缘图、人体姿态、深度图等），面临一个核心困境：
+
+\begin{warningbox}{从头训练条件模型的代价}
+如果用 Classifier-Free Guidance 从头训练一个新的条件模型：
+\begin{itemize}
+    \item 需要数十亿规模的\textbf{配对数据}（条件图像 + 真实图像），收集成本极高
+    \item 需要从零开始训练完整的扩散模型，计算成本巨大
+    \item 无法复用已有预训练模型学到的丰富视觉知识
+\end{itemize}
+例如，要训练一个「边缘图 $\to$ 真实图像」的模型，理论上需要 50 亿对（边缘图, 真实图像）的配对数据，这在实践中几乎不可能获得高质量的大规模配对。
+\end{warningbox}
+
+ControlNet 的目标是：\textbf{冻结预训练模型的参数，仅用少量配对数据（如 50K--100K 对）和少量额外参数，就能让模型接受新的条件输入}。
+
+\subsection{ControlNet 的架构设计}
+
+ControlNet 的设计遵循两个关键原则：
+
+\textbf{原则一：保持初始输出不变（Zero Convolution）}
+
+在微调开始时，新增模块的输出应为零，使得整个网络的行为与预训练模型完全一致。这通过\textbf{零卷积}（zero convolution）实现——将连接层的权重和偏置都初始化为零。
+
+\textbf{原则二：复用预训练编码器（Trainable Copy）}
+
+ControlNet 创建预训练 U-Net 编码器部分的一个\textbf{可训练副本}（trainable copy），用于处理条件输入：
+
+\begin{enumerate}
+    \item \textbf{原始 U-Net}：参数冻结，继续处理 $z_t$ 和 $t$（保证生成质量）
+    \item \textbf{ControlNet 编码器副本}：参数可训练，额外接收条件图像 $c$
+    \item \textbf{零卷积连接}：副本编码器的输出通过零卷积层与原始 U-Net 的 skip connections 相加
+\end{enumerate}
+
+\begin{importantbox}{ControlNet 的零卷积初始化策略}
+在训练开始时：
+\begin{itemize}
+    \item 零卷积的所有权重和偏置均为 0
+    \item ControlNet 副本的输出被零卷积"屏蔽"，对原始 U-Net 无影响
+    \item 整个系统的输出\textbf{恰好等于}预训练模型的输出——不会因为新增模块而破坏已学到的生成能力
+\end{itemize}
+随着训练进行，零卷积逐渐学到非零权重，条件信息被平滑地融入生成过程。
+\end{importantbox}
+
+\subsection{ControlNet 的训练}
+
+训练只更新 ControlNet 编码器副本和零卷积层的参数，原始 U-Net 完全冻结：
+
+\begin{itemize}
+    \item 训练数据：少量配对数据（如 50K 对边缘图-真实图像）
+    \item 训练目标：标准扩散损失 $\|\epsilon - \epsilon_\theta(z_t, t, c)\|^2$
+    \item 训练成本：远低于从头训练，通常 8 张 GPU 训练几天即可
+\end{itemize}
+
+\begin{knowledgebox}{ControlNet 的多种条件类型}
+由于 ControlNet 的条件编码器可以处理与原始图像同分辨率的任意图像输入，它已被成功应用于：
+\begin{itemize}
+    \item \textbf{Canny 边缘图}：控制轮廓和边缘
+    \item \textbf{人体姿态（OpenPose）}：控制人物动作
+    \item \textbf{深度图}：控制空间结构和远近关系
+    \item \textbf{语义分割图}：控制区域内容
+    \item \textbf{涂鸦/草图}：从简笔画生成真实图像
+    \item \textbf{法线图}：控制表面朝向和光照
+\end{itemize}
+每种条件类型需要单独训练一个 ControlNet 模块，但可以共用同一个冻结的基础模型。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+ControlNet 通过三个关键设计——冻结预训练模型、可训练编码器副本、零卷积初始化——实现了在少量数据和计算资源下为预训练扩散模型添加新条件类型的能力。它完美解决了"不想从头训练"和"不想丢失预训练知识"的矛盾，是扩散模型微调领域最成功的方法之一。
+
+\newpage

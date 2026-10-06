@@ -1,0 +1,51 @@
+\section{DPM-Solver++ 与实践改进}
+
+\subsection{从噪声预测到数据预测}
+
+DPM-Solver 的原始公式基于噪声预测 $\boldsymbol{\epsilon}_\theta$。DPM-Solver++ 提出了一个关键改进：转而对\textbf{数据预测}（data prediction）$\hat{\mathbf{x}}_0$ 做多项式近似。
+
+由 $\mathbf{x}_t = \alpha_t \mathbf{x}_0 + \sigma_t \boldsymbol{\epsilon}$ 可得：
+$$\hat{\mathbf{x}}_0(\mathbf{x}_t, t) = \frac{\mathbf{x}_t - \sigma_t \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t)}{\alpha_t}$$
+
+\begin{importantbox}{DPM-Solver++ 的核心改进}
+DPM-Solver++ 将积分对象从 $\boldsymbol{\epsilon}_\theta$ 换为 $\hat{\mathbf{x}}_0$。两者在数学上等价，但在有限步数下，$\hat{\mathbf{x}}_0$ 的变化通常比 $\boldsymbol{\epsilon}_\theta$ 更平滑，多项式近似误差更小。实验表明，DPM-Solver++ 在较少步数（如 10$\sim$15 步）时显著优于原始 DPM-Solver。
+\end{importantbox}
+
+\begin{knowledgebox}{为什么数据预测更平滑？}
+直觉上，$\hat{\mathbf{x}}_0$ 是"去噪后的干净图像估计"，它在采样过程中逐渐收敛到最终图像。相比之下，$\boldsymbol{\epsilon}_\theta$（噪声估计）随时间步的变化更剧烈，特别是在噪声水平发生快速变化的区域。因此，对 $\hat{\mathbf{x}}_0$ 做低阶多项式近似更合理。
+\end{knowledgebox}
+
+\subsection{多步法（Multistep Method）}
+
+除了单步法（每步从头计算中间点），DPM-Solver++ 还支持\textbf{多步法}：利用前几步已经计算过的噪声预测值来构造高阶近似，而无需额外的网络评估。
+
+例如，二阶多步 DPM-Solver++：
+\begin{enumerate}
+    \item 在第 $i$ 步，已有 $\boldsymbol{\epsilon}_\theta(\mathbf{x}_{t_i}, t_i)$ 和 $\boldsymbol{\epsilon}_\theta(\mathbf{x}_{t_{i-1}}, t_{i-1})$
+    \item 用这两个值做线性外推来近似区间内的噪声变化
+    \item 代入指数积分公式计算 $\mathbf{x}_{t_{i+1}}$
+\end{enumerate}
+
+\begin{importantbox}{多步法的优势}
+多步法在每步只需 1 次网络评估（NFE=1），但仍可达到 2 阶甚至 3 阶精度。代价是需要保存前几步的噪声预测缓存。在固定步数预算下，多步法通常是最具性价比的选择。
+\end{importantbox}
+
+\subsection{时间步调度策略}
+
+DPM-Solver 的性能还受到时间步选取策略的影响。常见策略包括：
+
+\begin{itemize}
+    \item \textbf{均匀时间步}：在 $t \in [0, T]$ 上等间距分割
+    \item \textbf{均匀 $\lambda$ 步}：在 $\lambda \in [\lambda_T, \lambda_0]$ 上等间距分割——这通常更好，因为 $\lambda$ 空间的均匀性与 ODE 的数值误差分布更匹配
+    \item \textbf{自适应步长}：根据误差估计动态调整步长（如 DOPRI5 中的方法）
+\end{itemize}
+
+\begin{warningbox}{不当的时间步选取会严重降低性能}
+在 $t$ 空间均匀分割时，低噪声区域（$t$ 接近 0）的步长在 $\lambda$ 空间中过大，导致近似误差集中在最后几步——而这恰恰是图像细节被确定的关键阶段。因此，在 $\lambda$ 空间中均匀分割通常是更安全的默认选择。
+\end{warningbox}
+
+\subsection{本章小结}
+
+DPM-Solver++ 通过对数据预测（而非噪声预测）做多项式近似来改善有限步精度，并引入多步法以在每步 1 NFE 的代价下实现高阶精度。时间步调度（特别是在 $\lambda$ 空间均匀分割）对最终性能也有重要影响。
+
+

@@ -1,0 +1,90 @@
+\section{Rectified Flow 与直线轨迹}
+
+本节是本讲在应用层面最重要的部分，讲者详细介绍了 Rectified Flow（矫正流）的思想、训练方法以及通过 Reflow 使轨迹变直的技术。
+
+\subsection{Rectified Flow 的定义}
+
+Rectified Flow 是 Flow Matching 的一种特殊情况，其条件流映射定义为 $\mathbf{x}_0$ 和 $\mathbf{x}_1$ 之间的\textbf{线性插值}：
+
+$$\psi_t(\mathbf{x}_0 \mid \mathbf{x}_1) = (1 - t)\, \mathbf{x}_0 + t\, \mathbf{x}_1$$
+
+对应的条件向量场（速度）极为简洁：
+
+$$u_t(\mathbf{x}_t \mid \mathbf{x}_0, \mathbf{x}_1) = \mathbf{x}_1 - \mathbf{x}_0$$
+
+即：条件速度恒定，方向始终指向从 $\mathbf{x}_0$ 到 $\mathbf{x}_1$ 的直线方向。
+
+\begin{importantbox}{Rectified Flow 的训练流程}
+Rectified Flow 的训练过程极其简洁：
+\begin{enumerate}
+    \item 从数据分布采样 $\mathbf{x}_1 \sim p_{\text{data}}$
+    \item 从参考分布采样 $\mathbf{x}_0 \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$
+    \item 均匀采样时间 $t \sim \mathcal{U}(0, 1)$
+    \item 计算中间点 $\mathbf{x}_t = (1-t)\mathbf{x}_0 + t\mathbf{x}_1$
+    \item 计算目标速度 $v^* = \mathbf{x}_1 - \mathbf{x}_0$
+    \item 最小化 $\mathcal{L} = \| v_\theta(\mathbf{x}_t, t) - v^* \|^2$
+\end{enumerate}
+\end{importantbox}
+
+\subsection{条件轨迹 vs.\ 边际轨迹}
+
+这是理解 Rectified Flow 局限性的关键。虽然每一对 $(\mathbf{x}_0, \mathbf{x}_1)$ 的\textbf{条件轨迹}是严格直线，但训练后模型输出的\textbf{边际向量场}产生的轨迹通常\textbf{不是}直线。
+
+\begin{warningbox}{条件直线不等于边际直线}
+考虑一个二维例子：源分布有两个高斯团，目标分布也有两个高斯团。每对 $(\mathbf{x}_0, \mathbf{x}_1)$ 之间的条件轨迹确实是直线，但由于 $\mathbf{x}_0$ 和 $\mathbf{x}_1$ 是\textbf{独立随机}配对的，在某些中间点 $\mathbf{x}_t$，条件速度可能指向截然不同的方向（向上或向下）。训练后神经网络输出的是这些条件速度的\textbf{期望}，结果可能既不向上也不向下，而是指向两者的平均方向。因此边际轨迹会发生弯曲。
+\end{warningbox}
+
+\textbf{弯曲轨迹的后果}：如果边际轨迹弯曲，在求解 ODE 时就需要足够多的时间步才能准确跟踪轨迹。步数越少，离散化误差越大，生成质量越差。理想情况下，如果所有边际轨迹都是直线，那么只需\textbf{一步}就能从 $\mathbf{x}_0$ 直接到达 $\mathbf{x}_1$。
+
+\subsection{Reflow：通过微调使轨迹变直}
+
+为了使边际轨迹更接近直线，Liu et al.\ (2023) 提出了 \textbf{Reflow}（重流化）技术：
+
+\begin{enumerate}
+    \item \textbf{第一阶段}：正常训练一个 Rectified Flow 模型（1-Rectified Flow）
+    \item \textbf{生成配对数据}：使用训练好的模型，从 $\mathbf{x}_0 \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$ 出发，通过完整的 ODE 求解生成 $\mathbf{x}_1$，记录 $(\mathbf{x}_0, \mathbf{x}_1)$ 配对
+    \item \textbf{第二阶段}：用这些配对数据重新训练模型（2-Rectified Flow）
+    \item 可以继续迭代：用 2-Rectified Flow 生成新配对，训练 3-Rectified Flow，以此类推
+\end{enumerate}
+
+\begin{importantbox}{Reflow 为什么有效？}
+Reflow 之所以能使轨迹变直，核心直觉是：
+\begin{itemize}
+    \item 在第一阶段，$\mathbf{x}_0$ 和 $\mathbf{x}_1$ 是\textbf{独立}采样的随机配对，没有对应关系
+    \item 经过第一阶段训练后，模型已经学到了一种从 $\mathbf{x}_0$ 到 $\mathbf{x}_1$ 的（弯曲的）映射
+    \item 在 Reflow 阶段，$(\mathbf{x}_0, \mathbf{x}_1)$ 配对不再是随机的，而是由模型确定的\textbf{确定性映射}产生的。这些配对之间已经存在合理的对应关系
+    \item 用这些``有意义的配对''重新训练，轨迹的交叉和冲突大大减少，边际轨迹自然变得更直
+\end{itemize}
+\end{importantbox}
+
+实验表明：
+\begin{itemize}
+    \item \textbf{1-Rectified Flow}：边际轨迹明显弯曲
+    \item \textbf{2-Rectified Flow}：轨迹显著变直
+    \item \textbf{3-Rectified Flow}：轨迹几乎是直线
+\end{itemize}
+
+\subsection{直线轨迹与少步生成}
+
+直线轨迹的直接好处是可以用\textbf{极少}的 ODE 求解步数完成生成：
+
+\begin{itemize}
+    \item 如果轨迹是完美直线，从起点 $\mathbf{x}_0$ 预测一次速度 $v_\theta(\mathbf{x}_0, 0)$，沿该方向走到终点即可——这是\textbf{单步生成}
+    \item 即使轨迹接近直线但不完美，2--4 步的 Euler 求解也能获得高质量结果
+    \item 对比：标准扩散模型通常需要 20--100 步才能获得同等质量
+\end{itemize}
+
+\begin{knowledgebox}{从 GAN 到扩散再到单步流模型}
+讲者指出了生成模型发展的有趣循环：
+\begin{itemize}
+    \item \textbf{GAN/VAE 时代}：单步生成，速度快但质量/多样性受限
+    \item \textbf{扩散模型时代}：多步迭代，质量大幅提升但速度牺牲
+    \item \textbf{Rectified Flow + Reflow}：通过微调回到单步/少步生成，同时保持高质量
+\end{itemize}
+这是一种``螺旋式上升''的发展路径。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+Rectified Flow 通过线性插值定义条件流映射，使训练极其简洁。然而随机配对导致边际轨迹弯曲，需要多步 ODE 求解。Reflow 技术通过使用模型自身生成的配对数据进行微调，可以有效地将边际轨迹``拉直''，从而实现少步甚至单步生成。
+

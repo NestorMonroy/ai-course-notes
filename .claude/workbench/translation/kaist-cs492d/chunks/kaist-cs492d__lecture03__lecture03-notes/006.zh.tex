@@ -1,0 +1,73 @@
+\section{DDPM 训练算法}
+
+\subsection{完整训练流程}
+
+将前面的推导综合起来，DDPM 的训练算法可以写成极其简洁的形式：
+
+\begin{enumerate}
+    \item \textbf{重复}以下步骤直到收敛：
+    \begin{enumerate}
+        \item 从训练集中采样一个干净数据点：$x_0 \sim q(x_0)$
+        \item 均匀随机采样一个时间步：$t \sim \text{Uniform}(\{1, 2, \dots, T\})$
+        \item 采样一个标准高斯噪声：$\epsilon \sim \mathcal{N}(0, I)$
+        \item 计算含噪数据：$x_t = \sqrt{\bar{\alpha}_t}\, x_0 + \sqrt{1 - \bar{\alpha}_t}\, \epsilon$
+        \item 计算损失并更新参数：$\nabla_\theta \left\| \epsilon - \epsilon_\theta(x_t, t) \right\|^2$
+    \end{enumerate}
+\end{enumerate}
+
+\begin{knowledgebox}{训练的简洁性}
+整个训练过程只需要几行 PyTorch 代码即可实现。没有对抗训练的不稳定性（如 GAN），没有变分推断的复杂性（如 VAE 的重参数化和 KL 项的平衡），只有一个简单的 L2 回归问题。这种简洁性是扩散模型被广泛采用的重要原因之一。
+\end{knowledgebox}
+
+\subsection{训练的伪代码实现}
+
+以下是使用 PyTorch 风格的简化实现：
+
+\begin{lstlisting}[caption={DDPM 训练的核心循环}, label=lst:train]
+# alpha_bar: precomputed cumulative product, shape [T]
+# model: noise prediction network epsilon_theta(x_t, t)
+
+for x0 in dataloader:
+    t = torch.randint(1, T+1, (batch_size,))
+    epsilon = torch.randn_like(x0)
+
+    # Forward jump: sample x_t directly from x_0
+    sqrt_alpha_bar = alpha_bar[t].sqrt()
+    sqrt_one_minus = (1 - alpha_bar[t]).sqrt()
+    x_t = sqrt_alpha_bar * x0 + sqrt_one_minus * epsilon
+
+    # Predict noise and compute loss
+    epsilon_pred = model(x_t, t)
+    loss = F.mse_loss(epsilon_pred, epsilon)
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+\end{lstlisting}
+
+\begin{warningbox}{$\bar{\alpha}_t$ 的预计算}
+在实现中，$\bar{\alpha}_t = \prod_{s=1}^{t}(1-\beta_s)$ 应当在训练开始前\textbf{预计算}并存储为一个长度为 $T$ 的向量。在每个训练步骤中，根据随机采样的 $t$ 索引对应的 $\bar{\alpha}_t$ 值即可。注意要正确处理 batch 维度上不同样本对应不同时间步的情况。
+\end{warningbox}
+
+\subsection{关于权重项的讨论}
+
+从 ELBO 严格推导，去噪匹配项 $L_{t-1}$ 前面有一个与 $t$ 相关的系数 $\frac{1}{2\sigma_t^2}$。如果我们保留这个权重，不同时间步的损失会被赋予不同的重要性。
+
+Ho et al.（2020）发现，实践中\textbf{去掉权重}（对所有 $t$ 均匀加权）效果更好。直觉上，这是因为：
+
+\begin{itemize}
+    \item 当训练足够长时间且 $t$ 被均匀采样时，每个时间步都会被充分训练
+    \item 均匀权重避免了某些时间步被过度强调而其他时间步被忽略的问题
+    \item 实验上，均匀权重的 FID 分数往往更好
+\end{itemize}
+
+\begin{knowledgebox}{权重项的理论与实践}
+虽然理论上权重项对应着正确的 ELBO 优化，但去掉权重后的目标可以看作一种\textbf{重加权}策略，实际上它更倾向于在高噪声水平上提高性能。后续的研究（如 P2 weighting, Min-SNR weighting 等）探索了各种自适应权重策略，试图在理论正确性和实践效果之间找到更好的平衡。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+DDPM 的训练算法极为简洁：采样数据、采样时间步、采样噪声、计算含噪数据、预测噪声、最小化 L2 损失。整个过程可以用不到 10 行 PyTorch 代码实现。权重项在实践中通常被省略。
+
+%% ========== 第七节：采样算法 ==========
+

@@ -1,0 +1,64 @@
+\section{课程回顾与问题背景}
+
+本节课是 KAIST CS492D ``扩散模型专题'' 系列第12讲，承接上一讲关于推理时引导生成（Inference-Time Guided Generation）的内容，进一步深入讨论更高级的引导技术。上一讲主要介绍了三类推理时引导方法：
+
+\begin{enumerate}
+    \item \textbf{注意力与中间层操纵}：通过直接修改神经网络的中间层或注意力输出来实现引导。优点是实现简单，缺点是缺乏理论解释，且仅适用于特定场景。
+    \item \textbf{基于逆问题的引导（DPS）}：将条件生成建模为逆问题，通过贝叶斯法则分解条件分数为边际分数与条件似然梯度之和。
+    \item \textbf{基于奖励函数的引导}：使用可微的奖励函数定义用户偏好，在生成过程中注入梯度引导。
+\end{enumerate}
+
+\begin{importantbox}{逆问题回顾}
+给定观测量 $y$ 和映射函数 $\mathcal{A}$，逆问题的目标是找到满足 $y = \mathcal{A}(x)$ 的 $x$。在扩散模型框架下，我们需要计算条件分数 $\nabla_{x_t} \log p(x_t | y)$，利用贝叶斯法则将其分解为：
+$$\nabla_{x_t} \log p(x_t | y) = \nabla_{x_t} \log p(x_t) + \nabla_{x_t} \log p(y | x_t)$$
+其中第一项是预训练模型已经学到的边际分数，第二项是需要额外计算的条件似然梯度。
+\end{importantbox}
+
+\subsection{DPS 方法的核心近似}
+
+DPS（Diffusion Posterior Sampling）方法的关键思路是：当逆问题中的映射函数 $\mathcal{A}$ 为线性时，条件分数项可以通过参数 $R$（$\mathcal{A}$ 的伪逆）来计算。更进一步，可以通过更粗糙的近似——将条件分布近似为高斯分布——来得到更简洁的形式：
+
+$$\nabla_{x_t} \log p(y | x_t) \approx -\nabla_{x_t} \| y - \mathcal{A}(\hat{x}_0(x_t)) \|^2$$
+
+其中 $\hat{x}_0(x_t)$ 是由当前噪声状态 $x_t$ 通过 Tweedie 公式估计的干净数据。
+
+\begin{knowledgebox}{Tweedie 公式}
+Tweedie 公式给出了在给定噪声观测 $x_t$ 时，对干净数据 $x_0$ 的最优后验估计：
+$$\hat{x}_0(x_t) = \frac{1}{\sqrt{\bar{\alpha}_t}} \left( x_t + (1 - \bar{\alpha}_t) \nabla_{x_t} \log p(x_t) \right)$$
+在实践中，这等价于用预训练的噪声预测网络 $\epsilon_\theta(x_t, t)$ 来估算 $x_0$。
+\end{knowledgebox}
+
+\subsection{DPS 的实现简洁性}
+
+DPS 方法在实现上极其简单——只需在生成流水线中添加一行代码。在每个去噪步骤中，先通过标准的反向过程计算 $x_{t-1}$，然后根据 L2 损失的梯度对 $x_{t-1}$ 进行一步更新：
+
+$$x_{t-1} \leftarrow x_{t-1} - \eta \cdot \nabla_{x_t} \| y - \mathcal{A}(\hat{x}_0(x_t)) \|^2$$
+
+其中 $\eta$ 是引导步长（guidance step size），控制每步引导的强度。整个 DPS 算法的流程可以总结为：
+
+\begin{enumerate}
+    \item 从 $x_T \sim \mathcal{N}(0, I)$ 开始
+    \item 对每个时间步 $t = T, T-1, \ldots, 1$：
+    \begin{enumerate}
+        \item 用预训练模型计算 $\hat{x}_0(x_t)$（Tweedie 估计）
+        \item 计算引导梯度 $g = \nabla_{x_t} \| y - \mathcal{A}(\hat{x}_0(x_t)) \|^2$
+        \item 执行标准去噪步得到 $\tilde{x}_{t-1}$
+        \item 应用引导更新 $x_{t-1} = \tilde{x}_{t-1} - \eta_t \cdot g$
+    \end{enumerate}
+    \item 输出 $x_0$
+\end{enumerate}
+
+讲者强烈建议学生用自己的扩散模型代码（如课程作业中的实现）来实验 DPS 方法，因为它实际上只需要在生成流水线中添加一行梯度更新代码。
+
+\begin{warningbox}{近似的代价}
+虽然将 $p(y|x_t)$ 近似为高斯分布使得计算极为简便，但这并非真实分布。尤其是在高噪声时间步，$\hat{x}_0$ 的估计质量较差，条件似然的近似误差会很大。因此实际效果往往对引导权重和时间步数非常敏感。
+\end{warningbox}
+
+\begin{knowledgebox}{线性逆问题 vs. 非线性逆问题}
+当映射函数 $\mathcal{A}$ 为线性时（如超分辨率、去模糊、修复等），可以推导出更精确的条件分数表达式，涉及 $\mathcal{A}$ 的伪逆运算。但在实践中，即使是线性情况下，DPS 的简单高斯近似也能取得不错的效果，因此通常直接使用通用的 L2 梯度引导形式。对于非线性映射 $\mathcal{A}$（如相位恢复、非线性传感器模型），高斯近似的误差可能更大，但仍是目前最实用的方法。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+DPS 框架通过贝叶斯法则将条件分数分解为边际分数和条件似然梯度，并利用高斯近似将后者简化为 L2 损失的梯度。这一方法不需要额外训练，可以应用于任意可微的条件函数。
+

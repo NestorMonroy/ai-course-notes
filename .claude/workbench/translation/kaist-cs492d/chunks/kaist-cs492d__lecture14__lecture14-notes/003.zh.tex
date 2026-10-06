@@ -1,0 +1,73 @@
+\section{训练 MDLM}
+
+\subsection{ELBO 损失函数}
+
+在 AR 模型中，训练目标是直接最大化对数似然 $\log p(\mathbf{x})$。在扩散模型中无法精确计算似然，因此使用\textbf{证据下界}（Evidence Lower Bound, ELBO）作为训练目标。
+
+MDLM 的核心贡献之一就是推导出了一个\textbf{极其简洁}的连续时间 ELBO：
+
+$$\mathcal{L}_{\text{MDLM}} = \mathbb{E}_{t \sim \mathcal{U}(0,1), \, \mathbf{z}_t \sim q(\mathbf{z}_t|\mathbf{x})} \left[ \frac{\alpha_t'}{1 - \alpha_t} \sum_{i: z_t^{(i)} = \text{M}} -\log x_\theta^{(i)}(\mathbf{z}_t, t) \right]$$
+
+各项含义：
+\begin{itemize}
+    \item $\mathbb{E}_{t \sim \mathcal{U}(0,1)}$：从 $[0, 1]$ 均匀采样时间步 $t$
+    \item $\mathbf{z}_t \sim q(\mathbf{z}_t | \mathbf{x})$：对干净文本 $\mathbf{x}$ 施加噪声得到 $\mathbf{z}_t$
+    \item $\frac{\alpha_t'}{1 - \alpha_t}$：\textbf{权重项}，即去掩码的概率（chance of unmasking）
+    \item $-\log x_\theta^{(i)}(\mathbf{z}_t, t)$：\textbf{交叉熵损失}，仅在 mask 位置上计算
+\end{itemize}
+
+\begin{importantbox}{连续时间极限}
+MDLM 论文的关键洞察：当离散化步数 $T \to \infty$ 时，离散时间 Markov 链收敛到连续时间 Markov 链，从而得到上述简洁的损失函数。这一简化极大地方便了训练和评估。
+\end{importantbox}
+
+\subsection{AR 训练与 MDLM 训练的对比}
+
+AR 模型和 MDLM 的训练流程非常相似，仅有三处关键差异：
+
+\begin{table}[H]
+\centering
+\caption{AR 模型与 MDLM 训练对比}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{方面} & \textbf{AR 模型} & \textbf{MDLM} \\
+\midrule
+注意力机制 & 因果注意力 & 双向注意力 \\
+输入 & 干净文本 $\mathbf{x}$ & 噪声序列 $\mathbf{z}_t$（随机掩码后） \\
+额外采样 & 无 & 需采样时间步 $t$ \\
+损失函数 & 交叉熵 & 加权交叉熵（权重 $\frac{\alpha_t'}{1-\alpha_t}$） \\
+计算位置 & 所有位置 & 仅 mask 位置 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{knowledgebox}{训练简洁性}
+如果你知道如何训练一个 AR 模型，你基本上也知道如何训练一个 MDLM。唯一的新增操作是：（1）随机采样一个时间步 $t$；（2）根据 $t$ 对输入进行随机掩码；（3）在损失中加入权重项。这种简洁性是 MDLM 被广泛采用的重要原因。
+\end{knowledgebox}
+
+\subsection{采样过程详解}
+
+MDLM 的完整采样过程（祖先采样, Ancestral Sampling）：
+
+\begin{enumerate}
+    \item \textbf{初始化}：$\mathbf{z}_T = [\text{M}, \text{M}, \ldots, \text{M}]$（全 mask 序列）
+    \item \textbf{单步去噪}（从 $\mathbf{z}_t$ 到 $\mathbf{z}_s$）：
+    \begin{enumerate}
+        \item 将 $\mathbf{z}_t$ 送入双向 Transformer
+        \item 模型对所有 mask 位置预测词的分布
+        \item 从分布中采样，填充所有 mask 位置
+        \item 根据去掩码概率 $\frac{\alpha_s - \alpha_t}{1 - \alpha_t}$ 决定保留哪些预测
+        \item 未保留的预测被重新 mask
+        \item 已揭示的 token 保持不变
+    \end{enumerate}
+    \item 重复步骤 2 共 $T$ 步，直到 $\mathbf{z}_0$ 完全揭示
+\end{enumerate}
+
+\begin{warningbox}{这不是启发式方法}
+这个采样过程不是凭直觉设计的启发式方法，而是严格从数学推导中得出的祖先采样器（Ancestral Sampler）。数学推导要求：（1）已揭示的 token 必须保持不变；（2）只有 mask 位置的预测才会被重新 mask。
+\end{warningbox}
+
+\subsection{本章小结}
+
+MDLM 的训练损失是一个加权交叉熵，权重由去掩码概率决定。连续时间极限是 MDLM 相比前作的核心简化。训练流程与 AR 模型高度相似，降低了实现门槛。
+
+\newpage

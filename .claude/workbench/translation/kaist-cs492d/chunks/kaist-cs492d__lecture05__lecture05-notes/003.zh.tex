@@ -1,0 +1,77 @@
+\section{DDIM 的采样过程}
+
+\subsection{通用采样公式}
+
+给定当前时间步 $t$ 的含噪样本 $\mathbf{x}_t$，DDIM 的单步更新公式为：
+
+$$
+\mathbf{x}_{t-1} = \sqrt{\bar{\alpha}_{t-1}}\,\underbrace{\hat{\mathbf{x}}_0(\mathbf{x}_t)}_{\text{预测的干净数据}} + \sqrt{1-\bar{\alpha}_{t-1}-\sigma_t^2}\cdot\underbrace{\frac{\mathbf{x}_t - \sqrt{\bar{\alpha}_t}\,\hat{\mathbf{x}}_0(\mathbf{x}_t)}{\sqrt{1-\bar{\alpha}_t}}}_{\text{``方向''指向 } \mathbf{x}_t} + \underbrace{\sigma_t\,\boldsymbol{\epsilon}_t}_{\text{随机噪声}}
+$$
+
+其中 $\hat{\mathbf{x}}_0(\mathbf{x}_t)$ 是通过噪声预测网络对 $\mathbf{x}_0$ 的估计：
+$$
+\hat{\mathbf{x}}_0(\mathbf{x}_t) = \frac{\mathbf{x}_t - \sqrt{1-\bar{\alpha}_t}\,\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t)}{\sqrt{\bar{\alpha}_t}}
+$$
+
+$\boldsymbol{\epsilon}_t \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$ 是独立采样的高斯噪声。
+
+\begin{importantbox}{采样公式的直观解读}
+DDIM 的单步更新可以分解为三个组成部分：
+\begin{enumerate}
+    \item \textbf{信号分量}：$\sqrt{\bar{\alpha}_{t-1}}\,\hat{\mathbf{x}}_0$——根据当前对干净数据的最佳估计，按 $t-1$ 时刻的信噪比进行缩放
+    \item \textbf{方向分量}：指向从 $\hat{\mathbf{x}}_0$ 到 $\mathbf{x}_t$ 方向的向量，保留了噪声的``方向信息''
+    \item \textbf{随机分量}：$\sigma_t \boldsymbol{\epsilon}_t$——额外注入的噪声，其大小由 $\sigma_t$ 控制
+\end{enumerate}
+当 $\sigma_t=0$ 时，随机分量消失，整个过程变为确定性的。
+\end{importantbox}
+
+\subsection{三种预测器的等价性}
+
+讲者指出，在实现 DDIM 采样时，可以使用三种等价的网络参数化：
+
+\begin{enumerate}
+    \item \textbf{噪声预测器}（$\boldsymbol{\epsilon}$-prediction）：$\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t) \approx \boldsymbol{\epsilon}$，预测添加的噪声
+    \item \textbf{干净数据预测器}（$\mathbf{x}_0$-prediction）：$\hat{\mathbf{x}}_{0,\theta}(\mathbf{x}_t, t) \approx \mathbf{x}_0$，直接预测原始数据
+    \item \textbf{均值预测器}（$\boldsymbol{\mu}$-prediction）：$\boldsymbol{\mu}_\theta(\mathbf{x}_t, t) \approx \boldsymbol{\mu}_{t-1}$，预测后验均值
+\end{enumerate}
+
+\begin{knowledgebox}{预测器之间的转换关系}
+三种预测器之间可以通过简单的线性变换相互转换：
+$$
+\hat{\mathbf{x}}_0 = \frac{\mathbf{x}_t - \sqrt{1-\bar{\alpha}_t}\,\boldsymbol{\epsilon}_\theta}{\sqrt{\bar{\alpha}_t}}, \quad
+\boldsymbol{\epsilon}_\theta = \frac{\mathbf{x}_t - \sqrt{\bar{\alpha}_t}\,\hat{\mathbf{x}}_0}{\sqrt{1-\bar{\alpha}_t}}
+$$
+无论网络内部使用哪种参数化，DDIM 的采样算法只需要 $\hat{\mathbf{x}}_0$ 的估计值即可。在实践中，$\boldsymbol{\epsilon}$-prediction 是最常用的参数化方式（DDPM 原始论文所采用），而 $\mathbf{x}_0$-prediction 在某些改进方法中也有应用。
+\end{knowledgebox}
+
+\subsection{$\sigma_t$ 参数化与特殊情况}
+
+$\sigma_t$ 的选择控制了采样过程中随机性的程度。DDIM 论文中引入了参数 $\eta \geq 0$ 来统一参数化：
+
+$$
+\sigma_t(\eta) = \eta \cdot \sqrt{\frac{1-\bar{\alpha}_{t-1}}{1-\bar{\alpha}_t}} \cdot \sqrt{1 - \frac{\bar{\alpha}_t}{\bar{\alpha}_{t-1}}}
+$$
+
+\begin{table}[H]
+\centering
+\caption{$\eta$ 参数的特殊取值及对应的采样行为}
+\begin{tabular}{cll}
+\toprule
+$\eta$ & \textbf{采样性质} & \textbf{等价模型} \\
+\midrule
+$0$ & 完全确定性采样 & DDIM（纯确定性） \\
+$1$ & 随机采样，方差与 DDPM 一致 & 等价于 DDPM \\
+$>1$ & 更大的随机性 & 超越 DDPM 的噪声注入 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{warningbox}{DDPM 是 DDIM 的特殊情况}
+当 $\eta = 1$ 时，DDIM 的后验分布 $q_\sigma(\mathbf{x}_{t-1}|\mathbf{x}_t, \mathbf{x}_0)$ 的方差恰好等于 DDPM 中推导出的后验方差 $\tilde{\beta}_t = \frac{1-\bar{\alpha}_{t-1}}{1-\bar{\alpha}_t}\beta_t$。此时 DDIM 退化为 DDPM 的马尔可夫采样过程。然而，由于两者的 ELBO 是等价的，使用不同的 $\eta$ 值采样不会影响训练目标——这是训练与推理解耦的关键。
+\end{warningbox}
+
+\subsection{本章小结}
+
+DDIM 的采样公式由三个分量组成：信号项、方向项和随机项。超参数 $\sigma_t$（或等价地 $\eta$）控制随机性的大小。$\eta=0$ 给出确定性采样，$\eta=1$ 退化为 DDPM。无论选择哪个 $\eta$，都不需要重新训练模型。
+
+

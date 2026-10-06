@@ -1,0 +1,121 @@
+\section{超越逆问题：多样化应用}
+
+\subsection{图像领域的拓展应用}
+
+推理时引导的威力远不止于解决逆问题。只要能定义合适的可微奖励函数，就可以引导预训练模型生成满足各种条件的输出。以下是几个典型应用场景。
+
+\begin{knowledgebox}{从逆问题到通用引导}
+逆问题只是奖励函数引导的一个特例。通用引导框架的适用条件是：
+\begin{enumerate}
+    \item 拥有一个预训练的扩散/流模型（proposer）
+    \item 能够定义一个可微的奖励/损失函数（verifier）
+    \item 奖励函数能编码用户希望输出满足的条件
+\end{enumerate}
+满足这三个条件的任何问题都可以使用推理时引导。
+\end{knowledgebox}
+
+\subsection{全景图像生成}
+
+预训练的图像扩散模型通常只能生成固定分辨率（如 $512 \times 512$）的图像。如何利用预训练模型生成更大尺寸的全景图像？
+
+\textbf{核心思路}：将大画布划分为多个重叠的窗口（每个窗口大小等于模型训练分辨率），在所有窗口上并行执行去噪过程，同时通过引导确保重叠区域一致。
+
+具体而言：
+\begin{enumerate}
+    \item 在大画布上放置多个重叠的窗口
+    \item 对每个窗口独立执行扩散去噪
+    \item 定义奖励函数：相邻窗口在重叠区域应产生相同的像素值
+    \item 奖励函数可以简单定义为重叠区域的 L2 距离（或更高级的风格损失）
+    \item 在每步去噪后，根据重叠一致性的梯度更新所有窗口
+\end{enumerate}
+
+\begin{importantbox}{Canonical Space 与 Instance Space}
+这类同步化应用引入了两个概念：
+\begin{itemize}
+    \item \textbf{Canonical Space（规范空间）}：最终生成数据所在的空间（如全景图像的完整画布、3D 物体的纹理空间）
+    \item \textbf{Instance Space（实例空间）}：每个扩散过程独立操作的空间（如单个窗口、单个视角的 2D 图像）
+\end{itemize}
+生成过程在多个 instance space 中并行进行，通过 canonical space 中的一致性约束实现同步。
+\end{importantbox}
+
+实际实现中，最简单的同步化方式（与 DPS 完全一致）是：
+
+\begin{enumerate}
+    \item 在 canonical space 中采样所有 $x_T$
+    \item 将 canonical space 中的噪声投影到各 instance space
+    \item 在各 instance space 中独立进行一步去噪
+    \item 将去噪结果投影回 canonical space
+    \item 在重叠区域取平均（或根据 L2 损失梯度更新）
+    \item 将更新后的结果再投影回各 instance space，继续下一步
+\end{enumerate}
+
+\begin{warningbox}{简单平均 vs. 梯度引导}
+最朴素的同步化方式是直接在重叠区域取平均。这种方式简单但可能导致模糊和不一致。使用 DPS 风格的梯度引导（定义 L2 一致性损失或风格损失作为奖励函数）通常能取得更好的结果，因为它让模型在每步去噪时就``意识到''一致性约束的存在。
+\end{warningbox}
+
+\subsection{360 度全景图像}
+
+同样的思路可以拓展到 360 度全景图像的生成。将球面展开为多个重叠的平面投影，在每个投影上独立运行扩散过程，通过球面上的重叠一致性约束实现全局协调。
+
+\subsection{3D 纹理生成}
+
+给定一个 3D 模型的表面几何（mesh），如何利用 2D 图像扩散模型为其生成纹理？这是一个极其实用的问题——3D 模型在游戏、电影、虚拟现实中无处不在，而手工制作纹理耗时费力。
+
+\begin{enumerate}
+    \item 从多个视角对 3D 表面进行渲染（投影到 2D），每个视角得到一张部分可见的 2D 图像
+    \item 在每个视角的 2D 图像上运行扩散去噪（instance space 中的操作）
+    \item 将 2D 结果反投影回 3D 表面（映射回 canonical space）
+    \item 通过奖励函数确保不同视角在 3D 表面上的重叠区域一致
+\end{enumerate}
+
+这里 canonical space 是 3D 表面上的纹理空间（UV space），instance space 是各个视角的 2D 图像空间。投影函数 $\pi_i$ 将 3D 表面上的点映射到第 $i$ 个视角的 2D 坐标，反投影函数 $\pi_i^{-1}$ 将 2D 像素映射回 3D 表面。
+
+\begin{importantbox}{3D 纹理生成的同步化约束}
+设从 $K$ 个视角 $\{v_1, \ldots, v_K\}$ 观察 3D 物体，每个视角 $v_i$ 的 2D 渲染图像为 $I_i$。对于 3D 表面上任意一个点 $p$，如果它在视角 $v_i$ 和 $v_j$ 中都可见，则需要满足：
+$$\pi_i(p) \text{ 处的颜色} = \pi_j(p) \text{ 处的颜色}$$
+这一约束可以形式化为奖励函数：
+$$r = -\sum_{i < j} \sum_{p \in \text{overlap}(v_i, v_j)} \| I_i(\pi_i(p)) - I_j(\pi_j(p)) \|^2$$
+\end{importantbox}
+
+\subsection{歧义图像（Visual Illusions）生成}
+
+一个有趣的应用是生成``歧义图像''——一张图像在不同变换下呈现完全不同的含义：
+\begin{itemize}
+    \item 正放是一群人的油画，翻转后变成一位老人的肖像
+    \item 正放是一盆绿植，翻转后变成爱因斯坦的画像
+\end{itemize}
+
+\begin{knowledgebox}{歧义图像的形式化}
+生成歧义图像可以视为同步化问题：
+\begin{itemize}
+    \item Canonical space：原始图像空间
+    \item Instance spaces：原始视角和变换后视角（如翻转、旋转）
+    \item 约束：在 canonical space 中只有一张图像，但它在两个 instance space 中分别符合不同的文本描述
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{无限缩放（Infinite Zooming）}
+
+另一个令人印象深刻的应用是利用图像扩散模型生成``无限缩放''视频——从星系不断放大到盘子上的细节再到建筑物内部。这可以通过定义不同缩放级别的 instance space，并在相邻级别的重叠区域施加一致性约束来实现。
+
+具体地，每个缩放级别对应一个 instance space，相邻级别之间的``重叠区域''是高缩放级别中的整张图像与低缩放级别中的中心区域。通过确保这些区域的一致性，就能生成视觉上连贯的无限缩放效果。
+
+\begin{knowledgebox}{无限缩放的分层结构}
+无限缩放可以看作分层级的同步化问题：
+\begin{itemize}
+    \item 第 0 层：最宏观的视图（如整个星系）
+    \item 第 1 层：第 0 层中心区域的放大版本
+    \item 第 2 层：第 1 层中心区域的进一步放大
+    \item $\ldots$
+\end{itemize}
+每一层都是一个独立的 instance space，使用同一个预训练图像模型进行去噪。相邻层之间通过缩放对应关系定义一致性约束，确保放大后的图像内容与上一层的中心区域在视觉上匹配。
+\end{knowledgebox}
+
+\subsection{运动生成的长序列拼接}
+
+对于运动生成（motion generation），预训练模型通常只能生成短时间序列。可以通过类似的同步化技术，将多段短运动拼接为长运动序列，同时确保过渡平滑。
+
+\subsection{本章小结}
+
+推理时引导的应用远超逆问题。通过定义合适的奖励函数和同步化约束，可以利用预训练的 2D 图像模型生成全景图、3D 纹理、歧义图像等多种超出训练域的内容。核心思想是 canonical space 与 instance space 的分离与同步。
+

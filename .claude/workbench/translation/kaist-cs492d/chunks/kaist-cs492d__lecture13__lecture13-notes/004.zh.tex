@@ -1,0 +1,85 @@
+\section{Score Distillation Sampling（SDS）}
+
+\subsection{核心思想：将扩散模型的损失函数作为对齐度量}
+
+SDS 的核心直觉出奇地简单：\textbf{直接利用扩散模型的训练损失函数作为生成质量的度量}。
+
+\begin{importantbox}{SDS 的关键洞察}
+扩散模型训练完成后，对于训练分布中的真实数据 $x_0$，其噪声预测损失会收敛到一个很小的值：
+$$
+\mathcal{L}_{\text{diffusion}}(x_0) = \mathbb{E}_{t, \epsilon}\left[\| \epsilon_\phi(x_t, t, c) - \epsilon \|_2^2\right] \approx \text{small value}
+$$
+这意味着我们可以反过来使用这个损失：\textbf{如果一张图像使得预训练扩散模型的噪声预测损失很小，那么这张图像就接近真实数据分布}。
+\end{importantbox}
+
+\subsection{SDS 的算法流程}
+
+SDS 的优化过程包含四个步骤，在每次迭代中循环执行：
+
+\begin{enumerate}
+    \item \textbf{渲染}：从随机视角 $\pi$ 渲染当前 3D 表示，得到 2D 图像
+    $$x_0 = g(\theta, \pi)$$
+
+    \item \textbf{前向加噪}：随机采样时间步 $t$ 和噪声 $\epsilon$，对渲染图像执行前向过程
+    $$x_t = \sqrt{\bar{\alpha}_t}\, x_0 + \sqrt{1 - \bar{\alpha}_t}\, \epsilon$$
+
+    \item \textbf{噪声预测}：使用预训练的扩散模型预测噪声
+    $$\hat{\epsilon} = \epsilon_\phi(x_t, t, c)$$
+    其中 $c$ 是文本条件（如``a bulldozer''）
+
+    \item \textbf{反向传播}：计算损失 $\| \hat{\epsilon} - \epsilon \|_2^2$，将梯度通过渲染函数 $g$ 传回 3D 表示参数 $\theta$
+\end{enumerate}
+
+\subsection{梯度推导与 Jacobian 近似}
+
+对上述损失函数关于 $\theta$ 求梯度，利用链式法则可得：
+
+$$
+\nabla_\theta \mathcal{L} = (\hat{\epsilon} - \epsilon) \cdot \underbrace{\frac{\partial \hat{\epsilon}}{\partial x_t}}_{\text{U-Net Jacobian}} \cdot \frac{\partial x_t}{\partial x_0} \cdot \frac{\partial g(\theta, \pi)}{\partial \theta}
+$$
+
+其中三个因子分别对应：
+\begin{itemize}
+    \item $(\hat{\epsilon} - \epsilon)$：噪声预测残差
+    \item $\frac{\partial \hat{\epsilon}}{\partial x_t}$：噪声预测网络（U-Net）的 Jacobian
+    \item $\frac{\partial x_t}{\partial x_0} \cdot \frac{\partial g}{\partial \theta}$：前向过程和渲染函数的导数
+\end{itemize}
+
+\begin{importantbox}{SDS 梯度的核心简化}
+在实践中，\textbf{U-Net Jacobian $\frac{\partial \hat{\epsilon}}{\partial x_t}$ 被近似为单位矩阵}（即直接忽略）。这带来两大好处：
+
+\begin{enumerate}
+    \item \textbf{节省计算}：U-Net 的 Jacobian 计算需要对网络所有参数做反向传播，这是整个流程中计算量最大的部分。跳过它可以显著节省时间和显存。
+    \item \textbf{质量基本不变}：实验表明，有无 Jacobian 项的生成质量几乎相同。
+\end{enumerate}
+
+简化后的 SDS 梯度为：
+$$
+\nabla_\theta \mathcal{L}_{\text{SDS}} \approx \mathbb{E}_{t,\epsilon}\left[w(t)(\hat{\epsilon} - \epsilon) \frac{\partial g(\theta, \pi)}{\partial \theta}\right]
+$$
+其中 $w(t)$ 是与时间步相关的权重函数。
+\end{importantbox}
+
+\begin{warningbox}{SDS 缺乏严格理论保证}
+Minhyuk Sung 教授明确指出，SDS 是一个``非常实用但没有完美理论解释''的方法。它并不是从某个明确的目标函数推导出来的最优梯度，而是一种启发式的实用设计。尽管如此，它在实验中表现非常好。
+\end{warningbox}
+
+\subsection{为什么叫 ``Score Distillation''？}
+
+\begin{knowledgebox}{名称解读：Score Distillation Sampling}
+\textbf{Score}（分数）：扩散模型学到的噪声预测 $\epsilon_\phi$ 与数据分布的 score function $\nabla_x \log p(x)$ 密切相关。噪声预测的残差 $(\hat{\epsilon} - \epsilon)$ 本质上提供了关于``数据应该如何调整才能更接近真实分布''的方向。
+
+\textbf{Distillation}（蒸馏）：我们将预训练扩散模型中学到的知识（以 score/噪声预测的形式）蒸馏到一个新的表示（如 3D 模型）中。
+
+\textbf{Sampling}：整个过程可以看作是一种特殊的采样过程——不是在图像空间中采样，而是在参数空间 $\theta$ 中通过梯度下降``采样''一个使得所有视角渲染都接近真实图像分布的 3D 表示。
+\end{knowledgebox}
+
+\subsection{SDS 的关键要求：可微分渲染}
+
+SDS 的梯度需要通过渲染函数 $g$ 反向传播到 3D 表示参数 $\theta$，因此\textbf{渲染函数必须是可微分的}。这正是 Neural Rendering 的重要性所在——NeRF 和 3D Gaussian Splatting 都提供了可微分的渲染管线。
+
+\subsection{本章小结}
+
+SDS 通过一个巧妙的设计将预训练扩散模型的损失函数作为跨模态生成的优化目标。其核心简化（忽略 U-Net Jacobian）使得算法既高效又有效。虽然缺乏完整的理论分析，但在实践中取得了令人印象深刻的结果。
+
+\newpage

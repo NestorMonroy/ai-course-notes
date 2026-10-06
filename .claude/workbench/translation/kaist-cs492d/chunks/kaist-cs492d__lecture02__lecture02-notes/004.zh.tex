@@ -1,0 +1,133 @@
+\section{扩散模型：前向过程}
+
+\subsection{两个关键设计选择}
+
+从层级 VAE 到 DDPM，有两个关键的简化设计：
+
+\begin{enumerate}
+    \item \textbf{维度匹配}：所有潜变量 $x_t$ 与数据 $x_0$ 具有相同的维度。在标准 VAE 中，潜空间维度通常低于数据空间，但扩散模型选择相同维度。
+    \item \textbf{固定前向过程}：变分后验（前向过程）$q(x_t|x_{t-1})$ 不通过神经网络参数化，而是预先定义好的。这意味着只需要学习逆过程 $p_\theta(x_{t-1}|x_t)$。
+\end{enumerate}
+
+\begin{importantbox}{扩散模型 vs. VAE 的本质区别}
+在 VAE 中，编码器（前向过程）和解码器（逆过程）\textbf{都需要学习}。在扩散模型中，前向过程是\textbf{预先定义}的——它只是简单地逐步添加噪声，无需任何训练。唯一需要学习的是逆过程（去噪过程）。这大大简化了训练，因为不再需要联合优化两个网络。
+\end{importantbox}
+
+\subsection{前向过程的定义}
+
+前向过程（Forward Process）是从数据 $x_0$ 逐步添加高斯噪声直到变成纯噪声 $x_T$ 的过程。其转移分布定义为：
+
+$$q(x_t | x_{t-1}) = \mathcal{N}(x_t; \sqrt{1 - \beta_t} \, x_{t-1}, \, \beta_t I)$$
+
+其中 $\beta_t \in (0, 1)$ 是\textbf{噪声调度}（noise schedule）参数。
+
+\begin{importantbox}{前向转移分布的物理含义}
+每一步前向过程做了两件事：
+\begin{enumerate}
+    \item \textbf{缩放}：将 $x_{t-1}$ 乘以 $\sqrt{1-\beta_t}$（小于 1），使信号逐步衰减，均值向零靠近。
+    \item \textbf{加噪}：添加方差为 $\beta_t$ 的高斯噪声。
+\end{enumerate}
+随着 $t$ 增大，$\beta_t$ 逐渐增大（但始终为小数），信号逐步被噪声淹没。
+\end{importantbox}
+
+用采样的形式来写，前向过程等价于：
+
+$$x_t = \sqrt{1 - \beta_t} \, x_{t-1} + \sqrt{\beta_t} \, \epsilon_t, \quad \epsilon_t \sim \mathcal{N}(0, I)$$
+
+\subsection{噪声调度（Noise Schedule）}
+
+参数 $\beta_t$ 需要满足以下条件：
+
+\begin{itemize}
+    \item $\beta_t \in (0, 1)$ 对所有 $t$ 成立
+    \item $\beta_t$ 是关于 $t$ 的\textbf{非递减}函数（或至少不递减）
+    \item $\beta_t$ 的值应保持较小（如 $10^{-4}$ 到 $0.02$ 量级）
+\end{itemize}
+
+常见的噪声调度方案包括：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{方案} & \textbf{描述} \\
+\midrule
+线性调度（Linear） & $\beta_t$ 从 $\beta_1$ 到 $\beta_T$ 线性增长 \\
+余弦调度（Cosine） & 基于余弦函数设计，在两端变化缓慢 \\
+常数调度 & $\beta_t$ 保持不变 \\
+可学习调度 & $\beta_t$ 作为可学习参数 \\
+\bottomrule
+\end{tabular}
+\caption{常见的噪声调度方案}
+\end{table}
+
+\begin{knowledgebox}{为什么 $\beta_t$ 需要非递减？}
+直觉上，前向过程应该``越来越快地''破坏信息。在早期步骤中，信号仍然很强，少量噪声即可；在后期步骤中，需要更多噪声来确保 $x_T$ 充分接近纯高斯噪声。非递减的 $\beta_t$ 保证了噪声添加的速率不会``倒退''，这在理论上保证了前向过程最终收敛到标准高斯分布。
+\end{knowledgebox}
+
+\subsection{$\alpha_t$ 符号简化}
+
+为了后续推导的方便，定义：
+
+$$\alpha_t = 1 - \beta_t$$
+
+由于 $\beta_t$ 是非递减的正数，$\alpha_t$ 是非递增的，且满足 $0 < \alpha_t < 1$。
+
+前向转移分布可以改写为：
+
+$$q(x_t | x_{t-1}) = \mathcal{N}(x_t; \sqrt{\alpha_t} \, x_{t-1}, \, (1 - \alpha_t) I)$$
+
+进一步定义\textbf{累积乘积}：
+
+$$\bar{\alpha}_t = \prod_{s=1}^{t} \alpha_s$$
+
+由于每个 $\alpha_s < 1$，随着 $t$ 增大，$\bar{\alpha}_t$ 单调递减并趋向于零。
+
+\subsection{前向过程的闭式解}
+
+层级化前向过程的一个关键优势是：从 $x_0$ 到任意时刻 $x_t$ 的条件分布有\textbf{闭式解}，无需逐步采样。
+
+\begin{importantbox}{前向过程闭式解（核心公式）}
+$$q(x_t | x_0) = \mathcal{N}(x_t; \sqrt{\bar{\alpha}_t} \, x_0, \, (1 - \bar{\alpha}_t) I)$$
+
+等价的采样形式：
+$$x_t = \sqrt{\bar{\alpha}_t} \, x_0 + \sqrt{1 - \bar{\alpha}_t} \, \epsilon, \quad \epsilon \sim \mathcal{N}(0, I)$$
+
+这意味着我们可以\textbf{一步到位}地从 $x_0$ 采样任意时刻的 $x_t$，无需经历所有中间步骤。
+\end{importantbox}
+
+\textbf{推导思路}：利用高斯分布的可加性。将 $x_t = \sqrt{\alpha_t} x_{t-1} + \sqrt{1-\alpha_t} \epsilon_t$ 递归展开：
+
+$$x_t = \sqrt{\alpha_t} (\sqrt{\alpha_{t-1}} x_{t-2} + \sqrt{1-\alpha_{t-1}} \epsilon_{t-1}) + \sqrt{1-\alpha_t} \epsilon_t$$
+
+$$= \sqrt{\alpha_t \alpha_{t-1}} x_{t-2} + \sqrt{\alpha_t(1-\alpha_{t-1})} \epsilon_{t-1} + \sqrt{1-\alpha_t} \epsilon_t$$
+
+由于两个独立高斯噪声的线性组合仍是高斯噪声：
+
+$$\sqrt{\alpha_t(1-\alpha_{t-1})} \epsilon_{t-1} + \sqrt{1-\alpha_t} \epsilon_t \sim \mathcal{N}(0, (1-\alpha_t\alpha_{t-1}) I)$$
+
+反复应用这个过程，最终得到：
+
+$$x_t = \sqrt{\bar{\alpha}_t} x_0 + \sqrt{1-\bar{\alpha}_t} \epsilon$$
+
+\begin{knowledgebox}{闭式解的实际意义}
+闭式解在训练中至关重要：在每次训练迭代中，我们需要对 $x_0$ 施加噪声得到 $x_t$，然后让神经网络学习去噪。如果必须按顺序逐步施加噪声，训练效率将极低。闭式解使我们可以直接通过一次采样得到任意时刻的噪声版本。
+\end{knowledgebox}
+
+\subsection{前向过程的极限行为}
+
+当 $t \to T$（$T$ 足够大）时，$\bar{\alpha}_T \to 0$，因此：
+
+$$q(x_T | x_0) \approx \mathcal{N}(x_T; 0, I)$$
+
+这意味着前向过程最终将任何数据点 $x_0$ 转化为接近标准高斯分布的纯噪声。这一性质保证了前向过程的\textbf{变分后验}自然地最大化了 ELBO 中的先验匹配项。
+
+\begin{warningbox}{$T$ 必须足够大}
+如果 $T$ 不够大或 $\beta_t$ 设置不当，$x_T$ 可能还保留着 $x_0$ 的信息，不够接近 $\mathcal{N}(0, I)$。这会导致 ELBO 中先验匹配项的损失较大，影响生成质量。在实践中，DDPM 原论文使用 $T = 1000$。
+\end{warningbox}
+
+\subsection{本章小结}
+
+扩散模型的前向过程通过预定义的噪声调度 $\{\beta_t\}$ 逐步向数据添加高斯噪声。其关键优势在于：(1) 无需训练，完全预定义；(2) 具有闭式解 $q(x_t|x_0)$，可以一步采样；(3) 当 $T$ 足够大时，$x_T$ 自然趋近标准高斯分布。
+
+

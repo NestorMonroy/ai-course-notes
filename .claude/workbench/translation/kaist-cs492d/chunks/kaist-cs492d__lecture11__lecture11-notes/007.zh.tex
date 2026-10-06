@@ -1,0 +1,82 @@
+\section{DPS：Diffusion Posterior Sampling}
+
+当我们愿意接受更粗糙的近似以换取更广泛的适用性时，就得到了 \textbf{DPS（Diffusion Posterior Sampling）} 方法。
+
+\subsection{更粗糙的 Delta 近似}
+
+DPS 使用比高斯更极端的近似：直接将 $p(x_0 | x_t)$ 近似为 Delta 分布：
+
+$$
+p(x_0 | x_t) \approx \delta(x_0 - \hat{x}_0)
+$$
+
+其中 $\hat{x}_0$ 是 Tweedie 估计。这意味着我们假定从 $x_t$ 可以确定性地恢复 $x_0$。
+
+\begin{warningbox}{Delta 近似的代价与收益}
+\textbf{代价}：这是比高斯近似更差的近似。如果 $p(x_0|x_t)$ 真的是 Delta 分布，就不需要迭代去噪了。
+
+\textbf{收益}：计算变得极其简单，而且\textbf{不再要求 $\mathcal{A}$ 是线性的}——任何可微的前向映射都可以使用。
+\end{warningbox}
+
+\subsection{DPS 的似然分数}
+
+在 Delta 近似下：
+
+$$
+p(y | x_t) \approx p(y | x_0 = \hat{x}_0) = \mathcal{N}(y; \mathcal{A}(\hat{x}_0), \sigma_y^2 I)
+$$
+
+\begin{importantbox}{DPS 引导公式}
+DPS 的似然分数为：
+$$
+\nabla_{x_t} \log p(y | x_t) \approx -\frac{1}{\sigma_y^2} \nabla_{x_t} \left\| y - \mathcal{A}(\hat{x}_0) \right\|_2^2
+$$
+其中 $\hat{x}_0 = \hat{x}_0(x_t)$ 是通过 Tweedie 公式从 $x_t$ 计算的去噪估计，$\nabla_{x_t}$ 表示对 $x_t$ 求梯度（需要通过 $\hat{x}_0$ 对 $x_t$ 的依赖关系进行反向传播）。
+
+\textbf{直观含义}：比较 Tweedie 估计经过前向映射后的结果 $\mathcal{A}(\hat{x}_0)$ 与实际观测 $y$ 之间的差异，计算 L2 损失关于 $x_t$ 的梯度，作为引导信号。
+\end{importantbox}
+
+\subsection{DPS 的算法流程}
+
+DPS 的实现极其简洁——只需在标准 DDPM 采样循环中添加一行代码：
+
+\begin{lstlisting}[caption={DPS 引导的伪代码}]
+# Standard DDPM sampling loop
+for t in reversed(range(T)):
+    # 1. Standard denoising step
+    eps_pred = model(x_t, t)           # predict noise
+    x0_hat = tweedie_estimate(x_t, eps_pred, t)  # Tweedie
+    x_t_minus_1 = ddpm_step(x_t, eps_pred, t)    # standard step
+
+    # 2. DPS guidance (just one extra line!)
+    loss = torch.norm(y - A(x0_hat)) ** 2
+    grad = torch.autograd.grad(loss, x_t)[0]
+    x_t_minus_1 = x_t_minus_1 - step_size * grad
+\end{lstlisting}
+
+\begin{importantbox}{DPS 的两种等价实现}
+在 DDPM 框架下，以下两种实现是等价的：
+\begin{enumerate}
+    \item 修改噪声预测 $\epsilon$，然后执行去噪步骤。
+    \item 先执行标准去噪步骤得到 $x_{t-1}'$，然后直接在 $x_{t-1}'$ 上加引导项。
+\end{enumerate}
+这是因为 $x_{t-1}$ 是 $\epsilon$ 的仿射函数，两种方式在数学上完全等价。第二种实现更加直观和简洁。
+\end{importantbox}
+
+\subsection{DPS 的适用范围}
+
+\begin{knowledgebox}{DPS 支持非线性前向映射}
+DPS 的一个关键优势是它\textbf{不要求} $\mathcal{A}$ 是线性的。只要 $\mathcal{A}$ 是可微的（以便反向传播计算梯度），DPS 就可以应用。这使得 DPS 可以处理更广泛的逆问题，例如：
+\begin{itemize}
+    \item 非线性失真的图像恢复
+    \item 涉及神经网络渲染器的 3D 重建
+    \item 基于非线性物理模型的信号恢复
+\end{itemize}
+代价是近似精度更低（Delta 近似），但实践中仍然能产生很好的结果。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+DPS 通过采用最简单的 Delta 近似，将似然分数计算转化为一个简单的 L2 损失梯度。它的实现只需在标准采样循环中增加一行梯度更新代码。虽然近似更粗糙，但换来了对非线性前向映射的支持，大大拓宽了适用范围。
+
+

@@ -1,0 +1,90 @@
+\section{MDLM：掩码扩散语言模型}
+
+\subsection{设计目标与核心思想}
+
+MDLM（Masked Diffusion Language Model）的目标是设计一个支持\textbf{并行采样}的语言模型。与 AR 模型逐词生成不同，MDLM 从一个全部被掩码（mask）的序列出发，逐步恢复出完整的文本。
+
+生成过程的直觉：
+\begin{enumerate}
+    \item 初始状态：一个长度为 $L$ 的全 mask 序列 $[\text{M}, \text{M}, \ldots, \text{M}]$
+    \item 将序列送入一个 BERT-like 双向 Transformer
+    \item 模型预测所有 mask 位置的词
+    \item 选择性地揭示部分预测，其余重新 mask
+    \item 重复步骤 2--4，直到所有位置都被揭示
+\end{enumerate}
+
+\begin{importantbox}{MDLM 与 AR 的本质区别}
+\begin{itemize}
+    \item \textbf{AR 模型}：使用\textbf{因果注意力}（Causal Attention），每个 token 只依赖左侧上下文，逐个生成
+    \item \textbf{MDLM}：使用\textbf{双向注意力}（Bidirectional Attention），每个 token 依赖整个上下文，可同时生成多个词
+\end{itemize}
+\end{importantbox}
+
+\subsection{前向过程：掩码噪声}
+
+扩散模型的核心框架是：定义一个已知的\textbf{前向腐蚀过程} $q$，然后学习其\textbf{逆过程} $p_\theta$。
+
+在 MDLM 中，前向过程就是\textbf{掩码操作}。给定干净文本 $\mathbf{x}$，通过逐步遮盖词来产生噪声序列。
+
+\begin{importantbox}{信号水平}
+MDLM 使用信号水平 $\alpha_t \in [0, 1]$ 来控制噪声程度：
+\begin{itemize}
+    \item $\alpha_t = 1$：完全干净的句子 $\mathbf{x}$（时间 $t = 0$）
+    \item $\alpha_t = 0$：完全被 mask 的序列（时间 $t = 1$）
+\end{itemize}
+从干净句子到中间噪声状态 $\mathbf{z}_t$ 的过程非常简单：对每个干净词抛一枚硬币，以概率 $1 - \alpha_t$ 将其替换为 mask token。
+\end{importantbox}
+
+形式化地，前向过程可以写为：
+
+$$q(\mathbf{z}_t | \mathbf{x}) = \prod_{i=1}^{L} q(z_t^{(i)} | x^{(i)})$$
+
+其中每个位置独立地进行掩码：
+
+$$q(z_t^{(i)} | x^{(i)}) = \begin{cases} \alpha_t & \text{if } z_t^{(i)} = x^{(i)} \text{（保留原词）} \\ 1 - \alpha_t & \text{if } z_t^{(i)} = \text{M} \text{（替换为 mask）} \end{cases}$$
+
+\begin{itemize}
+    \item $\mathbf{x}$：干净文本序列
+    \item $\mathbf{z}_t$：时间 $t$ 对应的噪声序列
+    \item $\alpha_t$：时间 $t$ 的信号水平
+    \item $L$：序列长度
+    \item M：特殊的 mask token
+\end{itemize}
+
+\subsection{反向后验：去掩码函数}
+
+\begin{importantbox}{反向后验}
+这是整个讲座中最重要的公式之一。反向后验 $q(\mathbf{z}_s | \mathbf{z}_t, \mathbf{x})$ 描述了：给定噪声序列 $\mathbf{z}_t$ 和干净文本 $\mathbf{x}$，如何从更嘈杂的状态 $\mathbf{z}_t$ 过渡到更干净的状态 $\mathbf{z}_s$（其中 $s < t$）。
+\end{importantbox}
+
+对于每个位置 $i$，反向后验的行为取决于该位置当前的状态：
+\begin{itemize}
+    \item \textbf{已揭示的 token}（$z_t^{(i)} \neq \text{M}$）：保持不变，即 $z_s^{(i)} = z_t^{(i)}$
+    \item \textbf{mask token}（$z_t^{(i)} = \text{M}$）：以概率 $\frac{\alpha_s - \alpha_t}{1 - \alpha_t}$ 被去掩码为干净词 $x^{(i)}$，否则保持 mask
+\end{itemize}
+
+\begin{warningbox}{反向后验本身并不能直接用于生成}
+注意 $q(\mathbf{z}_s | \mathbf{z}_t, \mathbf{x})$ 需要知道干净文本 $\mathbf{x}$，但在生成时我们恰恰不知道 $\mathbf{x}$ 是什么。因此，挑战在于学习一个\textbf{去噪网络} $x_\theta(\mathbf{z}_t, t)$ 来估计 $\mathbf{x}$，然后将估计值代入反向后验公式得到 $p_\theta(\mathbf{z}_s | \mathbf{z}_t)$。
+\end{warningbox}
+
+\subsection{生成过程 $p_\theta$}
+
+在推理时，我们使用训练好的去噪 Transformer $x_\theta$ 来近似反向过程：
+
+\begin{enumerate}
+    \item 将噪声序列 $\mathbf{z}_t$ 送入双向 Transformer
+    \item 模型对每个 mask 位置输出一个词表上的\textbf{类别分布}
+    \item 从分布中采样，填充所有 mask 位置
+    \item 选择性地重新 mask 部分预测（根据时间步进决定保留多少）
+    \item 重复上述过程，直到所有位置都被揭示
+\end{enumerate}
+
+\begin{knowledgebox}{Copy-over 操作}
+MDLM 的 Transformer 内含一个 copy-over 机制：对于已经是干净（非 mask）的位置，模型直接复制输入作为输出，不做修改。这意味着交叉熵损失实际上\textbf{只在 mask 位置上计算}，大幅简化了训练。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+MDLM 的核心设计可以概括为：（1）前向过程通过逐步掩码将文本转化为全 mask 序列；（2）学习一个双向 Transformer 来估计干净文本；（3）利用反向后验公式逐步去掩码以生成文本。
+
+\newpage

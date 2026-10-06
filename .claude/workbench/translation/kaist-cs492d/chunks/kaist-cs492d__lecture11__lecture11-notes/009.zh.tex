@@ -1,0 +1,59 @@
+\section{DDPM 框架下的引导实现细节}
+
+为了帮助读者理解 DPS 在代码层面的工作原理，本节详细展开 DDPM 去噪步骤与引导项的结合方式。
+
+\subsection{DDPM 逆过程回顾}
+
+DDPM 的逆过程（reverse process）定义了如何从 $x_t$ 采样 $x_{t-1}$：
+
+$$
+x_{t-1} = \frac{1}{\sqrt{\alpha_t}} \left( x_t - \frac{1-\alpha_t}{\sqrt{1-\bar{\alpha}_t}} \epsilon_\theta(x_t, t) \right) + \sigma_t z
+$$
+
+其中 $z \sim \mathcal{N}(0, I)$ 是随机噪声项，$\sigma_t$ 是对应时间步的噪声标准差，$\epsilon_\theta$ 是预训练的噪声预测网络。
+
+可以将此公式改写为关于 Tweedie 估计 $\hat{x}_0$ 的形式：
+
+$$
+x_{t-1} = c_1(t) \cdot x_t + c_2(t) \cdot \hat{x}_0 + \sigma_t z
+$$
+
+其中 $c_1(t)$ 和 $c_2(t)$ 是仅依赖于噪声调度（noise schedule）的系数。关键点是：\textbf{$x_{t-1}$ 是 $\hat{x}_0$ 的仿射函数，而 $\hat{x}_0$ 又是 $x_t$ 的函数}。
+
+\subsection{引导项的注入方式}
+
+引导的核心操作是在每一步的 $x_{t-1}$ 上添加一个修正项：
+
+$$
+x_{t-1}^{\text{guided}} = x_{t-1}^{\text{unguided}} - \zeta_t \cdot \nabla_{x_t} \left\| y - \mathcal{A}(\hat{x}_0) \right\|_2^2
+$$
+
+其中 $\zeta_t$ 是时间步相关的步长（step size）。
+
+\begin{warningbox}{梯度计算需要反向传播}
+注意 $\nabla_{x_t} \| y - \mathcal{A}(\hat{x}_0) \|_2^2$ 中的梯度是对 $x_t$ 求的，而 $\hat{x}_0$ 依赖于 $x_t$（通过 Tweedie 公式和噪声预测网络 $\epsilon_\theta$）。因此计算此梯度需要通过 $\epsilon_\theta$ 进行反向传播，这意味着：
+\begin{enumerate}
+    \item 每步引导需要一次额外的反向传播，计算开销约为正向传播的 2-3 倍。
+    \item 噪声预测网络的参数不被更新——我们只是利用梯度信息来修改采样轨迹。
+    \item 需要在 PyTorch 中开启 \texttt{x\_t.requires\_grad\_(True)} 以启用梯度追踪。
+\end{enumerate}
+\end{warningbox}
+
+\subsection{步长调度的实践考虑}
+
+\begin{knowledgebox}{步长 $\zeta_t$ 的选择策略}
+引导步长 $\zeta_t$ 的选择对结果质量至关重要：
+\begin{itemize}
+    \item \textbf{过大}：生成结果严格满足约束 $\mathcal{A}(x_0) = y$，但可能偏离数据流形，产生伪影。
+    \item \textbf{过小}：结果逼真但不充分满足约束条件。
+    \item \textbf{常见策略}：使用恒定步长，或根据时间步线性衰减（早期步长小，因为 $\hat{x}_0$ 估计不准；晚期步长大，因为估计更精确）。
+    \item \textbf{自适应策略}：根据 $\| y - \mathcal{A}(\hat{x}_0) \|$ 的大小动态调整步长。
+\end{itemize}
+实践中通常需要在具体任务上进行网格搜索来确定最佳步长。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+在 DDPM 框架下，DPS 引导的实现归结为在每个去噪步骤后添加一个梯度修正项。关键的实现细节包括梯度的反向传播、步长的选择以及计算开销的管理。
+
+

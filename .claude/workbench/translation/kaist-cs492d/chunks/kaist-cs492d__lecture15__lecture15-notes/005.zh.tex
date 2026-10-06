@@ -1,0 +1,59 @@
+\section{B3D：前馈式3D生成}
+
+\subsection{动机：消除优化瓶颈}
+
+CAT3D 中的 NeRF 优化步骤虽然有效，但仍需数十秒的迭代优化。一个自然的问题是：\textbf{能否用前馈模型替代优化步骤？}
+
+B3D（Both3D）给出了肯定的回答——它能在单个 GPU 上\textbf{不到7秒}内生成完整3D场景。
+
+\subsection{核心思想：Splatter Image}
+
+B3D 的关键思想基于 Splatter Image：为每个像素预测一个 3D Gaussian Splat 的参数。Splatter Image 本身是一种纯重建方法，无法处理未观察区域。B3D 在此基础上引入了\textbf{生成模型}，使其能够「幻想」（hallucinate）未见区域的内容。
+
+\begin{importantbox}{B3D 的两阶段生成流程}
+\textbf{第一阶段——扩散生成}：一个多视角隐扩散模型（multi-view latent diffusion model）同时生成多视角的 RGB 图像和 XYZ 点图（point map）。\\
+\textbf{第二阶段——Gaussian 回归}：一个 Gaussian Head 网络接收生成的 RGB 图像和点图，回归每个像素对应 3D Gaussian 的剩余属性（opacity 和 scale），输出多视角 Splatter Image。
+\end{importantbox}
+
+\subsection{为什么采用两阶段设计？}
+
+这一设计选择有深刻的技术原因：
+
+\begin{itemize}
+    \item RGB 颜色和 XYZ 位置可以从多视角数据集中可靠地获得监督信号——位置信息通过在现有多视角数据集上运行 Structure-from-Motion（SfM）管线获得
+    \item 但像素级 Gaussian 的 opacity 和 scale 很难获得可靠的真值，因此\textbf{不适合直接用扩散模型生成}
+    \item 已有研究表明，给定颜色和位置信息后，\textbf{回归} opacity 和 scale 比\textbf{生成}它们容易得多
+\end{itemize}
+
+\subsection{多视角 Gaussian Head}
+
+Gaussian Head 网络的关键设计要素：
+
+\begin{itemize}
+    \item 接收所有视角的预测点图和 RGB 图像
+    \item 将每个视角转换为对应的 Splatter Image（即每个像素一个 3D Gaussian）
+    \item 使用\textbf{跨视角注意力}（cross-view attention）让网络能够联合推理所有 Splatter Image，确保3D一致性
+    \item 最终的多视角 Splatter Image 组合在一起，代表完整的3D场景
+\end{itemize}
+
+\subsection{训练数据}
+
+B3D 的训练需要大规模多视角数据集，团队使用 MASt3R（一种3D Structure-from-Motion 管线）处理了以下数据集的所有场景：
+
+\begin{itemize}
+    \item CO3D
+    \item RealEstate10K (R10K)
+    \item MVImgNet
+    \item DL3DV
+\end{itemize}
+
+这确保了所有训练数据都具有密集的 XYZ 标注。结合合成物体数据集，构建了大规模训练集。
+
+\begin{knowledgebox}{训练数据的构建策略}
+虽然互联网上的3D数据稀缺，但多视角图像数据较为丰富。通过在多视角数据集上运行 SfM 管线，可以自动获得每张图像的密集深度/点图标注，从而为扩散模型的训练提供足够的监督信号。这种「利用2D数据间接获得3D监督」的策略是当前3D生成研究的重要范式。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+B3D 通过引入前馈 Gaussian Head 替代 NeRF 优化步骤，将3D生成速度从约1分钟提升到7秒以内。其两阶段设计（扩散生成 RGB+XYZ，回归 opacity+scale）巧妙地利用了不同属性在可监督性上的差异。
+

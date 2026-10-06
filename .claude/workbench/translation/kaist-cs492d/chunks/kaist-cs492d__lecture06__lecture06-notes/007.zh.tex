@@ -1,0 +1,72 @@
+\section{LoRA：低秩适应}
+
+\subsection{全参数微调的困境}
+
+当我们希望让预训练扩散模型适应特定风格或特定主体（如生成特定人物的照片），最直接的方法是微调模型的全部参数。然而这面临严重问题：
+
+\begin{itemize}
+    \item Stable Diffusion U-Net 约有 860M 参数，全参数微调需要大量显存
+    \item 用少量数据（如 5--20 张图）微调大模型极易\textbf{过拟合}
+    \item 每个定制版本都需要存储完整的模型权重（几 GB），部署成本高
+    \item 微调可能破坏预训练模型学到的通用能力（\textbf{灾难性遗忘}）
+\end{itemize}
+
+\subsection{LoRA 的核心思想}
+
+LoRA（Low-Rank Adaptation）基于一个关键假设：\textbf{微调引起的权重更新存在于低秩子空间中}。
+
+对于预训练模型中的权重矩阵 $W_0 \in \mathbb{R}^{d \times k}$，LoRA 将更新分解为两个低秩矩阵的乘积：
+
+$$
+W = W_0 + \Delta W = W_0 + B \cdot A
+$$
+
+其中 $B \in \mathbb{R}^{d \times r}$，$A \in \mathbb{R}^{r \times k}$，$r \ll \min(d, k)$ 是秩。
+
+\begin{importantbox}{LoRA 的参数效率}
+以一个 $1024 \times 1024$ 的权重矩阵为例：
+\begin{itemize}
+    \item 全参数微调：$1024 \times 1024 = 1,048,576$ 个可训练参数
+    \item LoRA（$r=4$）：$1024 \times 4 + 4 \times 1024 = 8,192$ 个可训练参数
+    \item 参数缩减：\textbf{128 倍}
+\end{itemize}
+在扩散模型中，通常只对 attention 层的 $W_Q$, $W_K$, $W_V$, $W_O$ 矩阵应用 LoRA，进一步减少可训练参数总量。
+\end{importantbox}
+
+\subsection{LoRA 在扩散模型中的应用}
+
+LoRA 的初始化和训练策略：
+
+\begin{itemize}
+    \item $A$ 使用高斯随机初始化，$B$ 初始化为零矩阵
+    \item 训练开始时 $\Delta W = BA = 0$，保证初始输出与预训练模型一致
+    \item 只训练 $A$ 和 $B$，冻结所有原始参数 $W_0$
+    \item 推理时可将 $\Delta W$ 合并回 $W_0$，\textbf{不增加任何推理延迟}
+\end{itemize}
+
+典型应用场景：
+\begin{itemize}
+    \item \textbf{风格适应}：用某位画家的作品训练 LoRA，生成该风格的图像
+    \item \textbf{主体定制}（DreamBooth + LoRA）：用特定物体/人物的几张照片训练，生成该主体的新图
+    \item \textbf{概念注入}：教模型理解新的视觉概念（如特定品牌 logo）
+\end{itemize}
+
+\begin{warningbox}{LoRA 的秩选择}
+秩 $r$ 是 LoRA 最关键的超参数：
+\begin{itemize}
+    \item $r$ 太小（如 1--2）：表达能力不足，微调效果差
+    \item $r$ 太大（如 128+）：接近全参数微调，失去参数效率优势
+    \item 实践推荐：对于扩散模型，$r = 4 \sim 32$ 通常是好的选择
+    \item 风格适应任务 $r$ 可以小一些（4--8），复杂条件任务 $r$ 需要大一些（16--32）
+\end{itemize}
+\end{warningbox}
+
+\begin{knowledgebox}{LoRA 的可组合性}
+LoRA 的一个优雅特性是\textbf{可组合性}：多个 LoRA 模块可以在推理时动态组合。例如，一个 LoRA 控制风格、另一个控制主体，两者可以同时加载并通过权重混合实现"特定风格画特定人物"。这使得 LoRA 成为社区驱动的个性化生态的基础——Civitai 等平台上有数以万计的 LoRA 模型。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+LoRA 通过低秩分解极大地减少了微调所需的参数量和计算量，使得在消费级 GPU 上用少量数据定制大规模扩散模型成为可能。它的零初始化策略（与 ControlNet 异曲同工）保证了微调不会破坏预训练能力，而推理时的参数合并则消除了额外的延迟开销。
+
+\newpage

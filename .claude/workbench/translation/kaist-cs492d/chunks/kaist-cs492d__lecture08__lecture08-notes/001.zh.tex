@@ -1,0 +1,71 @@
+\section{引言与课程回顾}
+
+本讲是 KAIST CS492D（扩散模型与流模型）的第 8 讲，核心议题是\textbf{如何高效求解扩散模型的逆过程 ODE}。讲者 Minhyuk Sung 首先回顾了此前课程中介绍的 DDPM、DDIM 以及连续时间 SDE/ODE 框架，然后引出本讲的核心问题：既然扩散模型的逆过程可以被等价地描述为一个常微分方程（ODE），那么我们能否利用 ODE 的特殊结构来设计更高效的求解器，从而在极少的采样步数下获得高质量图像？
+
+\begin{knowledgebox}{前置知识概览}
+理解本讲需要以下前置概念：
+\begin{itemize}
+    \item \textbf{DDPM}（Denoising Diffusion Probabilistic Models）：基于马尔可夫链的离散时间扩散模型，通常需要 $T=1000$ 步才能完成采样
+    \item \textbf{DDIM}（Denoising Diffusion Implicit Models）：DDPM 的确定性采样变体，可使用子序列跳步采样
+    \item \textbf{SDE/ODE 框架}：Song et al. 提出的连续时间表述，将扩散过程描述为随机微分方程（SDE），并给出等价的概率流 ODE（Probability Flow ODE）
+    \item \textbf{Score function}：$\nabla_{\mathbf{x}} \log p_t(\mathbf{x})$，可通过噪声预测网络 $\epsilon_\theta$ 计算
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{从 DDPM 到连续时间框架}
+
+在 DDPM 中，前向扩散过程定义为：
+$$q(\mathbf{x}_t | \mathbf{x}_0) = \mathcal{N}(\mathbf{x}_t; \sqrt{\bar{\alpha}_t}\, \mathbf{x}_0, (1 - \bar{\alpha}_t)\, \mathbf{I})$$
+
+其中：
+\begin{itemize}
+    \item $\bar{\alpha}_t = \prod_{s=1}^{t} (1 - \beta_s)$，是累积信号保留率
+    \item $\beta_t$ 是每步的噪声调度参数
+\end{itemize}
+
+在变分扩散模型（Variational Diffusion Model, VDM）的更一般框架下，前向跳跃分布可以重写为：
+$$q(\mathbf{x}_t | \mathbf{x}_0) = \mathcal{N}(\mathbf{x}_t; \alpha_t \mathbf{x}_0, \sigma_t^2 \mathbf{I})$$
+
+\begin{warningbox}{符号混淆警告}
+不同论文中 $\alpha$ 的定义不一致。在 DDPM 原始论文中，$\alpha_t = 1 - \beta_t$；而在 VDM/DPM-Solver 框架中，$\alpha_t$ 直接对应信号缩放系数 $\sqrt{\bar{\alpha}_t}$。阅读文献时需特别注意上下文中的符号约定，避免混淆。
+\end{warningbox}
+
+采样 $\mathbf{x}_t$ 等价于对干净数据 $\mathbf{x}_0$ 与标准高斯噪声 $\boldsymbol{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$ 做线性插值：
+$$\mathbf{x}_t = \alpha_t \mathbf{x}_0 + \sigma_t \boldsymbol{\epsilon}$$
+
+定义该框架只需要满足一个约束：信噪比（Signal-to-Noise Ratio, SNR）$\frac{\alpha_t^2}{\sigma_t^2}$ 关于时间 $t$ 单调递减——即随着时间推移，噪声逐渐占主导，直至 $\mathbf{x}_T$ 近似于标准高斯分布。
+
+\subsection{SDE 与 ODE 的双重描述}
+
+在连续时间域中，前向扩散过程可以用 SDE 描述：
+$$d\mathbf{x} = f(t)\, \mathbf{x}\, dt + g(t)\, d\mathbf{w}$$
+
+其中 $f(t)$ 为漂移系数，$g(t)$ 为扩散系数，$\mathbf{w}$ 为标准维纳过程。给定前向 SDE，对应的逆时间 SDE 为：
+$$d\mathbf{x} = \left[f(t)\, \mathbf{x} - g(t)^2 \nabla_{\mathbf{x}} \log p_t(\mathbf{x})\right] dt + g(t)\, d\bar{\mathbf{w}}$$
+
+\begin{importantbox}{Probability Flow ODE（概率流 ODE）}
+Anderson (1982) 证明，对于任意逆时间 SDE，都存在一个确定性的 ODE，使得两者在边际分布 $p_t(\mathbf{x})$ 上完全一致：
+$$\frac{d\mathbf{x}}{dt} = f(t)\, \mathbf{x} - \frac{1}{2} g(t)^2 \nabla_{\mathbf{x}} \log p_t(\mathbf{x})$$
+这就是概率流 ODE（PF-ODE）。由于没有随机噪声项，给定相同初始点 $\mathbf{x}_T$，ODE 的解是确定性的。这为利用 ODE 求解器加速采样奠定了基础。
+\end{importantbox}
+
+利用噪声预测网络 $\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t) \approx -\sigma_t \nabla_{\mathbf{x}} \log p_t(\mathbf{x})$，可将 PF-ODE 改写为只包含 $\boldsymbol{\epsilon}_\theta$ 的形式。
+
+\subsection{引入 $\lambda$ 函数}
+
+为了简化后续推导，定义 log-SNR 的半值函数：
+$$\lambda_t = \frac{1}{2} \log \frac{\alpha_t^2}{\sigma_t^2} = \log \frac{\alpha_t}{\sigma_t}$$
+
+\begin{itemize}
+    \item $\lambda_t$ 是 $t$ 的严格单调递减函数（因为 SNR 单调递减）
+    \item 利用 $\lambda_t$，许多表达式可以大幅化简
+    \item $e^{\lambda_t} = \frac{\alpha_t}{\sigma_t}$，$e^{-\lambda_t} = \frac{\sigma_t}{\alpha_t}$
+\end{itemize}
+
+引入 $\lambda_t$ 后，前向 SDE 的漂移函数 $f(t)$ 可以更简洁地用 $\lambda_t$ 表示，后续的积分变量替换也将围绕 $\lambda$ 进行。
+
+\subsection{本章小结}
+
+本节建立了从离散 DDPM/DDIM 到连续时间 SDE/ODE 的统一视角。关键要点：(1) 扩散模型的逆过程可以等价表述为一个确定性 ODE；(2) 该 ODE 具有半线性（semi-linear）结构，线性部分可以解析求解；(3) 变量 $\lambda_t$ 提供了更方便的参数化。
+
+

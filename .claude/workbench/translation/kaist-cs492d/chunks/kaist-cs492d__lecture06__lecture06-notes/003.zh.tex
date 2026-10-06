@@ -1,0 +1,96 @@
+\section{Classifier-Free Guidance (CFG)：无分类器引导}
+
+\subsection{动机：消除对外部分类器的依赖}
+
+Classifier Guidance 虽然优雅，但在实际部署中需要额外训练并维护一个噪声分类器网络，这增加了系统复杂度和计算成本。Classifier-Free Guidance (CFG) 的目标是：\textbf{在不使用任何外部分类器的情况下，实现与 Classifier Guidance 等效的条件引导效果}。
+
+\begin{importantbox}{CFG 的核心思路}
+不再分别训练无条件模型和分类器，而是训练一个\textbf{单一}的扩散模型，使其同时具备条件预测和无条件预测的能力。在推理时，通过两次前向传播（条件 + 无条件）的\textbf{外推}来增强条件效果。
+\end{importantbox}
+
+\subsection{训练策略：Null Label 与条件 Dropout}
+
+CFG 的训练非常简单：在标准的条件扩散模型训练中，以一定概率（通常 10\%--20\%）将条件信息 $y$ 替换为一个特殊的 null label $\varnothing$：
+
+$$
+\epsilon_\theta(x_t, t, y) = \begin{cases}
+\text{条件预测} & \text{概率 } 1-p_{\text{uncond}} \\
+\epsilon_\theta(x_t, t, \varnothing) & \text{概率 } p_{\text{uncond}}
+\end{cases}
+$$
+
+\begin{itemize}
+    \item 对于类别标签：null label 可以是一个特殊的 index 0
+    \item 对于文本条件：null label 是空字符串 ""  的 embedding
+    \item 对于图像条件：null label 可以是全零张量
+\end{itemize}
+
+这样，单个网络可以同时学习：
+\begin{itemize}
+    \item 输入条件 $y$ 时：$\epsilon_\theta(x_t, t, y) \;\longleftrightarrow\;$ 条件 score $\nabla_{x_t}\log p(x_t|y)$
+    \item 输入 $\varnothing$ 时：$\epsilon_\theta(x_t, t, \varnothing) \;\longleftrightarrow\;$ 无条件 score $\nabla_{x_t}\log p(x_t)$
+\end{itemize}
+
+\subsection{推理公式：条件与无条件的外推}
+
+在推理时，CFG 通过对条件预测和无条件预测做\textbf{外推}（extrapolation）来增强条件效果：
+
+$$
+\tilde{\epsilon}(x_t, t, y) = \epsilon_\theta(x_t, t, \varnothing) + w \cdot \bigl[\epsilon_\theta(x_t, t, y) - \epsilon_\theta(x_t, t, \varnothing)\bigr]
+$$
+
+等价形式：
+
+$$
+\tilde{\epsilon}(x_t, t, y) = (1-w)\,\epsilon_\theta(x_t, t, \varnothing) + w\,\epsilon_\theta(x_t, t, y)
+$$
+
+\begin{importantbox}{CFG 引导强度参数 $w$ 的含义}
+\begin{itemize}
+    \item $w = 0$：完全无条件生成（忽略条件 $y$）
+    \item $w = 1$：标准条件生成（无外推增强）
+    \item $w > 1$：条件增强——外推到条件方向更远处
+    \item $w < 1$ 且 $w > 0$：插值——弱化条件影响
+\end{itemize}
+在实际应用中，$w$ 通常设为 5--15，具体值取决于任务和模型。
+\end{importantbox}
+
+\subsection{CFG 与 Classifier Guidance 的等价性}
+
+CFG 的外推公式可以改写为：
+
+$$
+\tilde{\epsilon}(x_t, t, y) = \epsilon_\theta(x_t, t, y) + (w-1)\bigl[\epsilon_\theta(x_t, t, y) - \epsilon_\theta(x_t, t, \varnothing)\bigr]
+$$
+
+对比 Classifier Guidance 的公式：
+
+$$
+\tilde{\epsilon}(x_t, t) = \epsilon_\theta(x_t, t) - w'\cdot\sqrt{1-\bar\alpha_t}\;\nabla_{x_t}\log p_\phi(y|x_t)
+$$
+
+可以证明，当 $\lambda = w - 1$ 时，两者在数学上是等价的。差异 $\epsilon_\theta(x_t, t, y) - \epsilon_\theta(x_t, t, \varnothing)$ 隐式地编码了分类器梯度 $\nabla_{x_t}\log p(y|x_t)$ 的信息。
+
+\begin{warningbox}{CFG 的计算代价}
+CFG 需要在每个去噪步骤运行\textbf{两次}前向传播（一次有条件、一次无条件），因此推理时间约为无引导情况的 2 倍。在实际部署中，可以通过 batched inference 将两次预测打包为一个 batch 来缓解。一些近期工作（如 distillation 方法）试图将 CFG 的效果蒸馏进单次前向传播中。
+\end{warningbox}
+
+\subsection{Negative Prompt：CFG 的创意应用}
+
+CFG 框架还支持一个有趣的扩展——\textbf{负向提示词}（Negative Prompt）。在标准 CFG 中，无条件预测使用 null label $\varnothing$。如果将 $\varnothing$ 替换为一个具体的"不想要的"条件 $y_{\text{neg}}$，则公式变为：
+
+$$
+\tilde{\epsilon} = \epsilon_\theta(x_t, t, y_{\text{neg}}) + w\bigl[\epsilon_\theta(x_t, t, y) - \epsilon_\theta(x_t, t, y_{\text{neg}})\bigr]
+$$
+
+这意味着生成的图像会\textbf{远离} $y_{\text{neg}}$ 描述的概念。例如，设 $y_{\text{neg}} =$ ``male''，则生成的人像会偏向女性特征。
+
+\begin{knowledgebox}{CFG 的广泛适用性}
+CFG 的条件不限于类别标签，可以是：文本描述（text-to-image）、音频信号（audio-to-image）、视角信息（novel view synthesis）、其他图像（image-to-image）等任意模态。这使得 CFG 成为现代扩散模型中最通用的条件引导机制，几乎所有主流模型（Stable Diffusion、DALL-E、Imagen 等）都采用 CFG。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+Classifier-Free Guidance 是扩散模型领域最重要的实用技术之一。其核心创新在于通过条件 dropout 训练策略，让单个模型同时学习条件和无条件分布，再通过推理时的外推实现可控的条件增强。相比 Classifier Guidance，CFG 无需额外分类器、支持任意条件类型、实现简单，已成为工业界的标准配置。
+
+\newpage
