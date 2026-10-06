@@ -62,7 +62,14 @@ PARENTHESIZED = re.compile(r"[(（][^()（）\n]*[)）]")
 # la clase con que el recomendador busca un modelo cualificado y el consumidor
 # con que THYROX cita cada ítem. Ninguna nombra un modelo.
 DEFAULT_MODEL_POLICY = Path(__file__).resolve().parents[2] / "tools" / "lang" / "es-mx" / "model-policy.json"
-DEFAULT_TASK_CLASS = "analysis"
+# La traducción normal es una transformación acotada source → target que aceptan los
+# validadores deterministas V0–V6: capability translation-to-es-MX, clase mechanical,
+# y de la clase sale el esfuerzo (TASK_REQUIREMENTS de thyrox: mechanical → low). Una
+# unidad con ambigüedad, terminología en conflicto o contenido incompleto se escala a
+# analysis de forma explícita; nunca porque un modelo haya fallado. La clase no se
+# deduce del modelo que tradujo antes (H-THYROX-547).
+CAPABILITY = "translation-to-es-MX"
+DEFAULT_TASK_CLASS = "mechanical"
 CONSUMER = "ai-course-notes"
 VERIFIERS = ["check_translation_parity.py", "check_prose_vocabulary.py", "check_note_coverage.py",
              "note_language.py", "translation_loop.py"]

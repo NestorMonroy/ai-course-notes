@@ -183,7 +183,7 @@ def test_translate_asks_the_pool_for_units_under_the_consumer_policy(tmp_path: P
     assert value("--execution") == "unit"
     assert value("--work-reference").startswith("ai-course-notes:es-mx/bench/translate/")
     assert value("--model-policy") == str(REPO_ROOT / "tools" / "lang" / "es-mx" / "model-policy.json")
-    assert value("--task-class") == "analysis"
+    assert value("--task-class") == "mechanical"
     assert value("--context-tokens") == "32768"
     assert "--model" not in args
 
@@ -210,6 +210,7 @@ def test_the_shipped_policy_allows_only_qwen_without_fallback() -> None:
     assert policy["allowed"] == [
         {"runtime": "ollama", "repository": "Qwen/Qwen2.5-7B-Instruct-GGUF", "quantization": "Q4_K_M"},
         {"runtime": "ollama", "repository": "library/qwen2.5-7b-instruct", "source": "ollama", "quantization": "Q4_K_M"},
+        {"runtime": "ollama", "repository": "Qwen/Qwen3-4B-GGUF", "quantization": "Q4_K_M"},
     ]
 
 

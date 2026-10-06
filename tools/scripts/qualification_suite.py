@@ -34,7 +34,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 SUITE_ID = "es-mx-translation@1"
-TASK_CLASS = "analysis"
+# La clase la declara el ciclo de traducción; la suite no tiene una propia.
+from translation_loop import DEFAULT_TASK_CLASS as TASK_CLASS  # noqa: E402
 BEGIN_MARK, END_MARK = "<<<ES", "ES>>>"
 #: El mismo rango que ``translation_loop.HAN``: lo que el ciclo cuenta como chino residual.
 HAN_PATTERN = "[\\u4e00-\\u9fff]"
