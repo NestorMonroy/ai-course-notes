@@ -1,0 +1,168 @@
+\section{Data Parallelism：从复制模型到 ZeRO/FSDP}
+
+Data Parallelism（DP，数据并行）保持每个 rank 的模型计算相同，让不同 rank 处理不同 data shard。它最容易实现，也最适合建立 collective、overlap 和 memory accounting 的基本直觉；ZeRO 则是在 DP 框架内继续分片 optimizer state、gradient 与 parameter。
+
+\subsection{复制模型，切分 batch}
+
+上一章已经把训练状态与数据流分开记账；本节先选择最保守的空间变换：模型计算图完全不动，只把 batch 分给多个 rank。这样可以把所有差异集中到 gradient ownership 与同步时机上，也为后续 ZeRO 的状态分片提供一条清晰基线。第一组动画先对比串行累积与并行 micro-batch：单卡依次处理多个 batch 时，模型状态只存一份但时间线变长；增加 GPU 后，每个 rank 复制模型、optimizer state 和初始参数，却各自处理不同 batch。
+
+\lecturefigure{slide-019.jpg}{串行 gradient accumulation：多个 batch 在一张 GPU 上排队}{CS25 V6 official deck, p.~19}
+
+\lecturefigure{slide-020.jpg}{DP 第一步：跨 GPU 复制模型并分片 batch}{CS25 V6 official deck, p.~20}
+
+各 rank 的 forward/backward 独立执行，因此会得到不同的 local gradient。若直接各自更新，参数会立即分叉；DP 必须先把这些梯度聚合成同一个 global gradient。
+
+\lecturefigure{slide-021.jpg}{每个 data-parallel rank 产生不同 local gradient}{CS25 V6 official deck, p.~21}
+
+\term{Collectives（集合通信）}是多个 rank 共同参与的通信原语。\textbf{All-reduce} 把每个 rank 的输入做求和/平均并把结果返回所有 rank；\textbf{reduce-scatter} 先归约再把结果 shard 分发；\textbf{all-gather} 把各 rank 的 shard 拼成完整对象；\textbf{broadcast} 从一个 rank 复制给其他 rank。
+
+\lecturefigure{slide-022.jpg}{All-reduce：既归约梯度，也把相同结果送回每个 rank}{CS25 V6 official deck, p.~22}
+
+\[
+g_r=\nabla_\theta \ell_r(\theta),
+\qquad
+\bar g=\frac{1}{P}\sum_{r=1}^{P}g_r,
+\qquad
+\theta'_r=\operatorname{Opt}(\theta_r,\bar g,s_r).
+\]
+其中，$P$ 是 DP rank 数，$g_r$ 是 rank $r$ 的 local gradient，$\bar g$ 是 all-reduce 后的平均梯度，$\theta_r$ 与 $s_r$ 是该 rank 的参数和 optimizer state。只要初始状态相同且更新确定，各 rank 会保持一致。
+
+\lecturefigure{slide-023.jpg}{完整 DP 更新：数据分片、梯度 all-reduce、相同 optimizer step}{CS25 V6 official deck, p.~23}
+
+\begin{knowledgebox}{读图：DP 正确性来自“更新前会合”}
+图中最值得比较的不是 GPU 数，而是每种颜色何时分叉、何时重新会合。data 在 step 开始就被分片，forward/backward 因而独立；local gradient 在 all-reduce 前允许不同，但 optimizer 读取 gradient 之前必须变成相同的 $\bar g$。参数和 optimizer state 在 vanilla DP 中始终复制，所以每个 rank 执行同一更新后继续保持一致。若使用 gradient accumulation，还要明确 collective 是每个 micro-batch 触发，还是用 `no\_sync` 延迟到累积末尾；前者通信更多，后者需要保存更久的 local gradients。
+\end{knowledgebox}
+
+\subsection{DDP 代码不是性能结论}
+
+PyTorch DistributedDataParallel（DDP）把模型包装后，会注册 backward hooks 并在梯度 bucket 就绪时启动 collective。代码表面很短，但性能取决于 bucket 划分、网络、模型层次和是否真正产生 overlap。
+
+\lecturefigure{slide-024.jpg}{DistributedDataParallel 的最小代码接口}{CS25 V6 official deck, p.~24}
+
+\begin{lstlisting}[language=Python,caption={DDP 的所有权与更新语义示意}]
+model = DistributedDataParallel(model, device_ids=[local_rank])
+optimizer.zero_grad(set_to_none=True)
+loss = model(batch).loss
+loss.backward()            # hooks launch gradient collectives
+optimizer.step()           # every rank applies the same reduced gradient
+\end{lstlisting}
+
+下页补上容易漏掉的一点：all-reduce 完成之前，对应 gradient 不能安全地被 optimizer 使用；若 backward 已结束但网络仍在传输，GPU 会等待。
+
+\lecturefigure{slide-025.jpg}{DP 的同步边界：optimizer 必须等待全局梯度就绪}{CS25 V6 official deck, p.~25}
+
+\subsection{Profiler、bucket 与 communication overlap}
+
+torch.profiler 时间线把算子、kernel 和 NCCL collective 放在同一轴上。读这类图时先找三种空洞：compute stream 是否空闲，communication stream 是否排队，下一次 forward 是否因上一步 collective 未完成而延迟。没有时间线证据，就不能仅凭配置宣称 overlap 成功。
+
+\lecturefigure{slide-026.jpg}{torch.profiler：把 GPU compute 与 collective 放在同一时间线上}{CS25 V6 official deck, p.~26}
+
+naive DP 会等所有 backward 完成后再统一通信；此时通信完全落在 critical path。梯度 bucket 的价值是让后层梯度先完成、先启动 all-reduce，同时前层仍在 backward。
+
+\lecturefigure{slide-028.jpg}{naive DP：backward 后集中同步造成等待}{CS25 V6 official deck, p.~28}
+
+\lecturefigure{slide-029.jpg}{bucket overlap：梯度一旦就绪就开始通信}{CS25 V6 official deck, p.~29}
+
+当 bucket 足够大，collective 能达到有效带宽；当 bucket 足够小，启动更早但 launch latency 和小消息效率变差。最终时间线目标不是“通信消失”，而是紫色通信尽可能藏在橙色 backward 下面，只留下不能被覆盖的尾部。
+
+\lecturefigure{slide-030.jpg}{DP overlap 的目标：把大部分 all-reduce 藏在 backward 下}{CS25 V6 official deck, p.~30}
+
+\begin{knowledgebox}{读图：时间线要比较尾部，而不只比较重叠面积}
+三张 timeline 的横轴都是 wall-clock time，纵向把 GPU compute 与 communication stream 分开。naive 版本的紫色通信完全位于 backward 之后；bucket 版本让靠近输出端的 layer 先通信；最终版本进一步让 optimizer 或下一阶段只等待最后未隐藏的尾部。真正影响 step time 的是 critical path 最右端，而不是紫色块有多少落在橙色块下方。若 overlap 让 compute kernel 因带宽竞争而变长，视觉上重叠更多，端到端反而可能更慢。
+\end{knowledgebox}
+
+\teachervoice{00:07:28--00:11:37，老师把 all-reduce 拆成 reduce-scatter 与 all-gather，并反复用 profiler 空洞判断 overlap。课堂提醒：DDP API 很简单，但通信是否真的被隐藏必须用时间线验证。}
+
+\lecturefigure{slide-032.jpg}{Vanilla DP 的优缺点：实现简单，但完整复制模型状态}{CS25 V6 official deck, p.~32}
+
+\begin{warningbox}{Overlap 不是免费并行}
+通信与计算共享 HBM 带宽、PCIe/NVLink 资源和 kernel 调度；过多小 bucket 会增加启动开销，过大 bucket 又启动太晚。所谓“100\% overlap”还可能把 compute kernel 本身拖慢，因此应比较端到端 step time，而不是只看时间线重叠面积。
+\end{warningbox}
+
+\subsection{ZeRO-1：先分片 optimizer state}
+
+以混合精度 Adam 为例，每个参数可能对应低精度训练参数、高精度 master weight、一阶矩 $m$、二阶矩 $v$ 与梯度。Vanilla DP 在每个 rank 复制全部状态；ZeRO-1 让每个 rank 只拥有一部分 optimizer state，并只更新归自己负责的 parameter shard，最后再把更新后的参数同步给其他 rank。
+
+\lecturefigure{slide-033.jpg}{ZeRO-1 的动机：DP 重复保存完整 optimizer state}{CS25 V6 official deck, p.~33}
+
+若参数量为 $N$，参数与梯度每元素字节数分别为 $b_p,b_g$，optimizer state 每元素字节数为 $b_o$，则粗略每卡状态内存为
+\[
+M_{\mathrm{DP}}\approx N(b_p+b_g+b_o),
+\qquad
+M_{\mathrm{Z1}}\approx N(b_p+b_g)+\frac{Nb_o}{P}.
+\]
+其中，$P$ 是 DP rank 数。公式只描述持久状态，不含 activation、temporary buffer、fragmentation 和通信 staging memory；真实峰值必须用 profiler 或 allocator 统计验证。
+
+\lecturefigure{slide-034.jpg}{ZeRO-1：每个 rank 只拥有一部分 optimizer state}{CS25 V6 official deck, p.~34}
+
+\lecturefigure{slide-035.jpg}{ZeRO-1 更新路径：只处理本 rank 负责的状态与参数 shard}{CS25 V6 official deck, p.~35}
+
+All-reduce 本来就可分解为 reduce-scatter 与 all-gather。ZeRO-1 利用这一等价，把归约后的 gradient shard 直接送给负责更新它的 rank；optimizer 完成局部更新后，再 all-gather 新参数。
+
+\lecturefigure{slide-036.jpg}{ZeRO-1 没有凭空增加通信：把 all-reduce 分解并重排}{CS25 V6 official deck, p.~36}
+
+\subsection{ZeRO-2：只保留会被本 rank 使用的 gradient}
+
+ZeRO-1 虽然只更新一部分参数，却仍可能保存完整 gradient。既然 reduce-scatter 已把归约结果按 ownership 分片，其他 gradient shard 在本 rank 上没有用途；ZeRO-2 进一步丢弃它们。
+
+\lecturefigure{slide-037.jpg}{从 ZeRO-1 到 ZeRO-2：完整 gradient 是否还有必要}{CS25 V6 official deck, p.~37}
+
+\lecturefigure{slide-038.jpg}{ZeRO-2：optimizer state 与 gradient 都按 DP ranks 分片}{CS25 V6 official deck, p.~38}
+
+粗略内存变为
+\[
+M_{\mathrm{Z2}}\approx Nb_p+\frac{N(b_g+b_o)}{P}.
+\]
+其中，参数仍在每个 rank 复制，gradient 与 optimizer state 被分片。课堂还强调 tensor-preserving ownership：某些 optimizer 需要看到完整矩阵结构，不能把所有参数 flatten 成任意连续字节后再切开；分片策略必须保留算法需要的 tensor boundary。
+
+\teachervoice{00:11:37--00:15:12，课堂用 ZeRO-1/2 的小差别解释状态所有权，并补充 Muon 等 optimizer 对完整 tensor 结构的要求。这个实现约束比背诵 stage 名称更重要。}
+
+\subsection{ZeRO-3 / FSDP：参数只在需要时短暂物化}
+
+ZeRO-1/2 仍让每个 rank 常驻完整参数，因此当模型权重本身超过单卡容量时，它们已经无能为力。本节继续沿同一 ownership 逻辑推进到参数，但参数与 optimizer state 不同：参数正在 forward/backward 的关键路径上，不能只在 step 末尾访问。ZeRO-3 的难点正是 layer forward 需要完整 weight；解决办法不是永久 all-gather 全模型，而是在某个 FSDP unit 即将计算时收集它，计算后立即释放，并预取下一 unit。
+
+\lecturefigure{slide-039.jpg}{ZeRO-3 的问题：参数被分片后，forward 如何获得完整 layer}{CS25 V6 official deck, p.~39}
+
+\lecturefigure{slide-040.jpg}{ZeRO-3 forward：逐 unit all-gather、计算、释放与预取}{CS25 V6 official deck, p.~40}
+
+backward 也需要该 layer 的参数来计算 input/weight gradient，因此以反向顺序重复物化与释放。峰值内存不再是完整模型，而近似由常驻 shard、当前 unit、prefetch unit 和通信 buffer 决定。
+
+\lecturefigure{slide-041.jpg}{ZeRO-3 backward：再次按需物化参数并 reduce-scatter gradient}{CS25 V6 official deck, p.~41}
+
+\lecturefigure{slide-042.jpg}{ZeRO-3 时间线：把分块 all-gather 与相邻 layer compute 重叠}{CS25 V6 official deck, p.~42}
+
+FSDP unit 太大，峰值内存高且 all-gather 启动晚；太小，小消息、metadata 与 launch overhead 增多。FSDP1 以 wrapper/flattened parameter 为中心，FSDP2 的 \texttt{fully\_shard} 与 DTensor 更强调原生 tensor 结构和多维 device mesh 组合。
+
+\lecturefigure{slide-043.jpg}{PyTorch FSDP1 与 FSDP2 的代码接口}{CS25 V6 official deck, p.~43}
+
+\begin{lstlisting}[language=Python,caption={FSDP2 的逐层 fully\_shard 示意}]
+mesh = init_device_mesh("cuda", (dp_size,), mesh_dim_names=("dp",))
+for block in model.blocks:
+    fully_shard(block, mesh=mesh)
+fully_shard(model, mesh=mesh)
+
+loss = model(batch).loss
+loss.backward()
+optimizer.step()
+\end{lstlisting}
+
+最终比较页的关键不在“ZeRO-3 更先进”，而在通信位置：ZeRO-2 在 optimizer 附近做较集中的参数 all-gather；ZeRO-3 把它拆到每个 unit 的 forward/backward，并尝试与 compute 重叠。
+
+\lecturefigure{slide-045.jpg}{ZeRO-2 与 ZeRO-3：相同状态目标，不同通信时间线}{CS25 V6 official deck, p.~45}
+
+\lecturefigure{slide-046.jpg}{ZeRO/FSDP 的最终取舍：用通信换内存}{CS25 V6 official deck, p.~46}
+
+\begin{knowledgebox}{读图：ZeRO-2 与 ZeRO-3 的差异是“参数何时完整”}
+比较页上方的 ZeRO-2 在 forward/backward 期间拥有完整模型，因此主要参数同步靠近 optimizer 边界；下方 ZeRO-3 只保存 parameter shards，每到一个 FSDP unit 都要 all-gather，再在使用后 reshard。两者的 optimizer/gradient 分片可以相似，决定吞吐差异的是参数 all-gather 被切成多少块、能隐藏多少、快链路组有多大。若模型已经能用 ZeRO-2 装下，ZeRO-3 的额外 unit-level collectives 不会凭空提升样本效率；它们只是购买更多容量。
+\end{knowledgebox}
+
+\teachervoice{00:20:10--00:23:42，老师给出直接实践规则：如果 ZeRO-1 已经装得下，就不要习惯性上 ZeRO-3；后者只为额外节省内存而增加通信。超大规模还可在快链路小组内 FSDP、组间 Vanilla DP，形成 hybrid sharding。}
+
+\begin{importantbox}{ZeRO stage 的最短记忆法}
+ZeRO-1 分 optimizer state；ZeRO-2 再分 gradient；ZeRO-3 再分 parameter。stage 越高，每卡常驻状态越少，但 forward/backward 需要更频繁地恢复所需对象。选择原则是使用\textbf{刚好能满足内存约束的最低 stage}，而不是追求最高编号。
+\end{importantbox}
+
+\subsection{本章小结}
+
+DP 沿 batch 轴扩展吞吐，数学等价由 gradient collective 保证。bucket overlap 解决时间线，ZeRO/FSDP 解决状态复制；二者都受网络与 global batch 上限约束。当 batch 已不能继续增大，或参数矩阵本身需要跨设备计算，就要转向 Tensor Parallelism。
+

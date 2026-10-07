@@ -1,0 +1,54 @@
+\section{Pipeline Parallelism：切分 layer，调度时间}
+
+Pipeline Parallelism（PP，流水线并行）把连续或交错的 layer stage 放到不同 rank。它的通信对象只是 stage 间 activation 与 gradient，消息相对便宜；真正的难点是让所有 stage 有事可做，并管理多个 micro-batch 的 activation 生命周期。
+
+\subsection{从 layer placement 到 pipeline bubble}
+
+TP 在每个 layer 内协作，因而频繁触发 collective；PP 改为把完整 layer stage 交给不同 ranks，只在 stage 边界传 activation/gradient。通信对象变小了，但依赖链变长：后一 stage 必须等前一 stage 产出，backward 又反向依赖。若一个 batch 依次穿过所有 stage，后面的 rank 在开头等待，前面的 rank 在结束时等待。增加 micro-batch 可以填充流水线；调度器决定 forward/backward 的进入顺序。
+
+\lecturefigure{slide-071.jpg}{PP 直觉：沿 layer 维度切分模型}{CS25 V6 official deck, p.~71}
+
+All-Forward-All-Backward（AFAB）先把多个 micro-batch 的 forward 全部送入 pipeline，再按反方向做 backward。它简单，但需要保存很多 forward activation，并在 pipeline 两端留下 bubble。
+
+\lecturefigure{slide-072.jpg}{AFAB schedule：先全部 forward，再全部 backward}{CS25 V6 official deck, p.~72}
+
+\lecturefigure{slide-073.jpg}{Pipeline bubble：stage 没有可执行工作时的空闲区域}{CS25 V6 official deck, p.~73}
+
+\subsection{1F1B 与 DualPipe}
+
+AFAB 已经展示了 bubble 与 activation 生命周期的矛盾；本节比较两个更积极的 schedule，分别优化“同时存多少 activation”和“从几端注入工作”。One-Forward-One-Backward（1F1B）在 warmup 后优先交错 forward/backward，降低同时存活的 activation 数量。它改善内存，但并不自动消除由 pipeline 深度和 micro-batch 数造成的 bubble。
+
+\lecturefigure{slide-074.jpg}{1F1B：在稳态交错 forward 与 backward}{CS25 V6 official deck, p.~74}
+
+如果能从 pipeline 两端同时注入工作，理论上可进一步填充空洞。课堂以 DeepSeek DualPipe 为例：layer 采用双向/交错映射，两个方向的 forward/backward 被精细安排。
+
+\lecturefigure{slide-075.jpg}{继续压缩 bubble 的动机：让另一端也开始 forward}{CS25 V6 official deck, p.~75}
+
+\lecturefigure{slide-076.jpg}{DualPipe：双向注入与更复杂的依赖调度}{CS25 V6 official deck, p.~76}
+
+\begin{knowledgebox}{读图：三种 schedule 分别优化什么}
+AFAB 的颜色块按 forward 全部铺开后再 backward，最容易实现，但 activation 存活时间最长；1F1B 在 warmup 后让同一 stage 前后向交替，缩短 activation 生命周期，却仍要填充和排空 pipeline；DualPipe 的双向流试图用另一端的工作填补空洞，代价是 layer placement、micro-batch identity、send/recv 顺序和 deadlock avoidance 都更复杂。比较 schedule 时必须同时看 bubble、peak activations、通信冲突与实现可靠性，不能只看彩色块是否“更满”。
+\end{knowledgebox}
+
+\teachervoice{00:41:22--00:44:18，老师明确区分 1F1B 的内存收益与 bubble 问题，并把 DualPipe 描述为“有效但实现很复杂”的 schedule；需要跟踪每个 micro-batch 的正确 activation 与 gradient，不能只照着彩图拼接。}
+
+\subsection{激活内存、checkpointing 与 micro-batch 数}
+
+PP 每个 stage 只保存部分参数，但在 backward 到来前必须保留多个 micro-batch 的 activation。\term{Activation checkpointing（激活检查点/重计算）}不是模型 checkpoint：它在 forward 少存中间激活，backward 时重新执行部分 forward，以额外 FLOPs 换 HBM；CPU offload 则把激活暂存到主机内存，换取 PCIe/互连流量。
+
+\lecturefigure{slide-077.jpg}{PP 优缺点：便宜通信、有效参数分片与复杂 schedule}{CS25 V6 official deck, p.~77}
+
+设 stage 数为 $S$、micro-batch 数为 $M$，简单 AFAB 的 bubble fraction 常用近似
+\[
+\beta\approx\frac{S-1}{M+S-1}.
+\]
+其中，$\beta$ 是理想等时 stage 下的空闲比例，$S$ 越深，填充/排空成本越大；$M$ 越多，bubble 相对变小，但 activation 与调度开销增加。真实系统还受 stage imbalance、通信和 recomputation 影响。
+
+\begin{importantbox}{PP 的本质是 schedule}
+“每卡放几层”只定义空间切分；AFAB、1F1B、interleaved 1F1B、DualPipe 才定义时间切分。评估 PP 时必须同时报告 stage balance、micro-batch 数、activation policy、bubble 与端到端吞吐。
+\end{importantbox}
+
+\subsection{本章小结}
+
+PP 用便宜的点对点 activation/gradient 通信换取复杂调度和激活管理。它适合 layer 结构清晰、模型可分 stage 的场景；当主要问题不是模型深度而是超长 sequence 的 activation，Context Parallelism 才是更直接的切分轴。
+

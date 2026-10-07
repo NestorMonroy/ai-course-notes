@@ -1,0 +1,77 @@
+\section{Prefill、decode 与 GPU roofline}
+
+确定模型和 engine 后，硬件问题仍不能只看“这张卡有多少 TFLOP/s”。Transformer serving 同时包含 prefill 与 decode：前者一次处理大量输入 token，矩阵乘法容易获得较高 arithmetic intensity；后者每步只生成少量 token，却反复读取庞大权重与 KV cache，常被 HBM bandwidth 限制。同一模型因此会在 roofline 图上落入两个区域。
+
+\subsection{两个 sub-workload}
+
+Prefill 把整个 prompt 并行送入模型，计算量随 token 数增长但矩阵尺寸较大；decode 是 autoregressive loop，每产生一个 token 都要再次执行模型层。Batch 可以提高 decode 的矩阵利用率，却会增加排队、KV cache 和单用户 latency，所以不能无限扩大。
+
+\lecturefigure{slide-027.jpg}{Prefill 与 decode 搬运相似权重，却执行不同数量的 FLOP}{官方 deck 第 27 页；课堂 00:39:55--00:41:20}
+
+\begin{knowledgebox}{读图：先比较“bytes moved per useful token”}
+两边都要读取模型权重；prefill 对一批输入 token 复用权重，单位字节可以做更多乘加，因而偏 compute-bound。Decode 每步新增一个位置，若 batch 较小，读取许多 GiB 权重只服务少量 token，因而偏 memory-bandwidth-bound。图没有表示 prefill 永远 compute-bound：极短 prompt、特殊 kernel 或低 batch 仍会改变位置。
+\end{knowledgebox}
+
+\subsection{Arithmetic intensity 与 roofline}
+
+Arithmetic intensity（算术强度）定义为每搬运一字节数据完成的运算数：
+\[
+I=\frac{F}{B}\quad [\mathrm{FLOP/byte}],
+\]
+其中 $F$ 是 FLOP 数，$B$ 是从目标 memory level 搬运的字节数。Roofline 上界写成
+\[
+P\leq \min(P_{\mathrm{peak}},\; BW\cdot I),
+\]
+其中 $P$ 是可达性能，$P_{\mathrm{peak}}$ 是峰值算力，$BW$ 是内存带宽。低 $I$ 落在斜线 bandwidth roof，高 $I$ 才可能碰到水平 compute roof。
+
+\lecturefigure{slide-028.jpg}{用 roofline 判断 workload 是 bandwidth-bound 还是 compute-bound}{官方 deck 第 28 页；课堂 00:41:20--00:42:45}
+
+\begin{knowledgebox}{读图：ridge point 是硬件与 workload 的交界}
+横轴是 arithmetic intensity，纵轴是 FLOP/s；斜线斜率由 memory bandwidth 决定，水平线由 compute peak 决定。两线交点 $I^*=P_{\mathrm{peak}}/BW$ 是 ridge point。若 decode 落在交点左侧，增加 Tensor Core 峰值几乎无效；降低权重字节、提高 batch 或减少 HBM traffic 更重要。
+\end{knowledgebox}
+
+\begin{warningbox}{Roofline 是上界模型，不是性能预测器}
+它通常不包含 kernel launch、同步、通信、cache miss、load imbalance、shape inefficiency 与 host stall。一个点远低于 roofline 时，需要 profiler 找出原因；一个点接近 roofline 时，才说明该 memory/compute resource 可能接近物理上限。
+\end{warningbox}
+
+\subsection{HBM、SRAM、SM 与 Tensor Core}
+
+GPU 规格表里最容易混淆的是“容量”“带宽”和“算力”。HBM（High Bandwidth Memory，高带宽内存）是 GPU 外部封装上的高带宽 DRAM，用来存权重、KV cache 与 activation；SRAM（Static Random-Access Memory，静态随机存取存储器）位于芯片上，构成 register、cache 与 programmer-controlled shared memory，容量小但速度高。SM（Streaming Multiprocessor）是执行线程块的计算单元，Tensor Core 是 SM 内面向矩阵乘加的专用数据通路。
+
+\lecturefigure{slide-029.jpg}{为什么生产推理偏好 data-center Tensor-Core GPU}{官方 deck 第 29 页；课堂 00:42:45--00:45:00}
+
+\begin{knowledgebox}{硬件术语与 serving 关系}
+\begin{tabularx}{\textwidth}{L{2.4cm}YY}
+\toprule
+术语 & 是什么 & 对推理的影响 \\
+\midrule
+HBM & 高带宽 DRAM 显存 & 权重/KV 容量与 decode bandwidth 上限 \\
+SXM & 高功耗 GPU module form factor，不是 PCIe 插卡 & 允许更高 power envelope 与紧密互联 \\
+NVLink & node 内 GPU 高带宽互联 & tensor/pipeline parallel 的通信路径 \\
+InfiniBand & node 间低延迟高带宽网络 & 多机 replica、prefill/decode disaggregation \\
+SM & 执行 warp、shared memory 与 Tensor Core 的单元 & occupancy、调度和 kernel 并行度 \\
+Tensor Core & 专用矩阵乘加硬件 & BF16/FP8/FP4 matmul 峰值主要来源 \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\lecturefigure{slide-030.jpg}{GPU Glossary 与 Tensara：建立可操作的硬件直觉}{官方 deck 第 30 页；课堂 00:45:00--00:45:25}
+
+\begin{importantbox}{规格表阅读顺序}
+先问模型权重与 KV cache 是否装得下，再看 HBM bandwidth 是否支持 decode SLO，然后看目标 dtype/shape 是否能使用 Tensor Core，最后检查 node 内外互联。只比较峰值 TFLOP/s 会系统性高估小 batch decode，并忽略分布式通信。
+\end{importantbox}
+
+\subsection{为什么不直接用 CPU、TPU 或任意 inference ASIC}
+
+CPU 生态成熟、内存大，但一般缺少 HBM 级带宽与可编程片上 shared memory，难以满足严格交互延迟；TPU 可以高效运行，但端到端供应、软件和调度选择更集中；其他 ASIC 可能在特定模型上优秀，却要承担编译器、kernel、debugger 与供应商锁定。硬件选择是“性能乘以可运营性”，不是单一 benchmark。
+
+\lecturefigure{slide-031.jpg}{CPU、TPU 与专用 inference chip 的现实边界}{官方 deck 第 31 页；课堂 00:45:25--00:48:55}
+
+\begin{warningbox}{“GPU 是唯一选择”是课堂时点的工程判断}
+它表示在 2026-05-28 的通用大模型生产生态里，NVIDIA data-center GPU 在可编程性、模型支持、互联与工具链上最稳妥，并不证明其他硬件在未来或特定 workload 中没有优势。采购决策要重新验证当时可用软件和供应。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Prefill 与 decode 共享模型，却有不同 arithmetic intensity；硬件评估必须同时看 HBM 容量/带宽、Tensor Core dtype、SM 利用、互联与 host path。Roofline 先给出“该优化理论上该打哪里”，profiler 再回答“实现为什么没接近上界”。
+

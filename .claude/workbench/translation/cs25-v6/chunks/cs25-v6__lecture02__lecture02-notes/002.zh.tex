@@ -1,0 +1,70 @@
+\section{从 patch 到 object：表示结构决定模型能问什么问题}
+
+若世界模型只看到规则网格中的 patch，它可以拟合局部运动，却未必把``红球推动绿色 T 块''表示成实体间关系。Causal-JEPA 的切入点不是先发明更复杂 controller，而是把预测单位改成 object slot，并通过遮蔽让模型不能只沿着每个对象自己的轨迹外推。
+
+\subsection{三个 benchmark 对应三种能力}
+
+这三个 benchmark 并非随意挑选的 demo，而是分别检验不同能力。Push-T 测试动作条件规划；CLEVRER 测试描述、预测、解释与反事实问答；PHYRE 用多物体接触和重力检验 rollout 是否物理可信。读这组图时应先看任务输出：成功率、问题正确率和 rollout plausibility 分别测量不同能力，不能互相替代。
+
+\lecturefigure{slide-012.jpg}{Causal-JEPA 的三类验证环境：Push-T、CLEVRER、PHYRE}{CS25 V6 official deck, p.~12}
+
+\begin{knowledgebox}{Benchmark 到能力的映射}
+Push-T 的 image goal 使模型必须把动作序列接到空间结果；CLEVRER 的 counterfactual 问题要求判断移除一个对象后会发生什么；PHYRE 的长链交互暴露``仅记相关性''的失败。若一个模型只在其中一项领先，不能据此声称它已经获得一般物理理解。
+\end{knowledgebox}
+
+\subsection{为什么 patch token 容易错过交互单位}
+
+在 Push-T 中，灰色 T 块、绿色目标、蓝色控制点和障碍物具有稳定语义。patch grid 会把同一对象切成多个 token，并让一个 token 的内容随对象移动而改变；object-centric representation 则试图让每个 slot 持续指向同一实体。它减少 token 数，也把``谁影响谁''变成可直接提问的变量关系。
+
+\lecturefigure{slide-013.jpg}{像素 patch 与对象级状态对 Push-T 的不同分解}{CS25 V6 official deck, p.~13}
+
+下一页保持 DINO-WM 的 predictor 和训练接口，单独把 patch representation 换成 object representation，构造 OC-DINO-WM。这个 baseline 很重要，因为它隔离了``对象表示''本身的作用；若后续 C-JEPA 更强，还必须证明增益来自 masking，而不是仅来自 token 更少。
+
+\lecturefigure{slide-014.jpg}{DINO-WM 与 OC-DINO-WM：只替换状态表示的对照}{CS25 V6 official deck, p.~14}
+
+\[
+X_t\in\mathbb{R}^{H\times W\times C}
+\xrightarrow{g}
+S_t=\{s_t^1,\ldots,s_t^N\},
+\qquad s_t^i\in\mathbb{R}^{d}.
+\]
+其中，$X_t$ 是像素观测，$g$ 是 object-centric encoder，$S_t$ 是包含 $N$ 个 slot 的集合，$s_t^i$ 是第 $i$ 个对象候选的 $d$ 维表示。这里的集合符号意味着 slot 顺序本身没有语义；跨帧身份必须由视频 encoder 或额外锚点维持。
+
+\begin{warningbox}{object slot 不是现成的真值对象}
+slot 可能把一个实体拆成多个槽、把多个实体合并、追踪时交换身份，或把阴影与背景当作对象。因此 object-centric 只提供一种可学习的结构假设；后文关于 interaction 与 causal 的结论都依赖表示足够 faithful。
+\end{warningbox}
+
+\subsection{Slot Attention：竞争式分组而非检测框真值}
+
+Slot Attention 从 feature map 中初始化若干 slot query，让每个输入 feature 在 slots 之间竞争，再用加权和与 GRU 迭代更新 slot。它不需要检测框标签，因而适合自监督对象分解；代价是 slot 只在置换意义下等价，没有天然的``slot 1 永远是红球''规则。
+
+\lecturefigure{slide-015.jpg}{Slot Attention 的 encoder--slot--decoder 结构}{CS25 V6 official deck, p.~15}
+
+\lecturefigure{slide-016.jpg}{Slot Attention 迭代：竞争归一化、聚合与 GRU 更新}{CS25 V6 official deck, p.~16}
+
+\[
+\alpha_{ij}=\frac{\exp(q_i^\top k_j/\sqrt d)}{\sum_{i'=1}^{N}\exp(q_{i'}^\top k_j/\sqrt d)},
+\qquad
+u_i=\frac{\sum_j \alpha_{ij}v_j}{\sum_j\alpha_{ij}},
+\qquad
+s_i\leftarrow\operatorname{GRU}(s_i,u_i).
+\]
+其中，$q_i$ 是第 $i$ 个 slot 的 query，$k_j,v_j$ 是第 $j$ 个输入 feature 的 key 与 value，$\alpha_{ij}$ 是 feature $j$ 分配给 slot $i$ 的竞争权重，$u_i$ 是聚合更新，$s_i$ 是 slot 状态，$d$ 是 attention 维度。分母沿 slot 归一化，使不同 slots 竞争解释同一 feature。
+
+\begin{lstlisting}[language=Python,caption={Slot Attention 的最小机制伪代码}]
+slots = init_slots(batch_size, num_slots, dim)
+for _ in range(num_iterations):
+    queries = to_queries(layer_norm(slots))
+    keys, values = encode_features(features)
+    weights = softmax(queries @ keys.T / sqrt(dim), axis="slots")
+    updates = normalized_weighted_sum(weights, values)
+    slots = gru(slots, updates)
+return slots
+\end{lstlisting}
+
+\teachervoice{00:12:20--00:14:23，老师把 Slot Attention 定义为 encoder--decoder 中间的迭代分组机制，并提醒视频版本还必须维护 temporal consistency。它不是把检测器输出直接塞进 Transformer。}
+
+\subsection{本章小结}
+
+对象表示把可移动实体变成较稳定、较少量的 token，使交互结构更容易表达；但它同时引入 slot 无序、身份漂移和分解错误。Causal-JEPA 的关键问题因此变成：如何设计遮蔽，使 predictor 必须利用其他对象和动作，而不是继续依赖被预测对象自身的历史？
+

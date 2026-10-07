@@ -1,0 +1,129 @@
+\section{部署：在稀缺、故障与 burst 中满足 SLO}
+
+单副本在实验室里稳定，并不意味着生产部署已经解决。集群还要面对 GPU 稀缺、跨地域网络、机器失败、容器镜像、JIT 编译、CUDA Graph capture 与突发流量。讲者把 serverless GPU 的冷启动拆成多个可独立优化的阶段，说明“多开几台机器”为什么既昂贵又不一定够快。
+
+\subsection{四种 utilization 与网络预算}
+
+Allocation utilization 衡量分到 GPU 的时间里有多少在承载有用工作；kernel utilization 衡量 GPU 是否持续有 kernel；SM utilization 看计算单元是否活跃；bandwidth/FLOP utilization 看活跃时是否接近硬件上界。它们可以彼此矛盾：GPU 一直有 kernel，不代表 kernel 使用了足够 SM 或 HBM bandwidth。
+
+\lecturefigure{slide-033.jpg}{硬件约束决定部署选项}{官方 deck 第 33 页；课堂 00:49:05--00:50:40}
+
+\begin{knowledgebox}{读图：先把不可回收的网络延迟从预算里扣掉}
+交互请求可能先花约区域内十毫秒或全球百毫秒量级穿越网络，剩余预算才分给排队、prefill 与 decode。若 TTFT SLO 只有数百毫秒，部署地域、连接复用与路由会与 GPU 同等重要。图中的网络数字是数量级提示，不是固定 RTT。
+\end{knowledgebox}
+
+\begin{importantbox}{利用率不是一个标量}
+当 dashboard 显示“GPU utilization 90\%”时，必须问它测量的是 allocation、kernel active、SM active、HBM bandwidth 还是 Tensor Core FLOP。不同定义对应不同修复：缩容/调度、消除 host gap、改 kernel shape、提高 batch、减少 bytes，不能混用。
+\end{importantbox}
+
+\subsection{GPU failure 是常态事件}
+
+大规模 fleet 会把低概率硬件故障放大成日常事件。Slide 34 用 CPU、SSD 与 H100 的 mean time to failure（MTTF）做强烈对比；重点不是记住一个年化百分比，而是理解推理服务必须具备 health checking、draining、retry 与 replica replacement。与同步训练相比，独立 replica 失败更容易隔离，但仍会制造请求失败和容量缺口。
+
+\lecturefigure{slide-034.jpg}{生产环境中的硬件故障数量级对比}{官方 deck 第 34 页；课堂 00:50:40--00:51:25}
+
+\begin{warningbox}{如何读 annualized failure rate}
+若故障近似 Poisson process，单设备在时间 $t$ 内至少一次失败的概率可写为 $1-e^{-t/\mathrm{MTTF}}$。当 MTTF 小于一年，年化“事件数/设备年”可以大于 100\%，并不表示概率超过 1；它表示同一设备或替换后的设备一年内可能经历多次事件。真实故障也未必独立或指数分布。
+\end{warningbox}
+
+\lecturefigure{slide-035.jpg}{在大规模 GPU fleet 中持续维护健康容量}{官方 deck 第 35 页；课堂 00:51:25--00:51:55}
+
+\begin{knowledgebox}{读图：健康容量是动态资源，不是静态 inventory}
+这张图把 fleet 中的 GPU 状态聚合成时间序列。工程上应区分硬故障、温度/功耗异常、ECC/Xid、互联退化与应用误报；health signal 触发隔离时，还要避免所有 replica 同时被驱逐造成 capacity cliff。
+\end{knowledgebox}
+
+\subsection{Bursty demand 的三种结果}
+
+接下来的五张图构成一个控制问题。真实需求有明显峰谷；固定 over-provision 保住 SLO 却浪费 GPU；allocation 太慢会在峰值前半段排队，峰值过去后才拿到机器；目标是快速自动分配，让 provisioned capacity 贴近 demand，同时保留足够 buffer 吸收预测误差。
+
+\lecturefigure{slide-036.jpg}{一个月尺度的突发推理流量}{官方 deck 第 36 页；课堂 00:51:55--00:52:25}
+
+\begin{knowledgebox}{读图：容量问题由峰形而非平均值决定}
+图中长时间基线后出现多个尖峰。若按月平均购买容量，尖峰会形成巨大 queue；若按最大峰值长期预留，大部分时间 GPU 空闲。真正需要测量的是峰值高度、持续时间、上升斜率、可预测性与冷启动时间。
+\end{knowledgebox}
+
+\lecturefigure{slide-037.jpg}{固定 over-provision：SLO 稳定但利用率低}{官方 deck 第 37 页；课堂 00:52:25--00:52:55}
+
+\begin{knowledgebox}{读图：红线长期高于绿色 demand 的含义}
+Provisioned capacity 维持在高位，尖峰被吸收，但阴影差值代表付费却没有完成请求的 GPU 时间。这种方案对极高价值、不可排队的流量可能合理；对稀疏 data processor 则通常过贵。
+\end{knowledgebox}
+
+\lecturefigure{slide-038.jpg}{分配过慢：利用率与 QoS 同时受损}{官方 deck 第 38 页；课堂 00:52:55--00:53:25}
+
+\begin{warningbox}{慢扩容会出现“最差的两头”}
+需求上升时容量不足，用户排队；需求下降后迟到的 GPU 仍被分配，形成空闲。于是既没守住 latency，又付了闲置成本。只看平均 utilization 甚至可能把这种系统误判为“很忙、很高效”。
+\end{warningbox}
+
+\lecturefigure{slide-039.jpg}{快速自动 allocation：让 capacity 贴近需求}{官方 deck 第 39 页；课堂 00:53:25--00:53:50}
+
+\begin{knowledgebox}{读图：目标不是零空闲，而是受控 headroom}
+粉色 provisioned line 应在绿色 application demand 之前或同时上升，并在峰值后及时回落。完全零 buffer 会让任何预测误差变成排队；过大 buffer 又回到固定 over-provision。工程目标是用 SLO、failure rate 和 allocation latency 定义最小安全 headroom。
+\end{knowledgebox}
+
+\lecturefigure{slide-040.jpg}{把 serverless GPU 启动从分钟级拆成可优化阶段}{官方 deck 第 40 页；课堂 00:53:50--00:54:05}
+
+\begin{importantbox}{Cold-start critical path}
+可以把启动时间粗略拆成
+\[
+T_{\mathrm{cold}}=T_{\mathrm{machine}}+T_{\mathrm{container}}+T_{\mathrm{weights}}+T_{\mathrm{compile}}+T_{\mathrm{capture}}+T_{\mathrm{ready}}.
+\]
+机器 allocation、容器文件、权重加载、JIT/Torch compile、CUDA Graph capture 与 health readiness 都可能成为主导项。只优化镜像下载，无法修复等待 GPU 或 graph capture 的分钟级延迟。
+\end{importantbox}
+
+\subsection{Cloud Buffer：把稀缺 GPU 变成可快速分配的池}
+
+Cloud Buffer 的思想是在多个底层 cloud/region 上维持一小部分已获取、健康、可重配置的机器，使应用峰值不必等待完整云供应流程。它类似 memory allocator 的 free list：平台先承担资源碎片和预测，再把近乎即时的 machine allocation 暴露给上层应用。
+
+\lecturefigure{slide-043.jpg}{Cloud Buffer 的完整 warm-capacity 网格}{官方 deck 第 43 页；课堂 00:54:05--00:54:40；pages 041--042 为递进 build}
+
+\begin{knowledgebox}{读图：彩色块表示可被不同应用重用的 warm capacity}
+最终 build 展示多台机器与不同占用状态。关键不是让每个应用永久预留自己的 GPU，而是让平台在共享池中维持健康空闲或可迁移容量，再按需求重新绑定。这样把“云厂商分钟级供应”转换成“平台内部秒级调度”。
+\end{knowledgebox}
+
+\lecturefigure{slide-044.jpg}{Cloud Buffer 的控制平面与排队模型}{官方 deck 第 44 页；课堂 00:54:40--00:55:00}
+
+\begin{knowledgebox}{读图：区分 cloud allocation 与 application scheduling}
+一侧是 provider/region 中的机器供应，另一侧是 application queue 与 worker。控制器观察 demand、buffer health 与启动时间，决定何时补充或释放底层机器；上层 scheduler 决定哪个应用拿到哪台 warm machine。两个控制环的时间尺度和失败模式不同。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={带 headroom 与启动延迟的简化扩容控制器}]
+required = ceil(peak_forecast / per_replica_capacity)
+healthy = count_ready_replicas()
+starting = count_starting_replicas()
+
+if healthy + starting < required + failure_headroom:
+    request_from_cloud_buffer(
+        required + failure_headroom - healthy - starting
+    )
+elif healthy > required + scale_down_margin:
+    drain_then_release(healthy - required)
+\end{lstlisting}
+
+\subsection{Container cache：lazy、eager 与 content-addressed}
+
+拿到 GPU 后，容器文件系统仍可能很大。Lazy loading 只在实际访问时拉取 layer/page，缩短首次可运行时间；eager prefetch 提前拉取已知关键路径；content-addressed cache 按内容 hash 复用相同文件块，使不同镜像或版本共享依赖。三者结合，比每次完整下载镜像更适合高 churn 的推理 replica。
+
+\lecturefigure{slide-045.jpg}{容器文件系统的 lazy、eager 与内容寻址云缓存}{官方 deck 第 45 页；课堂 00:55:00--00:55:55}
+
+\begin{knowledgebox}{读图：启动与稳态需要不同策略}
+顶部长条表示镜像内容，粉色块是启动早期真正触碰的文件。Lazy 让应用先启动，eager 把已知热块提前送达，content hash 让重复库从共享 cache 命中。若预测错了热集合，lazy page fault 仍会进入请求关键路径，所以要用真实 startup trace 更新 prefetch 集合。
+\end{knowledgebox}
+
+\subsection{Checkpoint/restore：进程最终也是数据}
+
+SGLang、vLLM 启动时可能执行 JIT compilation、Torch compile、权重初始化和 CUDA Graph capture。讲者的关键直觉是：除 socket 等需要特殊处理的外部状态外，Linux process 与 GPU memory 最终都是可序列化状态；若恢复保存的状态比重新创建快，就可以把昂贵初始化移出用户冷启动路径。
+
+\lecturefigure{slide-046.jpg}{通过进程与 GPU checkpoint/restore 缩短应用启动}{官方 deck 第 46 页；课堂 00:55:55--00:56:55}
+
+\begin{knowledgebox}{读图：左边是需要重做的初始化，右边是可恢复状态}
+图中把 memory mapping、线程/文件状态、GPU allocation 与 graph 连接到持久存储。恢复不是简单复制权重：需要确保 driver/runtime 兼容、设备拓扑一致，并处理 TCP socket、外部服务连接与时间相关状态。Checkpoint 越靠近 ready state，恢复越快，但可移植性越差。
+\end{knowledgebox}
+
+\begin{warningbox}{Model checkpoint 与 activation/process checkpoint 不同}
+Model checkpoint 保存参数，供重新构建模型；activation checkpointing 是训练时少存 forward activation、backward 时重算；这里的 process/GPU checkpoint 保存已经初始化甚至 capture 后的运行时状态。三者解决不同问题，不应混称。
+\end{warningbox}
+
+\subsection{本章小结}
+
+生产部署的关键路径从 cloud allocation 一直延伸到 application ready。稳定系统需要多层 headroom、健康检查、排队与恢复：Cloud Buffer 缩短机器供应，content-addressed filesystem 缩短容器路径，checkpoint/restore 缩短 engine 初始化。它们共同服务于同一个 SLO，而不是三个独立产品特性。
+

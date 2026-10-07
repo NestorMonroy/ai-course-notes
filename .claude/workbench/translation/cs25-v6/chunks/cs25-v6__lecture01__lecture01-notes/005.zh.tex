@@ -1,0 +1,120 @@
+\section{RAG 与 Curriculum：把知识位置和学习顺序纳入 scaling}
+
+前一章改变 corpus 的来源与语言结构，本章改变另外两个维度：知识是存进参数还是在推理时检索，以及模型是否按一个 curriculum 与深度 schedule 共同成长。这两条路线都反对“只扩大静态预训练”的单轴 scaling 观。
+
+\subsection{RAG 的基本接口：参数记忆之外增加外部记忆}
+
+Retrieval-Augmented Generation（RAG，检索增强生成）先根据 query 从文档库取回证据，再把 query 与 evidence 一起交给语言模型。它把一部分知识更新从参数训练移到索引刷新，但增加 retrieval latency、context token、排序错误与证据冲突。
+
+\lecturefigure{slide-068.jpg}{基础模型：预训练数据被压入参数后直接生成输出}{CS25 V6 official deck, p.~68}
+
+\lecturefigure{slide-070.jpg}{完整 RAG：query 触发 retrieval，证据作为 context 进入 LLM}{CS25 V6 official deck, p.~70}
+
+若总 compute budget 为 $C$，可粗略写成
+\[
+C=C_{\mathrm{pretrain}}+C_{\mathrm{index}}+C_{\mathrm{retrieve}}+C_{\mathrm{generate}}.
+\]
+$C_{\mathrm{pretrain}}$ 形成 parametric knowledge，$C_{\mathrm{index}}$ 建立外部库，$C_{\mathrm{retrieve}}$ 在每次请求中搜索，$C_{\mathrm{generate}}$ 处理增长后的 context。RAG 不是免费知识，它把成本从一次性训练重新分配到存储和每次推理。
+
+\begin{knowledgebox}{首次使用：parametric 与 non-parametric memory}
+\textbf{Parametric memory} 指通过梯度写入权重的统计规律；更新慢、查询便宜但来源不可直接定位。\textbf{Non-parametric memory} 指文档库、向量索引或数据库；更新快、来源可追踪，但依赖 retrieval quality、索引和额外 context。RAG 是二者的组合，不是“没有参数学习”。
+\end{knowledgebox}
+
+\subsection{RAG scaling：最优点取决于任务与预算}
+
+研究把 OLMo-2 一类 base model 与 retrieval 模块放进统一 compute allocation。若预训练太少，模型可能不会理解 query、证据或生成任务；若预训练过多，继续把可检索事实压入参数的边际收益变低。最优 retrieval ratio 因任务而异：知识密集问题更依赖外部证据，纯语言建模或复杂推理仍需要强 base model。
+
+\lecturefigure{slide-071.jpg}{Studying RAG Scaling：参数规模、预训练 token 与 retrieval 共同变化}{CS25 V6 official deck, p.~71}
+
+\lecturefigure{slide-072.jpg}{How Much RAG is Optimal：不同任务的最优 retrieval allocation 不同}{CS25 V6 official deck, p.~72}
+
+\teachervoice{00:29:01--00:31:50，老师强调存在最低 useful pretraining budget；RAG 不能让一个几乎未训练的模型凭检索自动变强。最优点取决于 task、retriever 与总 compute，而不是固定比例。}
+
+\begin{lstlisting}[language=Python,caption={固定预算下搜索 pretraining 与 retrieval 分配的伪代码}]
+for pretrain_budget in candidate_pretrain_budgets:
+    model = train_base_model(tokens=budget_to_tokens(pretrain_budget))
+    for retrieval_k in candidate_k:
+        score = evaluate(
+            model=model,
+            retriever=index,
+            k=retrieval_k,
+            task=target_task,
+        )
+        record(pretrain_budget, retrieval_k, score)
+choose_pareto_frontier()
+\end{lstlisting}
+
+\begin{warningbox}{RAG 结果最容易被忽略的三项成本}
+第一，检索文档会增加 input token 与 KV cache；第二，错误证据会把模型推向错误但“有依据”的答案；第三，index 更新和权限控制成为新的系统状态。只比较参数量而不计 retrieval/serving 成本，会把最优点看错。
+\end{warningbox}
+
+Serving 端还要区分 prefill 与 decode。检索得到的 $k$ 篇文档会在 prefill 阶段一次性扩大输入长度，增加 attention 与 KV cache 建立成本；之后每个 decode token 继续读取这些 cache。若用户请求高并发，较大的 evidence context 会降低可容纳 batch。另一方面，较弱 base model 可能无法正确使用文档，出现 citation copying、证据冲突或忽略 retrieval。一个完整 RAG scaling 实验因此至少报告 retrieval recall、answer quality、context length、latency、throughput 与 fresh-index update cost，而不只是最终 accuracy。
+
+\subsection{Curriculum-Guided Layer Scaling：模型和数据一起成长}
+
+Curriculum learning 按某种难度或结构排序样本。CGLS 进一步让 layer count 随训练进程增长：模型先用较浅网络处理较简单数据，再逐步插入层、提高数据复杂度。设训练进度 $s\in[0,1]$，层数与难度 schedule 可写成
+\[
+L(s)=L_0+\lfloor s(L_{\max}-L_0)\rfloor,
+\qquad d(s)=d_0+s(d_{\max}-d_0).
+\]
+$L(s)$ 是当前深度，$d(s)$ 是数据难度指标。实际方法需要定义如何复制/初始化新层、如何维持 optimizer state，以及 difficulty 是否真正可测。
+
+\lecturefigure{slide-075.jpg}{CGLS 动机：静态模型可能无法匹配数据难度随训练变化}{CS25 V6 official deck, p.~75}
+
+\lecturefigure{slide-076.jpg}{Motivation：合成课程、儿童发展与 DataComp-LM 提供顺序线索}{CS25 V6 official deck, p.~76}
+
+\lecturefigure{slide-077.jpg}{Prior work：layer stacking 与相似度驱动的 growth 方法}{CS25 V6 official deck, p.~77}
+
+\lecturefigure{slide-078.jpg}{CGLS 方法：按训练阶段从 8 层增长到 16 层并改变 curriculum}{CS25 V6 official deck, p.~78}
+
+\begin{knowledgebox}{读图：不要把“课程”只理解成样本排序}
+slide 78 同时改变 model depth、transferred layers、randomly initialized layers 与 data complexity。读结果前先问每个阶段哪些参数是继承、复制或新建的；否则性能变化可能来自参数增长、训练步数或初始化，而不只是 curriculum 本身。
+\end{knowledgebox}
+
+\begin{lstlisting}[language=Python,caption={模型深度与数据难度共同调度的伪代码}]
+for stage in schedule:
+    model = grow_layers(
+        model,
+        target_depth=stage.depth,
+        transfer=stage.transfer_policy,
+    )
+    data = sample_by_difficulty(
+        corpus,
+        min_level=stage.min_difficulty,
+        max_level=stage.max_difficulty,
+    )
+    train(model, data, steps=stage.steps)
+\end{lstlisting}
+
+\subsection{结果与边界：小幅收益需要正确归因}
+
+slide 79--80 汇总多个 benchmark。比较时应先找到 fixed compute/parameter baseline，再判断 CGLS 是否在平均分、perplexity 或特定任务上稳定领先。即使平均收益存在，也要检查是否牺牲个别任务，以及增长过程的额外实现复杂度是否值得。
+
+\lecturefigure{slide-079.jpg}{CGLS 结果表一：多项 benchmark 的平均与分任务变化}{CS25 V6 official deck, p.~79}
+
+\lecturefigure{slide-080.jpg}{CGLS 结果表二：不同 baseline 和配置的对照}{CS25 V6 official deck, p.~80}
+
+\lecturefigure{slide-081.jpg}{讨论：收益、归一化 baseline 与未来 curriculum 方向}{CS25 V6 official deck, p.~81}
+
+\teachervoice{00:31:50--00:36:33，老师把 CGLS 描述为探索性方法：结果有改善，但仍需研究 curriculum 定义、hyperparameter、其他模型族和更大的 scale。实践经验：不要把一张平均分表升级成“人类式成长规律”。}
+
+Layer growth 还引出 optimizer-state 问题。Adam/AdamW 会为每个参数维护一阶动量 $m$ 与二阶动量 $v$；当新层加入时，这些 optimizer state 没有历史。复制已有层可继承表示，却可能造成层间同质化；随机初始化保持多样性，却在训练中制造分布突变。公平比较应说明新层权重、$m/v$、learning-rate warmup 与 residual scale 如何初始化，并按总 FLOPs 或总更新量匹配 baseline。否则 CGLS 的收益可能来自额外训练阶段，而不是 curriculum 与深度共同增长本身。
+
+\subsection{统一数据视角：selection、mixture、retrieval 与 curriculum}
+
+四个项目可归纳为一张决策表：Baby Scale 研究 source selection，Bilingual BabyLM 研究 mixture structure，RAG 研究 knowledge externalization，CGLS 研究 order 与 co-scaling。它们共同说明，data strategy 不只是训练前过滤，而是贯穿参数学习、推理和模型成长的系统变量。
+
+\lecturefigure{slide-084.jpg}{统一洞见一：数据来源、语言混合与任务依赖}{CS25 V6 official deck, p.~84}
+
+\lecturefigure{slide-085.jpg}{统一洞见二：curriculum、RAG 与模型成长的不同干预位置}{CS25 V6 official deck, p.~85}
+
+\lecturefigure{slide-086.jpg}{总体结论：未来语言模型需要更聪明而非只更多的数据}{CS25 V6 official deck, p.~86}
+
+\begin{importantbox}{数据策略选择清单}
+若问题是\textbf{训练语料噪声}，先做 selection/filtering；若问题是\textbf{语言或领域失衡}，调 mixture；若知识经常更新且需来源，考虑 RAG；若训练早期与后期适合不同样本，设计 curriculum；若模型容量随阶段改变，必须把 architecture growth 纳入实验。不同旋钮不能用同一个“数据质量”指标代替。
+\end{importantbox}
+
+\subsection{本章小结}
+
+RAG 把知识位置从参数扩展到外部 memory，CGLS 把学习顺序扩展到模型深度与数据难度的共同 schedule。两者都揭示 scaling 的核心是资源分配，而不是无条件增加 token 或参数。下一章转向模型训练完成后仍可改变行为的 post-training 与 inference-time compute。
+

@@ -1,0 +1,123 @@
+\section{Causal-JEPA：用 object masking 制造交互必要性}
+
+Causal-JEPA 不是先估计一个固定 causal graph，再在图上做消息传递。它在训练时删除部分 object histories，让模型面对一类 counterfactual-like completion：目标对象自身的信息不可见时，哪些邻近对象、动作和历史足以恢复它？这种任务把 interaction reasoning 从``可能有帮助''变成``降低 loss 所必需''。
+
+\subsection{香蕉反例：为什么只 mask 一个时刻还不够}
+
+如果只隐藏未来一帧的香蕉，模型仍可沿着香蕉自己的历史做速度外推，完全忽略它是否被其他物体咬掉。三格漫画用夸张方式说明 shortcut：真正的问题不是``下一帧长什么样''，而是``当目标对象自身轨迹被拿走时，谁决定它的变化''。
+
+\lecturefigure{slide-017.jpg}{香蕉反例：对象自身历史会让 predictor 绕过交互推理}{CS25 V6 official deck, p.~17}
+
+\teachervoice{00:14:23--00:16:30，课堂用漫画解释 object masking 的动机：若目标对象在历史中始终可见，模型可以只学 self-dynamics；遮掉对象跨时间的状态，才迫使模型读取施加影响的其他实体。}
+
+\begin{importantbox}{masking 在这里扮演什么角色}
+普通 data augmentation 关心鲁棒性；C-JEPA 的 masking 更像一个可观测性干预：训练时撤掉目标对象的部分 latent history，但保留其他对象、动作和一个最小身份锚点。模型若想恢复目标，就必须寻找 interaction-relevant context。
+\end{importantbox}
+
+\subsection{为什么 predictor 使用 bidirectional attention}
+
+DINO-WM 的 causal Transformer 按时间从过去预测未来，适合常规 autoregressive rollout；C-JEPA 训练时还要在历史窗口内部补全被 mask 的对象，因此允许未遮蔽的历史 token 彼此双向交互。这里的 bidirectional 仅作用于训练窗口中的 latent completion，不意味着 inference 偷看真实未来。
+
+\lecturefigure{slide-018.jpg}{Causal Transformer 与 bidirectional masked Transformer 的信息流}{CS25 V6 official deck, p.~18}
+
+\begin{warningbox}{bidirectional 不等于数据泄漏}
+训练时 future token 本身也被替换成 mask token，predictor 只能看到其位置与身份提示，不能看到真实目标 latent。推理时历史完全可见、未来仍被遮蔽，模型照样只能从过去和动作 rollout。判断泄漏要看 target value 是否进入输入，而不是只看 attention 是否双向。
+\end{warningbox}
+
+\subsection{从单对象轨迹到多对象遮蔽}
+
+最直接的构造是选中一个对象，把它在历史窗口与未来位置上的 slot 全部遮掉。这样 predictor 仍知道时间位置，却失去该对象的自轨迹。进一步遮多个对象可以增加任务难度，但如果连身份线索也删除，模型甚至不知道每个 mask token 应对应哪个对象，训练目标会变成不适定的集合匹配。
+
+\lecturefigure{slide-019.jpg}{第一步：沿时间轴遮蔽一个对象的历史与未来}{CS25 V6 official deck, p.~19}
+
+\lecturefigure{slide-020.jpg}{第二步：同时遮蔽多个对象，暴露身份歧义}{CS25 V6 official deck, p.~20}
+
+\lecturefigure{slide-021.jpg}{仅有 temporal positional encoding 无法回答 slot 身份是谁}{CS25 V6 official deck, p.~21}
+
+\[
+M_\tau\subseteq\{1,\ldots,N\},
+\qquad
+S_\tau^m=\{s_\tau^i\mid i\in M_\tau\},
+\qquad
+S_\tau^c=\{s_\tau^j\mid j\notin M_\tau\}.
+\]
+其中，$M_\tau$ 是时刻 $\tau$ 被遮蔽的 slot 索引集合，$S_\tau^m$ 是 masked object states，$S_\tau^c$ 是可见 context。$N$ 是 slot 数；同一对象可跨多个时间步进入 mask 集合，以压制 self-dynamics shortcut。
+
+\begin{lstlisting}[language=Python,caption={跨时间 object masking 的最小伪代码}]
+masked = slots.clone()
+for object_id in sampled_objects:
+    identity = project(slots[first_time, object_id])
+    for time_id in history_and_future:
+        masked[time_id, object_id] = identity + mask_token[time_id]
+predicted = predictor(masked, actions)
+loss = mse(predicted[mask_positions], slots[mask_positions])
+\end{lstlisting}
+
+\subsection{slot 是集合：身份锚点如何消除跨视频置换}
+
+Video A 的 slot 2 可能追踪绿色物体，Video B 的 slot 2 却可能追踪蓝色物体；slot index 不能跨样本当作类别 ID。C-JEPA 保留最早时刻 $t_0$ 的对象状态作为 identity anchor，再把它投影后与时间相关 mask embedding 相加。这样每个 mask token 表达``这个视频里从该初始对象延续出来、位于时刻 $\tau$ 的未知状态''。
+
+\lecturefigure{slide-022.jpg}{不同视频中的 slot 顺序可以任意置换}{CS25 V6 official deck, p.~22}
+
+\lecturefigure{slide-023.jpg}{identity anchor 加时间 mask embedding，定义可预测的对象身份}{CS25 V6 official deck, p.~23}
+
+\[
+\tilde z_\tau^i=\phi(z_{t_0}^i)+e_\tau.
+\]
+其中，$\tilde z_\tau^i$ 是替代真实对象状态的 mask token，$z_{t_0}^i$ 是最早可见时刻的身份锚点，$\phi$ 是线性投影，$e_\tau$ 是可学习 mask embedding 与 temporal positional encoding 的组合，$i$ 表示同一视频内的对象轨迹。
+
+\teachervoice{00:16:30--00:20:36，老师强调 object-centric representation 是 set 而非 list。保留第一个时间步不是为了泄露运动，而是为了给 mask token 一个视频内稳定身份；跨视频仍不假设 slot 顺序一致。}
+
+\subsection{动作为什么应该是单独节点}
+
+把同一个 action vector 复制并拼接到每个 object token，虽然实现简单，却把``谁被动作直接影响''隐藏在高维特征里。C-JEPA 把 action 当作独立 token/node，与对象在 attention 图中交互：predictor 可以学习动作先影响控制点、控制点再推动目标物体，而不要求每个对象都携带同一份动作副本。
+
+\lecturefigure{slide-024.jpg}{动作条件：复制拼接到所有 slot，还是作为独立节点}{CS25 V6 official deck, p.~24}
+
+\lecturefigure{slide-025.jpg}{action token 随时间进入对象交互图}{CS25 V6 official deck, p.~25}
+
+\begin{knowledgebox}{首次使用：auxiliary variable}
+本课的 auxiliary variable 指可观测但不属于对象视觉状态的条件，例如动作 $a_t$ 与 proprioception $p_t$。它们影响状态转移，却不应被误当成 object appearance 的一部分。作为独立 token 能让 attention 学习条件化关系，也便于分析哪个对象真正依赖动作。
+\end{knowledgebox}
+
+\subsection{完整训练目标：历史补全与未来预测合一}
+
+完整 Causal-JEPA 先用冻结 object-centric encoder 提取 history 与 future 的目标 slots，再替换选中的历史对象和全部未来位置，最后让 bidirectional predictor 同时恢复 masked history 与预测 future。前一项压制 self-dynamics，后一项维持真正的 forward world modeling；推理时不再遮历史，只 rollout 未来。
+
+\lecturefigure{slide-026.jpg}{Causal-JEPA 全结构：对象遮蔽、动作条件与联合 latent prediction}{CS25 V6 official deck, p.~26}
+
+\[
+\hat Z_{\mathcal T}=f_\theta(\bar Z_{\mathcal T},U_{\mathcal T}),
+\qquad
+\mathcal{L}_{\text{mask}}
+=\mathbb{E}\!\left[
+\sum_{\tau\in\mathcal T}\sum_{i=1}^{N}
+\mathbf{1}[\bar z_\tau^i\neq z_\tau^i]
+\left\|\hat z_\tau^i-z_\tau^i\right\|_2^2
+\right].
+\]
+其中，$\mathcal T$ 覆盖 history window 与 future horizon，$\bar Z_{\mathcal T}$ 是替换过的输入序列，$U_{\mathcal T}$ 是动作等辅助变量，$f_\theta$ 是 predictor，$\hat z_\tau^i$ 是预测 slot，$z_\tau^i$ 是冻结 encoder 给出的目标，指示函数只选择被遮蔽的位置。
+
+\[
+\mathcal{L}_{\text{mask}}
+=\underbrace{\mathbb{E}\!\left[\|\hat z_\tau^i-z_\tau^i\|_2^2\mid i\in M,\tau\le t\right]}_{\mathcal{L}_{\text{history}}}
++\underbrace{\mathbb{E}\!\left[\|\hat Z_\tau-Z_\tau\|_2^2\mid\tau>t\right]}_{\mathcal{L}_{\text{future}}}.
+\]
+其中，$\mathcal{L}_{\text{history}}$ 是历史对象补全误差，$\mathcal{L}_{\text{future}}$ 是未来状态预测误差，$M$ 是被选中的对象集合，$t$ 是当前时刻。两项共享 predictor，因此交互线索必须同时支持补全和 rollout。
+
+\teachervoice{00:20:36--00:22:38，Hazel 明确说 C-JEPA 不恢复 true causal graph；动作节点和 object masking 的目的，是让预测器在训练目标下依赖交互相关变量。}
+
+\subsection{三种评估问题对应三种失败模式}
+
+在进入结果前，讲者先把实验分成 reasoning、planning/control 与 physical plausibility。这个顺序很重要：VQA 可以检验 counterfactual 关系，却不证明 controller 高效；Push-T 成功率可以检验决策接口，却不证明 rollout 物理合理；PHYRE 的质性轨迹则能暴露相关性捷径，却未必给出通用任务表现。
+
+\lecturefigure{slide-027.jpg}{Causal-JEPA 的三类评估：推理、规划与物理可信性}{CS25 V6 official deck, p.~27}
+
+\begin{importantbox}{证据三角形}
+一个强世界模型结论最好同时回答：\textbf{关系是否可读出}（reasoning）、\textbf{预测是否可用于选动作}（control）、\textbf{分布外干预后是否仍遵守动力学}（plausibility）。本课的三组实验分别提供局部证据，不能合并成``模型已理解世界''这一无条件判断。
+\end{importantbox}
+
+\subsection{本章小结}
+
+Causal-JEPA 用 object slot 作为状态单位，用跨时间遮蔽移除目标对象的 self-history，用 identity anchor 解决 slot 集合的置换问题，并把动作作为独立辅助节点。其 loss 同时包含历史补全与未来预测，使 interaction reasoning 对降低训练误差变得必要。下一章检验这种结构偏置是否真的改善 counterfactual reasoning、planning efficiency 与 rollout plausibility。
+

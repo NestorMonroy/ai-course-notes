@@ -1,0 +1,70 @@
+\section{Expert Parallelism：MoE 的 token routing 与 all-to-all}
+
+Mixture-of-Experts（MoE）让每个 token 只激活少数 expert，从而扩大总参数而不同比例增加每 token FLOPs。Expert Parallelism（EP，专家并行）把 experts 放在不同 rank；路由结果决定每个 token 必须被发送到哪里，因此通信量与消息形状是数据依赖的。
+
+\subsection{切分 expert，而不是 attention}
+
+MoE block 仍含共享 attention、router、dispatch、expert MLP 与 combine。EP 只切 expert；若每个 EP rank 仍处理完全相同数据，共享 attention 会重复计算，因此实践中 EP group 往往也分片 data。
+
+\lecturefigure{slide-088.jpg}{EP 动机：MoE 中哪些部分可以跨设备切分}{CS25 V6 official deck, p.~88}
+
+\lecturefigure{slide-089.jpg}{第一步：把 experts 分布到不同 GPU}{CS25 V6 official deck, p.~89}
+
+\lecturefigure{slide-090.jpg}{路由问题：token 如何到达远端 expert}{CS25 V6 official deck, p.~90}
+
+\subsection{All-to-all、dispatch 与 combine}
+
+All-to-all 允许每个 rank 向每个其他 rank 发送不同消息。与 all-reduce 的“所有人得到同一个归约结果”不同，all-to-all 的目标是重排：发送前按 destination expert 打包 token，通信后每个 rank 收到属于本地 experts 的 token。
+
+\lecturefigure{slide-091.jpg}{All-to-all：每个进程向每个其他进程发送不同消息}{CS25 V6 official deck, p.~91}
+
+\lecturefigure{slide-092.jpg}{MoE dispatch：把路由到同一 expert 的 token 聚到其所在 rank}{CS25 V6 official deck, p.~92}
+
+expert 计算后必须执行反向 all-to-all，把结果送回原 token 顺序，这一步叫 combine。forward 的最小语义可写为
+\[
+y_i=\sum_{e\in\operatorname{TopK}(r(x_i))}p_{i,e}E_e(x_i).
+\]
+其中，$x_i$ 是 token 表示，$r$ 是 router，$p_{i,e}$ 是 token $i$ 分配给 expert $e$ 的权重，$E_e$ 是 expert MLP，TopK 决定实际激活的少数 experts。dispatch/combine 改变数据位置，但不能改变这个加权结果。
+
+\lecturefigure{slide-094.jpg}{完整 EP 数据流：shared attention、dispatch、expert、combine}{CS25 V6 official deck, p.~94}
+
+\subsection{真正难点：动态消息大小与 CPU--GPU 同步}
+
+每个 expert 接收多少 token 要等 router 计算后才知道。若通信库需要 CPU 先读取计数、分配 buffer、再发起 collective，GPU 会在关键路径等待。DeepEP、HybridEP 等实现利用 InfiniBand、RDMA、专用 SM 与预分配 buffer 降低这类同步。这也意味着算法性能依赖具体硬件和网络能力。
+
+\lecturefigure{slide-095.jpg}{EP difficulty：router 决定动态 buffer，CPU--GPU sync 进入关键路径}{CS25 V6 official deck, p.~95}
+
+\begin{knowledgebox}{读图：EP 的瓶颈发生在 GEMM 之前}
+绿色 router 很快给出 expert assignments，但每个 destination 的 token 数是动态的。发送方要按 expert 重排 token，接收方要知道 buffer offset，通信库还要在节点内 NVLink/NVSwitch 与节点间 InfiniBand 之间选择路径。图中 CPU 等待 GPU 计数的间隙会让后面的 expert GEMM 再快也无法补回。高性能 EP 因此同时需要 GPU-side metadata、预分配或对称内存、RDMA、拓扑感知 routing 和负载均衡；“专家计算稀疏”并不等于“系统通信稀疏”。
+\end{knowledgebox}
+
+\lecturefigure{slide-096.jpg}{EP 优缺点：MoE 的必要切分轴，也是高强度 all-to-all}{CS25 V6 official deck, p.~96}
+
+\teachervoice{00:51:42--00:53:56，老师指出很多 MoE 训练慢在 dispatch preprocess 与硬件支持，而不只是 expert GEMM。没有合适 InfiniBand/RDMA 或库支持时，公开论文中的 EP 吞吐未必可复现。}
+
+\begin{warningbox}{平均 token 数不能代表最慢 rank}
+若 router 把大量 token 发给同一 expert，该 rank 的 compute 与通信会成为 straggler，其他 ranks 即使空闲也必须等待。capacity factor、token dropping、auxiliary load-balance loss 或 auxiliary-loss-free bias 都是在质量、均衡与确定性之间取舍，不能只看平均 experts-per-token。
+\end{warningbox}
+
+\subsection{把 EP 通信藏进 PP schedule}
+
+上一节已经确认 EP 的 all-to-all 很难从单个 MoE block 内消除；下一步只能寻找与它独立的计算。本节回到 PP 的多 micro-batch 时间线，把不同 batch、不同 stage 的工作交错，从而让通信等待不再等同于设备空闲。实用方案把 EP 与 PP/1F1B 组合：当蓝色 micro-batch 做 dispatch/combine 时，GPU 可为绿色 micro-batch 执行另一个 stage 的 forward/backward。这样不是减少 all-to-all 字节，而是利用独立工作填充等待。
+
+\lecturefigure{slide-097.jpg}{EP+PP：用另一 micro-batch 的 compute 隐藏 dispatch/combine}{CS25 V6 official deck, p.~97}
+
+\begin{lstlisting}[language=Python,caption={EP 通信与另一 micro-batch 计算重叠的概念调度}]
+dispatch_blue = all_to_all_async(route(tokens_blue))
+backward_green = pipeline_stage.backward(microbatch_green)
+tokens_blue_local = dispatch_blue.wait()
+expert_blue = local_experts(tokens_blue_local)
+combine_blue = all_to_all_async(expert_blue)
+forward_green = pipeline_stage.forward(next_green)
+output_blue = combine_blue.wait()
+\end{lstlisting}
+
+\teachervoice{00:53:56--00:55:42，课堂把 practical solution 归纳为“用一个 batch 的 pipeline compute 隐藏另一个 batch 的 expert communication”。这说明 5D parallelism 的核心是跨轴联合 schedule，而不是逐项打开配置开关。}
+
+\subsection{本章小结}
+
+EP 只服务 MoE expert 层，通过 all-to-all 做 token dispatch/combine。它的难点是动态路由、负载不均、critical-path 网络和 CPU--GPU 同步；与 PP 组合可以隐藏部分通信，但无法消除硬件与最慢 rank 约束。
+

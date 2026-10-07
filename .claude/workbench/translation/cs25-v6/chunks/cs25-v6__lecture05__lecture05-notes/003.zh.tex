@@ -1,0 +1,66 @@
+\section{Two-Phase Pretraining：先扩大覆盖，再集中质量}
+
+Two-phase pretraining 不是简单地把训练切成两半，而是用两个目标不同的 sampling distribution。Phase 1 让模型接触广泛世界知识和多样表达；Phase 2 在仍保留一般能力的前提下，提高数学、代码、Wikipedia、任务型与其他高质量来源的采样概率。顺序本身成为可优化变量。
+
+\subsection{Piecewise curriculum 的核心机制}
+
+Phase 1 的关键词是 diversity：大量 web crawl、较低的高质量数据重复次数、较宽的 domain coverage。Phase 2 的关键词是 quality：提高高质量数据的 epoch 数，把有限的晚期更新用于更密集的能力信号。图中的红绿区域不是“坏数据/好数据”的道德划分，而是不同阶段的资源分工。
+
+\lecturefigure{slide-010.jpg}{Two-phase pretraining：多样性优先的 Phase 1 与质量聚焦的 Phase 2}{Stanford 官方录像，00:09:29--00:10:14}
+
+可把课程写成分段采样分布：
+\[
+p(D_k\mid s)=
+\begin{cases}
+w_k^{(1)}, & 0\le s<s_0,\\
+w_k^{(2)}, & s_0\le s\le 1,
+\end{cases}
+\qquad
+w_{\text{HQ}}^{(2)}>w_{\text{HQ}}^{(1)}.
+\]
+其中，$s$ 是归一化训练进度，$s_0$ 是 phase boundary，$w_k^{(1)}$ 与 $w_k^{(2)}$ 分别是两个阶段的数据权重。论文报告约后 40\% 训练使用 Phase 2 在其设置中效果最好，但 $s_0$ 仍应通过 proxy experiment 决定。
+
+\begin{lstlisting}[caption={固定 token budget 下的 two-phase sampler}]
+def sample_source(step, total_steps, phase_boundary, phase1, phase2):
+    progress = step / total_steps
+    weights = phase1 if progress < phase_boundary else phase2
+    return categorical_sample(weights)
+
+for step in range(total_steps):
+    source = sample_source(step, total_steps, 0.60, p1_weights, p2_weights)
+    batch = next_batch(source)
+    optimize_next_token_loss(batch)
+\end{lstlisting}
+
+\subsection{三种 baseline 隔离三个变量}
+
+自然分布按数据源现有 token 数抽样：大而低质的来源会因规模占据更多更新。Optimal blend + random order 已使用质量和 epoch 信息，但不改变时间顺序。Two-phase 同时控制 quality、epochs 与 order。只有这样的 baseline 设计，才能把“更好混合”与“更好课程”的收益拆开。
+
+\lecturefigure{slide-011.jpg}{Natural distribution、optimal random blend 与 two-phase baseline}{Stanford 官方录像，00:10:14--00:11:42}
+
+\begin{knowledgebox}{读图：先看三列，再看模型名}
+三列依次是 Quality、Epochs、Order。Natural distribution 三项都不控制；optimal random blend 控制前两项；two-phase 再控制顺序。Pascal 与 Volta 的名字只是帮助记忆。若某个新实验同时改了 tokenizer、模型规模或总 token 数，就不再是这张表定义的干净比较。
+\end{knowledgebox}
+
+\subsection{17\% 与 3.4\% 分别回答什么}
+
+前一节已经把三种 baseline 的控制变量拆开；本节进一步说明两个 headline number 各自对应哪一个反事实，避免把“优化 mixture 的总收益”误写成“ordering 单独带来的收益”。结果图中，Volta 相对 Pascal 的平均相对提升约为 17\%，其中混合质量与顺序都发生改变；相对已经拥有 optimal blend 但随机排序的 baseline，two-phase 仍约有 3.4\% 提升。前一个数字说明 recipe 很重要，后一个数字才更接近 curriculum order 的独立贡献。
+
+\lecturefigure{slide-012.jpg}{Two-phase strategy 相对自然分布与随机最优混合的结果}{Stanford 官方录像，00:11:42--00:12:32}
+
+若 baseline accuracy 为 $a$、新方法 accuracy 为 $b$，相对提升是
+\[
+\Delta_{\mathrm{rel}}=\frac{b-a}{a}\times 100\%,
+\]
+而绝对提升是 $\Delta_{\mathrm{abs}}=b-a$ 个 percentage points。课程中的多处“\% better”是相对提升，不能与绝对百分点混用，也不能跨不同 benchmark suite 直接相加。
+
+\teachervoice{00:27:16--00:27:58，讲者回答“先质量、后多样性是否可行”时说，交换两个 phase 的消融更差。这个结果支持当前方向，但仍是特定 corpus 与 model regime 下的经验，不是普遍学习定律。}
+
+\begin{warningbox}{两阶段不是“先垃圾、后精品”}
+Phase 1 仍需要过滤和基本质量控制；Phase 2 也不能只保留狭窄高分数据。过早收窄会损失覆盖，过晚或过长地重复高质量数据会出现 diminishing returns。工程上应同时监控 domain coverage、validation loss、memorization 与 downstream transfer。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Two-phase pretraining 把 curriculum 写进 sampling distribution：前期扩大覆盖，后期提高高质量信号密度。严谨解释必须区分 natural distribution、optimal random blend 与 ordered blend，并说明相对提升口径。接下来，课程把“何时出现”从一般数据推进到更敏感的 reasoning data。
+

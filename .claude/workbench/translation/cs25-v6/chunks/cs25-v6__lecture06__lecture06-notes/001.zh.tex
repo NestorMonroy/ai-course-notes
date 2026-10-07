@@ -1,0 +1,83 @@
+\section{同一个模型，两条学习通道}
+
+这堂课从一个看似简单、实际上非常根本的问题出发：语言模型获得一条新信息时，\textbf{把它写进参数}与\textbf{把它留在上下文}，是否会产生同一种可调用知识？两条路径都能让模型在当前任务上表现得像“学会了”，但 Lampinen 及合作者的受控实验表明，二者在 reversal、syllogism、codebook、alternative goal 等需要重组关系的测试上，会表现出显著不同的泛化模式。
+
+\subsection{研究对象不只是 Transformer，也包括学习系统本身}
+
+课程首先把问题放到自然智能与人工智能的共同坐标中。这里不是要从 Transformer 的一个实验直接推断大脑机制，而是利用人工系统的可控性：研究者可以把\textbf{完全相同的新信息}分别放进 context 或 parameter，再观察后续预测如何变化。对人类而言，我们很难精确控制一段经历进入了哪类记忆系统；对模型而言，这个干预可以重复、消融并量化。
+
+\lecturefigure{slide-002.jpg}{从语言模型泛化反推学习系统的计算原则}{Stanford CS25 V6 Lecture 06 官方 slide p. 2}
+
+\teachervoice{00:01:06--00:02:18，老师强调这是一种 cognitive science 方法：模型的价值不仅是性能对象，也是一种可做受控干预的学习系统。后面的自然智能类比必须建立在这些模型实验之后，而不能先把脑区名称套到模型组件上。}
+
+\begin{importantbox}{本讲的总问题}
+给定同一批经验 $D$，如果模型通过参数更新学习 $D$，与把 $D$ 直接放进上下文，模型能否对\textbf{未被显式写出的关系}做出同样灵活的推理？若不能，差异来自容量、优化、访问方式，还是知识表示的可用性？
+\end{importantbox}
+
+\subsection{Parametric learning 与 in-context learning}
+
+参数学习（parametric learning）通过训练损失把大量样本压缩进权重；上下文学习（in-context learning, ICL）不更新权重，而是在一次前向推理中使用 prompt 里的事实、示例和文档。二者都可以改变输出，却对应不同的信息生命周期：前者持久、可摊销，但经历被高度压缩；后者短暂、占用 context window，却保留更多局部细节。
+
+\lecturefigure{slide-003.jpg}{语言模型的两种学习路径：参数优化与上下文使用}{Stanford CS25 V6 Lecture 06 官方 slide p. 3}
+
+参数学习可以写成
+$$
+\theta' = \arg\min_{\theta}\sum_{(x,y)\in D}\mathcal{L}\!\left(f_{\theta}(x),y\right),
+$$
+其中：
+\begin{itemize}
+  \item $D$ 是新训练数据；
+  \item $f_{\theta}$ 是参数为 $\theta$ 的语言模型；
+  \item $\mathcal{L}$ 是 next-token 或任务损失；
+  \item $\theta'$ 是吸收数据后长期保留的新参数。
+\end{itemize}
+
+ICL 则保持参数不变：
+$$
+p(y\mid x,D)=f_{\theta}\!\left(y\mid \operatorname{concat}(D,x)\right).
+$$
+这里 $D$ 不被压进 $\theta$，而是作为当前计算图的一部分直接参与预测。因而“模型知道了什么”必须拆成两个问题：信息是否存在，以及信息是否能在当前目标下被重新组织和调用。
+
+\begin{knowledgebox}{术语表：两种“学会”到底差在哪里}
+\begin{tabularx}{\textwidth}{L{0.22\textwidth}X X}
+\toprule
+维度 & Parametric learning & In-context learning \\
+\midrule
+信息位置 & 权重与内部表示 & 当前 token 序列及其激活 \\
+持续时间 & 跨请求保留 & 通常只在当前上下文有效 \\
+整合范围 & 可跨海量训练样本统计整合 & 受 context window 与检索质量限制 \\
+细节保留 & 经优化压缩，可能绑定原任务格式 & 原始经历较完整，可按新目标重读 \\
+主要成本 & 训练、更新、版本管理 & 推理 token、KV cache、检索与延迟 \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{受控实验：只改变信息从哪里来}
+
+课程的关键方法不是比较两个不同模型，而是尽量固定模型、数据和测试，只改变信息通道。研究者可以构造模型预训练时没见过的实体和关系，把整套新数据放进 context，或者用相同数据 fine-tune，再对正向事实、反向关系、组合推理与隐藏结构分别测试。这种设计把“信息来源”从模型规模、世界知识和训练语料中剥离出来。
+
+\lecturefigure{slide-004.jpg}{把同一份 novel information 注入 context 或 parameters 的受控实验}{Stanford CS25 V6 Lecture 06 官方 slide p. 4}
+
+\begin{lstlisting}[language=Python,caption={同数据、不同信息通道的受控比较伪代码}]
+dataset = build_novel_relations()
+tests = build_forward_and_latent_tests(dataset)
+
+icl_model = frozen_model
+icl_scores = evaluate(icl_model, context=dataset, tests=tests)
+
+ft_model = finetune(copy(frozen_model), dataset)
+ft_scores = evaluate(ft_model, context=None, tests=tests)
+
+compare(icl_scores, ft_scores, by=["forward", "reversal", "composition"])
+\end{lstlisting}
+
+\lecturefigure{slide-005.jpg}{全课路线：先测差异，再比较三种桥接方案，最后讨论自然智能}{Stanford CS25 V6 Lecture 06 官方 slide p. 5}
+
+\begin{warningbox}{不要把“会回答”直接等同于“形成了同一种知识”}
+两个系统在训练分布或显式问题上都能答对，不代表内部知识具有相同的可重组性。真正有辨识度的是：问题换方向、换目标、换语言、增加一跳关系，或要求调用训练中只隐含存在的结论时，性能是否仍然保持。
+\end{warningbox}
+
+\subsection{本章小结}
+
+本章建立了全课的因果变量：同一信息通过参数或上下文进入模型。参数学习擅长跨大量经验做长期统计整合，ICL 则让少量经历以更丰富的细节直接参与当前计算。接下来要检验的不是哪条路径“更智能”，而是哪一类测试能暴露它们在知识可用性上的差异。
+

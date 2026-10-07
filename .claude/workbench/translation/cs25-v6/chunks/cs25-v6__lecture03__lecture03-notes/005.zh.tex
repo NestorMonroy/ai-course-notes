@@ -1,0 +1,111 @@
+\section{Attention 的隐藏前提：数据必须处在正确抽象层}
+
+“Attention is all you need”常被误读为只要把任意原始序列切成位置就能直接送进 Transformer。真实系统几乎总有 encoder、patchifier 或 tokenizer，把高分辨率原始信号变成更少、更稳定、更有语义的单位。本章把 preprocessing 从工程脚注提升为 architecture contract：attention 对它收到的 token 负责，却没有自动重新定义 token 的自由。
+
+\subsection{Myth：raw data 直接进 Transformer}
+
+下面这张简图刻意画得很诱人：input 进入 Transformer，output 自然出现。这个 pipeline 在 API 层面似乎成立，却隐藏了数据表示的全部工作。讲者称它为 myth，不是因为 Transformer 不强，而是因为成功应用通常先把原始数据变成适合逐 token 比较的表示。
+
+\lecturefigure{slide-016.jpg}{误解：把任意原始数据直接交给 Transformer}{Stanford 官方录像，00:23:00--00:23:29}
+
+\subsection{Reality：attention 位于 encoder 与 decoder 之间}
+
+现实 pipeline 往往是 encoder $\rightarrow$ Transformer $\rightarrow$ decoder。Encoder 的作用不只是降采样，而是把局部、噪声或连续信号映射到 attention 可以有效比较的 abstraction level。图中的红字“right level of abstraction”是后半堂课的中心句。
+
+\lecturefigure{slide-017.jpg}{现实：attention 通常作用于已经 pre-compressed 的表示}{Stanford 官方录像，00:23:30--00:23:59}
+
+\begin{importantbox}{Attention 对 tokenization 是“beholden”的}
+Softmax attention 可以重新混合 token 表示，却不能撤销最初 segmentation 已经丢失的信息，也不能在不增加序列长度的情况下把一个 token 自动拆成多个可寻址单位。输入单位的分辨率、边界与语义因此会深刻改变模型的学习难度。
+\end{importantbox}
+
+\subsection{Perceptual modalities：patchifier 先制造 vision token}
+
+Vision Transformer 不对每个像素做全局 attention，而是把图像切成 patch，线性投影为 token，再进入 Transformer。Patch size 决定了计算与细节：更小 patch 提高分辨率却使序列更长；更大 patch 减少 attention 成本却可能把多个对象或边界混在一起。
+
+\lecturefigure{slide-018.jpg}{图像、视频、音频等 perceptual modality 先经过 patchifier}{Stanford 官方录像，00:24:00--00:24:29}
+
+若图像高宽为 $H,W$，patch size 为 $P\times P$，则 token 数近似为
+\[
+L_{\mathrm{vision}}=\frac{H}{P}\frac{W}{P}.
+\]
+将 $P$ 减半会使 token 数约增至四倍，full attention 的 pairwise work 约增至十六倍。这里的瓶颈并非视觉数据“不能用 Transformer”，而是原始分辨率必须先被组织成可承受的 token stream。
+
+\subsection{Discrete modalities：tokenizer 先定义语言单位}
+
+语言与基因序列看似已经离散，但 character / byte / base pair 往往不是最有用的建模单位。Byte Pair Encoding（BPE，字节对编码）用频繁合并规则把低级符号组合成较长 token；它既缩短序列，也注入了边界和重复模式的 inductive bias。
+
+\lecturefigure{slide-019.jpg}{语言与 genomics 常先经过 tokenizer，再交给 Transformer}{Stanford 官方录像，00:24:30--00:24:59}
+
+\begin{knowledgebox}{第一次出现：Token、Tokenizer 与 Vocabulary}
+\term{Token} 是模型一次处理和寻址的离散单位；\term{tokenizer} 把原始字符串映射为 token id；\term{vocabulary} 是可用 token 的有限集合。BPE token 不必等于一个完整词，也不天然具有“真实语义”，但常包含词、词根、前后缀与空格边界等重复结构，因此比单字符更接近 attention 擅长的可组合单位。
+\end{knowledgebox}
+
+\subsection{Tokenization 的问题真实存在，但工程上也确实好用}
+
+Karpathy 的列表展示 spelling、数字、空格、罕见字符串等 tokenizer edge cases。讲者没有声称这些问题让现有 LLM 不可用；相反，他承认 data engineering 与 prompt tricks 能修掉很多症状。研究动机在于：若模型能从 raw data 端到端学出单位，就不必把人为 heuristic 永久冻结在数据入口。
+
+\lecturefigure{slide-020.jpg}{没有 tokenization 会怎样：工程可用性与 end-to-end 理想之间的张力}{Stanford 官方录像，00:25:00--00:26:39}
+
+\teachervoice{00:25:18--00:26:39，Gu 把问题放在 bitter lesson 下解释：feature engineering 在当前尺度可能有效，但更通用、从 raw data 自动学习的系统通常更能从长期 scaling 中获益。}
+
+\begin{warningbox}{“去 tokenizer”不是删除 preprocessing}
+Tokenizer-free model 仍需 byte embedding、local encoder、routing、downsampling 与 decoder。区别在于这些步骤是否与语言模型联合学习、是否能随 context 改变，而不是系统从此没有表示变换。
+\end{warningbox}
+
+\subsection{Character / byte-level evidence：多花 attention compute 也没有抹平差距}
+
+这张图比较 MambaByte 与 LlamaByte。横轴是训练字节数，纵轴是验证损失；模型与 FLOPs 被尽量匹配。先比较蓝色 MambaByte 与紫色 sliding-window attention，再看 dashed global-attention baseline：即使全局 attention 使用更多计算，曲线仍未追上 MambaByte，说明差距不只是“attention 太慢”。
+
+\lecturefigure{slide-021.jpg}{Character / byte-level language modeling：MambaByte 与 attention baseline 的 scaling 曲线}{Stanford 官方录像，00:26:40--00:28:49}
+
+常用 byte-level 指标 bits per byte（BPB，每字节比特数）定义为
+\[
+\mathrm{BPB}=-\frac{1}{L\ln 2}\sum_{t=1}^{L}\ln p(x_t\mid x_{<t}).
+\]
+其中 $L$ 是 byte 数，$p(x_t\mid x_{<t})$ 是正确 byte 的条件概率。BPB 越低越好；与 token-level perplexity 相比，它避免了不同 tokenizer 直接比较时单位不一致的问题，但仍受数据集、context length 与模型预算影响。
+
+\begin{knowledgebox}{读图：先看 matched condition，再看 global attention}
+第一层结论是同尺寸、同数据条件下 recurrent model 的曲线更低；第二层才是 global attention 即使付出更多 FLOPs 仍未反转结果。图不能证明所有 byte task 都由 SSM 统治，但支持“输入分辨率改变了 attention 的 modeling efficiency”。
+\end{knowledgebox}
+
+\subsection{DNA evidence：没有自然语言式 tokenizer 时差距更明显}
+
+DNA 序列只有少量碱基符号，单个 base pair 通常不是可独立寻址的高层语义单元。图中的 parameter scaling 显示，在该 human-genome autoregressive setup 下，Mamba 达到相近结果所需参数约为 Transformer++ 的三分之一。这里应读取“在该任务和指标中的 parameter efficiency”，而不是“DNA 上所有 SSM 都比 Transformer 好三倍”。
+
+\lecturefigure{slide-022.jpg}{DNA language-model scaling：Mamba 与 Transformer++ 的参数效率比较}{Stanford 官方录像，00:28:50--00:29:29}
+
+\begin{warningbox}{跨领域曲线不能直接外推}
+Genome pretraining 的 alphabet、long-range dependency、evaluation target 与自然语言不同。一个架构在 next-base prediction 上占优，不自动意味着 variant interpretation、gene regulation 或 clinical task 同样占优；下游能力仍要单独验证。
+\end{warningbox}
+
+\subsection{Effective token：什么单位值得被缓存？}
+
+讲者给出两个实用问题。第一，是否值得为每个输入单位缓存一份 representation？第二，hard attention 到单个单位是否有意义？Subword 常是可组合词素，字符与 DNA base 多数时候不是独立语义单位，视觉 patch 则取决于是否包含对象、纹理或空白背景。这个 checklist 比“永远用某架构”更可迁移。
+
+\lecturefigure{slide-023.jpg}{Effective tokens for attention：缓存价值、hard attention 与模态粒度}{Stanford 官方录像，00:29:30--00:32:59}
+
+标准 attention 可写为
+\[
+\operatorname{Attn}(q,K,V)
+=\sum_{i=1}^{L}\alpha_i v_i,
+\qquad
+\alpha_i=\frac{\exp(q^\top k_i/\sqrt d)}{\sum_j\exp(q^\top k_j/\sqrt d)}.
+\]
+其中 $q$ 是当前 query，$k_i,v_i$ 是第 $i$ 个 token 的 key/value，$d$ 是 head dimension，$\alpha_i$ 是 soft attention 权重。Hard-attention heuristic 指的是：若一个合理决策经常需要把权重集中到少数单元，逐 token cache 很自然；若单元本身噪声大、语义弱，模型先压缩再寻址可能更合理。
+
+\begin{importantbox}{一个可操作的架构诊断}
+先不要问“Transformer 还是 SSM 更先进”，而要问：\textbf{我当前的数据单位是否值得长期缓存？单个单位是否值得被精确召回？} 如果答案经常是否，优先考虑 learned compression、hierarchy、local encoder 或 recurrent layer；如果答案经常是是，attention 的 token database 很有价值。
+\end{importantbox}
+
+\subsection{Compressive model 为什么在多模态中普遍出现}
+
+图中的圆环按 Mamba 早期论文应用领域分类，vision/image 占比最大，language/NLP 只是其中一部分。这个分布不能作为性能 benchmark，因为包含 trend-following 与不同成熟度工作；它更适合作为需求信号：在视觉、时间序列、音频与机器人中，人们普遍缺少像 BPE 那样成熟的 tokenization heuristic。
+
+\lecturefigure{slide-024.jpg}{Compressive model 的广泛模态应用：不只语言}{Stanford 官方录像，00:33:00--00:34:09}
+
+\teachervoice{00:32:59--00:34:12，Gu 明确保留怀疑：某些 Mamba 应用可能只是跟风；但 audio、time series、vision 难以找到好 tokenizer，使 natural compression 成为有吸引力的 inductive bias。}
+
+\subsection{本章小结}
+
+Attention 的力量建立在合适 token 上。Patchifier 与 tokenizer 同时做降分辨率、加边界和引入语义单位；当这些 heuristic 缺失时，逐 character、byte、base 或 patch 缓存可能浪费容量并增加 distractor。Byte 与 DNA 曲线支持 architecture-by-resolution interaction，但不允许普遍化为单一赢家。下一章介绍 H-Net：把“先压缩成有效 token”从离线规则变成模型内部可学习过程。
+

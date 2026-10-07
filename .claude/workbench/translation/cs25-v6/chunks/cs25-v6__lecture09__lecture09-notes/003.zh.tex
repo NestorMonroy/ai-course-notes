@@ -1,0 +1,68 @@
+\section{单副本 benchmark：画出 latency--throughput frontier}
+
+当 workload 已经可测，下一步应隔离一个 replica，而不是直接在整个集群上跑一个不透明的峰值数字。单副本 benchmark 的目标是找到两个端点与中间可行区域：最小延迟端告诉我们独享资源时有多快，最大吞吐端告诉我们暴露全部并行性时能处理多少工作，二者之间的 sweep 才是实际 SLO 的选点空间。
+
+\subsection{Serial、burst 与 rate sweep}
+
+本节先把 frontier 的测量过程拆成三个可复现实验。最小延迟测试一次只提交一个请求，等它完成后再发下一个；最大吞吐测试把 $N$ 个请求同时提交，让 scheduler 尽可能 batch。前者几乎不给排队，后者充分利用并行，但单请求等待通常更长。然后在两者之间逐步提高到达率，记录延迟分位数、吞吐与错误率。
+
+\lecturefigure{slide-013.jpg}{Benchmark 一个 replica 的三步法}{官方 deck 第 13 页；课堂 00:20:02--00:20:49}
+
+\begin{lstlisting}[caption={单副本 latency--throughput sweep 伪代码}]
+for offered_qps in rates_between(serial_qps, burst_qps):
+    results = replay_requests(
+        replica=engine,
+        arrival_rate=offered_qps,
+        token_distribution=production_sample,
+        duration="long-enough-for-steady-state",
+    )
+    record(
+        throughput=results.completed_qps,
+        ttft=percentiles(results.ttft, [50, 95, 99]),
+        tpot=percentiles(results.tpot, [50, 95, 99]),
+        queue=percentiles(results.queue_time, [95, 99]),
+        errors=results.error_rate,
+    )
+\end{lstlisting}
+
+\lecturefigure{slide-014.jpg}{最小延迟与最大吞吐是同一 frontier 的两个端点}{官方 deck 第 14 页；课堂 00:20:49--00:21:30}
+
+\begin{knowledgebox}{读图：横线和竖线分别表示什么}
+上方串行时间线中，请求之间几乎没有重叠，所以每个请求最早完成，但硬件空隙较多；下方 burst 把请求堆叠到同一时间窗口，scheduler 能形成更大 batch，总完成时间更短，却把排队延迟分摊到每个请求。实际部署通常位于两端之间，而且 SLO 限制会把 frontier 的一部分判为不可用。
+\end{knowledgebox}
+
+若单副本在目标 SLO 下可稳定完成 $c$ QPS，而总峰值到达率为 $\lambda_{\mathrm{peak}}$，最粗的副本数下界是
+\[
+N_{\mathrm{replica}}\geq \left\lceil\frac{\lambda_{\mathrm{peak}}}{c\rho_{\mathrm{target}}}\right\rceil,
+\]
+其中 $\rho_{\mathrm{target}}<1$ 是为抖动、故障与扩容延迟预留的目标利用率。这个式子没有替代 queueing simulation；它只是迫使团队显式写出 headroom。
+
+\subsection{为什么 p95/p99 token latency 会变成肉眼可见的卡顿}
+
+前一小节画出了单请求与 aggregate throughput 的边界；本节进一步说明 percentile 怎样变成真实体验。Slide 15 指向一个 token timing simulator。讲者在现场保持中位数很快、只抬高尾部延迟，输出立刻出现“快一段、停一下”的 stutter。原因是一个回答包含许多 token，用户会经历多次独立或相关的延迟事件，而不是只抽样一次分位数。
+
+\lecturefigure{slide-015.jpg}{Token timing simulator 的指标入口}{官方 deck 第 15 页；课堂 00:21:30--00:22:55}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.97\textwidth,height=0.46\textheight,keepaspectratio]{images/token-timing-demo-002207.jpg}
+  \caption{现场演示：中位 token 很快，尾部延迟仍会造成流式输出停顿}
+  \figsource{官方录像 00:22:07；完整五秒采样视觉审计中唯一的 deck 外教学 demo}
+\end{figure}
+
+\begin{knowledgebox}{读图：用户看到的是一条序列，不是一枚 percentile}
+先看页面中的 token 流，而不是单个 p50 数字。若每个 token 有概率 $p$ 落入“明显卡顿”区间，一个长度为 $T$ 的回答至少遇到一次卡顿的概率近似为
+\[
+1-(1-p)^T.
+\]
+例如 $p=0.01$、$T=200$ 时，该概率约为 $86.6\%$。真实延迟事件还会因排队、batch 与 GC/host stall 相关，因此独立假设往往过于乐观。
+\end{knowledgebox}
+
+\begin{warningbox}{Benchmark 必须复现生产 token 分布与到达过程}
+固定短 prompt、固定短输出、无 prefix reuse 的合成测试，可能完全错过生产中的长上下文、cache churn、工具调用与 burst。端点测试用于理解上限；上线决策仍要用带时间戳的真实或去敏 trace 回放，并报告 p50/p95/p99 与 per-replica 结果。
+\end{warningbox}
+
+\subsection{本章小结}
+
+一个可信 benchmark 应给出 workload、模型与精度、engine version、hardware、arrival process、token 分布、warmup、测量窗口、分位数和错误率。最小延迟与最大吞吐不是互相竞争的“最终分数”，而是帮助我们理解 scheduler 与硬件的两个边界。
+

@@ -1,0 +1,127 @@
+\section{AI co-scientist 的多智能体系统设计}
+
+前两章解释了为什么需要系统；本章进入系统内部。阅读架构图时，应沿着三条流向：科学家怎样定义问题，Agent 怎样让候选假设持续改进，以及工具与记忆怎样把内部文本循环连接到外部证据。
+
+\subsection{科学家输入的不是一句万能 prompt}
+
+科学家可以描述 research goal、实验约束、偏好属性和已有想法，还可以对候选进行 add、review、discuss。系统最终返回 top-ranked hypotheses、research proposals 与 overview。这个接口承认目标本身会变化：专家看到中间结果后，可以修正约束、指出遗漏或重新定义问题。
+
+\lecturefigure{slide-007.jpg}{AI co-scientist 的完整多智能体架构}{Stanford CS25 V6 Lecture 07 官方录像 00:22:34；图源 arXiv:2502.18864v1}
+
+\begin{knowledgebox}{读图：从左到右看控制权，从中间看改进循环}
+左侧科学家定义目标并持续反馈；中部 supervisor 配置研究计划，ranking tournament 把比较结果反馈给 generation、reflection、evolution 与 proximity；右侧系统调用 search、专门模型等工具，并使用 memory 维持跨轮状态。输出不是一个孤立答案，而是一组带排序、证据和实验建议的研究对象。
+\end{knowledgebox}
+
+\teachervoice{00:22:26--00:25:54，老师强调科学家能提供 seed idea、约束与自然语言反馈。系统的“自主”是受目标和资源控制的探索自主，不是脱离专家的研究授权。}
+
+\begin{importantbox}{Scientist-in-the-loop 不等于最后签字}
+真正的 scientist-in-the-loop 要覆盖问题定义、证据选择、候选反馈、实验设计、结果解释和停止条件。若人只在系统生成百页报告后点击同意，人的角色已经从协作者退化成责任承担者，无法纠正搜索方向。
+\end{importantbox}
+
+\subsection{六类核心 Agent 的分工}
+
+架构中的 Agent 并非人格化角色，而是对不同推理操作的模块化封装。Generation 负责扩大候选空间；Reflection 用文献、模拟和反例降低明显错误；Ranking 进行相对比较；Evolution 对高价值候选做组合与改写；Proximity 判断候选间关系；Meta-review 从整个组合中提取共同问题和下一步。
+
+\begin{knowledgebox}{术语表：Agent 为什么要分工}
+\begin{tabular}{L{0.17\textwidth}L{0.33\textwidth}L{0.32\textwidth}}
+\toprule
+Agent & 核心操作 & 主要失败风险 \\
+\midrule
+Generation & 文献探索、科学辩论、提出多样假设 & 重复已知结论、无约束幻想 \\
+Reflection & 完整 review、web search、simulation review、deep verification & 证据遗漏、错误否决新颖想法 \\
+Ranking & 成对比较、tournament、总结 win/loss pattern & judge 偏好与循环评价 \\
+Evolution & 组合、简化、扩展高价值候选 & 只做文风润色，未增加可检验内容 \\
+Proximity & 判断候选相似、互补或冲突 & 语义表面相似掩盖机制差异 \\
+Meta-review & 形成研究全景和跨候选结论 & 压缩时丢失少数但关键的线索 \\
+\bottomrule
+\end{tabular}
+\end{knowledgebox}
+
+\begin{lstlisting}[language=Python,caption={Generate--debate--evolve 的概念性循环}]
+def research_cycle(goal, constraints, budget):
+    hypotheses = generation.explore(goal, constraints)
+    while budget.remaining():
+        reviews = reflection.critique(hypotheses, tools=True)
+        matches = ranking.pairwise_tournament(hypotheses, reviews)
+        ranked = ranking.update_scores(matches)
+        hypotheses = evolution.expand(ranked.top(), reviews)
+        hypotheses = proximity.merge_and_separate(hypotheses)
+        memory.store(hypotheses, reviews, matches)
+    return meta_review.synthesize(hypotheses, memory)
+\end{lstlisting}
+
+\subsection{Ranking tournament 与 Elo：相对比较为何有用}
+
+开放式假设很难直接给绝对分数，但两个候选之间可以提出更具体的问题：哪一个机制更完整？哪一个更可证伪？哪一个与已有证据冲突更少？Ranking agent 因而组织 pairwise tournament，并从 win/loss pattern 更新优先级。
+
+若候选 $i$ 与 $j$ 的当前分数为 $r_i,r_j$，Elo 风格的期望胜率可写为
+$$
+E_i=\frac{1}{1+10^{(r_j-r_i)/400}},
+$$
+更新为
+$$
+r_i' = r_i + \eta(S_i-E_i).
+$$
+其中：
+\begin{itemize}
+  \item $E_i$ 是系统根据旧分数预测候选 $i$ 胜出的概率；
+  \item $S_i\in\{0,0.5,1\}$ 是本次比较结果；
+  \item $\eta$ 是更新步长；
+  \item $r_i'$ 只表示在当前 judge、rubric 与候选池中的相对优先级。
+\end{itemize}
+
+\begin{warningbox}{Elo 不能证明 novelty、truth 或 impact}
+若 judge 偏好术语密集、结构完整或接近训练分布的假设，Elo 会稳定放大这种偏好。科学排序必须记录评价维度、比较理由、引用证据和反例；最终仍需专家与实验把内部 ranking 接到现实世界。
+\end{warningbox}
+
+\teachervoice{00:29:12--00:31:47，老师把 ranking 比作 Go 或 chess tournament：重点是让候选相互比较并总结失败模式。这个类比解释了工程机制，不意味着科学拥有棋类那样客观、即时的胜负。}
+
+\subsection{Test-time compute 与异步 Supervisor}
+
+Test-time compute 指模型参数固定后，在一次研究任务中额外投入的推理、采样、搜索、工具和验证计算。AI co-scientist 的 supervisor 把高层目标拆成任务，写入异步队列，再按候选价值与验证需要分配不同模型和预算。异步性允许 generation 不必等所有 reflection 完成，也允许昂贵验证只服务少量高优先级候选。
+
+\begin{knowledgebox}{背景概念：test-time compute}
+训练计算改变参数；test-time compute 不更新基础模型权重，而是在当前问题上增加搜索深度、候选数量、反思轮数和工具调用。它可以提高特定任务质量，却同时增加 token、延迟、外部 API 与审查成本，必须与实验预算一起管理。
+\end{knowledgebox}
+
+总预算 $B$ 可以被不同任务消耗：
+$$
+\sum_{a\in\mathcal{A}} c_a n_a
++\sum_{t\in\mathcal{T}} c_t n_t
++C_{\text{human}}
+\le B.
+$$
+其中：
+\begin{itemize}
+  \item $\mathcal{A}$ 是 Agent 类型集合，$n_a$ 是调用次数，$c_a$ 是单次成本；
+  \item $\mathcal{T}$ 是外部工具集合，$n_t$ 与 $c_t$ 分别表示调用次数和成本；
+  \item $C_{\text{human}}$ 是专家阅读、反馈和实验设计成本；
+  \item $B$ 不只可以是美元，也可以是延迟、GPU 时间或实验容量。
+\end{itemize}
+
+\begin{lstlisting}[language=Python,caption={异步 Supervisor 的资源路由示意}]
+while queue.has_work() and budget.available():
+    task = queue.pop_highest_value()
+    model = "pro" if task.requires_deep_verification else "flash"
+    result = workers.submit(task, model=model)
+    memory.link(result, task.provenance)
+    queue.add(reflection.followups(result))
+    queue.add(evolution.promising_variants(result))
+\end{lstlisting}
+
+\teachervoice{00:39:11--00:39:43，老师给出实际路由经验：review 或 verification 可使用推理更强的 Pro variant，较简单工作用 Flash 节省 token 和成本。讲义把它视为 workload-aware routing，而不是固定产品推荐。}
+
+\subsection{内部评测的循环性}
+
+课程中途的提问击中了核心问题：如果同类模型生成假设、再由同类模型评价，系统会不会只奖励“听起来像好科学”的文本？公开论文使用专家目标、自动 Elo 和多模型比较展示 test-time scaling，但这些证据主要说明内部流程能持续优化某种 rubric，并不等价于新机制在自然界成立。
+
+\begin{warningbox}{Model-as-judge 的三重循环}
+生成器与 judge 可能共享训练数据偏好；novelty judge 可能不知道未公开研究；完整叙述可能压过真正关键但表达粗糙的线索。降低循环性需要异构 judge、明确 rubric、检索证据、专家盲评、时间切分和最终实验，而不是再加一轮“请仔细检查”。
+\end{warningbox}
+
+\teachervoice{00:33:58--00:37:04，老师承认系统并非在所有目标上都胜出，听众也追问自动评价能否真正测 novelty。课堂没有把这些问题隐藏在平均分后面。}
+
+\subsection{本章小结}
+
+AI co-scientist 把科学家输入、六类 Agent、Supervisor、工具和 memory 组织成 generate--debate--rank--evolve 循环。Pairwise tournament 适合为开放候选提供相对优先级，test-time compute 允许按任务增加搜索，但 Elo 与 model-as-judge 仍只是内部信号。系统可靠性取决于能否把内部搜索接到异构证据、人类判断和真实实验。
+

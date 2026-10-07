@@ -1,0 +1,54 @@
+\section{H-Net：把 tokenization 变成可学习的 hierarchy}
+
+前一章指出 tokenization 的作用不仅是缩短序列，还在于制造 attention 能有效处理的单位。H-Net 的设计目标不是简单换一个 tokenizer，而是把 segmentation、compression 与 sequence modeling 放进同一端到端网络，并允许模型递归学习多层 abstraction。它同时说明 Transformer 与 SSM 可以在同一架构中承担不同分辨率的工作。
+
+\subsection{Dynamic chunking：边界是 context-dependent prediction}
+
+H-Net 从 byte 等低级单位开始，由 encoder 产生表示，再预测哪些位置是 chunk boundary。图右侧的绿色/彩色边界在训练早期不断探索，后期逐渐对齐空格、subword 与更高层组合；它们不是人工标签，也不保证等于语言学 token，而是由 language-modeling loss 共同塑造的压缩决策。
+
+\lecturefigure{slide-025.jpg}{H-Net：从 raw sequence 中学习 data-dependent dynamic chunks}{Stanford 官方录像，00:34:10--00:37:19}
+
+令 encoder 输出 $z_1,\ldots,z_L$，routing head 给出边界概率
+\[
+r_t=\sigma(w^\top z_t+b),
+\qquad
+m_t\in\{0,1\},\quad m_t\sim\operatorname{Route}(r_t).
+\]
+其中，$r_t$ 表示位置 $t$ 作为 chunk end 的倾向，$m_t$ 是路由决定。若第 $j$ 个 chunk 覆盖区间 $I_j$，其 summary 可写为
+\[
+c_j=\operatorname{Pool}\{z_t:t\in I_j\}.
+\]
+实际 H-Net 需要 differentiable routing、smoothing、normalization 与 stage-aware optimization；上式只展示“预测边界并聚合区间”的接口。
+
+\teachervoice{00:35:07--00:37:17，讲者描述训练动画：模型最初不知道边界，随后稳定到接近空格和有意义 subword 的位置；多层组合还能形成 phrase-like group。这个现象是 learned compression 的证据，不是 tokenizer ground truth。}
+
+\subsection{完整架构：chunking、main model 与 dechunking}
+
+左图是 hourglass hierarchy：细粒度序列先经过 outer encoder 和 chunking 变短，中间 main model 在较粗单位上处理，再通过 dechunking 把表示扩回原分辨率，经过 decoder 做 autoregressive prediction。右图展开 routing / smoothing module。读这张图要注意，main model 可以是 Transformer；H-Net 并非“全网禁用 attention”。
+
+\lecturefigure{slide-026.jpg}{H-Net 架构：多阶段 chunking、主模型、dechunking 与信号稳定化}{Stanford 官方录像，00:37:20--00:40:39}
+
+\begin{lstlisting}[caption={H-Net 单层 hierarchy 的教学版数据流}]
+def hnet_stage(fine_sequence, outer_encoder, router, main_model, decoder):
+    fine_features = outer_encoder(fine_sequence)
+    boundary_scores = router(fine_features)
+    coarse_features, routing_map = chunk(fine_features, boundary_scores)
+    coarse_outputs = main_model(coarse_features)
+    expanded_outputs = dechunk(coarse_outputs, routing_map)
+    return decoder(fine_features, expanded_outputs)
+\end{lstlisting}
+
+\begin{knowledgebox}{为什么 outer stage 倾向 SSM，inner stage 可以用 Transformer}
+Outer encoder 直接面对 byte / character 等高分辨率、弱语义单位，需要在线压缩并形成 chunk；有限 recurrent state 对这种任务有合适 inductive bias。Inner model 接收的已是更少、更高层的 chunk，逐 chunk attention 变得合理。架构因此不是二选一，而是让 primitive 匹配 resolution。
+\end{knowledgebox}
+
+\begin{warningbox}{Dynamic routing 是困难的离散优化}
+边界决定会改变序列长度和后续计算路径，训练容易出现全切、全不切、梯度不稳定或 stage collapse。讲者明确说 published H-Net 是“第一个可工作的步骤”，依赖 routing module、smoothing、normalization、projection 与 stage-aware optimization，不能从四行伪代码推断实现简单。
+\end{warningbox}
+
+\teachervoice{00:40:00--00:40:43，Gu 说这是 non-trivial discrete optimization；00:57:23--00:59:08 的 Q\&A 又强调 H-Net 还未在最大尺度充分验证，chunking mechanism 和每个 stage 都有很大改进空间。}
+
+\subsection{本章小结}
+
+H-Net 把离线 tokenizer--LM--detokenizer pipeline 改写为可学习 hierarchy：低层 encoder 形成 context-dependent chunk，内层模型在粗粒度单位上计算，再扩回原分辨率预测。它最重要的系统启示是按 resolution 分工：SSM 在原始细粒度边界承担压缩，attention 在高层 chunk 上承担精确组合。下一章将用 scaling 与 ablation 检查这种设计是否真的产生更好 inductive bias。
+

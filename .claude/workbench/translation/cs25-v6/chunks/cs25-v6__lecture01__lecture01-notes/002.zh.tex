@@ -1,0 +1,122 @@
+\section{Embedding、RNN 与 Transformer：序列信息怎样流动}
+
+上一章说明监督信号来自哪里，本章进入计算机制。序列模型必须解决三件事：把离散符号放进连续空间，让不同位置交换信息，并保留顺序。Embedding 解决第一件事，RNN 用递归状态解决后两件事，Transformer 则用 attention 和 positional information 重新组织信息流。
+
+\subsection{从 token 到向量：静态表示与上下文表示}
+
+设词表大小为 $|V|$，隐藏维度为 $d$，embedding table 为 $E\in\mathbb{R}^{|V|\times d}$。token id $x_i$ 的初始向量为
+\[
+e_i=E[x_i],\qquad e_i\in\mathbb{R}^{d}.
+\]
+Tokenization 先把字符串切成词、子词或字节 token；embedding 再把离散 id 映射为可训练向量。静态 embedding 对同一 token 使用同一向量，contextual representation 则在后续层根据上下文不断更新，因此多义词可以分离。
+
+\lecturefigure{slide-023.jpg}{Word embeddings：语义邻近、向量算术与上下文局限}{CS25 V6 official deck, p.~23}
+
+\teachervoice{00:10:14--00:11:31，老师先用“模型只处理数字”解释 embedding 的必要性，再指出同一个词在不同上下文只用一个向量的局限。课堂提示：contextualization 发生在后续序列交互，不是 tokenizer 本身完成的。}
+
+\begin{knowledgebox}{首次使用：token、embedding 与 contextual state}
+\textbf{Token} 是离散序列单位；\textbf{embedding} 是 token 的初始可学习向量；\textbf{contextual state} 是经过多层 attention/MLP 后、已经混入上下文的信息状态。三者分别对应分词边界、参数查表和动态计算，不能混为一谈。
+\end{knowledgebox}
+
+\subsection{RNN：把过去压进一个递归状态}
+
+Recurrent Neural Network（RNN，循环神经网络）按时间步更新隐藏状态：
+\[
+h_t=\phi(W_x x_t+W_h h_{t-1}+b),\qquad
+\hat{y}_t=W_o h_t.
+\]
+$x_t$ 是当前输入，$h_{t-1}$ 是历史压缩，$W_x,W_h,W_o$ 是参数，$\phi$ 是非线性。LSTM 通过门控缓解梯度消失，但每一步仍依赖前一步，训练难以完全并行，远距离信息也必须穿过较长路径。
+
+\lecturefigure{slide-024.jpg}{Transformer 之前的 RNN/LSTM：按时间步递归更新状态}{CS25 V6 official deck, p.~24}
+
+\teachervoice{00:11:31--00:12:19，老师没有把 RNN 写成“失败架构”，而是强调其顺序归纳偏置与 step-by-step dependency。它适合流式状态，却难以利用大规模并行训练。}
+
+\begin{warningbox}{递归状态不是无限记忆}
+$h_t$ 的维度固定，历史信息必须被压缩。即使 LSTM 能改善梯度传播，也不意味着任意早期细节都可无损保留。长序列中的遗忘、覆盖和 credit assignment 是结构问题，不只是调大 hidden size 的工程问题。
+\end{warningbox}
+
+\subsection{Self-attention：把序列交互改写成软检索}
+
+上一小节的 RNN 把所有历史压进单一递归状态；本节改问：能否让当前位置直接访问整段序列，而不必让信息逐步穿过 $h_{t-1},h_{t-2},\ldots$？Self-attention 的答案是建立一个内容寻址矩阵。读下面公式时先看 score 如何产生，再看 value 如何被加权；softmax 权重只是当前层的路由，不是永久知识库。
+
+给定输入矩阵 $X\in\mathbb{R}^{n\times d}$，模型学习
+\[
+Q=XW_Q,\qquad K=XW_K,\qquad V=XW_V,
+\]
+并计算
+\[
+\operatorname{Attn}(Q,K,V)
+=\operatorname{softmax}\!\left(\frac{QK^{\top}}{\sqrt{d_k}}\right)V.
+\]
+$Q$ 表示当前位置的查询，$K$ 表示可匹配的索引，$V$ 表示真正聚合的内容，$d_k$ 是 key 维度。除以 $\sqrt{d_k}$ 用于控制点积尺度，使 softmax 不至于过早饱和。
+
+\lecturefigure{slide-025.jpg}{Transformer 两分钟：self-attention 让每个 token 访问其他位置}{CS25 V6 official deck, p.~25}
+
+\lecturefigure{slide-026.jpg}{QKV 图书馆类比：查询、摘要索引与书中内容}{CS25 V6 official deck, p.~26}
+
+\teachervoice{00:12:19--00:14:20，老师用图书馆解释 QKV：query 是想找的内容，key 是书的摘要或索引，value 才是取回的信息。讲义提醒：Q/K/V 是同一输入的不同线性投影，不是三份独立数据库。}
+
+\begin{lstlisting}[language=Python,caption={Scaled dot-product attention 的最小伪代码}]
+def attention(x, Wq, Wk, Wv):
+    q = x @ Wq
+    k = x @ Wk
+    v = x @ Wv
+    score = q @ k.T / sqrt(k.shape[-1])
+    weight = softmax(score, axis=-1)
+    return weight @ v
+\end{lstlisting}
+
+\subsection{Tokenization、位置与多头：同一 block 的三个接口}
+
+Attention 本身只看到向量集合。模型还需要 tokenizer 决定序列粒度、positional encoding 注入顺序、多头结构让不同子空间并行建立关系。若原始文本被切成 $n$ 个 token，标准 self-attention 的 score matrix 为 $n\times n$，计算与显存大致随 $n^2$ 增长；这也是长上下文系统的核心成本来源之一。
+
+\lecturefigure{slide-027.jpg}{Tokenization：同一句话可被切成不同的序列单位}{CS25 V6 official deck, p.~27}
+
+\lecturefigure{slide-028.jpg}{Positional encoding：为 permutation-invariant attention 注入顺序}{CS25 V6 official deck, p.~28}
+
+位置向量可写成 $p_i$，初始状态为 $z_i^{(0)}=e_i+p_i$。经典 sinusoidal encoding 使用不同频率：
+\[
+p_{i,2k}=\sin\!\left(i/10000^{2k/d}\right),\qquad
+p_{i,2k+1}=\cos\!\left(i/10000^{2k/d}\right).
+\]
+$i$ 是位置，$k$ 是频率索引，$d$ 是维度。现代模型还会使用 RoPE、ALiBi 或相对位置机制，但共同目标都是让交互权重感知相对或绝对顺序。
+
+Multi-head attention 将通道分成多个头：
+\[
+\operatorname{MHA}(X)=\operatorname{Concat}(H_1,\ldots,H_h)W_O,
+\quad H_j=\operatorname{Attn}(XW_Q^{(j)},XW_K^{(j)},XW_V^{(j)}).
+\]
+$h$ 是头数，每个头拥有独立投影，$W_O$ 负责重新混合。头并不天然对应可命名语法关系；它们只是提供多组并行交互子空间。
+
+\lecturefigure{slide-029.jpg}{多头 attention：多组查询关系并行聚合后再混合}{CS25 V6 official deck, p.~29}
+
+\lecturefigure{slide-030.jpg}{完整 Transformer：attention、MLP、残差与归一化的堆叠}{CS25 V6 official deck, p.~30}
+
+\begin{knowledgebox}{读图：从组件表到信息流}
+先沿 residual stream 读主干，再看 attention 如何跨 token 交换信息，MLP 如何逐位置变换通道，LayerNorm 如何稳定尺度。图中每个 block 都不是“理解模块”；能力来自大量层、训练数据和目标共同形成的表示。一个 head 的可视化只能提供局部相关性线索，不能自动构成因果解释。
+\end{knowledgebox}
+
+\subsection{为什么 Transformer 取代 RNN，又为什么问题没有结束}
+
+Transformer 的优势来自短路径和并行计算：任意两个 token 在一层 attention 中即可交互，训练时可同时处理所有位置。RNN 的每步成本较小且天然流式，但长距离依赖要经过多次递归。若隐藏维度为 $d$、长度为 $n$，attention 交互约为 $O(n^2d)$，逐位置投影/MLP 约为 $O(nd^2)$；实际瓶颈取决于 $n$、$d$、batch 与硬件。
+
+\lecturefigure{slide-031.jpg}{RNN 与 Transformer：递归路径、并行训练与长依赖的对照}{CS25 V6 official deck, p.~31}
+
+\lecturefigure{slide-032.jpg}{Transformer 今日版图：语言、视觉、语音、生物、视频与机器人}{CS25 V6 official deck, p.~32}
+
+\lecturefigure{slide-033.jpg}{Large Language Model：规模、预训练、自回归与上下文学习}{CS25 V6 official deck, p.~33}
+
+\teachervoice{00:14:20--00:16:20，老师把成功归因于并行训练、长依赖建模和统一 token 接口，同时指出 quadratic attention 与 long-context reasoning 仍是限制。课堂提示：dominant architecture 不等于 Pareto frontier 在所有 workload 上都最优。}
+
+\begin{importantbox}{“Transformer 今天无处不在”的正确解释}
+统一序列接口让文本、图像 patch、音频帧、蛋白质 residue 和动作 token 能共享相似 backbone；成熟的训练基础设施又降低了跨领域复制成本。但每个模态仍需要专门的 tokenizer/encoder、数据配方、loss、评估与 serving 约束。共享 block 不等于问题已经同质化。
+\end{importantbox}
+
+从资源核算看，Transformer 的优势和代价来自同一件事：显式建立 token-to-token 交互。训练中必须保存或重算 activation，推理中自回归模型通常保存 KV cache；序列增长会同时增加 score computation、cache capacity 与 memory bandwidth 压力。较短序列、较大隐藏维度时，MLP 和 projection 可能占主要 FLOPs；超长序列或多模态 token 很多时，attention 与 KV cache 会迅速主导。工程上不能只说“attention 是 $O(n^2)$”，还要给出 batch、head、dtype、prefill/decode 阶段和硬件带宽。后文 RAG、agent 与视频模型之所以昂贵，往往不是模型参数突然增多，而是它们把更多 evidence、history 和 observation 放进 context。
+
+这里还要区分训练并行与推理状态。训练时整段序列已知，可以一次构造 $Q,K,V$ 并做矩阵乘；自回归 decode 时每一步只新增一个 query，却要读取此前所有 key/value。KV cache 避免重复计算历史 token，但将 compute 问题部分转成显存容量与带宽问题。Multi-Query/Grouped-Query Attention 通过让多个 query head 共享较少的 K/V head 减少 cache；windowed 或 sparse attention 通过限制可访问位置降低成本；二者都可能牺牲细粒度长程访问。系统设计因此是在质量、随机访问、带宽和 latency 之间做折中，而不是简单选择“完整 attention 或不要 attention”。
+
+\subsection{本章小结}
+
+Embedding 把 token 放入连续空间，RNN 用递归状态传递历史，Transformer 用 QKV 软检索、位置机制和多头交互重写了序列信息流。它的可扩展性来自并行矩阵计算与统一接口，而它的限制来自二次交互、上下文执行、数据与系统约束。下一章转向决定梯度内容的另一半：pretraining data strategy。
+

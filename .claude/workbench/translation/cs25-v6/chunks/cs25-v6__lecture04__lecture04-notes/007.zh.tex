@@ -1,0 +1,85 @@
+\section{五维组合：从“支持哪些并行”到“选择哪种布局”}
+
+前五章分别沿 batch、hidden/sequence、layer、context 和 expert 轴切分。真正的 ultra-scale run 会在 device mesh 上同时使用多轴：某个轴负责容量，某个轴负责吞吐，某个轴只覆盖 attention 或 MoE，另一些轴被限制在快链路域内。
+
+\subsection{五个轴如何组合}
+
+总 world size 可写成多个并行度的乘积：
+\[
+P_{\mathrm{world}}
+=P_{\mathrm{DP}}P_{\mathrm{TP}}P_{\mathrm{PP}}P_{\mathrm{CP}}P_{\mathrm{EP}}.
+\]
+其中，各 $P$ 分别是 data、tensor、pipeline、context 与 expert parallel size。这个乘积只说明 rank 编号空间；能否高效还取决于轴到物理拓扑的映射、每轴 collective、micro-batch 和模型结构。
+
+\lecturefigure{slide-099.jpg}{5D parallelism：五个切分轴在同一训练图中组合}{CS25 V6 official deck, p.~99}
+
+\lecturefigure{slide-100.jpg}{全课回顾：DP、TP/SP、PP、CP、EP}{CS25 V6 official deck, p.~100}
+
+\begin{knowledgebox}{读图：五个轴不是平均分配 GPU}
+组合图中每种颜色覆盖的网络区域不同：DP/ZeRO 贯穿完整训练状态，TP/SP 主要在每个 dense block 内，PP 跨 layer stages，CP 只改变长序列 attention 的数据布局，EP 只进入 MoE block。因而 world size 的乘积分解不会得到唯一答案。常见原则是把最频繁、最延迟敏感的 TP collective 放在最快的节点内域，把 DP/PP 映射到更大域，再根据 sequence 与 MoE 是否存在决定 CP/EP。任何轴大小改变都会反向影响 micro-batch、activation、通信消息尺寸和负载均衡。
+\end{knowledgebox}
+
+逻辑 device mesh 还必须落到物理机器。假设每节点有八张 GPU，节点内由 NVSwitch 全连接，节点间通过较慢的 InfiniBand；那么 TP=8 往往比把 TP=16 跨两节点更自然，因为每个 Transformer block 的 collective 都留在快域。DP 可以跨更多节点，因为 gradient bucket 较大且较容易与 backward overlap；PP 的 stage 边界消息频率较低，也可能跨节点，但要避免把严重不均衡的 layers 分到不同 stage。EP 是否跨节点则取决于 all-to-all fabric、专家数与路由负载。这个映射没有绝对规则，却有一个稳定目标：把最频繁、最同步敏感、最难隐藏的通信放在最低延迟的拓扑层，把更稀疏或可流水化的通信推到更大范围。
+
+因此，扩大 world size 之前应先画两张图：一张逻辑 mesh，标出每轴切分对象与 collective；一张物理 topology，标出节点、快链路、NIC 和 oversubscription。只有两张图的高频边彼此对齐，增加 ranks 才更可能提升吞吐，而不是放大同步等待。
+
+这也是课程把 topology 放在 Q\&A 最后强调的原因：并行算法给出可行计算，物理网络决定它是否值得执行。
+
+\begin{knowledgebox}{五维并行决策表}
+\begin{tabularx}{\linewidth}{L{0.12\linewidth} L{0.16\linewidth} L{0.18\linewidth} X}
+\toprule
+轴 & 主要切分 & 关键通信/调度 & 只在什么问题出现时使用 \\
+\midrule
+DP/ZeRO & batch 与训练状态 & all-reduce、reduce-scatter、all-gather & 需要吞吐或状态分片，且 global batch 尚可扩展 \\
+TP/SP & hidden 与 activation layout & 每层 all-reduce / RS / AG & 单层矩阵或 activation 需跨快链路设备计算 \\
+PP & layer depth & P2P activation/gradient、1F1B & 模型可分 stage，且 micro-batch 足够填充 pipeline \\
+CP & sequence length & 每层 K/V ring exchange & 单个超长上下文的 sequence memory 是瓶颈 \\
+EP & experts / routed tokens & all-to-all、load balance & 模型含 MoE，expert 参数与 token routing 需跨设备 \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{从 cheat sheet 到可执行选择流程}
+
+上一节给出了五个轴的逻辑分工，但工程团队仍需要把它变成可执行的排障与搜索顺序。本节从最硬的容量约束开始，再逐步加入样本、拓扑与结构条件，目标是尽早排除没有必要的轴，而不是一次搜索所有并行度组合。官方 cheat sheet 的价值不是给出固定答案，而是强迫工程师按顺序缩小空间：先问模型与 optimizer state 能否装下，再问 global batch 是否允许 DP，接着把 TP 放进快链路域、用 PP 处理深度、只为长上下文启用 CP、只为 MoE 启用 EP。
+
+\lecturefigure{slide-101.jpg}{Ultra-Playbook cheat sheet：按约束选择并行策略}{CS25 V6 official deck, p.~101}
+
+\begin{importantbox}{推荐的选择顺序}
+第一，建立参数、optimizer、gradient、activation 的峰值账本。第二，选择能满足容量的最低 ZeRO stage。第三，用 DP 吃满允许的 global batch。第四，在节点内增加 TP/SP。第五，模型深度仍超限时再加 PP。第六，只有 long context 或 MoE 分别引入 CP/EP。最后，用真实 topology 与 profiler 搜索每轴大小，而不是从论文配置复制。
+\end{importantbox}
+
+训练系统还包括 data loader、checkpoint manager、orchestrator、fault tolerance、network fabric 和 storage。讲义若只画模型层 collective，会忽略实际 run 中常见的输入饥饿、保存暂停、节点故障与恢复时间。
+
+\lecturefigure{slide-102.jpg}{训练基础设施全景：计算图之外还有数据、存储与编排}{CS25 V6 official deck, p.~102}
+
+\begin{knowledgebox}{读图：GPU 利用率低不一定是模型并行的问题}
+基础设施图把训练作业放在 data ingestion、host preprocessing、distributed runtime、checkpoint/storage 和 orchestration 之间。若 data loader 供给不足，改变 TP size 不会修复输入饥饿；若 checkpoint 周期阻塞全体 ranks，增加 pipeline micro-batches 只会让暂停前积累更多状态；若单节点反复故障，最高瞬时吞吐也可能输给更稳定、恢复更快的配置。验收一次 ultra-scale run 应同时记录 tokens/s、model FLOPs utilization、network throughput、checkpoint pause、restart time、data wait 与失败率，才能区分“模型图没吃满”和“系统外围饿死模型图”。
+\end{knowledgebox}
+
+\begin{warningbox}{搜索并行布局时要固定比较口径}
+不同布局可能改变 micro-batch、gradient accumulation、activation checkpointing、kernel shape 和数值精度；若这些变量同时变化，吞吐差异无法归因。可靠实验应固定有效 global batch、sequence length、optimizer 与训练目标，先测单轴变化，再联合搜索；报告时同时给出峰值 HBM、每步时间、通信占比和收敛指标，而不是只给某个“加速倍数”。
+\end{warningbox}
+
+\subsection{Q\&A：负载均衡、数学等价与自动布局}
+
+课堂 Q\&A 补充了三条没有完整写进 deck 的规则。第一，MoE router 必须抑制极端不均衡，可用 auxiliary loss 或 auxiliary-loss-free bias；目标不是让每个 token 平均，而是避免少数 ranks 成为全局 straggler。第二，正确的 parallelism 只重排等价 forward/backward，理论上不应改变 scaling law；若 convergence 明显不同，应优先检查数值精度、collective 顺序、随机数、loss scaling 或 bug。第三，没有脱离硬件的“自动最优布局”。
+
+\teachervoice{00:57:18--00:59:34，Q\&A 说明 load-balance loss 与 router bias 都可改善 token 分布；并行策略若实现正确，应保持单卡数学语义，不能把收敛变化当作并行本身的必然效果。}
+
+\teachervoice{00:59:34--01:01:34，CPU 数据预处理可用并行 workers 提前隐藏；自动 parallelism 仍要输入 model size、GBS、sequence length、网络与 NVLink/NVSwitch 域。课堂最终答案是 topology-dependent，而不是某个固定 5D 比例。}
+
+\begin{warningbox}{“数学等价”仍不保证逐 bit 相同}
+浮点加法不满足结合律，不同 collective tree、bucket 顺序、混合精度和随机数切分会造成数值差异；异步 overlap 还可能暴露 race 或 stale buffer。工程上应要求 loss curve、gradient norm 与最终指标统计等价，而不是期待跨布局逐 bit 一致。
+\end{warningbox}
+
+\subsection{规模化训练的能源责任}
+
+前面的选择规则主要优化时间、显存与网络，但资源账本还有一个不能在结尾被省略的维度：实际消耗的 accelerator-hours 与由失败、空闲、低利用率造成的无效能耗。本节把系统效率重新解释为责任边界，而不是把能源问题留给数据中心之外。结束页把能源影响放回系统设计：提高 MFU、减少失败 run、避免不必要的高 stage、选择更合适的模型/数据规模、提升 checkpoint 与恢复效率，既是成本优化，也是减少无效能源消耗。责任不等于停止规模化，而是让每个 GPU-hour 对明确学习目标负责。
+
+\lecturefigure{slide-105.jpg}{结尾提醒：扩展到数千 GPU 时必须计入能源影响}{CS25 V6 official deck, p.~105}
+
+\subsection{本章小结}
+
+五维并行不是五种互斥架构，而是同一 device mesh 上的资源分解。正确布局从容量与数学等价出发，经 topology mapping、collective schedule 与 profiler 验证收口；错误布局则会把一个显存问题变成更昂贵的网络、bubble 或 straggler 问题。
+

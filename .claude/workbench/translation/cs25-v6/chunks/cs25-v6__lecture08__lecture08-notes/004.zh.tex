@@ -1,0 +1,75 @@
+\section{Chameleon：把所有 modality 离散成 token}
+
+第一条路线追求最大程度的接口统一：如果 text 和 image 都能变成离散 ID，就可以直接沿用 causal language modeling。Chameleon 的历史意义在于证明 mixed-modal early fusion 可以在大规模预训练中成立；它也清楚暴露了统一接口的代价——codebook 压缩会丢失细粒度视觉语义，而图像生成的离散预测效率未必优于 continuous latent diffusion。
+
+\subsection{Early fusion 的强假设}
+
+上一章留下的第一个选择是 representation。本节从最彻底的方案开始：把 image 也离散化，并在进入 Transformer 之前完成融合。读图时先看 tokenizer 位于何处，再看统一序列换来了什么训练便利。
+
+\lecturefigure{slide-022.jpg}{Chameleon：把所有 modality 编码为离散 token 的 early-fusion 模型}{官方 deck 第 22 页；Chameleon arXiv 2405.09818v2}
+
+\begin{knowledgebox}{读图：early fusion 发生在模型输入之前}
+图中 image 先被 tokenizer 转成离散视觉 token，再与 text token 交错进入同一个 Transformer。所谓 early fusion，是在深层模型之前就形成统一序列，而不是分别跑完视觉 encoder 与语言模型后才拼接 logits。它的优点是所有位置都能参与同一 causal context；风险是视觉 tokenizer 的 information bottleneck 被带入所有后续任务。
+\end{knowledgebox}
+
+令 encoder 产生连续 patch latent $z_e(x)$，codebook 为 $\{e_k\}_{k=1}^{K}$。VQ assignment 写成
+$$
+k^*(x)=\arg\min_{k\in\{1,\ldots,K\}}\left\|z_e(x)-e_k\right\|_2^2,
+\qquad z_q(x)=e_{k^*(x)}.
+$$
+$K$ 是 codebook size，$z_q$ 是量化后的 latent。压缩越强，序列越短；但若多个细节不同的 patch 落到同一 code，模型将无法从 token ID 恢复被丢掉的信息。
+
+\lecturefigure{slide-023.jpg}{VQ-VAE 把连续图像 patch 映射到离散 codebook}{官方 deck 第 23 页；VQ-VAE-2 arXiv 1906.00446v1；课堂 00:12:55--00:14:18}
+
+\begin{knowledgebox}{读图：VQ-VAE 同时承担 compression 与 vocabulary construction}
+左侧 encoder 把像素压到 latent grid；中间 quantizer 为每个位置选择最近 codebook vector；右侧 decoder 尝试重建图像。对 Chameleon 而言，最关键的输出不是重建图本身，而是 code index sequence。这个序列可以像文字一样进入 cross-entropy，但重建质量和 semantic fidelity 受 codebook 容量、下采样率与训练目标共同限制。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={VQ 图像 tokenization 的最小伪代码}]
+def vq_tokenize(image, encoder, codebook):
+    latent = encoder(image)                 # [H, W, D]
+    distance = pairwise_l2(latent, codebook)
+    token_ids = distance.argmin(axis=-1)    # [H, W]
+    return token_ids.flatten()
+\end{lstlisting}
+
+\teachervoice{00:12:27--00:12:55，老师称“把多模态世界视为离散 token sequence”是一个 very powerful view。强大之处是可直接迁移 LM 训练栈；但“powerful”描述建模统一性，不等于表示没有损失。}
+
+\subsection{一个序列为什么能生成任意 text-image order}
+
+当 text 与 image code 被放进同一因果序列，模型可以学习
+$$
+p(t_1,\ldots,t_i,v_1,\ldots,v_j,t_{i+1},\ldots),
+$$
+因此既能 text-to-image，也能 image-to-text，还能交替生成多段文本和图像。关键不是新增一个特殊“图片模式”，而是训练数据中本来就存在 interleaved ordering，模型学习在 modality boundary 后继续预测正确 target space。
+
+\lecturefigure{slide-024.jpg}{Chameleon 的 arbitrary-order interleaved text-image generation}{官方 deck 第 24 页；课堂 00:14:23--00:14:50}
+
+\begin{knowledgebox}{读图：任意顺序来自训练分布，不来自无条件自由组合}
+图中可以先图后文、先文后图或交替出现，说明模型具有 mixed-modal continuation 能力。它仍受 context window、训练中见过的 interleaving pattern 与 tokenizer fidelity 限制。若数据几乎只有 caption pair，模型不会仅因 architecture 统一就自动学会复杂图文故事编排。
+\end{knowledgebox}
+
+\lecturefigure{slide-025.jpg}{Chameleon 的 mixed-modal multitask 能力}{官方 deck 第 25 页；课堂 00:14:50--00:15:26}
+
+\begin{knowledgebox}{读图：任务多样性是 early fusion 的真正价值测试}
+图中同时出现 captioning、visual question answering、image generation 与 mixed-modal reasoning。先比较 input/output modality，再比较评价方式：理解任务通常输出文本，可用 accuracy 或 language metric；生成任务输出图像，需要 perceptual 或 human evaluation。把它们列在一页不代表分数可直接相加，也不代表一种 representation 对每项任务都最优。
+\end{knowledgebox}
+
+\subsection{统一 token interface 的两类瓶颈}
+
+Chameleon 的结果证明“可行”，但课堂随后强调两个边界。第一，离散图像 code 对 fine-grained understanding 往往弱于 SigLIP 一类 continuous semantic embedding；第二，生成侧的 diffusion/flow matching 在质量和效率上发展更快。于是出现一个核心矛盾：同一 image representation 很难同时服务 semantic understanding 与 high-fidelity generation。
+
+\lecturefigure{slide-026.jpg}{Chameleon 的贡献、表示限制与 2026 年技术位置}{官方 deck 第 26 页；课堂 00:15:32--00:16:30}
+
+\begin{knowledgebox}{读图：Summary 的第二点比第一点更重要}
+第一点确认 early-fusion from scratch 可以保住 text-only performance 并产生 mixed-modal capability。第二点把结论收窄：VQ token 对细粒度视觉语义有损，生成侧又被 continuous latent diffusion 超越。右下角“and many others”表示后续模型大量采用 continuous input encoder 或混合表示，并不是在宣称 Chameleon 已被完全淘汰。
+\end{knowledgebox}
+
+\begin{warningbox}{不能从 Chameleon 推出的结论}
+不能推出所有 modality 都应该离散；不能推出一个 vocabulary 就能消除 modality gap；不能根据 qualitative sample 断言 reasoning 与 generation 已正迁移；也不能把 text-only performance 保持理解为所有视觉任务达到 state of the art。Chameleon 的核心证据是 early-fusion feasibility，而不是 universal representation optimality。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Chameleon 用最彻底的方式迁移 language modeling：所有输入和输出都变成离散 token，再用统一 cross-entropy。它获得了优雅的 interleaving 与 multitask 接口，也把视觉信息压缩瓶颈暴露得很清楚。下一条路线保留一个共享 Transformer，却放弃“所有输出都必须是离散 ID”的要求。
+

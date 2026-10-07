@@ -1,0 +1,100 @@
+\section{Debugging、observability 与 evals}
+
+系统已经部署后，真正困难的问题从“能不能跑”变成“为什么今天某些请求变差”。LLM 服务同时包含传统软件错误、模型行为变化与性能退化；如果只记录 HTTP status 和最终字符串，许多 tokenizer、queue、KV、replica 或硬件问题都无法复现。本章把 correctness evidence 与 performance telemetry 放到同一套观测设计里。
+
+\subsection{三类 production bug}
+
+Application-level bug 可能来自 prompt、tool permission、业务规则或用户体验；model-quality bug 表现为输出质量下降，可能由 distribution shift、tokenizer 或 chat template 引起；performance bug 则是 SLO regression、straggler 或 replica 差异。三类 bug 可以互相伪装，例如 tokenizer 错误既降低质量，也可能改变 token 长度和 latency。
+
+\lecturefigure{slide-048.jpg}{生产推理常见的三类 bug}{官方 deck 第 48 页；课堂 00:57:08--00:59:24}
+
+\begin{knowledgebox}{读图：先定位 ownership，再找共同证据}
+应用错误由产品与 infra 共同负责；模型质量错误需要 eval、trace 与 token 证据；性能错误需要队列、分阶段 latency 与硬件 telemetry。不要因为团队边界不同就分别记录不兼容的数据：request ID、model/version、token IDs、replica、timestamps 与 eval outcome 应能跨层关联。
+\end{knowledgebox}
+
+\teachervoice{00:58:13--00:59:08，老师说 tokenizer 与 chat template 在新 open model 发布初期“几乎肯定有 bug”，而且随着 special token 与模板变复杂，问题并未自动消失。记录并修复这类问题是高价值的开源贡献。}
+
+\begin{warningbox}{Train--serve skew 不只来自数据分布}
+训练/评测时的 tokenizer version、chat template、system prompt、sampling、stop token、tool schema 与 quantization 只要和生产不同，就可能造成行为漂移。上线清单应把这些配置当作模型 artifact 的一部分，而不是散落在应用代码中。
+\end{warningbox}
+
+\subsection{Observability：能否只靠日志重建问题}
+
+Observability 的工程目标是：面对未预先列举的故障，系统是否输出了足够状态，让工程师从 trace/log/metric 推断内部发生了什么。它不是“图表数量很多”，而是外部信号对内部状态具有辨识力。对 LLM 服务，token IDs 尤其关键，因为 Unicode 字符串可能掩盖 special token、byte fallback 或模板边界。
+
+\lecturefigure{slide-049.jpg}{不同故障层所需的 observability 证据}{官方 deck 第 49 页；课堂 00:59:24--01:01:27}
+
+\begin{knowledgebox}{读图：三条日志策略围绕同一个 request identity}
+应用层可用 OpenTelemetry/Datadog 或专用 LLM trace；模型质量层要保存 eval baseline、采样参数、反馈与 token IDs；性能层要记录比当前 dashboard 更多的原始字段。三类证据只有共享 request/trace ID 才能回答“这次错误输出是否发生在特定 replica、特定 queue spike 或特定 tokenizer version”。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={可关联 correctness 与 performance 的结构化日志}]
+event = {
+    "trace_id": trace_id,
+    "request_id": request_id,
+    "model": model_revision,
+    "engine": engine_revision,
+    "tokenizer": tokenizer_revision,
+    "input_token_ids": input_ids,
+    "output_token_ids": output_ids,
+    "replica": replica_id,
+    "queue_ms": queue_ms,
+    "prefill_ms": prefill_ms,
+    "decode_ms": decode_ms,
+    "eval_tags": online_eval_results,
+}
+\end{lstlisting}
+
+\begin{warningbox}{日志也有隐私与成本边界}
+Prompt、token IDs、tool output 与用户反馈可能包含敏感信息。生产系统应定义去敏、采样、访问控制、保留期和删除流程；“log more”不是无限复制用户数据，而是先设计可关联 schema，再按风险保存必要字段。
+\end{warningbox}
+
+\subsection{Evals 是应用层 observability}
+
+如果没有一组稳定任务与评分规则，团队无法区分模型退化、deployment bug 与产品目标改变。Evals 可以从 notebook 或 spreadsheet 起步，随后变成 model-agnostic regression suite，用于比较模型、quantization、fine-tune、speculator、prompt 和 engine。它们至少要活得比一次模型切换更久。
+
+\lecturefigure{slide-050.jpg}{用 eval 建立 LLM application 的可观测性}{官方 deck 第 50 页；课堂 01:01:27--01:02:55}
+
+\begin{importantbox}{老师强调：Models and deployments are temporary; evals are forever}
+这里的 “forever” 不是字面永久，而是说明 eval 通常必须跨越多个模型与部署版本，才能让比较成立。一个好的 eval case 应保存输入、期望行为、评分方法、失败解释与业务重要性；只保存一个总分会让 regression 无法定位。
+\end{importantbox}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{L{2.8cm}YY}
+\toprule
+Eval 层级 & 解决的问题 & 典型输出 \\
+\midrule
+Unit / protocol & tokenizer、template、tool schema 是否正确 & exact tokens、JSON validity、stop behavior \\
+Task regression & 关键业务任务是否退化 & success rate、rubric score、failure clusters \\
+Safety / permission & 高风险行为是否被阻止 & policy violations、tool authorization \\
+Performance-quality joint & 优化是否破坏质量 & quality delta 对 latency/cost delta \\
+Online shadow / canary & 真实流量下是否稳定 & drift、tail latency、user feedback \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{最小生产 metric set}
+
+服务端应同时记录 user-facing、engine-stage 与 hardware-level 指标。TTFT、TPOT/ITL、TTLT 是结果；queueing、prefill、cached prefill、decode 是分解；temperature、power、kernel/SM/memory utilization 是底层解释。每项至少保留 per-replica 与 aggregate、p50/p95/p99/mean，避免平均值吞掉 straggler。
+
+\lecturefigure{slide-051.jpg}{生产推理应记录的最小指标集合}{官方 deck 第 51 页；课堂 01:02:55--01:05:45}
+
+\begin{knowledgebox}{Queue 是 tail latency 的首要嫌疑}
+从 ingress、load balancer、scheduler、tokenizer pool 到 GPU work queue，系统可能有多层等待。Little's law 给出稳态直觉
+\[
+L=\lambda W,
+\]
+其中 $L$ 是系统内平均在途请求数，$\lambda$ 是完成率，$W$ 是平均停留时间。它不直接给出 p99，但提醒我们：当到达率接近服务率时，queue 会迅速积累，TTFT 首先恶化。
+\end{knowledgebox}
+
+\lecturefigure{slide-052.jpg}{Endpoint dashboard 把 workload、SLO 与硬件状态放到同一界面}{官方 deck 第 52 页；课堂 01:05:45--01:06:45}
+
+\begin{knowledgebox}{读图：Dashboard 应支持 drill-down 而不只是展示}
+顶部 aggregate 曲线用于发现时间窗口，下一层按 model、replica、region、hardware、prompt bucket 与 engine version 切分，最后链接到 trace 和 profiler。若 dashboard 只能显示“整体变慢”，却不能定位到哪一层 queue 或哪组 replica，它仍不具备可调试性。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+可运营的 inference system 把 correctness 与 performance 绑定到同一 request evidence。Token IDs、版本、queue/stage latency、replica 与 eval outcome 是最小关联键；eval 则把模糊的“质量不错”变成可回归的长期资产。
+

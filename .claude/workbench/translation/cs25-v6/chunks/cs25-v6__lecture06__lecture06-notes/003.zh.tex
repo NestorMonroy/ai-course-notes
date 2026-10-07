@@ -1,0 +1,90 @@
+\section{Bridge 1：用 In-Context Augmentation 改造训练数据}
+
+第一条桥接路线在训练前完成：既然模型在 context 中能看到 reversal、missing link 和 multi-hop implication，就让模型先在 context 中把这些关系显式化，再用扩展后的数据 fine-tune。它把一次昂贵的推理过程离线摊销进参数，适合未来问题族相对可预见的场景。
+
+\subsection{离线与在线：先做架构级分流}
+
+Slide 25 把方案分成两族。Train-time/offline 方法在训练前生成补充结论，之后推理便宜；test-time/online 方法保留原始经历，在问题出现时检索或重新生成，覆盖更开放但每次请求更贵。这个分流比具体算法名更重要，因为它决定数据治理、延迟、缓存、评测和失败恢复方式。
+
+\lecturefigure{slide-025.jpg}{桥接 latent gap 的两大家族：离线增强与在线恢复}{Stanford CS25 V6 Lecture 06 官方 slide p. 25}
+
+\begin{importantbox}{设计选择先问“未来问题是否可枚举”}
+若未来查询类型稳定、训练可重跑且推理延迟敏感，离线 augmentation 有吸引力；若目标不断变化、单次经历细节很重要，或错误需要追溯原始证据，则在线 retrieval / regeneration 更合适。
+\end{importantbox}
+
+\subsection{算法：让模型先连接文档，再 fine-tune}
+
+In-context augmentation 把完整或分块语料放进 context，要求模型重写当前文档、连接其他文档、补出反向关系和跨文档推论。生成结果与原数据合并，再进行 fine-tuning。这里的关键不是普通 paraphrase，而是让已有 ICL skill 把 latent relation 转换成直接监督信号。
+
+\lecturefigure{slide-026.jpg}{Approach 1：in-context augmentation 的训练流水线}{Stanford CS25 V6 Lecture 06 官方 slide p. 26}
+
+\begin{lstlisting}[language=Python,caption={In-context augmentation 的最小实现框架}]
+augmented = []
+for document in corpus:
+    context = retrieve_related_documents(corpus, document)
+    prompt = build_connection_prompt(context, document)
+    implications = teacher_model.generate(prompt)
+    augmented.extend(validate_and_deduplicate(implications))
+
+finetune_dataset = corpus + augmented
+student = finetune(base_model, finetune_dataset)
+\end{lstlisting}
+
+\lecturefigure{slide-027.jpg}{把单篇文档与全局语料连接，生成可直接训练的结论}{Stanford CS25 V6 Lecture 06 官方 slide p. 27}
+
+读这个例子时要追踪三层对象：原始文档只写出局部事实；全局 context 提供另一条关系；augmentation 模型生成“Dax can zarp”一类跨文档结论。最终 student 不必在测试时重新扫描整套 corpus，因为该结论已经成为训练 target。
+
+\subsection{结果：augmented fine-tuning 可以追平甚至超过 ICL}
+
+在 reversal 与 syllogism 等已被 augmentation 覆盖的问题族上，扩展数据后的 fine-tuning 能追平 ICL，部分设置甚至更好。这并不神秘：ICL 的推理结果被转成更多直接监督，student 获得了原 fine-tuning 缺少的目标方向。
+
+\lecturefigure{slide-028.jpg}{Augmented fine-tuning 在 reversal 与 syllogism 上追平或超过 ICL}{Stanford CS25 V6 Lecture 06 官方 slide p. 28}
+
+\lecturefigure{slide-029.jpg}{结论：ICL 可作为训练数据的关系展开器}{Stanford CS25 V6 Lecture 06 官方 slide p. 29}
+
+\teachervoice{00:24:17--00:27:21，老师把两种结果称为“很好但不同”：ICL 直接在测试时灵活推理；augmentation 则用 ICL 先生成连接，再把这些连接蒸馏进参数。后者的优势只对被展开的问题族成立。}
+
+\begin{knowledgebox}{为什么 augmented fine-tuning 可能超过直接 ICL}
+直接 ICL 每次都要在长 context 中检索并组合，受位置、干扰和 context retrieval 能力影响；augmentation 可以生成多种方向、去重、过滤，再通过多轮优化强化同一结论。因此“超过 ICL”不表示参数学习天然更灵活，而表示离线管线为目标任务构造了更直接的监督分布。
+\end{knowledgebox}
+
+\subsection{没有从无到有：变化的是可访问性}
+
+Slide 30 预先回应信息论质疑：如果 augmentation 只是读原数据，怎么能“得到更多信息”？正确回答是，它没有创造新的 ground-truth；它利用模型已有先验与 context reasoning，把原数据隐含的结论改写为显式样本。理解这两页时要区分 semantic implication 与 independent evidence：前者可以通过计算被展开，后者仍必须来自真实观测或可靠来源；augmentation 只能改善表示和访问，不能替代证据采集。
+
+\lecturefigure{slide-030.jpg}{质疑：augmentation 是否从 nothing 产生 information？}{Stanford CS25 V6 Lecture 06 官方 slide p. 30}
+
+\lecturefigure{slide-031.jpg}{回答：把 latent implication 变成 explicit supervision}{Stanford CS25 V6 Lecture 06 官方 slide p. 31}
+
+若增强器 $A$ 对数据 $D$ 是确定性的，则
+$$
+H\!\left(A(D)\mid D\right)=0.
+$$
+其中：
+\begin{itemize}
+  \item $A(D)$ 是由 $D$ 推导出的重写、反向关系或组合结论；
+  \item $H(\cdot\mid\cdot)$ 是条件熵；
+  \item 该式说明给定原数据后，确定性增强没有新增独立随机信息；
+  \item 实际 LLM 生成是随机的，还会注入模型先验和错误，因此必须验证 factuality，而不能把所有新 token 当作新证据。
+\end{itemize}
+
+\begin{warningbox}{“信息已在数据里”不等于“生成一定正确”}
+Syllogism 的有效结论与 hallucinated connection 都可能被模型流畅写出。生产管线应记录来源文档、推理类型、生成模型与 prompt 版本，并用规则、verifier、交叉采样或人工抽检过滤；否则 latent expansion 会把错误也固化进参数。
+\end{warningbox}
+
+\subsection{根本限制：无法预先枚举每一种未来用途}
+
+离线方法必须猜未来会问什么。一个研究者今天读论文时，不可能提前写出这段经历将来对所有课题、目标和组合的意义；关系数量随文档与潜在目标组合增长。Slide 32 用“也许未来博士论文会用到”这一例子说明，全面 augmentation 在开放世界中不可行。更深的限制是目标本身也会改变：同一事实对检索、规划、解释、反事实和安全审计的可用形式并不相同，因此提前生成若干固定 paraphrase 仍不能覆盖未来的计算需求。
+
+\lecturefigure{slide-032.jpg}{为每个未来目标预先增强数据是不可扩展的}{Stanford CS25 V6 Lecture 06 官方 slide p. 32}
+
+假设语料有 $N$ 个经验、每次推理最多组合 $k$ 个经验，潜在组合数量粗略达到
+$$
+\sum_{i=1}^{k}\binom{N}{i},
+$$
+其中 $N$ 是经验数，$k$ 是允许的组合深度。真实问题还包含目标、语言和输出格式，使空间更大。因此离线 augmentation 需要任务先验与预算，而不是无限展开。
+
+\subsection{本章小结}
+
+In-context augmentation 的价值是把 context 中容易形成的 latent relation 转成 explicit supervision，并把测试时计算前移到训练时。它适合可预见的问题族，却承担生成、验证、数据膨胀与模型漂移成本；最重要的上限是无法预知每次经历的所有未来用途。这正是在线 episodic retrieval 的出发点。
+

@@ -1,0 +1,66 @@
+\section{从“有多少数据”到“怎样构造最优混合”}
+
+数据规模仍在增加，但可用的人类生成文本不是无限的。因此，预训练工程不能只问“再抓多少网页”，还要问每个 token 是否值得出现、出现几次，以及在训练早期还是晚期出现。这里的关键是把 mixture weight 与 temporal order 分开建模，否则会把两个不同的收益来源混在一起。
+
+\subsection{数据来源很多，真正稀缺的是有效训练机会}
+
+法律文书、书籍、论文、网页、数学材料等来源在格式、质量、规模和重复度上差异巨大。大语料库里 token 多，并不意味着训练价值高；小语料库质量高，也不意味着无限上采样不会过拟合。第一张图给出数据多样性，第二张图给出规模增长与 human-generated data frontier，两者共同解释为什么 recipe optimization 变得必要。
+
+\lecturefigure{slide-006.jpg}{LLM 预训练数据的多源构成}{Stanford 官方录像，00:06:28--00:06:51}
+
+读图时先把“来源”与“样本”分开。Web crawl 可能占绝大多数 token，但内部质量分布极宽；论文或法律文书规模较小，却可能在特定能力上提供高密度信号。混合策略不是给来源贴一个永久标签，而是结合过滤、领域、难度、重复次数与下游验证来分配预算。
+
+\lecturefigure{slide-007.jpg}{训练 token 规模增长与人类生成数据边界}{Stanford 官方录像，00:06:51--00:07:49}
+
+\begin{knowledgebox}{读图：蓝色增长曲线应该怎样理解}
+横轴是时间，纵轴对应模型训练消耗的数据量；图中历史点和预测带强调从 GPT-3 时代的数百 billion token 走向 tens of trillions。它支持“单纯增加新的人类文本会越来越困难”的资源判断，但不证明某一年会精确耗尽数据，也不计入 synthetic data、multimodal data、交互轨迹与重复训练的价值。
+\end{knowledgebox}
+
+\subsection{两个问题：权重与顺序}
+
+面对同一批来源，需要回答两个正交问题。第一，\textbf{how to weigh}：一个 batch 中各来源按什么概率被抽到；第二，\textbf{how to order}：这种概率是否随训练进度改变。前者构成 blend，后者构成 curriculum。若只报告最终总体比例，却不报告时间顺序，外部读者无法复现真实训练分布。
+
+\lecturefigure{slide-008.jpg}{最大化数据潜力的两个问题：如何加权、如何排序}{Stanford 官方录像，00:07:49--00:08:22}
+
+\begin{importantbox}{Blend 与 curriculum 的数学区别}
+设数据源为 $D_1,\ldots,D_K$。固定 blend 使用常数权重 $w_k$，满足 $w_k\ge 0$ 且 $\sum_k w_k=1$；curriculum 则使用随训练进度 $s\in[0,1]$ 变化的 $w_k(s)$。即使所有阶段积分后的总 token 数相同，不同的 $w_k(s)$ 仍可能产生不同模型。
+\end{importantbox}
+
+\subsection{质量估计、epoch 估计与 blend creation}
+
+最优混合的第一步是 quality estimation：用规则、classifier、LLM rubric 或人工评测估计数据源在目标能力上的有效性。第二步是 epoch estimation：测试某个领域重复 1、2、4、6 次时，边际收益何时转负。最终权重同时依赖质量和可重复次数；“高质量”不是无限复制许可证。
+
+\lecturefigure{slide-009.jpg}{最优数据混合的三步：质量估计、重复次数估计与 blend construction}{Stanford 官方录像，00:08:22--00:09:29}
+
+设源 $k$ 的唯一 token 数为 $N_k$，计划重复 $e_k$ 次，总预算为 $B$，则一个教学化权重可以写为
+\[
+w_k=\frac{q_k e_k N_k}{\sum_j q_j e_j N_j},
+\qquad
+\sum_k w_k=1.
+\]
+其中，$q_k$ 表示经验质量系数，$e_k$ 表示预计可重复 epoch 数，$N_k$ 表示源规模。真实 recipe 往往还会加入 domain floor、temperature、去重与采样上限，因此该式是思考框架，不是论文唯一实现。
+
+\begin{lstlisting}[caption={领域级质量与重复次数消融的教学版伪代码}]
+for domain in domains:
+    quality_score = evaluate_quality_classifier(domain)
+    for repeats in [1, 2, 4, 6]:
+        candidate = reallocate_budget(
+            base_blend, add=(domain, repeats), remove="low_quality_crawl"
+        )
+        model = train_small_proxy(candidate, fixed_token_budget)
+        record(domain, repeats, downstream_score(model))
+
+best_repeats = choose_before_diminishing_returns(records)
+final_blend = assemble_domain_level_weights(quality_score, best_repeats)
+\end{lstlisting}
+
+\teachervoice{00:25:17--00:26:45，讲者在问答中补充：repeat-count ablation 会把预算从 low-quality crawl 移给目标领域，通常按 domain category 做，而不是为每个独立数据源都跑一套昂贵实验。}
+
+\begin{warningbox}{Quality 不是文档的天然属性}
+同一文档对语言流畅度、数学推理、代码生成或法律检索的价值可能不同。FineWeb-Edu 一类 classifier 只是在指定 rubric 下给出 educational score；训练工程必须记录 rubric、模型版本、阈值、domain composition 与下游验证，否则“high quality”无法被复核。
+\end{warningbox}
+
+\subsection{本章小结}
+
+数据瓶颈把研究重点从“抓更多”推向“分配更好”。Blend 权重回答每类数据占多少，curriculum 回答它们何时出现；quality estimation 与 epoch estimation 则分别估计信号密度和重复上限。下一章把随时间变化的 $w_k(s)$ 具体化为 two-phase pretraining。
+

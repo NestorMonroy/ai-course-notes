@@ -1,0 +1,96 @@
+\section{现代 SSM 的三项核心：容量、选择性与可训练性}
+
+把 recurrence 写成两行公式还远远不够。传统 RNN 已经有 hidden state，早期 linear attention 也能递推；现代 SSM 真正有效，是因为同时解决了三个互相牵制的问题：状态容量是否足够，更新是否能选择性记忆，训练是否能绕开逐步串行。三张 replacement slide 必须分别阅读，因为它们不是同一张累计页。
+
+\subsection{Ingredient 1：state expansion 扩大记忆瓶颈}
+
+若每个输入通道只用一个标量状态，模型很快遇到容量瓶颈。State expansion（状态扩张）让每个输入通道对应 $N$ 维状态，使模型可以在同一时间尺度上维护多种衰减、频率或记忆特征。图右侧的问题“state 有多大、能记多少”是架构问题，不等同于把整层 model width 盲目放大。
+
+\lecturefigure{slide-007.jpg}{SSM Ingredient 1：state size 与 state expansion}{Stanford 官方录像，00:09:49--00:10:56}
+
+对 batch size 为 $B$、序列长度为 $L$、通道数为 $D$ 的输入，概念上的状态张量可以看成 $B\times D\times N$。训练时通常不能把每个时间步的完整状态全部 materialize 到 HBM（High Bandwidth Memory，高带宽显存），否则 activation memory 近似随 $BLDN$ 增长；因此后面的 scan / recomputation / fused implementation 与状态扩张是同一个设计包。
+
+\begin{knowledgebox}{State size 不等于“可记住 $N$ 个 token”}
+$N$ 是状态维度，不是一个离散槽位计数器。状态以分布式数值表示叠加信息；更大 $N$ 提高表示容量，却不能保证精确保留任意 $N$ 个历史事实。能否记住还取决于 update、训练信号、数值稳定性与任务结构。
+\end{knowledgebox}
+
+\subsection{Ingredient 2：selectivity 决定写什么、忘什么}
+
+容量足够后，模型还要控制信息流。固定 $A,B$ 的 Linear Time-Invariant（LTI）系统对每个 token 使用同一更新规则，适合平稳、可压缩信号，却难以处理语言中变化很大的 information rate。Selective SSM 令参数依赖输入，使当前 token 能决定旧状态保留多少、新信息写入多少。
+
+\lecturefigure{slide-008.jpg}{SSM Ingredient 2：input-dependent transition 带来 selectivity / gating}{Stanford 官方录像，00:10:57--00:12:22}
+
+把更新抽象为
+\[
+h_t=f_\theta(h_{t-1},x_t)
+=A(x_t)h_{t-1}+B(x_t)x_t.
+\]
+若某一维上 $A(x_t)\approx 1,B(x_t)\approx 0$，模型近似“保持旧记忆、忽略当前输入”；若 $A(x_t)\approx 0$ 且 $B(x_t)$ 较大，则近似“清空旧内容、写入当前输入”。实际模型使用连续门控，不是硬开关，但这两个极限给出了 selectivity 的教学直觉。
+
+\begin{lstlisting}[caption={Selective recurrent update 的教学版伪代码}]
+def selective_step(x_t, state, parameters):
+    keep = sigmoid(parameters.keep_projection(x_t))
+    write = parameters.write_projection(x_t)
+    candidate = parameters.input_projection(x_t)
+    next_state = keep * state + write * candidate
+    output = parameters.readout(next_state, x_t)
+    return output, next_state
+\end{lstlisting}
+
+\begin{warningbox}{Selectivity 不是免费获得的逻辑记忆}
+Input-dependent transition 提高了“什么时候写、什么时候忘”的表达力，但不会自动学习符号变量、栈或数据库索引。若 supervision 不要求保存某条信息，门控仍可能把它遗忘；若状态容量和数值条件不足，再聪明的 gate 也无处存放。
+\end{warningbox}
+
+\subsection{Ingredient 3：parallel scan 把 sequential semantics 改写成 parallel training}
+
+Recurrence 的定义按时间串行，但训练不一定真的逐 token 执行。对线性更新，可以把相邻时间段表示成 affine transform，再利用结合律做 tree reduction / associative scan。这样保留 recurrent semantics，同时把训练深度从 $O(L)$ 降到 $O(\log L)$ 级别的并行阶段；Mamba-2、Gated DeltaNet 等还会进一步改写为 chunked matrix multiplication。
+
+\lecturefigure{slide-009.jpg}{SSM Ingredient 3：associative scan 与 matmul rewrite 解决训练效率}{Stanford 官方录像，00:12:23--00:13:39}
+
+定义单步变换 $T_t(h)=A_t h+b_t$，其中 $b_t=B_t x_t$。两个变换的组合为
+\[
+(A_2,b_2)\circ(A_1,b_1)
+=\left(A_2A_1,\;A_2b_1+b_2\right).
+\]
+该组合满足结合律，因此可以并行 scan。这里的关键不是把 recurrence 变成 attention，而是找到一个可结合的 summary，使多个时间段先各自压缩，再合并为更长前缀的状态变换。
+
+\begin{lstlisting}[caption={Affine recurrence 的 associative composition}]
+def compose(right, left):
+    A_right, b_right = right
+    A_left, b_left = left
+    return A_right @ A_left, A_right @ b_left + b_right
+
+# parallel_prefix_scan applies compose in a tree schedule.
+prefix_transforms = parallel_prefix_scan(compose, step_transforms)
+\end{lstlisting}
+
+\teachervoice{00:12:23--00:13:29，讲者强调扩大状态和增强 update 会让模型更难计算；现代工作的核心之一就是利用线性结构、scan 与 chunked matmul，在不按时间逐步 materialize 大状态的情况下完成训练。}
+
+\subsection{Mamba：创新在组合，而不是三件孤立发明}
+
+State expansion 在早期 SSM / linear attention 中存在，gating 来自经典 RNN，parallel scan 也早有先例。Mamba 的关键贡献是把三者组合成一个在信息密集语言上真正有竞争力的系统。读图时应把三个 bullet 当作联合必要条件：少一个，模型可能容量不足、更新过于僵硬或训练不可承受。
+
+\lecturefigure{slide-010.jpg}{Mamba 作为 selective SSM：组合 state size、state update 与 efficiency}{Stanford 官方录像，00:14:20--00:14:59}
+
+\begin{importantbox}{Mamba 的教学定位}
+这堂课不把 Mamba 讲成“Transformer 的线性替代品”，而把它讲成一次系统综合：用更大的 state 提供容量，用 selectivity 控制信息，用硬件可执行的 scan / matmul rewrite 保住训练效率。三者共同改变了 recurrent model 的可用边界。
+\end{importantbox}
+
+\subsection{现代模型表：相似之处比公式差异更值得先学}
+
+下表式 slide 汇总 Linear Attention、DeltaNet、S4、Mamba、GLA、RWKV、mLSTM、Mamba-2 等模型的 recurrence 与 readout。第一遍不要逐项背公式，而应先横向找共性：它们都在决定状态如何衰减、如何写入外积或向量、如何读出 query-dependent output。只有明确任务需要后，才值得深入某一行的 parameterization。
+
+\lecturefigure{slide-011.jpg}{现代 recurrent / linear model 的 recurrence 对照与共同问题}{Stanford 官方录像，00:15:00--00:16:19}
+
+\begin{knowledgebox}{课堂工程判断：冻结在 2026-04-16}
+讲者当时把 Mamba-2 与 Gated DeltaNet 称为更“tried-and-true”的大规模选择：后者通常更强但更慢；Mamba-3 刚在 2026-03-16 发布，尚未充分经历大规模验证。这个判断是课堂快照，不应被写成永久排名。
+\end{knowledgebox}
+
+\begin{warningbox}{Perplexity parity 不是 capability parity}
+Perplexity（困惑度）是交叉熵的指数 $\exp(H)$，可直观理解为模型在每个 token 上面对的“有效选项数”，越低通常越好。但它高度依赖 tokenizer 与数据分布，不能单独证明 retrieval、reasoning、state tracking 或 downstream task 等价。Gu 也明确说“recurrent models 可竞争”首先是 coarse-grained perplexity 结论。
+\end{warningbox}
+
+\subsection{本章小结}
+
+现代 SSM 的可用性来自三项协同：足够大的 state 提供容量，input-dependent update 提供选择性，associative scan / matmul rewrite 提供训练可执行性。Mamba 把这些历史组件组合成有效系统；后续模型主要在 state parameterization 与计算路径上继续优化。理解这一共同骨架后，下一章可以把具体公式暂时放下，直接比较两种 autoregressive state 的能力边界。
+

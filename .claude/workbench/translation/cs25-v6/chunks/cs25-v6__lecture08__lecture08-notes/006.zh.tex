@@ -1,0 +1,152 @@
+\section{Mixture-of-Transformers：按 modality 分配参数与计算}
+
+Chameleon 统一 token，Transfusion 统一 backbone；MoT 则在共享序列之上重新引入 specialization。核心观察是：不同 modality 在 hidden space 中形成可分结构，且它们对参数容量、优化速度和输出目标的需求不同。与其让所有 token 竞争同一套 attention/FFN，不如利用已知 modality label 做 deterministic routing。
+
+\subsection{Shared backbone baseline 与 modality gap}
+
+为了判断是否需要 specialization，本节先建立 dense shared-backbone baseline，再查看不同层的 representation geometry。两张图要连起来读：slide 031 给出参数共享假设，slide 032 只提供可能反驳它的经验信号。
+
+\lecturefigure{slide-031.jpg}{所有 modality 共用同一 Transformer backbone 的 dense baseline}{官方 deck 第 31 页}
+
+\begin{knowledgebox}{读图：Dense baseline 的优点是简单，代价是全部激活}
+底部不同颜色的 token 全部穿过同一个黄色 Transformer。每个 token 都激活同样参数，因此 implementation 简单、跨 modality attention 自然；但 image/audio token 数量可能远大于 text，且不同输出任务的 gradient 会竞争同一 capacity。后面的 sparse design 不是取消交互，而是改变 token 在每层使用哪套投影与 FFN。
+\end{knowledgebox}
+
+\lecturefigure{slide-032.jpg}{不同层中的 modality gap 与表示分群}{官方 deck 第 32 页；Mind the Gap arXiv 2203.02053v2}
+
+\begin{knowledgebox}{读图：分群是现象，不是因果证明}
+四个 panel 展示不同层的 image/text representation 在投影空间中逐渐形成不同结构。应先比较 layer 1、5、17、32 的分离程度，再问这种 gap 是否来自输入统计、contrastive objective、position encoding 或训练数据。图支持“modality 有可利用的结构差异”，但不能单独证明“分开参数一定更好”。
+\end{knowledgebox}
+
+\begin{warningbox}{Modality gap 的常见误读}
+表示可分并不等于语义无法对齐；相反，跨模态检索常要求不同分布仍在某些方向上可比较。MoT 使用 modality label 做路由，是一种工程选择。要证明它有效，还必须看 matched-compute loss、downstream metric 与稳定性，而不是只看二维散点图。
+\end{warningbox}
+
+\subsection{Deterministic routing 是什么}
+
+设第 $\ell$ 层对 modality $m$ 有参数 $\theta_{\ell,m}$。对 token $h_i^\ell$，已知其 modality $m_i$，则
+$$
+h_i^{\ell+1}
+=h_i^\ell+F_{\theta_{\ell,m_i}}
+\left(h_i^\ell,\operatorname{Attn}_{\theta_{\ell,m_i}}(H^\ell)\right).
+$$
+路由由 $m_i$ 决定，不需要额外 gate 学习。虽然 query/key/value projection 可按 modality 区分，attention 仍可在整个 mixed sequence 上计算，因此 text token 与 image token 仍然交换信息。
+
+\lecturefigure{slide-033.jpg}{MoT 的第一状态：独立 modality 参数与确定性路由}{官方 deck 第 33 页；Mixture-of-Transformers arXiv 2411.04996v2}
+
+\begin{knowledgebox}{读图：黑、橙、绿表示“谁使用哪套参数”}
+输入 token 的 modality 已知，因此路由无需 top-$k$ gate。右侧两个气泡是核心：independent transformer parameters for each modality 与 deterministic routing。图中 token 仍排列在同一序列，区别只是经过 attention/FFN 时选择对应颜色的参数路径。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={MoT 的 deterministic modality routing}]
+def mot_layer(hidden, modality_ids, experts):
+    output = zeros_like(hidden)
+    for modality, transformer_block in experts.items():
+        mask = modality_ids == modality
+        output[mask] = transformer_block(hidden, query_mask=mask)
+    return output
+\end{lstlisting}
+
+\lecturefigure{slide-039.jpg}{完整 MoT architecture：多 modality 参数路径与各自 training objective}{官方 deck 第 39 页；课堂 00:21:48--00:24:30}
+
+\begin{knowledgebox}{读图：从左到右追踪一个 token}
+左侧完整图把 text、image、audio token 分别送入对应颜色的 attention 与 FFN；上方输出仍回到同一 mixed sequence。右侧补充 image diffusion objective 与 language-modeling objective，说明 routing 与 loss 都按 modality 定义。读图重点不是颜色数量，而是：序列保持联合、参数激活稀疏、目标保持专用。
+\end{knowledgebox}
+
+\teachervoice{00:42:42--00:44:08 的 Q\&A 补充了一个容易遗漏的点：参数路径分开后，token 仍通过 self-attention 看到其他 modality 的 context。Specialization 改变 projection/FFN，不等于把信息流切成互不通信的子模型。}
+
+\subsection{MoT 与 Mixture-of-Experts 有何不同}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{0.98\textwidth}{L{0.17\textwidth}Y Y}
+\toprule
+架构 & 路由与解决的问题 & 代价与课程关系 \\
+\midrule
+Dense Transformer & 所有 token 激活同一参数；实现简单、共享充分 & active compute 高，modality 可能竞争 capacity。 \\
+MoT & 根据已知 modality deterministic routing 到专用参数 & 路由稳定、可控；需要维护多套参数，并决定哪些层共享。 \\
+MoE & learned gate 按 token 内容选择 top-$k$ experts & 可在同一 modality 内学习功能分工，但有 load balancing、routing instability 与通信开销。 \\
+MoT + MoE & 先按 modality 选参数族，再在族内学习 expert routing & 同时建模跨 modality 差异与 modality 内多样性，系统复杂度最高。 \\
+\bottomrule
+\end{tabularx}
+\caption{术语消化：Dense、MoT 与 MoE 的路由差异}
+\end{table}
+
+若总参数为 $P_{\text{total}}$，一次 token 只激活其 modality 路径 $P_{m}$，active-parameter ratio 可写成
+$$
+\rho_m=\frac{P_m}{P_{\text{total}}}.
+$$
+稀疏模型比较必须报告 $P_{\text{total}}$ 与 $P_{\text{active}}$。只用总参数宣称“更大”会夸大单次计算，只用 active 参数又会隐藏存储与通信成本。
+
+\subsection{先看实验配置，再看曲线}
+
+架构图之后最容易直接跳到漂亮曲线，但本节先做资源核算。只有确认序列长度、token 数、训练步数与 GPU 配置，才能判断 slide 041 的优势是否来自 routing，而不是额外训练预算；同时还要区分 total parameters 与 active parameters，才不会误读 sparse model 的规模。
+
+\lecturefigure{slide-040.jpg}{MoT 实验从 163M 到 7B 的 matched training configuration}{官方 deck 第 40 页；Mixture-of-Transformers arXiv 2411.04996v2}
+
+\begin{knowledgebox}{读表：资源口径决定结论是否可信}
+四个规模均使用 sequence length 4096、约 2.10M tokens/batch、250k steps，总训练量约 0.524T tokens；较大模型增加 GPU 并降低 per-GPU batch。比较时先确认 token budget 与 steps 一致，再看 hidden dimension、layers、heads 和 GPU 数。这样才能把曲线差异主要归因于 architecture，而不是训练更多数据。
+\end{knowledgebox}
+
+\begin{importantbox}{Matched compute 的最低报告项}
+多模态 sparse model 至少报告：每种 modality 的 token 比例、total/active parameters、每 step FLOPs、训练 tokens、diffusion sampling steps、GPU 数、通信开销与 wall-clock。表中 token budget 匹配是重要基础，但并不自动匹配所有系统成本。
+\end{importantbox}
+
+\lecturefigure{slide-041.jpg}{MoT + Transfusion 7B 的 loss、sample efficiency 与下游指标}{官方 deck 第 41 页；课堂 00:24:30--00:26:58}
+
+\begin{knowledgebox}{读图：五个 panel 回答不同问题}
+左上 red MoT curve 在相同 training step 下达到更低 image loss；右上把 MoE/MoT 达到 Dense loss 所需 steps 画出，红色斜率更小表示更高 sample efficiency。下方 CLIP 越高越好、FID 越低越好、CIDEr 越高越好；slide 报告 MoT 在三项均优于 Dense。它支持 generation 与 captioning 改善，但仍需检查数据、sampling 与统计方差。
+\end{knowledgebox}
+
+\begin{warningbox}{Loss 下降不等于所有能力提升}
+Image diffusion loss、CLIP、FID 与 CIDEr 分别测优化目标、语义对齐、分布质量与 caption overlap。它们不能替代 image understanding accuracy、spatial reasoning、safety 或 human preference。尤其课堂后续明确指出，modality separation 没有改善所讨论的 image-understanding route。
+\end{warningbox}
+
+\lecturefigure{slide-042.jpg}{Dense 与 MoT 的图像生成定性对照}{官方 deck 第 42 页；Mixture-of-Transformers arXiv 2411.04996v2}
+
+\begin{knowledgebox}{读图：看 prompt composition，而不只看美观}
+四列 prompt 都要求不常见的对象组合，如 lychee-inspired chair、sushi city、cheeseburger character 与 chrome duck/turtle interaction。比较上下两行时，先看对象数量、关系和材质是否满足，再看形状稳定性。MoT 样例更接近文字约束，但这仍是 selected qualitative evidence，需要与 slide 041 的量化指标共同阅读。
+\end{knowledgebox}
+
+\subsection{Modality capacity 与 learned experts 可以叠加}
+
+上一节比较 Dense 与 MoT，本节进一步问同一 modality 内部是否也需要功能分工。slide 043 因此不是重复的稀疏图，而是把 deterministic modality routing 与 learned expert routing 组合成两级结构。
+
+\lecturefigure{slide-043.jpg}{在 modality routing 内继续组合 Mixture-of-Experts}{官方 deck 第 43 页；课堂 00:26:58--00:28:20}
+
+\begin{knowledgebox}{读图：两级稀疏解决两种异质性}
+第一层按 modality 做 deterministic routing，处理 text/image/audio 的统计差异；第二层 MoE gate 在某个 modality 内选择 experts，处理任务、风格或语义功能差异。两级都增加 total parameters，但 active path 仍可保持稀疏。工程上还要处理 expert parallelism、load balancing 与跨设备 all-to-all 通信。
+\end{knowledgebox}
+
+\teachervoice{00:27:55--00:28:20，老师给出一条实践观察：增加 experts 对 text performance 的帮助增长更快，而 image generation 未必同速扩展。因此各 modality 不应机械分配相同 expert 数量；capacity allocation 本身是可调超参数。}
+
+\subsection{冻结语言路径并异步扩展新 modality}
+
+两级稀疏解决训练时的 capacity 分配，本节转向模型演化：已有 language model 很强时，怎样增加 image/audio generation 而不重训全部参数。读 slide 044 时应把 stability 与 controllability 理解为训练工作流收益。
+
+\lecturefigure{slide-044.jpg}{MoT 的四项工程结论与 modality-aware follow-up}{官方 deck 第 44 页；课堂 00:28:20--00:29:57}
+
+\begin{knowledgebox}{读图：第三点把 architecture 变成训练工作流}
+前两点总结 deterministic routing 与非文本生成提升；第三点强调 efficiency、stability、controllability，以及跨 stage 异步训练不同 modality。若 text path 已很强，可以冻结它，只训练 image/audio path，从而减少 catastrophic forgetting 与全量 continued pretraining 成本。第四点说明这种思路已扩展成一类 modality-aware architecture。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={冻结已有 language path，扩展新的 generation modality}]
+def extend_with_new_modality(model, new_loader):
+    freeze(model.text_parameters)
+    trainable = model.image_parameters + model.cross_modal_adapters
+    for batch in new_loader:
+        loss = model.image_generation_loss(batch)
+        update(trainable, loss)
+\end{lstlisting}
+
+\begin{warningbox}{Asynchronous training 的隐含条件}
+冻结旧路径只有在新 modality 能通过有限 cross-modal interface 学到所需对齐时才有效。若任务需要重塑共享 attention、词义或 reasoning behavior，完全冻结会限制 transfer。所谓 controllability 是减少干扰的一种工程手段，不是免费获得联合最优。
+\end{warningbox}
+
+\teachervoice{00:29:57--00:31:36，课堂 Q\&A 给出负面结果：MoT 的 modality separation 对 image generation 有帮助，但没有观察到 image understanding 改善。若输出是 text，text 与 image input 经过共享参数反而可能更合适。这个边界必须与正面曲线一起保留。}
+
+\subsection{本章小结}
+
+MoT 把“共享一个模型”改写成“共享一个序列与交互图，但按 modality 激活不同参数”。它在 matched token budget 下改善 image generation loss、CLIP/FID 与 captioning metric，并支持更可控的 modality extension；同时，它不证明 understanding 与 generation 都受益。下一章看这种 specialization 怎样进入更复杂的统一预训练与机器人系统。
+

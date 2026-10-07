@@ -1,0 +1,44 @@
+\section{Context Parallelism：为超长序列分片 attention}
+
+Context Parallelism（CP，上下文并行）沿 sequence length 切分同一个样本。它不是为了增加 batch，而是为了让单个超长上下文的 activation、Q/K/V 和 attention 工作跨设备分担。
+
+\subsection{为什么 DP、TP、PP 仍可能装不下长上下文}
+
+当 sequence length 增长时，activation 与 attention working set 会迅速上升。即使参数已被 ZeRO、TP 或 PP 分片，每个 rank 仍可能持有过长的 token 维；因此需要专门沿 sequence 轴切分。
+
+\lecturefigure{slide-079.jpg}{CP 动机：sequence length 增长造成 activation memory 爆炸}{CS25 V6 official deck, p.~79}
+
+DP 沿 batch 轴把样本分给不同 rank；同一 sequence 不被拆开。回顾页的意义是建立对照：CP 将单个样本的 $S$ 个 positions 分为 $S_1,\ldots,S_P$，每个 rank 只拥有一段。
+
+\lecturefigure{slide-081.jpg}{DP 回顾：切 batch，不切单个 sequence}{CS25 V6 official deck, p.~81}
+
+\lecturefigure{slide-083.jpg}{CP：同一个 sequence 按 token positions 分片}{CS25 V6 official deck, p.~83}
+
+\subsection{Ring Attention 与 online softmax}
+
+每个 query shard 仍需要看到全序列 K/V。Ring Attention 让 K/V blocks 沿设备环传递；rank 对当前 block 计算局部 score，并用 online softmax 的 running maximum 与 running normalizer 合并多个 block，而不必一次物化完整 attention matrix。
+
+\lecturefigure{slide-085.jpg}{Ring Attention：循环交换 K/V block 并在线更新 softmax}{CS25 V6 official deck, p.~85}
+
+\begin{knowledgebox}{读图：query 留在本地，K/V 绕环移动}
+每个 rank 固定保存自己的 query shard，并依次接收来自其他 ranks 的 K/V block；完成一轮后，每个 query 已与全序列所有 keys 交互。图中的环不是为了做平均，而是为了控制每次在 HBM 中出现的 K/V 块大小。online softmax 的 running max/denominator 使不同块的 score 能数值稳定地合并。因果 attention 还要结合 block 位置应用 mask；若通信与 block compute 无法重叠，ring 的每一跳都会直接拉长 layer latency。
+\end{knowledgebox}
+
+对第 $i$ 个 query，分块 softmax 可维护
+\[
+m_i^{(t)}=\max\bigl(m_i^{(t-1)},\max_j s_{ij}^{(t)}\bigr),
+\]
+\[
+\ell_i^{(t)}=e^{m_i^{(t-1)}-m_i^{(t)}}\ell_i^{(t-1)}
++\sum_j e^{s_{ij}^{(t)}-m_i^{(t)}}.
+\]
+其中，$s_{ij}^{(t)}$ 是第 $t$ 个 K/V block 的 attention score，$m_i^{(t)}$ 是截至该 block 的运行最大值，$\ell_i^{(t)}$ 是稳定 softmax 分母。输出分子也用相同重标定递推，从而在 block 流过时得到与全量 softmax 等价的结果。
+
+\lecturefigure{slide-086.jpg}{CP 的边界：长序列唯一直接切分轴，但每层都要交换 K/V}{CS25 V6 official deck, p.~86}
+
+\teachervoice{00:46:02--00:49:14，老师把 CP 限定为 long-context bottleneck 的专用工具：它在每个 attention block 内通信，对短序列帮助不大；如果问题不是 sequence memory，就不应因为“支持 CP”而启用。}
+
+\subsection{本章小结}
+
+CP 把单个长上下文的 token positions 分到多个 rank，Ring Attention 用在线 softmax 与 K/V 轮转保持全局 attention 语义。它直接解决长 sequence memory，却增加 attention critical-path communication；下一节的 EP 则只针对 Mixture-of-Experts 的稀疏专家层。
+

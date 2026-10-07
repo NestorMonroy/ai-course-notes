@@ -1,0 +1,176 @@
+\section{性能优化：先改架构，再清 host，最后碰 kernel}
+
+进入优化阶段前，必须确认 workload、SLO、correctness eval 与 telemetry 都已建立。否则 speedup 无法归因，也无法知道质量是否受损。讲者给出的优先级非常明确：speculative decoding 和 quantization 可能改变数量级；host overhead 常有几十个百分点；成熟 kernel 通常只剩若干百分点。
+
+\subsection{Optimization funnel}
+
+优化顺序应按理论上限与实现成本排序。先寻找能减少 autoregressive step、bytes 或空闲时间的结构性改变，再消除 CPU/launch gap，最后才在已经高效的 kernel 上争取百分点。这个顺序也降低风险：越靠近底层，越容易投入大量专业工作却只优化一个非瓶颈。
+
+\lecturefigure{slide-054.jpg}{大改动、host grind 与 kernel percentage points}{官方 deck 第 54 页；课堂 01:06:45--01:07:45}
+
+\begin{importantbox}{优化前的四个 gate}
+1）应用 eval 能检测质量退化；2）benchmark 复现生产 workload；3）trace 能分解 queue、host、GPU 与 network；4）目标指标明确。缺一项时，先补测量系统，而不是继续调参数。
+\end{importantbox}
+
+\subsection{Speculative decoding：用便宜 drafter 换少量 target step}
+
+Autoregressive decode 的串行依赖来自“下一个 token 必须等上一个 token”。Speculative decoding 让便宜的 drafter 一次提出多个候选，target model 并行验证这段序列；在 lossless 版本中，接受/拒绝规则保证最终采样分布与直接 target sampling 一致。加速取决于 drafter 成本、接受长度、target verification 效率与 batch pressure。
+
+\lecturefigure{slide-055.jpg}{Speculative decoding 的 draft--verify 流水线}{官方 deck 第 55 页；课堂 01:07:45--01:09:20}
+
+\begin{knowledgebox}{读图：并行验证不等于候选全部接受}
+Drafter 生成 $k$ 个 token，target 一次 forward 计算这些位置的分布；从左到右接受满足校正规则的 token，遇到拒绝则从 target 分布采样并重新开始。若接受率低，drafter 工作被浪费；若 $k$ 太大，verification 占用 batch 与 KV，反而伤害高并发吞吐。
+\end{knowledgebox}
+
+若每轮平均接受 $a$ 个 draft token，并额外产生一个 target token，粗略的每 target call 产出为 $a+1$。令 drafter 成本相对 target verification 为 $r$，可用直觉式
+\[
+S\approx \frac{a+1}{1+r+o},
+\]
+其中 $o$ 汇总调度、树/采样和未充分 batch 的开销。它只用于理解变量方向，不是精确性能模型。
+
+\lecturefigure{slide-056.jpg}{增加匹配数据后，speculator 可显著改变吞吐曲线}{官方 deck 第 56 页；课堂 01:09:20--01:10:50}
+
+\begin{knowledgebox}{读图：先确认横纵轴与 baseline，再看“Just add data”}
+两幅曲线展示 speculator 随数据/训练改善后可获得更高吞吐或更好 scaling。它支持“drafter 与 target 分布越匹配，接受率越高”的机制，但不证明任何模型都能得到相同倍数。应报告 target、draft architecture、sequence distribution、batch、hardware 与 quality equivalence。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Lossless speculative decoding 的概念流程}]
+while not finished:
+    draft_tokens, draft_probs = drafter.propose(prefix, k)
+    target_probs = target.verify(prefix, draft_tokens)
+    accepted, correction = rejection_sampling(
+        draft_tokens, draft_probs, target_probs
+    )
+    emit(accepted)
+    if correction is not None:
+        emit(correction)
+    prefix = update(prefix, accepted, correction)
+\end{lstlisting}
+
+\subsection{N-gram、MTP、EAGLE 与 DFlash}
+
+不同 speculation 方法主要区别在 drafter 从哪里获得预测能力。N-gram 直接复用 prompt/历史中的局部重复；MTP（multi-token prediction）在 base model 训练时加入多步预测头；EAGLE 使用 target hidden state 预测未来 feature/token；DFlash 用 block diffusion drafter 并行去噪多个候选。它们的训练成本、适配性、接受率和 host/scheduler 复杂度不同。
+
+\lecturefigure{slide-057.jpg}{多类 speculative drafting 方法}{官方 deck 第 57 页；课堂 01:10:50--01:13:20}
+
+\begin{knowledgebox}{术语消化：四类 drafter 各解决什么}
+\begin{tabularx}{\textwidth}{L{2.2cm}YY}
+\toprule
+方法 & 核心机制 & 适用与代价 \\
+\midrule
+N-gram & 从当前 prompt/历史查找重复 continuation & 无训练、便宜；对代码/重复文本有效，泛化有限 \\
+MTP & 模型训练时直接预测未来多个 token & 与 base model 深度集成；需要训练时支持 \\
+EAGLE & 利用 target hidden features 训练轻量 drafter & 接受率高；需要额外模型与版本匹配 \\
+DFlash & diffusion drafter 一次并行生成一个 token block & 降低串行 draft 成本；为 2026 年新方法，部署证据仍在积累 \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\teachervoice{01:12:30--01:13:20，老师明确把“我们押注 DFlash 这一类方法”表达为团队的经验判断，而非全领域定论。讲义保留这一口吻，同时把论文版本冻结在课堂日前公开的 arXiv:2602.06036。}
+
+\subsection{Quantization：减少 bytes，也改变模型}
+
+Quantization 把权重、activation 或 KV cache 从高精度映射到更少 bit。对 bandwidth-bound decode，权重字节减少可直接提高 token/s；对 Tensor Core 支持的低精度 matmul，峰值 FLOP/s 也可能提高。但 scale、outlier、累积误差、长上下文和特定硬件指令都会影响实际质量与速度。
+
+\lecturefigure{slide-058.jpg}{Quantization 需要 hardware、kernel 与 application 全栈协同}{官方 deck 第 58 页；课堂 01:13:20--01:16:10}
+
+\begin{knowledgebox}{读图：BF16、FP8 与 FP4 是风险梯度，不是版本号}
+BF16（16-bit brain floating point）通常作为高质量推理基线；FP8 用 8 bit 浮点格式降低 bytes 并利用新 GPU Tensor Core；FP4/MXFP4 等 4 bit 浮点更激进，硬件与 calibration 要求更高。Attention/KV cache 对误差和动态范围常比大 matmul 更敏感，因此“整模型统一压到某个 bit”不是可靠默认。
+\end{knowledgebox}
+
+含 $P$ 个参数、每参数 $b$ bit 的纯权重存储下界约为
+\[
+M_{\mathrm{weight}}=\frac{Pb}{8}\ \mathrm{bytes},
+\]
+但真实显存还包括 scale/zero point、padding、KV cache、workspace 与 graph buffers。对有 $L$ 层、$n_{kv}$ 个 KV head、head dimension $d_h$、上下文长度 $T$、每元素 $b_e$ bytes 的 decoder，KV cache 量级为
+\[
+M_{KV}\approx 2L n_{kv}d_h T b_e,
+\]
+前面的 2 表示 key 与 value。长上下文时，KV 精度可能重新成为容量与 bandwidth 主导项。
+
+\begin{warningbox}{任何量化都必须穿过 application eval}
+Perplexity（PPL，交叉熵的指数，可粗略理解为模型在每个 token 上面对的“有效选择数”）或通用 benchmark 不足以证明你的 structured output、tool use、长上下文与 safety 行为不变。量化上线应做 paired replay、failure clustering、长度分桶与 canary；若应用定义允许有限损失，也要把允许的质量预算写入 SLO。
+\end{warningbox}
+
+\subsection{Host overhead：不要让 GPU 等 Python}
+
+当结构性优化完成后，trace 中常出现 GPU kernel 之间的空隙：Python scheduler、tokenization、sampling、IPC、memory allocation 或 kernel launch 没有及时准备下一步。GPU 很贵，任何 host gap 都是在为闲置 HBM 与 Tensor Core 付费。目标不是“CPU utilization 越高越好”，而是让关键 host path 在 GPU 完成前准备好下一批工作。
+
+\lecturefigure{slide-059.jpg}{Host overhead 在 GPU timeline 中形成可见空洞}{官方 deck 第 59 页；课堂 01:16:10--01:16:55}
+
+\begin{knowledgebox}{读图：彩色 kernel 之间的黑色空隙就是机会}
+先确认 gap 是否由 host launch、同步、allocation、communication 或真正的数据依赖造成。若 GPU kernel 本身很短，固定 launch overhead 占比会更大；若多 replica 只有少数出现 gap，则可能是 CPU contention、NUMA、温度或 Python path 差异。
+\end{knowledgebox}
+
+\subsection{CUDA Graph：把重复 launch 序列一次 capture}
+
+CUDA Graph 把一串 kernel launch、dependency 和部分 memory operation 记录成可重复 replay 的图，减少每个 decode step 由 host 逐个提交 kernel 的开销。它特别适合 shape 与 control flow 相对稳定的 decode，但 dynamic batch、variable sequence 与 memory address 会要求 padding、bucket 或多 graph 管理。
+
+\lecturefigure{slide-060.jpg}{CUDA Graph capture 将重复 GPU 工作压成可 replay 图}{官方 deck 第 60 页；课堂 01:16:55--01:17:20}
+
+\begin{importantbox}{Launch-overhead 模型}
+若一步 decode 有 $N$ 次 kernel launch，每次 host launch 开销为 $t_l$，则
+\[
+T_{\mathrm{step}}\approx T_{\mathrm{GPU}}+Nt_l+T_{\mathrm{Python}}+T_{\mathrm{sync}}.
+\]
+CUDA Graph 主要压缩 $Nt_l$ 与部分调度开销，不会自动减少 $T_{\mathrm{GPU}}$。当 kernel 很长时收益有限；当 step 很碎时收益显著。
+\end{importantbox}
+
+\subsection{先用系统级信号找 straggler}
+
+在深入代码前，温度、功耗与 utilization 能快速识别异常 replica。功耗偏低可能表示 GPU 没有收到足够工作，温度/时钟异常可能触发 throttling。然后用 Nsight Systems、Torch Profiler 或 CUPTI timeline 对齐 CPU thread、CUDA launch、communication 与 kernel，找到慢 replica 的差异。
+
+\lecturefigure{slide-061.jpg}{低功耗可以暴露没有吃满工作的慢 replica}{官方 deck 第 61 页；课堂 01:17:20--01:17:35}
+
+\begin{knowledgebox}{读图：功耗不是性能目标，而是旁路证据}
+同一 workload 下，一台 replica 的功耗明显更低，可能是 host starvation、较低 clock、通信等待或更小 batch。它不能单独证明根因，但能帮助从数百副本中挑出需要 trace 的异常样本。
+\end{knowledgebox}
+
+\lecturefigure{slide-062.jpg}{Nsight Systems / Torch Profiler 在 timeline 上定位 straggler}{官方 deck 第 62 页；课堂 01:17:35--01:18:00}
+
+\begin{knowledgebox}{读图：先比较 replica，再解释 kernel}
+图中多条 timeline 里有一条明显偏慢。第一步对齐相同请求阶段，比较 host gap、collective、kernel duration 与 overlap；只有确认差异落在某个 kernel 内部，才进入 Nsight Compute。否则低层 counter 会让人精确优化错误位置。
+\end{knowledgebox}
+
+\subsection{普通 Python profiler 仍可能带来两位数收益}
+
+前面的系统级 trace 已确认 GPU 在等待 host；本节继续用普通 CPU profiler 缩小根因。Slides 63--64 强调一个反常识案例：多模态 SGLang 路径每次请求重复构造对象/张量，py-spy flame graph 直接暴露热点；用 Python dictionary 缓存指针/对象后，端到端性能提升超过 10\%。这不是“dict 总能加速”，而是说明 host path 仍值得用最简单工具观察。
+
+\lecturefigure{slide-063.jpg}{py-spy flame graph 直接暴露 host 热点}{官方 deck 第 63 页；课堂 01:18:00--01:18:20}
+
+\begin{knowledgebox}{读图：横向宽度代表采样时间占比}
+Flame graph 中宽 frame 表示更多 CPU samples 落在该调用路径。先找请求热路径上可消除的重复工作、allocation 与 serialization，而不是先重写所有 Python。采样 profiler 对低侵入线上诊断尤其有价值。
+\end{knowledgebox}
+
+\lecturefigure{slide-064.jpg}{一个 Python dictionary 消除重复构造并获得两位数加速}{官方 deck 第 64 页；课堂 01:18:20--01:18:42}
+
+\begin{importantbox}{案例可迁移的不是代码，而是方法}
+1）用端到端 trace 确认 GPU 等待；2）用 host profiler 找最宽调用路径；3）验证对象是否能按稳定 key 复用；4）检查缓存失效、内存增长与并发安全；5）重新跑 correctness + workload benchmark。不要从“dict 很快”跳到无界缓存。
+\end{importantbox}
+
+\subsection{Kernel optimization 为什么排最后}
+
+矩阵乘、attention 与 collective kernel 往往由 NVIDIA、模型团队和专门研究者长期优化，并通过 cuBLAS、cuDNN、CUTLASS、FlashAttention、FlashInfer、DeepGEMM 等库复用。若系统仍有排队、低 batch、host gap 或错误 dtype，手写 kernel 很难得到可见端到端收益。
+
+\lecturefigure{slide-065.jpg}{只有在大项完成后才进入 kernel optimization}{官方 deck 第 65 页；课堂 01:18:42--01:19:03}
+
+\begin{knowledgebox}{Fused kernel 的第一使用定义}
+Fused kernel（融合 kernel）把多个原本独立的 GPU operation 合进一次 kernel 执行，减少 HBM 中间结果读写、kernel launch 与同步。它的收益取决于是否减少真正瓶颈的 bytes/launch；融合过大也会增加 register pressure、降低 occupancy 或限制 shape 通用性。
+\end{knowledgebox}
+
+\lecturefigure{slide-066.jpg}{Nsight Compute 把硬件 counter 映射到 C++、PTX 与 SASS}{官方 deck 第 66 页；课堂 01:19:03--01:19:25}
+
+\begin{knowledgebox}{读图：三个层级回答不同问题}
+C++/Triton source 表示算法意图，PTX 是虚拟 ISA，SASS 是目标 GPU 真正执行的机器指令。Nsight Compute 用 memory throughput、Tensor Core utilization、occupancy、stall reason 与 instruction mix 解释 kernel 离 roofline 多远；只有结合 shape 与数据依赖，counter 才有意义。
+\end{knowledgebox}
+
+\lecturefigure{slide-067.jpg}{白板先于 profiler：先推导瓶颈与上界}{官方 deck 第 67 页；课堂 01:19:25--01:19:49}
+
+\begin{importantbox}{Kernel 优化的分析顺序}
+先写出输入输出 shape、理论 FLOP、必要 bytes 与依赖；计算 arithmetic intensity 和可达 roofline；选择 tiling、data layout、fusion 与并行分解；最后用 profiler 验证。白板不是替代测量，而是缩小实验空间并防止对 counter 过拟合。
+\end{importantbox}
+
+\subsection{本章小结}
+
+优化顺序可以浓缩为：减少 target step（speculation）、减少 bytes/提高低精度算力（quantization）、填平 GPU 前后的 host gap（graph 与 profiling）、最后提升 kernel 接近物理上限的程度。每一步都必须通过相同 workload benchmark 与 application eval。
+

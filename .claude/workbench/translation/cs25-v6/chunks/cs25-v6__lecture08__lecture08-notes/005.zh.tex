@@ -1,0 +1,91 @@
+\section{Transfusion：同一 Transformer，两个预测世界}
+
+Transfusion 的设计抓住一个关键分离：\textbf{sequence-level ordering 可以统一，modality-level loss 不必统一。} 文本继续做 autoregressive next-token prediction，图像则在 continuous latent space 中做 diffusion denoising。这样既保留 mixed-modal context，又避免用 VQ vocabulary 逐 token 生成图像。
+
+\subsection{从离散 code 转向 continuous image latent}
+
+Chameleon 的瓶颈来自量化，因此本节先改变 image target space，再讨论怎样与 text 共用 backbone。读 slide 027 时要把“共享 Transformer”和“连续 image latent”作为两个独立设计决定。
+
+\lecturefigure{slide-027.jpg}{Transfusion 在一个 Transformer 中容纳 text token 与 image latent}{官方 deck 第 27 页；Transfusion arXiv 2408.11039v1}
+
+\begin{knowledgebox}{读图：共享 backbone，不共享 target distribution}
+文本 block 仍然是离散 token；图像 block 由连续 latent patch 构成。Transformer 让两类位置互相条件化，但输出头和损失根据 modality 选择。换句话说，统一的是 context mixing 与 parameter backbone，而不是要求图像也预测一个 vocabulary category。
+\end{knowledgebox}
+
+在 diffusion 中，clean latent $z_0$ 被逐步加噪：
+$$
+z_t=\sqrt{\bar\alpha_t}\,z_0+\sqrt{1-\bar\alpha_t}\,\epsilon,
+\qquad \epsilon\sim\mathcal{N}(0,I).
+$$
+模型根据 mixed-modal context、time step $t$ 和 noisy latent $z_t$ 预测噪声：
+$$
+\mathcal{L}_{\text{diff}}
+=\mathbb{E}_{z_0,t,\epsilon}
+\left[\left\|\epsilon-\epsilon_\theta(z_t,t,\text{context})\right\|_2^2\right].
+$$
+$\bar\alpha_t$ 控制保留多少 clean signal；$\epsilon_\theta$ 是 denoiser。生成时从噪声开始，迭代反演得到 image latent，再经 decoder 还原像素。
+
+\subsection{联合 loss 如何工作}
+
+有了连续 latent 后，下一步是说明两个时间尺度怎样进入同一训练循环。本节连接 sequence autoregression 与 diffusion denoising，并明确 loss weighting 是 optimization design，而不是符号上的简单相加。
+
+\lecturefigure{slide-028.jpg}{Transfusion 把 autoregressive text loss 与 diffusion image loss 放入同一模型}{官方 deck 第 28 页；课堂 00:17:25--00:18:35}
+
+\begin{knowledgebox}{读图：看清两条时间轴}
+文本沿序列位置做 left-to-right prediction；图像 block 内部则沿 diffusion time 从 noisy latent 逐步还原。两种“时间”不可混淆：sequence position 决定 block 之间的因果条件，diffusion step 决定 image latent 的去噪进度。共享 Transformer 接收二者，但每个位置的 supervision 来自不同目标。
+\end{knowledgebox}
+
+联合目标可以抽象为
+$$
+\mathcal{L}_{\text{Transfusion}}
+=\mathcal{L}_{\text{AR-text}}+\lambda_{\text{img}}\mathcal{L}_{\text{diff-image}}.
+$$
+$\lambda_{\text{img}}$ 用来平衡 gradient scale。若图像 block 很长或 diffusion loss 数值更大，不做 normalization 可能让图像梯度主导 backbone；反之，权重过低又会让模型退化为 text model 加弱生成头。
+
+\begin{lstlisting}[caption={Transfusion 风格的 modality-aware joint objective}]
+def transfusion_loss(hidden, batch):
+    text_loss = cross_entropy(
+        text_head(hidden[batch.text_mask]),
+        batch.text_targets,
+    )
+    noise = normal_like(batch.image_latents)
+    noisy = add_noise(batch.image_latents, noise, batch.steps)
+    pred = image_head(hidden, noisy, batch.steps)
+    image_loss = mse(pred, noise)
+    return text_loss + batch.image_weight * image_loss
+\end{lstlisting}
+
+\teachervoice{00:17:49--00:18:35，老师把 Transfusion 概括为“在一个 Transformer 中结合 autoregressive language modeling 与 diffusion image generation”。这里的单一模型不意味着单一 loss；恰恰是允许不同目标，才避免把图像硬压成文字式分类。}
+
+\subsection{定性样例应该证明什么}
+
+机制成立后仍需要检查模型实际输出。本节用 slide 029 训练一种更严格的读图方式：先核对 prompt constraints，再看视觉细节，最后明确 qualitative evidence 不能回答哪些统计问题。
+
+\lecturefigure{slide-029.jpg}{Transfusion 的 mixed-modal generation examples}{官方 deck 第 29 页；Transfusion arXiv 2408.11039v1}
+
+\begin{knowledgebox}{读图：先检查 instruction fidelity，再看视觉质量}
+每个样例同时测试 prompt 中对象、关系、风格与 interleaving。读图时先核对模型是否生成了要求的实体和布局，再看细节、纹理与一致性。漂亮样例支持“模型能产生这类输出”，却不能回答平均成功率、失败分布、训练数据记忆、prompt sensitivity 或安全性。
+\end{knowledgebox}
+
+\begin{warningbox}{Qualitative sample 的证据上限}
+少量 curated samples 不能证明 distribution-wide superiority。需要与 Dense/VQ baseline 在 matched data、FLOPs、sampling steps 与 human protocol 下比较；否则图像更好可能来自更强 decoder、更长采样或筛选。后面的 MoT 结果同时给 loss curve、CLIP、FID 与 captioning score，证据层级更高，但仍不是完整产品评估。
+\end{warningbox}
+
+\subsection{理解与生成仍然使用不同 image representations}
+
+前一节只说明生成质量，本节回到讲座第二条主线：生成 latent 是否也适合理解。答案仍是否定或至少未解决，因此 slide 030 的 open problem 是从 Transfusion 过渡到 modality-aware architecture 的关键。
+
+\lecturefigure{slide-030.jpg}{Transfusion 的贡献与 understanding-generation representation split}{官方 deck 第 30 页；课堂 00:19:22--00:20:25}
+
+\begin{knowledgebox}{读图：第三条是 open problem，不是实现细节}
+前两条说明联合 AR/diffusion 优于 VQ 生成路线；第三条指出 VAE latent 对 image understanding 不够有效。许多系统因此使用一套 continuous semantic encoder 做理解，另一套 generative latent 做图像输出。模型在 backbone 层统一，representation 层却仍分叉，这正是“native multimodal”不等于“所有组件完全共享”的例子。
+\end{knowledgebox}
+
+\begin{importantbox}{Objective sharing 与 representation sharing 是两条独立轴}
+可以共享 backbone 但使用不同 loss；可以共享输入 encoder 但使用不同 output decoder；也可以为理解和生成使用两套 image representation，再在中间语义层对齐。设计评审时应分别记录 $R_{\text{understand}}$、$R_{\text{generate}}$ 与 $L_m$，不要用“统一模型”掩盖这些差异。
+\end{importantbox}
+
+\subsection{本章小结}
+
+Transfusion 证明统一 sequence context 与 modality-specific objective 可以共存。它解决了“怎样生成连续图像”这一问题，却没有自动解决 image understanding。下一章继续问：即使 representation 与 loss 选得合理，把所有 token 都送入同一套 Transformer 参数，是否仍会发生 capacity conflict？
+

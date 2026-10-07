@@ -1,0 +1,67 @@
+\section{Bridge 3：用 RL 学会在测试时重新生成信息}
+
+RL 路线假设模型的参数里仍有完成任务所需的“碎片”，只是没有在当前问题中自动显式化。于是训练一个 reasoning policy，让模型先在 chain of thought 中回忆、改写或组合相关信息，再输出答案。它把隐式 retrieval 变成模型内部的 test-time action。
+
+\subsection{Regeneration：把参数知识重新写回自己的 context}
+
+Slide 36 的关键句是：模型已经知道 pieces，需要学会在没有外部 retrieval 时，把必要信息重新生成到 CoT 中。这里的 CoT 不应被神秘化，它只是额外 token 计算；真正问题是 RL reward 能否促使这些 token 携带有用 premise，而不是冗长自言自语。
+
+\lecturefigure{slide-036.jpg}{Approach 3：通过 RL 在 CoT 中重新生成必要信息}{Stanford CS25 V6 Lecture 06 官方 slide p. 36}
+
+可把策略目标写成
+$$
+J(\pi_{\phi})=
+\mathbb{E}_{q\sim Q,\,z\sim\pi_{\phi}(\cdot\mid q)}
+\left[r\!\left(q,z,a(z,q)\right)\right],
+$$
+其中：
+\begin{itemize}
+  \item $q$ 是问题；
+  \item $z$ 是模型生成的中间 reasoning / recall tokens；
+  \item $a(z,q)$ 是基于这些 token 得到的最终答案；
+  \item $r$ 是答案正确性或任务 reward；
+  \item $\pi_{\phi}$ 是被 RL 更新的 reasoning policy。
+\end{itemize}
+
+\begin{lstlisting}[language=Python,caption={用 RL 学习 test-time regeneration 的抽象训练循环}]
+for query, answer in rl_dataset_A:
+    reasoning = policy.sample(query)
+    prediction = policy.answer(query, reasoning)
+    reward = task_reward(prediction, answer)
+    policy.update(reasoning, reward)
+
+evaluate(policy, heldout_dataset_B)
+\end{lstlisting}
+
+\subsection{A/B transfer：学到 task answer，还是学到 general reasoning policy}
+
+实验先把两个新知识数据集 A、B 写入模型参数，再只在 A 上做 RL。若 B 的 held-out latent test 也提高，说明策略不只是记住 A 的具体答案，而是学习了可迁移的“怎样把参数信息重新表达进 context”的过程。Augmentation baseline 只扩展 A，用于区分数据覆盖与 reasoning transfer。
+
+\lecturefigure{slide-037.jpg}{只在数据集 A 上做 RL，再测试数据集 B 的 latent holdouts}{Stanford CS25 V6 Lecture 06 官方 slide p. 37}
+
+\lecturefigure{slide-038.jpg}{RL policy 对数据集 B 的 syllogism holdouts 产生迁移}{Stanford CS25 V6 Lecture 06 官方 slide p. 38}
+
+图中的重点是红色 reasoning-generalization bar：只增强 A 并不会自动提高 B，而在 A 上训练的 reasoning policy 能对 B 的部分结构迁移。这支持“学到过程”而不只是“增加样本”，但迁移范围仍取决于结构相似性与 reward 覆盖。
+
+\begin{knowledgebox}{两种 transfer 不要混淆}
+\textbf{Knowledge transfer} 是把 A 的事实带到 B；\textbf{reasoning-policy transfer} 是在 A 上学到一种操作，随后对 B 的不同事实执行。课程关心后者，因此数据集必须隔离，且 B 的 held-out target 不能在 RL 训练中泄漏。
+\end{knowledgebox}
+
+\subsection{真正的 reversal 仍然困难}
+
+RL 并没有解决全部 latent gap。对于 syllogism，模型可以学到“先把相关命题写出来，再组合”的通用程序；对于 true reversal，如果参数表示没有提供从对象到主体的有效索引，模型可能只能枚举候选关系，直到找到匹配项。枚举在小合成空间可行，在开放实体空间则不可接受。
+
+\lecturefigure{slide-039.jpg}{RL 对 true reversal 的改善依赖近乎穷举的策略}{Stanford CS25 V6 Lecture 06 官方 slide p. 39}
+
+\lecturefigure{slide-040.jpg}{RL regeneration 改善部分问题，但不是通用解法}{Stanford CS25 V6 Lecture 06 官方 slide p. 40}
+
+\teachervoice{00:34:44--00:35:10，老师明确说 reversal 从这种 in-context recall strategy 获益不大；要靠 RL 解决，往往需要先重建所有可能关系。课程把这作为方法边界，而不是把平均提升包装成全面成功。}
+
+\begin{warningbox}{更多 test-time tokens 不保证获得正确信息}
+若参数表示缺少可访问索引，long CoT 可能只是在更大空间里重复搜索。评估应记录成功所需 token、候选枚举规模、错误轨迹与停止条件，而不能只报告允许无限预算后的最终 accuracy。
+\end{warningbox}
+
+\subsection{本章小结}
+
+RL 可以训练一个 test-time regeneration policy，把部分参数知识重新显式化，并跨数据集迁移到相似 latent structure；但它受 reward、结构覆盖和搜索成本限制。特别是 reversal 暴露了一个根本问题：若知识没有按反向访问组织，推理 token 只能补偿，无法免费创造索引。
+

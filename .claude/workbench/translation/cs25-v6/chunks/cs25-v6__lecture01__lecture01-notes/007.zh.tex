@@ -1,0 +1,68 @@
+\section{Self-improving agents：把一次生成改成闭环系统}
+
+Post-training 仍可把模型看成输入到输出的函数；agent 则让模型在环境中反复感知、决策、行动和更新状态。关键不是使用了“agent”这个名字，而是系统是否拥有目标、observation、action space、memory、tool permissions 与 termination condition。
+
+\subsection{Agent 的操作性定义}
+
+设环境状态为 $s_t$，模型可见 observation 为 $o_t$，内部 memory 为 $m_t$，动作策略为
+\[
+a_t\sim\pi_{\theta}(a\mid o_t,m_t,g),
+\]
+其中 $g$ 是目标。环境返回 $o_{t+1}$，memory update 为 $m_{t+1}=U(m_t,o_{t+1},a_t)$。Agent 的能力来自策略、工具、状态更新和环境反馈共同组成的闭环，而不是模型参数单独决定。
+
+\lecturefigure{slide-102.jpg}{AI agent 的组成：目标、决策、工具、memory 与反馈}{CS25 V6 official deck, p.~102}
+
+\lecturefigure{slide-103.jpg}{Agent loop：perceive、reason、act、observe、reflect、repeat}{CS25 V6 official deck, p.~103}
+
+\teachervoice{00:43:12--00:44:05，老师把 agent 与 one-shot model 的区别压缩成 loop。课堂提示：没有 observation 或 state update 的多轮 prompt，不一定构成真正环境交互。}
+
+\begin{importantbox}{Agent contract 的最小字段}
+目标 $g$、可见 observation、允许 action/tool、memory policy、budget、停止条件、错误恢复与权限边界必须显式定义。若缺少其中任何一项，“自主性”就会变成无法审计的模糊承诺。
+\end{importantbox}
+
+\subsection{Self-improvement：改输出、改 memory，还是改策略}
+
+“自我改进”可以指三种不同层级：对当前答案做 refinement；把失败总结写入 episodic memory；或通过训练更新参数。slide 104 提出总框架，slide 105--106 分别展示 refinement 与 reflection。前两者主要改变当前 context 或外部 state，不等于模型永久学会了新能力。
+
+\lecturefigure{slide-104.jpg}{Self-improvement：生成、反馈、修订与经验积累}{CS25 V6 official deck, p.~104}
+
+\lecturefigure{slide-105.jpg}{Refinement：对同一输出进行批评和迭代修订}{CS25 V6 official deck, p.~105}
+
+\lecturefigure{slide-106.jpg}{Reflexion：把失败总结为可复用 memory 供后续任务调用}{CS25 V6 official deck, p.~106}
+
+若第 $k$ 次候选为 $y^{(k)}$，critic 产生反馈 $c^{(k)}$，refinement 可写成
+\[
+y^{(k+1)}\sim p_{\theta}(y\mid x,y^{(k)},c^{(k)}).
+\]
+只有当 critic 与 generator 的错误不完全相关、反馈能定位可修复问题、并且 budget 允许多次迭代时，循环才可能提高表现。否则系统会反复改写措辞或放大同一错误。
+
+\subsection{ReAct：reasoning 与 acting 交替}
+
+ReAct 把 thought、action 与 observation 交替写进轨迹。Action 调用搜索、数据库、代码或其他 API；observation 把真实结果返回模型。它比纯 CoT 多了环境 grounding，却增加工具选择错误、参数错误、权限越界、prompt injection 与不可重复外部状态。
+
+\lecturefigure{slide-107.jpg}{ReAct：reasoning、tool action 与 observation 的交替闭环}{CS25 V6 official deck, p.~107}
+
+\begin{lstlisting}[language=Python,caption={带权限与终止条件的最小 agent loop}]
+state = initialize(goal, memory)
+for step in range(max_steps):
+    proposal = model.plan(state)
+    if proposal.action == "finish":
+        return proposal.answer
+    authorize(proposal.action, policy=tool_policy)
+    observation = tools.execute(proposal.action)
+    state = update_state(state, proposal, observation)
+raise BudgetExceeded(state)
+\end{lstlisting}
+
+\teachervoice{00:44:05--00:45:43，老师把 refinement、reflection 与 ReAct 视为把反馈插在不同位置：输出后、跨任务 memory、或环境 action 之后。实践经验：loop 越长，状态、权限和 termination 越需要工程化。}
+
+\begin{warningbox}{“循环次数更多”不保证可靠性}
+如果 critic 与 generator 共享盲点，reflection 会把错误总结成更有说服力的 memory；如果工具 observation 被 prompt injection 污染，下一步 reasoning 会在错误状态上继续。Agent eval 必须测量成功率、成本、恢复能力和副作用，而不只是最终文本质量。
+\end{warningbox}
+
+Agent 评估应把轨迹而非最终答案作为最小审计单元。需要记录每次 tool call、参数、observation 来源、状态变更与停止原因，再分别统计 task success、无效步骤、危险 action、恢复率、token/latency cost 和权限违规。对于不可逆工具，还要区分 simulation、dry-run 与真实执行。若 benchmark 只给最终 reward，系统可能通过偶然 shortcut 成功而掩盖不安全路径；若只看漂亮 trace，又可能奖励冗长解释。可靠 agent 的目标是以可控成本稳定完成任务，并在失败时停在安全状态。
+
+\subsection{本章小结}
+
+Agent 把模型变成闭环策略，但闭环的每个接口都带来新的可观测性和失败模式。Refinement 改当前候选，reflection 改外部经验，ReAct 增加真实 observation。要谈 self-improvement，必须说明被改的是输出、memory、工具策略还是参数。
+

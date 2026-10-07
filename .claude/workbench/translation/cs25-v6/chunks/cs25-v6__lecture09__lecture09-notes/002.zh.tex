@@ -1,0 +1,109 @@
+\section{把应用翻译成 workload 与 SLO}
+
+系统工程不能从“我们要部署某个模型”开始，因为同一模型可以服务完全不同的产品。更稳健的起点是识别请求由谁发起、谁等待结果、输入输出多长、流量多突发、允许多慢、质量怎样判定。讲者先给出三类 archetype，不是为了给产品贴标签，而是为了展示三组完全不同的目标函数。
+
+\subsection{三个应用 archetype}
+
+交互助手（Chatbot+）让人持续留在交互回路中；后台代理（background agent）执行分钟到小时级任务；数据处理器（data processor）把非结构化输入转成可存储、可检索的结果。它们可能调用同一个 Transformer，但对尾延迟、吞吐、缓存与弹性的优先级截然不同。
+
+\lecturefigure{slide-007.jpg}{面向基础设施的三类 LLM 应用}{官方 deck 第 7 页；课堂 00:08:13--00:11:12}
+
+\begin{knowledgebox}{读图：先找 downstream consumer}
+判断类别时不要先看产品名，而要问“谁消费结果”。若每个 token 都直接影响人的等待感受，属于交互型；若最后一个 token 或最终 artifact 才交付价值，属于后台 agent；若结果写入数据库或索引供以后消费，属于 data processor。这个判断会直接决定 batching、autoscaling 与 retry 策略。
+\end{knowledgebox}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{L{2.5cm}YYY}
+\toprule
+类型 & 典型消费者与回路 & 主导约束 & 合理的 figure of merit \\
+\midrule
+Chatbot+ & 人类逐 token 观看，频繁多轮交互 & TTFT、TPOT/ITL、p95/p99 抖动 & output tokens/s/user \\
+Background agent & 人等待最终 PR、报告、图像或行动 & TTLT、工具调用、失败恢复、成本 & task completion time / success \\
+Data processor & 数据库、对象存储或后续 pipeline & 总吞吐、峰谷弹性、单位成本 & megatokens per dollar \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\teachervoice{00:10:52--00:11:12，老师特别提醒 data processor 的流量可能长时间稀疏、随后突然集中写入；“平均吞吐”掩盖了真正决定容量与弹性的 burst。}
+
+\subsection{SLO 是产品与系统的接口}
+
+下一步不是立刻挑 GPU，而是把应用需求写成 workload definition 与 service-level objective（SLO，服务级目标）。SLO 是内部工程目标；SLA（service-level agreement）通常是带有业务或合同后果的外部承诺。二者都应明确测量窗口、分位数、错误定义和适用流量，否则“快”“稳定”“便宜”没有可操作含义。
+
+\lecturefigure{slide-009.jpg}{Workload 与 SLO 定义系统设计空间}{官方 deck 第 9 页；课堂 00:11:17--00:12:11}
+
+\begin{importantbox}{Workload contract}
+可以把一次部署的最小合同写成
+\[
+W=(M,\lambda,L_{\mathrm{in}},L_{\mathrm{out}},r_{\mathrm{prefix}},B_{\mathrm{lat}},Q,C),
+\]
+其中 $M$ 是模型与精度，$\lambda$ 是请求/查询到达率，$L_{\mathrm{in}}$ 与 $L_{\mathrm{out}}$ 是输入和输出 token 分布，$r_{\mathrm{prefix}}$ 是可复用前缀比例，$B_{\mathrm{lat}}$ 是延迟预算，$Q$ 是质量/eval 约束，$C$ 是成本上限。注意每个量都应是分布或分位数，而不只是均值。
+\end{importantbox}
+
+\lecturefigure{slide-010.jpg}{用 advisor 把模糊需求改写成可测 workload}{官方 deck 第 10 页；课堂 00:12:11--00:13:15}
+
+\begin{knowledgebox}{读图：表单的价值是强迫团队暴露假设}
+图中的模型、token 长度、吞吐和延迟选项不是自动给出最佳部署，而是把产品经理、应用开发者和 infra engineer 的隐含假设放在同一张表里。若团队说不出输入/输出长度、峰值流量和可接受质量退化，就还没有足够信息做硬件采购或 engine benchmark。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={工作负载定义的最小机器可读结构}]
+workload = {
+    "model": "candidate-and-precision",
+    "qps": {"avg": 18, "p95": 42, "peak": 90},
+    "input_tokens": {"p50": 1200, "p95": 8000},
+    "output_tokens": {"p50": 180, "p95": 1200},
+    "prefix_reuse": 0.55,
+    "slo": {"ttft_p95_ms": 450, "tpot_p95_ms": 40},
+    "quality_gate": "application_eval_v12",
+}
+\end{lstlisting}
+
+\subsection{QPS、TPQ、prefix reuse 与 latency budget}
+
+有了合同框架，才可以逐项定义指标。QPS（queries per second）描述模型实际收到的查询；RPS（requests per second）更接近外部 API 请求，一次 agent 请求可能触发多次模型 query。TPQ（tokens per query）应拆成 prefill 的输入 token 与 decode 的输出 token。Prefix reuse 表示不同请求共享开头上下文的程度，它决定 KV cache 是否能被重复利用。
+
+\lecturefigure{slide-011.jpg}{定义 LLM workload 的核心指标}{官方 deck 第 11 页；课堂 00:13:20--00:19:10}
+
+\begin{knowledgebox}{系统术语速查}
+\begin{tabularx}{\textwidth}{L{2.5cm}YY}
+\toprule
+术语 & 定义 & 设计影响 \\
+\midrule
+QPS / RPS & 内部模型查询率 / 外部请求率 & Agent tool loop 会让 QPS 高于 RPS \\
+TPQ & 每次查询的输入与输出 token 数 & 决定 prefill、decode、KV cache 与成本 \\
+Prefix reuse & 多请求共享相同 token 前缀 & 高命中可跳过重复 prefill，但要付存储与路由代价 \\
+TTFT & time to first token，首 token 返回时间 & 受排队、prefill、网络和启动时间影响 \\
+TPOT / ITL & time per output token / inter-token latency & 决定流式输出是否顺滑 \\
+TTLT & time to last token & 近似由 TTFT、输出长度和 TPOT 共同决定 \\
+Replica & 一套可独立接收请求的 engine/worker 资源单元 & 先测单副本容量，再横向扩展 \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+对不含复杂工具调用的流式生成，可以用近似式
+\[
+T_{\mathrm{last}}\approx T_{\mathrm{first}}+(L_{\mathrm{out}}-1)T_{\mathrm{pot}}.
+\]
+其中 $T_{\mathrm{first}}$ 是 TTFT，$L_{\mathrm{out}}$ 是生成 token 数，$T_{\mathrm{pot}}$ 是平均或目标分位数下的 TPOT。进入 agent loop 后，还要加入每轮 tool latency、网络等待、重试和新的 prefill；因此端到端 TTLT 常常只能用真实 trace 估计。
+
+\begin{warningbox}{均值 QPS 与均值 token 长度会制造虚假安全感}
+容量规划应至少保留峰值/季节性、输入输出长度分布与请求相关性。长上下文请求若恰好在峰值同时出现，会同时增加 prefill、KV cache 和排队压力；分别取三个均值再相乘，往往低估真正尾部。
+\end{warningbox}
+
+\teachervoice{00:17:55--00:19:10，老师建议先在单 replica 上理解“多少请求能在目标延迟内被服务”，再用副本数匹配总 QPS。推理请求通常可在副本间独立分配，这与必须维护强一致状态的数据库扩展问题不同。}
+
+\subsection{每种应用优化不同的标量}
+
+Slide 12 把三类应用再次放在一起，是为了防止团队用同一个 dashboard 数字评价所有产品。交互系统可能牺牲总吞吐换取单用户流畅；后台 agent 可以接受较慢的 token，只要最终任务更快、更可靠；数据处理器甚至可以等待更大的 batch，以更低成本完成全部工作。
+
+\lecturefigure{slide-012.jpg}{三类应用的 figure of merit}{官方 deck 第 12 页；课堂 00:19:10--00:20:02}
+
+\begin{importantbox}{优化目标必须与价值交付对齐}
+同一个改动可能让 aggregate tokens/s 上升，却让每个用户的 TPOT 变差；也可能让单请求 TTFT 下降，却因为 GPU 利用率过低而使成本翻倍。只有先声明 figure of merit 和不可违反的 quality/SLO gate，所谓“更快”才有方向。
+\end{importantbox}
+
+\subsection{本章小结}
+
+Workload 与 SLO 是后续所有工程选择的输入。最关键的不是记住缩写，而是把它们连成因果链：应用消费者决定 latency/cost objective，token 与流量分布决定资源需求，prefix 与 agent loop 决定缓存和查询结构，单副本测量决定扩容单位。
+

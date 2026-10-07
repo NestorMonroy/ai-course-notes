@@ -1,0 +1,122 @@
+\section{LeWorldModel：用一个可解释正则化阻止端到端坍塌}
+
+Lucas 的后半场换了一个问题：即使不讨论 object structure，JEPA 从 raw pixels 端到端训练仍会坍塌。既有方法用 EMA、stop-gradient、pretrained encoder、proprioception 或多项 covariance/variance loss 绕开问题；LeWorldModel 试图用两个 loss term、一个需要调的权重和约 15M 参数完成同一目标。
+
+\subsection{世界模型概念比 2018 年命名更早}
+
+这里重新定义 world model，不是重复开场，而是强调其历史连续性：系统辨识、model predictive control 与内部模拟的思想远早于深度生成模型。Ha 与 Schmidhuber 在 2018 年普及了现代术语，但数学核心仍是受控制变量影响的状态演化映射。
+
+\lecturefigure{slide-037.jpg}{World model：受控制变量影响的状态演化映射及历史脉络}{CS25 V6 official deck, p.~37}
+
+\[
+s_{t+1}=f(s_t,a_t)+\varepsilon_t.
+\]
+其中，$s_t$ 是系统状态，$a_t$ 是控制变量，$f$ 是未知动力学，$\varepsilon_t$ 表示未建模扰动或随机性。学习 world model 的目标是得到足够准确的 $\hat f$，使 rollout 能支持规划，而不必重建环境的每个视觉细节。
+
+\teachervoice{00:34:51--00:36:53，Lucas 区分 concept 与 terminology：内部世界模拟的思想至少可追溯到 Craik 与早期控制理论，2018 年论文让 ``World Models'' 这一现代名称流行起来。}
+
+\subsection{JEPA 为什么拒绝为无关细节付费}
+
+slide 38 用漫画说明生成目标的负担：一个未来包含很多同样合理的细节，像素 likelihood 必须对整个分布负责；JEPA 只要求抽象表示中的可预测结构一致。对于 control，球的位置和速度通常比纹理中的每片叶子重要。代价是 encoder 必须自己决定什么可丢弃，而错误丢弃会直接损害 planning。
+
+\lecturefigure{slide-038.jpg}{JEPA：在抽象表示中预测，避开不必要的生成细节}{CS25 V6 official deck, p.~38}
+
+\begin{importantbox}{Reconstruction-free 的真正含义}
+它不是``没有 decoder 所以更先进''，而是训练信号不要求恢复完整输入分布。模型可以把容量集中在 dynamics-relevant factors；但若 downstream goal 依赖被丢弃细节，reconstruction-free representation 同样会失败。表示是否足够必须由任务与干预评估，而非由架构口号决定。
+\end{importantbox}
+
+\subsection{常数表示为何是 prediction loss 的全局捷径}
+
+若 $E(o)=c$ 对所有观测都输出常数，predictor 只需输出 $c$，下一 embedding 的 MSE 就能为零。这个坍塌不是 optimization 没收敛，而是目标函数存在一个极好却无信息的解。因此任何端到端 JEPA 都必须引入额外约束，让 batch 中不同样本与特征维度保持足够变化。
+
+\lecturefigure{slide-039.jpg}{Representation collapse：所有输入被编码到同一点}{CS25 V6 official deck, p.~39}
+
+\[
+E_\theta(o_t)=c,\quad
+P_\phi(c,a_t)=c
+\quad\Longrightarrow\quad
+\|P_\phi(E_\theta(o_t),a_t)-E_\theta(o_{t+1})\|_2^2=0.
+\]
+其中，$c$ 是常数向量，$E_\theta$ 是 encoder，$P_\phi$ 是 action-conditioned predictor。等式说明仅有 prediction loss 无法区分``完美预测真实状态''与``所有状态都相同''。
+
+\subsection{已有 anti-collapse recipe 的代价}
+
+V-JEPA 依赖 masking、EMA 与 stop-gradient；DINO-WM 冻结 pretrained encoder，把坍塌问题交给上游表示；PLDM 端到端训练，但需要多项 temporal/spatial VCReg loss。三类方法分别牺牲目标可解释性、表示适应自由或调参简洁性。LeWorldModel 的主张不是它们无效，而是能否用一个明确分布约束替代复杂 recipe。
+
+\lecturefigure{slide-040.jpg}{既有 JEPA recipe：EMA、冻结 encoder 与多项 regularization}{CS25 V6 official deck, p.~40}
+
+\teachervoice{00:36:53--00:38:54，Lucas 将 prior recipes 归纳为三条：V-JEPA 用 heuristic target update，DINO-WM 受 pretrained knowledge 边界限制，PLDM 用六项左右的 loss 维持方差与协方差。LeWM 的目标是端到端、像素输入、少超参，而不是否认这些方法的基线价值。}
+
+\begin{knowledgebox}{Anti-collapse 方法矩阵}
+\begin{tabularx}{\textwidth}{L{0.19\textwidth} L{0.24\textwidth} X}
+\toprule
+方法族 & 如何避免坍塌 & 主要代价 \\
+\midrule
+EMA/stop-gradient & 用慢目标分支制造稳定 target & 优化解释较弱，含额外更新规则 \\
+Frozen encoder & 继承预训练表示的多样性 & 无法针对当前 dynamics 完全适配 \\
+Variance 与 covariance losses & 显式维持维度方差与去相关 & 多项权重、稳定性与扩展性成本 \\
+Distribution matching & 约束整批 embedding 分布 & 需要选择统计检验与采样近似 \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{LeWorldModel 的最小训练合同}
+
+slide 41 把设计目标写成一串 ``No'' 与 ``Full''：不依赖 EMA、masking、stop-gradient 或 pretrained encoder，从 raw pixels 在单 GPU 上端到端训练，只保留一个正则权重。真正需要验证的不是清单是否漂亮，而是 slide 42 的代码是否确实对应一个完整可优化目标。
+
+\lecturefigure{slide-041.jpg}{LeWorldModel 的设计目标：端到端、少启发式与单一超参数}{CS25 V6 official deck, p.~41}
+
+\lecturefigure{slide-042.jpg}{LeWorldModel：encoder、action-conditioned predictor、MSE 与 SIGReg}{CS25 V6 official deck, p.~42}
+
+\[
+\hat z_{t+1}=P_\phi(z_t,a_t),
+\qquad z_t=E_\theta(o_t),
+\qquad
+\mathcal{L}_{\text{pred}}=\|\hat z_{t+1}-z_{t+1}\|_2^2.
+\]
+其中，$o_t$ 是原始像素观测，$E_\theta$ 是 ViT encoder，$z_t$ 是 compact latent state，$a_t$ 是动作，$P_\phi$ 是 Transformer predictor，$\hat z_{t+1}$ 是下一 latent 预测。prediction loss 让表示保留可预测 dynamics，但单独使用会坍塌。
+
+\begin{lstlisting}[language=Python,caption={LeWorldModel 的两项 loss 训练伪代码}]
+def train_step(observations, actions, weight):
+    embeddings = encoder(observations)
+    predicted = predictor(embeddings[:, :-1], actions[:, :-1])
+    prediction_loss = mse(predicted, embeddings[:, 1:])
+    anti_collapse = mean(sigreg(step) for step in embeddings.transpose(0, 1))
+    loss = prediction_loss + weight * anti_collapse
+    loss.backward()
+    optimizer.step()
+\end{lstlisting}
+
+\teachervoice{00:38:54--00:40:59，老师强调 ``what you see is what you get''：真实代码就是 encode、predict、MSE、SIGReg 四步；唯一需要联合搜索的 loss 权重是 $\lambda$，可以用 logarithmic/bisection 风格缩小范围。}
+
+\subsection{SIGReg：把高维正态性拆成随机一维检验}
+
+Sketched Isotropic Gaussian Regularizer（SIGReg）要求 batch 中 latent embeddings 近似各向同性高斯。直接在高维检验分布很困难，于是它采样多个单位方向，把 embedding 投影到一维，在每个方向上使用 normality statistic，再平均这些统计量。Cramér--Wold 直觉是：若所有一维投影都与目标分布一致，联合分布也被约束。
+
+\lecturefigure{slide-043.jpg}{SIGReg：随机投影、一维正态性检验与联合分布约束}{CS25 V6 official deck, p.~43}
+
+\[
+Z\in\mathbb{R}^{NB\times d},
+\qquad
+h^{(m)}=Zu^{(m)},\quad u^{(m)}\in\mathbb{S}^{d-1},
+\qquad
+\operatorname{SIGReg}(Z)=\frac{1}{M}\sum_{m=1}^{M}T\!\left(h^{(m)}\right).
+\]
+其中，$N$ 是 history length，$B$ 是 batch size，$d$ 是 embedding dimension，$Z$ 汇总所有 latent，$u^{(m)}$ 是第 $m$ 个随机单位方向，$h^{(m)}$ 是一维投影，$T$ 是 Epps--Pulley 等 normality statistic，$M$ 是投影数。
+
+\[
+\mathcal{L}_{\text{LeWM}}
+=\mathcal{L}_{\text{pred}}+\lambda\operatorname{SIGReg}(Z).
+\]
+其中，$\lambda$ 平衡 dynamics prediction 与 anti-collapse。$\lambda$ 太小会接近平凡常数解，太大则可能为了匹配高斯而牺牲任务相关预测；单一超参数只是搜索空间更小，不代表无需验证。
+
+\teachervoice{00:40:59--00:42:59，Lucas 用随机箭头解释 SIGReg：每次把高维 latent 投影到一维，优化投影分布的正态性；大量方向共同约束联合分布。课堂把数学细节留给论文，但明确指出这是防坍塌而非生成建模。}
+
+\begin{warningbox}{Gaussian regularization 不等于 latent factors 独立}
+各向同性高斯约束鼓励总体方差与方向覆盖，不能保证每个维度对应可解释物理量，也不能排除非线性缠结。它解决的是 ``不要全部相同'' 与分布退化，不直接解决 object structure、causal identification 或 downstream controllability。
+\end{warningbox}
+
+\subsection{本章小结}
+
+LeWorldModel 把端到端 JEPA 写成 prediction MSE 加 SIGReg：前者学习可预测状态，后者排除常数表示。随机一维 normality tests 提供可扩展的 distribution constraint，使模型不再依赖冻结 encoder 或复杂多项 regularizer。接下来必须检验的是：这种 compact latent 是否真的能用于在线规划，以及它的速度优势来自哪里。
+

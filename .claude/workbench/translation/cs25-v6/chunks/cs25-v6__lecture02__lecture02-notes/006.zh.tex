@@ -1,0 +1,61 @@
+\section{潜空间规划：模型预测如何变成动作}
+
+世界模型本身只回答``采取这串动作会发生什么''；controller 还要反向寻找``为了到达目标应采取什么动作''。LeWorldModel 使用 model predictive control（MPC）：在 latent space 中反复 rollout 候选动作，计算终点与目标的距离，让 solver 更新动作序列，然后只执行前几步并重新观察环境。
+
+\subsection{Latent MPC 的预测--优化闭环}
+
+slide 45 应从左到右、再从右下回到动作读：当前图像与目标图像先被同一 encoder 映射为 $z_1,z_g$；predictor 根据动作序列产生 $\hat z_2,\ldots,\hat z_H$；cost 比较终点与目标；solver 更新动作并重复。encoder 不生成像素，因而每个候选 rollout 都只在小 latent 上运行。
+
+\lecturefigure{slide-045.jpg}{LeWorldModel 的 latent model-predictive control 闭环}{CS25 V6 official deck, p.~45}
+
+\[
+\hat z_{h+1}=P_\phi(\hat z_h,a_h),\quad \hat z_1=E_\theta(o_1),
+\qquad
+J(a_{1:H})=\|\hat z_{H+1}-E_\theta(o_g)\|_2^2+\beta R(a_{1:H}).
+\]
+其中，$H$ 是 planning horizon，$o_1$ 是当前观测，$o_g$ 是目标图像，$a_{1:H}$ 是候选动作序列，$J$ 是规划 cost，$R$ 是动作平滑、幅值或边界 penalty，$\beta$ 是约束权重。实际 MPC 会执行首个动作后重新编码观测，以减少 open-loop 累积误差。
+
+\begin{lstlisting}[language=Python,caption={Latent MPC 的最小预测--优化循环}]
+actions = initialize_action_sequence(horizon)
+for _ in range(num_solver_steps):
+    state = encoder(current_observation)
+    for action in actions:
+        state = predictor(state, action)
+    cost = latent_distance(state, encoder(goal_observation))
+    cost += action_constraint_penalty(actions)
+    actions = solver.update(actions, cost)
+execute(actions[0])
+\end{lstlisting}
+
+\teachervoice{00:42:59--00:47:04，Lucas 把评估分成 online control 与 intuitive physics 两条。规划时先采样或初始化动作轨迹，在 latent 中 rollout，再用 goal embedding 的距离更新动作；这正是 world model 与 controller 的接口。}
+
+\begin{knowledgebox}{首次使用：Model Predictive Control}
+MPC 每次只承诺一个短 horizon：预测未来、优化动作、执行第一步、获取新观测、再规划。它与一次性 open-loop plan 的区别是持续闭环纠错；与直接 policy 的区别是测试时仍显式调用 world model 和 optimizer，因此更慢但更容易处理新目标。
+\end{knowledgebox}
+
+\subsection{四个环境不能只比较平均成功率}
+
+slide 46 横跨 Two-Room、Reacher、Push-T 与 OGBench-Cube，难度和 action geometry 不同。LeWM 在部分复杂任务上优于端到端 PLDM，并与使用 DINOv2 的 DINO-WM 竞争；它并非所有最简单环境都最优。应分别看最终成功率、方差、是否使用 proprioception，以及每次 planning 的计算量。
+
+\lecturefigure{slide-046.jpg}{多环境 control 结果：不同 baseline 的成功率与任务差异}{CS25 V6 official deck, p.~46}
+
+\begin{knowledgebox}{读图：比较 control baseline 的四个问题}
+第一，输入是 pixels only 还是额外含 proprioception；第二，encoder 是冻结 foundation model 还是端到端训练；第三，solver、horizon 与 candidate 数是否一致；第四，成功率差异是否大于误差条。只有控制这些条件，速度与成功率才可放在同一 Pareto 图上解释。
+\end{knowledgebox}
+
+\subsection{48 倍规划加速来自 compact model，不是免费午餐}
+
+slide 47 把完整 planning time 与成功率并列。LeWM 约 15M 参数、compact latent 和较少 token，使一次 action-search loop 可在单 GPU 上低于一秒，并相对 foundation-model world model 达到最高约 $48\times$ 的 speedup。这个数字依赖固定 planning setup；换 solver、batch size、horizon 或硬件后比例会变化。
+
+\lecturefigure{slide-047.jpg}{规划速度与成功率：LeWorldModel 的 systems-level tradeoff}{CS25 V6 official deck, p.~47}
+
+\teachervoice{00:47:04--00:49:08，老师把优势归因于 compact end-to-end representation：foundation encoder 产生的大量 token 让每次 imagination 更贵。课堂同时承认 LeWM 是 competitive 而非所有任务全面领先。}
+
+\begin{warningbox}{Planning speed 不能脱离 controller 配置}
+``模型更小''只减少每次 rollout 成本；总延迟还乘以候选轨迹数、solver iterations、horizon 与 replanning 频率。若为了弥补模型误差需要更多采样，端到端收益可能缩小。工程报告应同时给模型 FLOPs、solver budget、wall-clock 与成功率。
+\end{warningbox}
+
+\subsection{本章小结}
+
+latent MPC 把世界模型变成可执行控制器：encoder 定义状态与目标，predictor rollout 动作后果，cost 与 solver 反向搜索动作。LeWM 的主要系统优势来自 compact latent 与小模型，使大量候选 rollout 更便宜；其证据是特定环境和固定 controller budget 下的速度--成功率 Pareto，而不是无条件实时控制保证。
+

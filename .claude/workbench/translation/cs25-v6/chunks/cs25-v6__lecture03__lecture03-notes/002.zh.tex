@@ -1,0 +1,66 @@
+\section{两种记忆接口：token cache 与 compressed state}
+
+上一章定义了比较镜头，本章把它用于一次真实解码。关键不是重新推导 multi-head attention，而是把读者带到 serving loop：每生成一个 token，系统要读取哪些历史、写入什么状态、下一步的成本如何变化？只有先建立这个资源账本，才能理解为什么“quadratic versus linear”既重要又不够。
+
+\subsection{Attention inference：为什么 KV cache 会随上下文增长}
+
+Transformer 解码时，新 query 需要与所有历史 key/value 表示交互。实际系统不会每一步重新计算过去的 hidden states，而是缓存每层的 key 和 value；这就是 KV cache（Key--Value cache，键值缓存）。图中弧线越来越长，表示后续 token 的 query 必须访问越来越多历史位置。
+
+\lecturefigure{slide-005.jpg}{Attention inference：逐 token cache 使内存与每步读取随 context 增长}{Stanford 官方录像，00:06:40--00:07:49}
+
+若模型有 $n_\ell$ 层、每个 token 每层保存 $n_{kv}$ 个 KV head、每个 head 维度为 $d_h$，元素字节数为 $b$，则单条序列的 KV cache 近似为
+\[
+M_{\mathrm{KV}}\approx 2L\,n_\ell n_{kv}d_h b.
+\]
+因子 $2$ 来自 key 与 value，$L$ 是已缓存 token 数。第 $t$ 步 attention 读取 $O(t)$ 个历史位置，整段 naive decoding 的 attention work 累加为 $O(L^2)$；但这不等于所有 wall-clock latency 都严格按同一常数增长，因为 kernel、batching、memory bandwidth 与并行度都会改变实际曲线。
+
+\begin{knowledgebox}{第一次出现：KV cache 与 MQA / GQA}
+KV cache 保存的是每层历史 token 的 key/value 表示，而不是原始文本。Multi-Query Attention（MQA）让多个 query head 共用一组 KV head，Grouped-Query Attention（GQA）让一组 query head 共用一组 KV head；二者都通过减小 $n_{kv}$ 降低缓存，但仍保留随 $L$ 线性增长的 token-resolution state。
+\end{knowledgebox}
+
+\teachervoice{00:07:07--00:08:03，Gu 提醒“KV cache”只是 Transformer 公式产生的名字；更高层的事实是模型维护一个不断扩张的 token 数据库，而这个数据库才定义了它的 memory / compute characteristics。}
+
+\subsection{SSM inference：把整段历史折叠进有限状态}
+
+SSM 不保留每个 token 的独立记录，而是每来一个输入就更新状态 $h_t$。读图时应对照上下两排：上排 attention 的历史 token 仍可被单独寻址；下排 recurrent model 只留下蓝色状态球，早期 token 已被“写进”状态，原位置被丢弃。压缩不是附带优化，而是状态定义本身。
+
+\lecturefigure{slide-006.jpg}{高层取舍：attention 保存历史 token，SSM 更新并保留压缩状态}{Stanford 官方录像，00:07:50--00:08:49}
+
+一类结构化 SSM 可以写为
+\[
+h_t=A_t h_{t-1}+B_t x_t,
+\qquad
+y_t=C_t^{\top}h_t.
+\]
+其中，$x_t\in\mathbb{R}$ 表示一个输入通道，$h_t\in\mathbb{R}^{N}$ 是状态，$A_t\in\mathbb{R}^{N\times N}$ 控制旧状态如何保留，$B_t\in\mathbb{R}^{N}$ 控制新输入如何写入，$C_t\in\mathbb{R}^{N}$ 从状态读出输出 $y_t$。具体模型通常利用 diagonal、block、low-rank 或 head-wise structure，不能把这里的 dense matrix 直接当作实现成本。
+
+\begin{lstlisting}[caption={Attention cache 与 recurrent state 的解码接口对比}]
+def attention_decode(prompt, steps, model):
+    kv_cache = model.prefill(prompt)
+    token = prompt[-1]
+    for _ in range(steps):
+        logits, kv_cache = model.decode_one(token, kv_cache)
+        token = sample(logits)
+        yield token
+
+def recurrent_decode(prompt, steps, model):
+    state = model.scan_prompt(prompt)
+    token = prompt[-1]
+    for _ in range(steps):
+        logits, state = model.step(token, state)
+        token = sample(logits)
+        yield token
+\end{lstlisting}
+
+\begin{importantbox}{复杂度来自记忆接口}
+Attention 的优势是任意历史位置仍可被精确访问，代价是状态随 context 增长；SSM 的优势是状态大小与 context length 解耦，代价是过去必须共享有限容量。所谓 quadratic 与 linear，不是两个孤立 Big-O 标签，而是“保留逐 token 细节”与“持续压缩历史”的计算后果。
+\end{importantbox}
+
+\begin{warningbox}{Linear-time 不等于永远更快}
+线性 recurrence 若没有高效 kernel，可能在真实 GPU 上输给高度优化的 attention。反过来，FlashAttention 之类 fused kernel（把多个 GPU 操作合并为一个 kernel，以减少 HBM（High Bandwidth Memory，高带宽显存）读写和 launch overhead）能显著改善 attention 常数。讲义后续比较的是建模接口；部署结论必须同时做硬件 benchmark。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Transformer 的 generation state 是随上下文增长的 token-resolution KV cache；SSM 的 generation state 是固定大小的 compressed recurrent state。前者把精确 recall 写进接口，后者把在线更新和压缩写进接口。接下来需要回答：有限状态怎样才能既装得下、写得准，又在训练时算得快？这正是现代 SSM 的三项核心设计。
+

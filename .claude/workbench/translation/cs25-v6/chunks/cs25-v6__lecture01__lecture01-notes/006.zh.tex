@@ -1,0 +1,129 @@
+\section{Post-training 与 inference-time compute：行为怎样在预训练后继续改变}
+
+Pretraining 让模型获得广泛条件分布，但不会自动把输出变成可控助手。Post-training 可以改变参数，也可以在推理时增加 prompt、搜索、检索、工具或 verifier。判断一个方法时先问：它更新权重、改变解码、增加外部状态，还是重新定义奖励？否则 CoT、RLHF、RAG 与 agent 很容易被混成一个模糊的“增强层”。
+
+\subsection{Post-training 地图：训练后还有哪些旋钮}
+
+课程把 post-training 与 inference-time compute 放在同一页：prompt engineering、instruction tuning、preference optimization、retrieval、agents/tools 都能改变部署行为。若基础模型分布为 $p_0(y\mid x)$，post-training 得到 $p_{\theta}(y\mid x)$，推理时策略还可写成
+\[
+y^{\star}=\arg\max_{y\in\mathcal{S}(x;B)}
+\left[s_{\theta}(y\mid x)+\lambda r(y,x)\right],
+\]
+$\mathcal{S}(x;B)$ 是预算 $B$ 内生成的候选集合，$s_{\theta}$ 是模型分数，$r$ 是 verifier/reward。增加 inference-time compute 扩大候选或验证深度，却不会修复完全缺失的知识与工具权限。
+
+\lecturefigure{slide-088.jpg}{Post-training 与 inference-time compute 的方法地图}{CS25 V6 official deck, p.~88}
+
+\teachervoice{00:36:33--00:38:05，老师把 prompting、fine-tuning、preference learning、retrieval 与 agent/tool use 视为不同干预位置。课堂提示：部署行为来自 base model 与推理系统共同作用。}
+
+\begin{importantbox}{四种“改进模型”的含义}
+\begin{enumerate}
+  \item \textbf{Update weights}：SFT、DPO、RL 等直接改变参数；
+  \item \textbf{Change decoding}：self-consistency、search、reranking 改变候选选择；
+  \item \textbf{Add context/state}：RAG、memory、tool outputs 增加可见信息；
+  \item \textbf{Change environment}：agent loop 让模型行动并获得新 observation。
+\end{enumerate}
+四者的成本、可回滚性和失败模式完全不同。
+\end{importantbox}
+
+\subsection{从 CoT 到可执行分解}
+
+Chain-of-Thought（CoT）要求模型输出中间步骤，把一次性映射拆成顺序推理。它可能提高复杂任务表现，也可能生成听起来合理但不忠实的解释。Tree-of-Thoughts 扩大为多分支搜索；Program-of-Thought 把部分计算交给解释器；Socratic questioning 和 computation graph 则显式定义子问题依赖。
+
+\lecturefigure{slide-089.jpg}{Chain-of-Thought：让模型在答案前展开中间步骤}{CS25 V6 official deck, p.~89}
+
+\lecturefigure{slide-090.jpg}{标准 prompting 与 CoT prompting 的示例对比}{CS25 V6 official deck, p.~90}
+
+\lecturefigure{slide-091.jpg}{Tree-of-Thoughts：从单条推理链扩展到分支搜索}{CS25 V6 official deck, p.~91}
+
+\lecturefigure{slide-092.jpg}{Program-of-Thought：把可执行计算交给代码解释器}{CS25 V6 official deck, p.~92}
+
+\begin{knowledgebox}{读图：四种方法改变的是不同接口}
+CoT 增加顺序 token；ToT 增加候选分支与 search controller；Program-of-Thought 增加 executable tool；Socratic/computation graph 增加显式 dependency structure。它们都可被称为“reasoning”，但 compute、可验证性与错误传播路径不同。
+\end{knowledgebox}
+
+Socratic decomposition 可把任务图写成有向无环图 $G=(V,E)$，每个节点 $v_i$ 是子问题，边 $(v_j,v_i)$ 表示 $i$ 依赖 $j$。只有当所有前驱完成后才求解 $v_i$。这种结构便于局部验证，却引入 decomposition error：若一开始漏掉关键节点，后续每一步都可能局部正确而全局失败。
+
+\lecturefigure{slide-093.jpg}{Socratic questioning：递归提问把复杂问题拆成子问题}{CS25 V6 official deck, p.~93}
+
+\lecturefigure{slide-094.jpg}{Computation graphs：用依赖图组织分解与子结果}{CS25 V6 official deck, p.~94}
+
+\teachervoice{00:38:05--00:40:36，老师把 CoT 的扩展分成 branching、execution 与 structured decomposition。讲义提醒：更多 reasoning token 是搜索预算，不等于这些 token 忠实反映模型内部因果过程。}
+
+\begin{lstlisting}[language=Python,caption={带 verifier 的结构化推理搜索伪代码}]
+frontier = [initial_state(problem)]
+for depth in range(max_depth):
+    candidates = []
+    for state in frontier:
+        for thought in model.propose(state, branches=k):
+            next_state = state.extend(thought)
+            score = verifier(next_state)
+            candidates.append((score, next_state))
+    frontier = top_b(candidates, beam_width)
+return select_final(frontier)
+\end{lstlisting}
+
+\begin{warningbox}{Reasoning trace 的三种证据强度}
+一条 trace 可以是\textbf{可读解释}、\textbf{帮助得到答案的 scratchpad}，或\textbf{忠实描述内部计算的因果证据}。前两者常见，第三者需要 intervention、counterfactual 或 mechanistic evidence。不能因文本步骤正确，就断言模型“正是这样想的”。
+\end{warningbox}
+
+\subsection{RLHF、DPO、RLAIF 与 GRPO：反馈源和优化路径不同}
+
+Reinforcement Learning from Human Feedback（RLHF）通常先收集偏好，再训练 reward model，最后用 policy optimization 改变生成策略。Direct Preference Optimization（DPO）跳过显式 reward model 与在线 RL，直接优化偏好对：
+\[
+\mathcal{L}_{\mathrm{DPO}}
+=-\log\sigma\!\left(\beta\left[
+\log\frac{\pi_{\theta}(y^+\mid x)}{\pi_{\mathrm{ref}}(y^+\mid x)}
+-\log\frac{\pi_{\theta}(y^-\mid x)}{\pi_{\mathrm{ref}}(y^-\mid x)}
+\right]\right).
+\]
+$y^+$ 与 $y^-$ 是 preferred/rejected response，$\pi_{\mathrm{ref}}$ 是参考策略，$\beta$ 控制偏离程度。
+
+\lecturefigure{slide-096.jpg}{RLHF：人类偏好、reward model 与 policy optimization}{CS25 V6 official deck, p.~96}
+
+\lecturefigure{slide-097.jpg}{DPO：直接从偏好对更新策略而不显式训练 reward model}{CS25 V6 official deck, p.~97}
+
+RLAIF 用 AI 生成或判断偏好，降低人工成本，却可能放大 teacher model 的偏见。GRPO 在同一 prompt 下采样一组回答，用组内相对 reward 构造 advantage。若 reward 为 $r_i$，组均值与标准差为 $\mu_r,\sigma_r$，则可写成
+\[
+\hat{A}_i=\frac{r_i-\mu_r}{\sigma_r+\epsilon}.
+\]
+它避免单独 value model 的一部分成本，但仍依赖 reward/verifier 是否可信，也可能通过 group sampling 产生高推理开销。
+
+\lecturefigure{slide-098.jpg}{RLAIF：AI feedback 替代部分人工偏好标注}{CS25 V6 official deck, p.~98}
+
+\lecturefigure{slide-099.jpg}{GRPO：组内相对奖励与 reasoning policy 优化}{CS25 V6 official deck, p.~99}
+
+\begin{knowledgebox}{术语消化：偏好优化方法到底差在哪里}
+\begin{tabularx}{\textwidth}{p{0.17\textwidth}p{0.24\textwidth}X}
+\toprule
+方法 & 反馈来源/中间模型 & 核心机制与主要风险 \\
+\midrule
+RLHF & 人类偏好 + reward model & 在线/近在线 policy optimization；reward hacking 与训练复杂度高 \\
+DPO & 人类或 AI 偏好对 & 直接分类式目标；更简单但仍受偏好数据质量约束 \\
+RLAIF & AI critic 或 constitutional feedback & 降低人工成本；teacher bias 可被系统化放大 \\
+GRPO & 可验证 reward + 组内样本 & 相对 advantage、无需独立 value model；采样成本与 verifier 偏差明显 \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{Process supervision：奖励步骤还是只奖励终点}
+
+Outcome supervision 只看最终答案，模型可以通过 shortcut 偶然得分；process supervision 为中间步骤提供标签或 reward。若 reasoning trace 为 $z_{1:m}$，可写成
+\[
+R_{\mathrm{process}}(z)=\sum_{i=1}^{m}w_i r_i(z_i,z_{<i},x).
+\]
+$r_i$ 评价第 $i$ 步，$w_i$ 是权重。难点在于谁来定义“正确步骤”、如何处理多条等价路径，以及模型是否学会迎合 checker 而不是解决问题。
+
+\lecturefigure{slide-100.jpg}{Process supervision：从最终答案监督转向中间 reasoning step}{CS25 V6 official deck, p.~100}
+
+\teachervoice{00:40:36--00:43:12，老师区分 RLHF、DPO、RLAIF、GRPO 与 process supervision：它们的 feedback source、是否显式建 reward model、以及奖励 outcome 还是 steps 都不同。}
+
+\begin{warningbox}{可验证任务不代表 verifier 无偏}
+数学答案、代码测试和格式检查容易自动评分，但 reward 往往只覆盖可测部分。模型可能输出过拟合测试、利用数值容差或生成冗长“可评分步骤”。因此 verifier 设计本身是训练目标设计，而不是中立的测量工具。
+\end{warningbox}
+
+从基础设施看，DPO 主要需要 preference pair 和普通反向传播；RLHF/GRPO 则需要生成 rollout、reward 计算、policy/reference model logprob，并可能在多机间交换大量 variable-length sequence。推理 token 也是训练成本：同一 batch 中 reasoning 长度差异会造成 padding 与负载不均。选择算法时应同时比较离线数据构建、在线采样、reward latency、显存中的多份模型和可复现性。一个算法在论文中 token efficiency 更高，不代表 wall-clock 或 cluster utilization 更好。
+
+\subsection{本章小结}
+
+Post-training 可以改变参数，inference-time compute 可以扩大搜索，retrieval/tools 可以增加信息，process supervision 可以改变 reward 的颗粒度。CoT、ToT、Program-of-Thought、RLHF、DPO、RLAIF 与 GRPO 不是同一类“reasoning trick”；它们分别操作候选空间、外部执行、偏好数据与优化器。
+

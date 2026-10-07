@@ -1,0 +1,92 @@
+\section{三种桥接方案的工程选择}
+
+课程在 slide 41--42 把三条路径重新放到同一系统视角。它们并不是互斥论文：augmentation 可以生成高频方向，retrieval 保存长尾经历，RL 则处理无法直接检索但可通过通用过程重建的结构。真正设计任务是分配训练算力、存储、推理延迟和错误恢复责任。
+
+\subsection{统一框架：把 latent information 变成当前 context}
+
+三条路径做的其实是同一件事：在答案生成前，让任务需要的关系以可用形式进入当前计算。区别只在时机和载体。Augmentation 在训练前显式化并写入参数；retrieval 在测试时从外部 memory 取回；RL 在测试时从参数中生成一个内部工作集。
+
+\lecturefigure{slide-041.jpg}{三条桥接路径都在利用 in-context reasoning}{Stanford CS25 V6 Lecture 06 官方 slide p. 41}
+
+\begin{importantbox}{统一抽象：Context Construction}
+可把系统写成 $C_q=B(D,M,\theta,q)$：bridge $B$ 根据训练数据 $D$、外部记忆 $M$、模型参数 $\theta$ 与问题 $q$ 构造工作上下文 $C_q$。三种方法分别把主要计算放在离线数据构造、在线外部检索和在线内部生成。
+\end{importantbox}
+
+\subsection{计算、覆盖与依赖关系}
+
+Slide 42 的 pros/cons 不能只读成“谁准确率高”。Train-time augmentation 增加生成与训练成本，却使部署便宜；retrieval 训练免费，但要求可靠 memory system，并增加每次请求的 I/O 与 token；RL 可能跨显式增强分布迁移，但训练和推理都需要额外 rollout compute，对 reversal 仍弱。
+
+\lecturefigure{slide-042.jpg}{Augmentation、retrieval 与 RL 的收益和成本对照}{Stanford CS25 V6 Lecture 06 官方 slide p. 42}
+
+\begin{knowledgebox}{读图：没有一列在所有维度占优}
+这页不是方法排行榜，而是 Pareto frontier。Augmentation 用训练计算换低延迟，retrieval 用外部系统换开放覆盖，RL thinking 用额外生成换过程迁移。选择时应先固定业务约束，再寻找可接受方案，而不是从某个 benchmark 的最高柱反推统一架构。
+\end{knowledgebox}
+
+\begin{table}[H]
+\centering
+\small
+\caption{三种桥接方案的工程决策表}
+\begin{tabularx}{\textwidth}{L{0.18\textwidth}X X X}
+\toprule
+维度 & Train-time augmentation & Test-time retrieval & Test-time RL thinking \\
+\midrule
+主要成本 & 离线生成、验证、再训练 & 索引、召回、额外 context & RL rollout 与每次生成更多 token \\
+推理延迟 & 低，结论已进入参数 & 中高，依赖检索和长 context & 中高，依赖 reasoning 长度 \\
+覆盖范围 & 受预先增强的问题族限制 & 受 memory recall 与 episode 质量限制 & 受 learned procedure 与搜索空间限制 \\
+可追溯性 & 需保存增强样本 provenance & 可引用原 episode & 内部 CoT 未必忠实或可验证 \\
+典型失败 & hallucination、drift、遗漏未来目标 & relevant memory 未召回或冲突 & 冗长搜索、reward overfit、reversal 枚举 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+总成本可以粗略写为
+$$
+C_{\text{total}}=
+C_{\text{base-train}}+C_{\text{augment}}+C_{\text{RL}}
++N_{\text{query}}\left(C_{\text{retrieve}}+C_{\text{reason}}\right).
+$$
+其中 $C_{\text{augment}}$ 与 $C_{\text{RL}}$ 是一次性训练侧成本，$C_{\text{retrieve}}$ 和 $C_{\text{reason}}$ 会随查询量 $N_{\text{query}}$ 重复支付。选择方案时必须把未来调用量、延迟 SLO 与错误代价一起计算。
+
+\subsection{Q\&A：长上下文、模型规模与检索能力}
+
+在问答中，Lampinen 说明 ICL 的稳定性依赖模型和内容。单条事实通常容易；数十万 token context 中仍可能成功，但真实实体比 nonsense token 更容易被检索，因为预训练已经教会模型如何处理前者。因而 context length 与“模型熟不熟悉这类信息的检索方式”不可混为一个变量。
+
+\teachervoice{00:46:14--00:48:05，老师给出的关键 caveat 是：同样长度的数据，把真实人名替换成 nonsense words 后，context performance 会明显下降。tokenization 可能贡献一部分，但更大的因素是预训练形成的 retrieval skill。}
+
+\begin{warningbox}{不要用单一 context-window 长度预测 ICL 能力}
+窗口允许放下数据，只说明 storage capacity 足够；真正性能还受位置、实体形式、attention 干扰、query wording、训练时长上下文分布与模型检索技能影响。部署评测必须使用真实内容类型，而不是只测 needle-in-a-haystack 的单一模板。
+\end{warningbox}
+
+对于参数量和 sparsity，课堂没有给出干净结论。更大模型可能同时改善 parametric 与 contextual performance；MoE sparsity 也可能改变容量与路由，但 presented experiments 没有隔离这些变量。合理结论是需要 controlled scaling study，而不是宣称规模会自动消除 gap。
+
+\subsection{Q\&A：augmentation 的隐藏成本}
+
+老师估计 offline augmentation 可能至少比一次小数据 fine-tuning 贵一个数量级，因为先要进行多轮 inference/generation，再在更大的数据集上训练。这是经验估计而非论文 benchmark，但提示团队不能只把“推理时免费”写进方案，而忽略离线 GPU、验证和迭代成本。
+
+\teachervoice{01:08:09--01:09:43，老师列出三类代价：生成与训练使 augmentation 很贵；生成样本会 hallucinate；更大 fine-tuning 数据还可能扭曲原知识。Regularization 能缓解 drift，但具体 tradeoff 取决于训练设置。}
+
+\begin{knowledgebox}{Augmentation 上线前应记录的控制面}
+\begin{enumerate}
+  \item 生成模型、prompt、temperature 与采样次数；
+  \item 每条新结论对应的源文档与可验证推理链；
+  \item hallucination、重复与冲突过滤率；
+  \item 原任务、新 latent task 与 unrelated capability 的前后对比；
+  \item 额外生成 token、训练 token、FLOPs、wall-clock 与 GPU-hours；
+  \item 防止参数 drift 的 KL、weight decay、replay 或混合数据策略。
+\end{enumerate}
+\end{knowledgebox}
+
+\subsection{Q\&A：prompt 设计既是算法，也是泄漏风险}
+
+论文在 factual relation 任务上复用了同一组 prompt，ablation 的影响小于预期；但讲者明确说这些 prompt 绑定事实和实体关系，未必迁移到数学推理。Prompt 若直接要求生成目标测试形式，会接近“把答案告诉模型”；若太泛，又可能无法展开需要的 latent relation。
+
+\teachervoice{01:10:03--01:12:08，老师说 prompt 大致要求重写文档并连接 corpus 中其他实体，同时承认很难完全避免 task foreknowledge。跨域通用的 augmentation prompt 仍是开放问题。}
+
+\begin{warningbox}{Prompt leakage 的审计问题}
+若评测 reversal，却在 augmentation prompt 中直接写“生成所有反向关系”，模型提升证明的是定向数据构造有效，不是自动发现任意 latent structure。报告应区分 generic connection prompt、task-aware prompt 与直接 target leakage。
+\end{warningbox}
+
+\subsection{本章小结}
+
+三种桥接方案可统一为 context construction，但成本位置不同：augmentation 把计算前移，retrieval 把存储和召回外置，RL 把搜索留在模型内部。生产选择必须联合考虑 coverage、latency、provenance、retrieval recall、hallucination、drift 与 query volume，而不能只看一张准确率柱状图。
+

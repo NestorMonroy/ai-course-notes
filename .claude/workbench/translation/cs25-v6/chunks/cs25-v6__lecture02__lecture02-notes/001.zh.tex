@@ -1,0 +1,92 @@
+\section{世界模型的合同：状态、动作与可预测未来}
+
+本课不是把 ``world model'' 当成一个更大的视频生成器，而是先规定它必须履行什么合同：给定当前状态与可执行动作，模型应当预测环境怎样演化，并让预测足以支撑 reasoning、planning 与 control。两位讲者随后从两条互补路线回答这个合同：Causal-JEPA 给预测任务加入对象交互的结构偏置，LeWorldModel 则把端到端训练压缩成一个稳定而简洁的目标。
+
+\subsection{从一步预测到受控状态转移}
+
+普通自回归预测只写成 $x_t\mapsto x_{t+1}$，但真实环境中的未来还取决于智能体和外部参与者采取的动作。因而本课采用的最小世界模型是受控状态转移：模型既要知道``现在有什么''，也要知道``施加动作后什么会改变''。读第一张图时，应把三列理解为三项独立验收，而不是一条网络自动同时满足的性质。
+
+\lecturefigure{slide-003.jpg}{世界模型的三项合同：状态表示、转移规律与动作响应}{CS25 V6 official deck, p.~3}
+
+\[
+f_\theta:\mathcal{S}\times\mathcal{A}\rightarrow\mathcal{S},
+\qquad
+\hat{s}_{t+1}=f_\theta(s_t,a_t).
+\]
+其中，$\mathcal{S}$ 是状态空间，$\mathcal{A}$ 是动作空间，$s_t$ 是时刻 $t$ 的状态，$a_t$ 是该时刻施加的动作，$f_\theta$ 是参数为 $\theta$ 的转移模型，$\hat{s}_{t+1}$ 是模型预测的下一状态。若环境含有不可观测随机性，更诚实的写法是条件分布 $p_\theta(s_{t+1}\mid s_{\le t},a_{\le t})$，而不是假设唯一确定的未来。
+
+\teachervoice{00:01:52--00:03:41，Hazel 把 world model 直观地称为 simulator，并要求读者始终记住三项设计问题：表示是否保留当前重要信息，转移模型是否学到环境规则，动作是否以正确方式改变未来。}
+
+\begin{importantbox}{世界模型不是一个单独网络名}
+一个可用的世界模型至少包含三层接口：\textbf{observation encoder} 把像素变成状态，\textbf{dynamics predictor} 推演未来，\textbf{decision interface} 把预测接到动作搜索或策略学习。只展示一段逼真视频，只能证明生成器会产生某种视觉序列，不能证明它的状态可控、动作语义正确或预测足以规划。
+\end{importantbox}
+
+\subsection{为什么本课暂时不追求重建每个像素}
+
+生成式世界模型可以产生高度逼真的未来，但像素级似然要求模型同时解释任务相关结构和大量不可预测细节，例如纹理、光照噪声或背景中的随机运动。讲者并非否定 Sora、GAIA、Genie 或交互式三维生成，而是把问题缩窄为：如果目标是控制与推理，是否可以直接学习一个只保留可预测、可决策因素的 latent state？
+
+\lecturefigure{slide-004.jpg}{本课范围之外的生成式世界模型：视频、驾驶与交互环境}{CS25 V6 official deck, p.~4}
+
+下一页把差异画成监督信号的位置。生成架构把预测结果送回像素空间，与真实未来 $y$ 直接比较；joint-embedding 架构则把目标也编码成 $s_y$，只要求预测 latent 与目标 latent 相容。核心不是简单删除 decoder，而是允许表示空间忽略多解未来中不影响任务的细节。
+
+\lecturefigure{slide-005.jpg}{生成式预测与 joint-embedding prediction 的监督位置不同}{CS25 V6 official deck, p.~5}
+
+\[
+\mathcal{L}_{\text{pixel}}=\ell\!\left(D(P(E(x),a)),y\right),
+\qquad
+\mathcal{L}_{\text{latent}}=\ell\!\left(P(E(x),a),\operatorname{sg}(E(y))\right).
+\]
+其中，$E$ 是 encoder，$P$ 是 predictor，$D$ 是 decoder，$x$ 是上下文，$a$ 是动作或辅助条件，$y$ 是未来观测，$\ell$ 是距离或负对数似然，$\operatorname{sg}$ 表示 stop-gradient。第一式必须重建目标域；第二式只需在表示空间对齐，因此可以选择性保留可预测因素。
+
+\begin{warningbox}{latent 并不自动等于 semantic}
+把 loss 移到 latent space 只改变优化接口；若 encoder 学到常数、背景纹理或训练集捷径，latent 仍可能毫无用途。后文的 object masking 与 SIGReg 分别解决``预测依赖什么''和``表示如何不坍塌''，二者不能互相替代。
+\end{warningbox}
+
+\subsection{JEPA 的 energy-based 视角与表示坍塌}
+
+JEPA 可以用 energy-based model（能量模型）理解：兼容的上下文--未来组合应得到低能量，不兼容组合应得到高能量。这个视角允许一个上下文对应多个合理未来，而不要求平均成模糊像素。然而，如果 encoder 把所有输入映射到同一向量，任意预测都会与目标``相等''，于是损失为零却没有学到世界。
+
+\lecturefigure{slide-006.jpg}{JEPA：在表示空间学习兼容性与能量地形}{CS25 V6 official deck, p.~6}
+
+\[
+\mathcal{E}_\theta(x,y)=\left\|P_\theta(E_\theta(x))-E_\theta(y)\right\|_2^2,
+\qquad
+\mathcal{E}_\theta(x,y^+) < \mathcal{E}_\theta(x,y^-).
+\]
+其中，$\mathcal{E}_\theta$ 是兼容性能量，$y^+$ 是与 $x$ 相容的未来，$y^-$ 是不相容未来，$E_\theta$ 与 $P_\theta$ 分别为表示器和预测器。低能量意味着``可作为合理未来''，并不等价于对像素概率进行了归一化。
+
+\teachervoice{00:06:13--00:08:16，老师强调 anti-collapse 大致分为 contrastive 与 regularization 两族。V-JEPA 使用 EMA target encoder、stop-gradient 与遮蔽任务，目的不是装饰训练流程，而是排除常数表示等平凡解。}
+
+\lecturefigure{slide-007.jpg}{V-JEPA：时空遮蔽、context encoder、target encoder 与 predictor}{CS25 V6 official deck, p.~7}
+
+\begin{knowledgebox}{首次使用：EMA 与 stop-gradient}
+\textbf{EMA（Exponential Moving Average）target encoder} 用在线 encoder 参数的指数滑动平均更新目标分支，使目标变化更慢；\textbf{stop-gradient} 阻止目标分支被当前预测误差直接拉动。二者常一起稳定自监督训练，但它们是优化启发式，不等于已经解释了表示为何必然非坍塌。
+\end{knowledgebox}
+
+\subsection{从表示学习到动作条件世界模型}
+
+V-JEPA 2 把大规模视频表示学习与少量交互数据上的 action-conditioned post-training 分开：先从观察中学习视觉状态，再冻结或复用表示，训练动作条件 predictor。DINO-WM 更进一步地问：既然 DINOv2 已经能提供强视觉特征，是否无需重新学习 encoder，只在这些 feature 上训练动力学即可？
+
+\lecturefigure{slide-008.jpg}{V-JEPA 2：从遮蔽视频预训练到动作条件 post-training}{CS25 V6 official deck, p.~8}
+
+\lecturefigure{slide-009.jpg}{DINO-WM：冻结 DINOv2，在 patch latent 上自回归预测未来}{CS25 V6 official deck, p.~9}
+
+\teachervoice{00:08:16--00:10:17，Hazel 要求读者区分两阶段：V-JEPA 2 的大规模 action-free pretraining 先学表示，V-JEPA 2-AC 与 DINO-WM 才把动作和 proprioception 接入预测器。课程随后质疑的是 patch representation 是否适合表达对象间作用，而不是否认这些 baseline 的规划能力。}
+
+\begin{knowledgebox}{术语消化：四种容易混淆的对象}
+\begin{tabularx}{\textwidth}{L{0.20\textwidth} X}
+\toprule
+术语 & 本课中的含义 \\
+\midrule
+representation model & 把观测压成任务可用状态；不一定知道动作后果。 \\
+dynamics model & 在给定状态与动作时预测状态演化；可以建立在冻结表示上。 \\
+world model & 表示、动力学与决策接口的组合；能否规划取决于三者共同质量。 \\
+JEPA & 在表示空间做预测的训练框架；encoder 与 predictor 完全可以由 Transformer 实现。 \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+世界模型的最小合同是受控状态转移；JEPA 的价值是把预测目标移到表示空间，让模型不必重建所有像素；其根本风险是 latent 可能坍塌或学到错误捷径。V-JEPA、V-JEPA 2 与 DINO-WM 给出了三种稳定表示与动力学的组合方式，而下一章的问题是：这些状态应该由 patch 组成，还是由可交互对象组成？
+

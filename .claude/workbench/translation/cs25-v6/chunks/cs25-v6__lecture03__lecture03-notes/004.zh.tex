@@ -1,0 +1,75 @@
+\section{Autoregressive state：database、brain 与 hybrid}
+
+前一章解释了 recurrent state 怎样被构造，本章转向它怎样改变模型行为。Gu 的主张是：任何自回归模型都携带一个跨步状态，架构差异可以先还原成“状态里保存什么、怎样访问”。这种抽象把 Transformer 与 SSM 放到同一坐标系，也让 recall、state tracking、online interaction 与 hybrid design 变成同一个问题的不同侧面。
+
+\subsection{每个自回归模型都有 state}
+
+对通用生成器，可把第 $t$ 步写成
+\[
+s_t=U_\theta(s_{t-1},x_t),
+\qquad
+p(x_{t+1}\mid x_{\le t})=R_\theta(s_t).
+\]
+其中，$s_t$ 是 autoregressive state，$U_\theta$ 是更新，$R_\theta$ 是 readout。SSM 的 $s_t$ 是固定形状 recurrent state；Transformer 的 $s_t$ 则包括所有层的 KV cache。两者都符合状态机描述，只是状态空间与访问方式截然不同。
+
+\lecturefigure{slide-012.jpg}{关键抽象：所有 autoregressive model 都可视为携带跨步状态}{Stanford 官方录像，00:16:20--00:17:19}
+
+\begin{importantbox}{状态是“步骤之间留在内存里的东西”}
+这个定义比“模型有没有 recurrence layer”更宽。Transformer 在网络图上不是传统 RNN，但在 autoregressive decoding loop 中，它仍把 KV cache 从一步传给下一步，因此也有 state。用这个定义比较模型，可以避免把计算图标签误当成能力本质。
+\end{importantbox}
+
+\subsection{Database versus brain：一个有用但危险的类比}
+
+Transformer 的 cache 像数据库：每个历史 token 有自己的记录，新 query 可以对任意记录做内容寻址。SSM 的固定状态更像人类工作记忆：新经验持续改写同一状态，细节可能丢失，但系统可以不断在线运转。图中“database”与“brain”不是褒贬，而是在对比精确索引与分布式压缩。
+
+\lecturefigure{slide-013.jpg}{粗粒度类比：Transformer 像数据库，SSM 像压缩式大脑状态}{Stanford 官方录像，00:17:20--00:18:39}
+
+\teachervoice{01:01:22--01:03:31 的 Q\&A 中，Gu 主动警告这些 brain analogies “very, very coarse”，自己并非 neuroscientist；人脑只被当作“有限在线状态仍可支持智能”的存在性启发，不能用来证明 SSM 具有生物合理性。}
+
+\begin{warningbox}{类比的适用范围}
+“Database”不意味着 Transformer 真的执行 SQL；“brain”也不意味着 SSM 复现神经回路。这个类比只描述 memory interface：一个保留逐位置记录并支持精确寻址，一个把历史写入有限分布式状态。超出这个接口的生物学、意识或 AGI 推论都没有证据。
+\end{warningbox}
+
+\subsection{SSM 的一体两面：online processing 与 retrieval loss}
+
+固定状态使 recurrence 可以按恒定接口持续接收流数据，适合 speech、control、time series 与交互式 agent；同一压缩也会让 exact string、associative recall、needle-in-a-haystack 与 general QA 中的细粒度证据变弱。读图时应把绿色优点与灰色缺点看成同一机制的两面，而不是两组互不相关的 benchmark 现象。
+
+\lecturefigure{slide-014.jpg}{早期取舍总结：stateful online processing 与 fine-grained retrieval 的冲突}{Stanford 官方录像，00:18:40--00:19:39}
+
+可以用信息瓶颈直觉表达这种冲突：若 $s_t$ 的容量有限，而过去 $x_{\le t}$ 包含的任务相关信息不断增长，更新 $U_\theta$ 必须选择保留哪些统计量。对控制任务，最近动态与低维 sufficient state 可能足够；对逐字引用任务，任何不可逆压缩都可能删除答案。
+
+\begin{knowledgebox}{State tracking 与 retrieval 不是同一能力}
+State tracking 要求持续更新“现在处于什么状态”，例如计数器、游戏位置或控制系统隐变量；retrieval 要求从长上下文中精确取回某个旧事实。有限 state 可以非常擅长前者却弱于后者。Mamba-3 的一项目标正是提升复杂状态跟踪，但这仍不等同于获得完整 token database。
+\end{knowledgebox}
+
+\subsection{Hybrid：让压缩状态做主处理，让 attention 做外部查找}
+
+若内部压缩与外部精确查找互补，最自然的系统就是 hybrid。图中列出的 H3、Jamba、Zamba、Samba 等把 recurrent / linear layers 与 attention layers 交错。讲者借用“brain + scratchpad”直觉解释为什么网络可能需要较多 compressive layers，再用少量 attention 层补 exact lookup。
+
+\lecturefigure{slide-015.jpg}{Hybrid models：交错 SSM 与 attention，并追问合理层数比例}{Stanford 官方录像，00:20:00--00:21:39}
+
+\begin{lstlisting}[caption={按周期插入 attention 的 hybrid stack 教学伪代码}]
+def build_hybrid_stack(depth, attention_period):
+    layers = []
+    for layer_index in range(depth):
+        if (layer_index + 1) % attention_period == 0:
+            layers.append(AttentionBlock())
+        else:
+            layers.append(RecurrentBlock())
+    return layers
+\end{lstlisting}
+
+\teachervoice{00:20:31--00:21:26，较早工作常在 perplexity 上得到约 10:1 的 SSM-to-attention ratio；到 2026 年讲者观察到新模型常用至少 3:1 或 4:1。这个变化本身说明 ratio 不是常数，而会随模型、训练与能力目标漂移。}
+
+\begin{warningbox}{不要把 10:1 写成最优定律}
+比例依赖 layer width、state size、attention type、训练数据、tokenizer、参数预算与 evaluation。更重要的是，旧实验主要看 perplexity；需要 retrieval、tool use 或 multimodal alignment 时，最优 attention 频率可能完全不同。合理做法是把比例当作 ablation 起点。
+\end{warningbox}
+
+\begin{importantbox}{Compression 可能是能力，不只是妥协}
+多组 hybrid ablation 在不计速度时仍偏好更多 linear / recurrent layers，这削弱了“有限状态只是为了省算力”的解释。压缩迫使模型形成 task-relevant summary，可能帮助 state tracking 与 abstraction building；后面的 H-Net outer-stage ablation 会给出更直接证据。
+\end{importantbox}
+
+\subsection{本章小结}
+
+Autoregressive state 把不同架构还原成统一接口。Transformer 的 database-like cache 擅长细粒度 recall；SSM 的 brain-like compressed state 擅长在线更新，却会牺牲精确回忆。Hybrid 不是折中拼盘，而是把两种 memory primitive 分工。下一章进一步追问：attention 为什么对 token 的“粒度与语义”如此敏感？
+

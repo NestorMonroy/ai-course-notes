@@ -1,0 +1,122 @@
+\section{RLP 机制：thought policy、counterfactual baseline 与 information gain}
+
+完整 RLP pipeline 包含四个互相依赖的部分：thought policy 产生 rollout，no-think baseline 给出反事实预测，information-gain reward 衡量 thought 的增益，EMA 让 baseline 稳定追随 policy。只看最终公式会漏掉 prompt、采样、停止梯度和更新时序等工程条件。
+
+\subsection{全局流程图先看两条路径}
+
+输入 context 一路进入 no-think baseline，得到 $p_\phi(x_t\mid x_{<t})$；另一路进入 thought policy，先采样 $c_t$，再得到 $p_\theta(x_t\mid x_{<t},c_t)$。两个 log probability 的差形成 reward，reward 再更新 thought tokens 的 policy，同时普通 NTP 仍训练模型预测真实 token。
+
+\lecturefigure{slide-026.jpg}{RLP 总览：两条预测路径、信息增益奖励与策略更新}{Stanford 官方录像，00:32:34--00:33:00}
+
+\begin{knowledgebox}{读图：不要把两套模型理解成永久独立网络}
+图中 $\theta$ 与 $\phi$ 表示两个参数状态：policy 是当前网络，baseline 是其 EMA-delayed copy。它们共享架构，baseline 不是额外训练的外部 verifier；延迟复制提供一个缓慢变化的 counterfactual reference。
+\end{knowledgebox}
+
+\subsection{Prompt contract 决定探索空间}
+
+课程展示的 prompt 要求模型专注于下一步 reasoning，不要直接跳到 boxed answer，也不要复述题目或输出元数据。这说明“让模型思考”不是中性的：prompt 定义 thought 的长度、风格与可探索空间。若 prompt 改变，reward distribution 与 rollout compute 也会改变。
+
+\lecturefigure{slide-027.jpg}{用于生成 thought 的 prompt contract}{Stanford 官方录像，00:33:00--00:33:19}
+
+\begin{lstlisting}[caption={RLP thought prompt 的简化教学版}]
+Prompt:
+  Reason about the useful next step for predicting the next token.
+  Do not jump to a final boxed answer.
+  Do not restate the question, context metadata, or commentary.
+  Produce a concise thought that can help the next-token prediction.
+\end{lstlisting}
+
+\begin{warningbox}{Prompt 也是算法超参数}
+Thought length、sampling temperature、number of rollouts、stop token 与 prompt wording 都会改变探索成本和可学信号。把这些细节省略，只报告“使用 chain-of-thought”，会让复现结果失去可比性。
+\end{warningbox}
+
+\subsection{Thought policy：先生成 action，再预测 token}
+
+给定 prompt 与 context，policy 采样多条 thought rollout。每条 thought 与 context 拼接后预测真实下一 token，因此一条 rollout 同时产生 action probability 与 token probability。Group-relative optimization 可以把同一位置的多条 thought 互相比较，降低必须训练单独 value model 的需求。
+
+\lecturefigure{slide-028.jpg}{Thought policy 生成 reasoning rollout 与 next-token prediction}{Stanford 官方录像，00:33:19--00:34:02}
+
+对第 $i$ 条 rollout，记 thought 为 $c_t^{(i)}$，则其 reasoned score 为
+\[
+S_{\mathrm{pred}}^{(i)}
+=\log p_\theta(x_t\mid x_{<t},c_t^{(i)}).
+\]
+其中，$i=1,\ldots,G$，$G$ 是每个位置采样的 thought 数。$S_{\mathrm{pred}}$ 高并不意味着 thought 文本本身正确，只表示它帮助模型给真实 token 更高概率。
+
+\subsection{No-think baseline：需要一个同上下文反事实}
+
+若只最大化 reasoned score，模型可能利用本来就很容易的 token 获得高分。Baseline 使用相同 context、但不看 thought，估计该 token 在“没有探索”时已有多容易。Reward 因而关注 thought 带来的增量，而不是 token 的绝对 likelihood。
+
+\lecturefigure{slide-029.jpg}{No-think baseline 提供 context-only counterfactual}{Stanford 官方录像，00:34:02--00:34:25}
+
+\begin{importantbox}{Counterfactual 的作用}
+同一个 $x_t$ 若本来就几乎确定，则 $p_\phi$ 已很高，普通常识 thought 很难获得大 reward；若某条 thought 真正消除了歧义，$p_\theta$ 相对 $p_\phi$ 的提升才会显著。Baseline 把“题目简单”与“思考有效”分离。
+\end{importantbox}
+
+\subsection{Information gain：log-likelihood ratio}
+
+RLP 的核心奖励是 reasoned predictor 与 no-think baseline 在真实 token 上的 log probability 差。正值表示 thought 提高预测，零表示没有贡献，负值表示 thought 误导模型。论文在计算 policy update 时把 reward 视作常数，不通过两个 scorer 反向传播 reward 本身，以避免目标发生不受控耦合。
+
+\lecturefigure{slide-030.jpg}{Information-gain reward 的完整计算图}{Stanford 官方录像，00:34:25--00:35:34}
+
+\[
+r_t^{(i)}
+=\log p_\theta(x_t\mid x_{<t},c_t^{(i)})
+-\log p_\phi(x_t\mid x_{<t}).
+\]
+其中，$r_t^{(i)}$ 是第 $i$ 条 thought 在位置 $t$ 的奖励；$p_\theta$ 是加入 thought 后的预测概率；$p_\phi$ 是 context-only baseline；$x_t$ 始终是语料真实 token。该量类似 pointwise log-likelihood ratio，而不是 Shannon mutual information 的完整数据集期望。
+
+\teachervoice{00:34:25--00:35:34，讲者强调：thought 只有在“meaningfully contributes”时 reward 才为正；垃圾 thought 可以得到零或负值。这个口头说明比“模型生成 CoT”更接近方法本质。}
+
+\begin{warningbox}{Information gain 不等于事实真相}
+一条错误但与训练语料统计相关的 thought 也可能提高某个 token 的概率；一条正确但冗长或措辞不匹配的 thought 可能 reward 很低。RLP 优化 predictive usefulness，不直接优化 truthfulness、faithfulness 或 safety。
+\end{warningbox}
+
+\subsection{Dense non-binary reward 与 group-relative advantage}
+
+Information gain 定义了单条 thought 的分数，但策略优化还需要把多个 rollout 转成相对 credit；本节从 reward 过渡到 advantage，说明为什么 RLP 不必为每个 token 训练额外 value model。与只在最终答案给 0/1 的 sparse reward 不同，RLP 的 reward 是实数，并可在文档的任意选定位置计算。对同一位置的 $G$ 条 rollout，可用组内均值和标准差构造 advantage，使“比同组其他 thought 更有帮助”的 rollout 获得正更新。
+
+\lecturefigure{slide-031.jpg}{RLP 使用 dense、non-binary 的 token-level reward}{Stanford 官方录像，00:35:34--00:35:45}
+
+\[
+A_t^{(i)}
+=\frac{r_t^{(i)}-\bar r_t}{\operatorname{std}(r_t)+\epsilon},
+\qquad
+\bar r_t=\frac{1}{G}\sum_{i=1}^{G}r_t^{(i)}.
+\]
+其中，$A_t^{(i)}$ 是 group-relative advantage，$G$ 是 rollout 数，$\epsilon$ 防止方差过小时除零。实际 RLP 使用 clipped surrogate 更新 thought tokens，并与标准 likelihood training 交错。
+
+\subsection{EMA baseline：既要跟得上，又不能同步追逐}
+
+Baseline 若完全冻结，会逐渐失去参考价值；若每步与 policy 完全同步，又可能让 reward target 快速漂移。Exponential Moving Average（EMA，指数移动平均）用缓慢更新折中：baseline 保持“足够新”，但故意落后，从而缓解 reward hacking 与不稳定自举。
+
+\lecturefigure{slide-032.jpg}{EMA-delayed no-think baseline 的更新位置}{Stanford 官方录像，00:35:45--00:36:31}
+
+\[
+\phi\leftarrow \tau\phi+(1-\tau)\theta,
+\qquad 0<\tau<1.
+\]
+其中，$\theta$ 是当前 thought policy 参数，$\phi$ 是 baseline 参数，$\tau$ 是 EMA decay。$\tau$ 越接近 1，baseline 越稳定但越陈旧；越小则跟随更快，但 counterfactual target 也更易抖动。
+
+\begin{lstlisting}[caption={RLP 单步训练的教学版伪代码}]
+document = sample_general_pretraining_document()
+t = random_token_position(document)
+context, target = document[:t], document[t]
+
+thoughts = policy.sample_thoughts(context, group_size=G)
+baseline_logp = no_think_ema.log_prob(target, context)
+rewards = []
+for thought in thoughts:
+    reasoned_logp = policy.log_prob(target, context, thought)
+    rewards.append(stop_gradient(reasoned_logp - baseline_logp))
+
+advantages = group_normalize(rewards)
+update_thought_policy_clipped(thoughts, advantages)
+update_standard_next_token_loss(document)
+ema_update(no_think_ema, policy, decay=tau)
+\end{lstlisting}
+
+\subsection{本章小结}
+
+RLP 的闭环是：policy 采样 thought，baseline 给出 no-think counterfactual，log-likelihood ratio 形成 dense reward，group-relative advantage 更新 thought tokens，EMA 稳定 baseline，同时 NTP 继续学习文档。任何一个组件缺失，都可能把方法退化为普通 CoT imitation 或不稳定自奖励。
+

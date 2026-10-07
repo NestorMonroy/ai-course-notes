@@ -1,0 +1,79 @@
+\section{Bridge 2：用 Episodic Retrieval 把经历带回 Context}
+
+第二条桥接路线不提前展开所有结论，而是保存较完整的经历。当新问题出现时，系统检索相关 episode，把它重新放回 context，让模型用已有 ICL skill 按当前目标解释。这种方法把“未来用途未知”转化为“测试时能否找到正确经历”。
+
+\subsection{Oracle episodic memory：先证明价值，再承认检索未解}
+
+课程中的检索器是 oracle episodic memory：它保证至少召回一个相关经历，但会混入若干 distractors。这个设置故意把问题拆开：先问“只要相关经历回到 context，latent generalization 会不会恢复”，而不是同时解决 embedding、index、ranking、recency 和权限控制。
+
+\lecturefigure{slide-033.jpg}{Approach 2：oracle episodic retrieval 在测试时恢复相关经历}{Stanford CS25 V6 Lecture 06 官方 slide p. 33}
+
+定义检索集合 $M_q$ 后，常见指标为
+$$
+\operatorname{Recall}@k=\frac{|M_q^{(k)}\cap R_q|}{|R_q|},
+\qquad
+\operatorname{Precision}@k=\frac{|M_q^{(k)}\cap R_q|}{k}.
+$$
+其中：
+\begin{itemize}
+  \item $R_q$ 是问题 $q$ 的相关经历集合；
+  \item $M_q^{(k)}$ 是检索器返回的前 $k$ 条经历；
+  \item oracle 设定保证高 recall，但允许 precision 不完美；
+  \item 实验因此测试模型能否在 distractors 中使用至少一条正确记忆。
+\end{itemize}
+
+\begin{lstlisting}[language=Python,caption={Oracle episodic retrieval 实验的职责分离}]
+memories = store_training_experiences(dataset)
+
+def answer(query):
+    relevant = oracle_pick_at_least_one(memories, query)
+    distractors = sample_irrelevant(memories, count=4)
+    context = shuffle(relevant + distractors)
+    return frozen_model.generate(context=context, query=query)
+\end{lstlisting}
+
+\teachervoice{00:29:09--00:29:31，老师直接称这个 retrieval system 在“cheating”：它有 perfect recall，只是 precision 不完美。这个承认不是削弱实验，而是在明确实验只证明条件命题——相关 episode 回到 context 后确实有价值。}
+
+\subsection{结果：reversal 与 codebook 都恢复}
+
+图中的比较重点不是 forward condition，因为参数学习和 episodic retrieval 都能处理显式方向；真正有区分度的是 reversal 和 latent codebook condition。带 retrieval 的系统即使同时看到干扰记忆，也能接近 ICL 式的灵活泛化。
+
+\lecturefigure{slide-034.jpg}{Episodic retrieval 在 reversal 与 codebook latent test 上的收益}{Stanford CS25 V6 Lecture 06 官方 slide p. 34}
+
+\begin{knowledgebox}{读图：显式条件用于校准，latent 条件用于辨别机制}
+两组图都应先看 explicit / trained condition，确认参数学习与 retrieval 至少能完成基础任务；再看 reversal 或 latent codebook condition。若只有后者拉开差距，证据支持的是 flexible reuse，而不是 retrieval 简单提供了更多训练数据或更强基础模型。
+\end{knowledgebox}
+
+\lecturefigure{slide-035.jpg}{结论：把学习经历带回 context，可恢复其 latent value}{Stanford CS25 V6 Lecture 06 官方 slide p. 35}
+
+\begin{importantbox}{Retrieval 改变的是计算现场}
+参数里可能保留了事实，却没有稳定暴露完成当前变换所需的方向；episodic retrieval 把原经历作为 token 重新呈现，使模型可以调用已经训练好的 context reasoning circuit。它不是把更多事实永久写入参数，而是为当前目标重建一个可计算的局部世界。
+\end{importantbox}
+
+\subsection{与 RAG 的关系：不只找答案，还要找可重新解释的经历}
+
+普通 RAG 常被描述为检索包含答案的文档；这里更关注检索包含\textbf{可推出答案的经历}。例如，文档只写“X is Y's parent”，问题却问“Y's parent was?”；retriever 不必存一条预先生成的反向答案，只需把原关系带回 context。
+
+\begin{knowledgebox}{Episodic retrieval 与常规 factual RAG 的差别}
+\begin{tabularx}{\textwidth}{L{0.24\textwidth}X X}
+\toprule
+维度 & Factual RAG 常见目标 & 本讲的 episodic retrieval \\
+\midrule
+检索对象 & 含直接答案或相近段落 & 与当前目标相关的原始经历 \\
+生成职责 & 摘录、综合、引用事实 & 重解释方向、组合关系、改变目标 \\
+关键风险 & 文档缺失、排序错误、引用不实 & 相关性之外还要保留足够关系细节 \\
+实验状态 & 可用实际 retriever 评估 & 课程使用 oracle 隔离检索价值 \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\teachervoice{00:30:41--00:31:24，老师把这项工作与 retrieval-augmented generation 联系起来，但指出重点是让 context 对参数中不易调用的 latent relation 重新做推理，而不只是查一条 factual answer。}
+
+\begin{warningbox}{Oracle result 不能直接变成产品承诺}
+真实系统必须解决 query reformulation、embedding drift、长期记忆污染、权限与隐私、时间有效性、冲突经历、recall/latency 预算。只要 recall 下降，概念上正确的 episodic architecture 也会因“记忆根本没回来”而失败。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Episodic retrieval 避免了离线枚举所有未来用途，只在目标出现时把相关经历放回 context。Oracle 实验证明了这种计算接口能恢复 reversal 与 codebook 的 latent value，但没有解决通用检索器。第三条路线进一步追问：如果模型不访问外部 memory，能否在 test time 自己重新生成需要的信息？
+

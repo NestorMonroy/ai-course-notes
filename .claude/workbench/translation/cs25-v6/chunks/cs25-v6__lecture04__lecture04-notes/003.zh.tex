@@ -1,0 +1,97 @@
+\section{Tensor 与 Sequence Parallelism：分解矩阵计算}
+
+Tensor Parallelism（TP，张量并行）让多个 rank 对\textbf{同一 batch}共同完成一个 layer。它不依赖增大 global batch，因此能突破 DP 的样本轴上限；代价是 collective 进入每个 Transformer block 的 critical path，通常必须放在 NVLink/NVSwitch 等快拓扑域内。
+
+\subsection{动机：同一输入，切分 hidden dimension}
+
+DP 的扩展速度最终受 global batch 上限约束：继续增加 rank 会让每卡 micro-batch 过小，或改变优化所需的 batch 统计。本节因此改用模型内部的 hidden dimension 作为新轴，在不增加样本数的前提下共同完成同一次 layer 计算。DP 让每张卡看到不同 batch；TP 则让每张卡看到相同输入，但只保存和计算部分 weight、gradient 与 optimizer state。完整激活是否复制，取决于采用纯 TP 还是 TP+Sequence Parallelism。
+
+\lecturefigure{slide-049.jpg}{TP 动机：保持 batch 不变，沿 hidden dimension 切分模型}{CS25 V6 official deck, p.~49}
+
+\subsection{从一个矩阵乘法到两个矩阵乘法}
+
+TP 的正确性不应靠“框架会处理”来理解，而应从最小 GEMM 推导。先看一个矩阵乘法能在哪里切，再看两次相邻 matmul 如何让第一次的 shard 直接成为第二次输入，从而推迟一次昂贵的聚合。对 $Y=XW$，可沿 $W$ 的输出列切分：$W=[W_1,\ldots,W_P]$，每个 rank 计算 $Y_r=XW_r$，最后把列拼接为 $Y$。这是 column parallel；若下一层的 weight 沿输入行切分，每个 rank 计算局部部分和，再 all-reduce 得到完整输出。
+
+\lecturefigure{slide-050.jpg}{一个矩阵乘法的 column-parallel 切分}{CS25 V6 official deck, p.~50}
+
+\[
+H_r=XW^{(1)}_r,
+\qquad
+Z=\sum_{r=1}^{P} H_rW^{(2)}_r.
+\]
+其中，$X$ 是在 TP ranks 上相同的输入，$W^{(1)}_r$ 是第一矩阵的列 shard，$H_r$ 是局部 hidden shard，$W^{(2)}_r$ 是第二矩阵对应的行 shard，$Z$ 是 all-reduce 后的完整输出。中间激活不必先 all-gather，通信被推迟到两次 matmul 之后。
+
+\lecturefigure{slide-052.jpg}{两次 matmul：column parallel 接 row parallel，只需一次 all-reduce}{CS25 V6 official deck, p.~52}
+
+backward 是转置矩阵乘法的同一分解。课堂特别保留“same upstream gradient”假设：如果输出 gradient 在 ranks 间不一致，局部乘法无法恢复单卡等价结果；后面的 Sequence Parallelism 会用显式 collective 消除脆弱的隐含同步。
+
+\lecturefigure{slide-053.jpg}{TP backward：转置 matmul 与 upstream-gradient 同步假设}{CS25 V6 official deck, p.~53}
+
+\subsection{MLP 与 Attention 都是矩阵分解的实例}
+
+Transformer MLP 的 up projection 可做 column parallel，激活函数在局部 hidden shard 上执行，down projection 做 row parallel，末端 all-reduce。这样每个 rank 只保存一部分中间宽维度，并承担约 $1/P$ 的主要 GEMM compute。
+
+\lecturefigure{slide-056.jpg}{MLP TP：up projection 列切分、down projection 行切分}{CS25 V6 official deck, p.~56}
+
+Attention 中，Q/K/V heads 可沿 head 或 hidden dimension 切分，局部完成 attention，再把 output projection 的部分和归约。注意力内部是否还需要额外通信取决于 head 布局、GQA/MQA、sequence/context parallel 组合和实现。
+
+\lecturefigure{slide-059.jpg}{Attention TP：切分 QKV 与 output projection}{CS25 V6 official deck, p.~59}
+
+\lecturefigure{slide-060.jpg}{TP 优缺点：节省模型与计算，但 collective 进入每层关键路径}{CS25 V6 official deck, p.~60}
+
+\begin{knowledgebox}{读图：TP 图中的横切与竖切对应不同 collective}
+Column-parallel 把输出 features 分到 ranks，中间 activation 天然保持 hidden shards；row-parallel 把输入 features 与 weight rows 配对，每个 rank 得到同一输出空间的一部分和，必须 all-reduce。MLP 图用这一对切分包住非线性，Attention 图则把 Q/K/V heads 与 output projection 映射到相同模式。读图时先找“每个 rank 拥有哪一列/哪一行”，再决定结果需要 concat、sum 还是保持分片；如果先背 all-reduce 次数，很容易在 GQA、MoE 或自定义 block 中套错。
+\end{knowledgebox}
+
+\teachervoice{00:23:42--00:30:38，老师先用两次 matmul 推出 TP，再映射到 MLP 与 attention；其重点不是记图，而是识别 column-parallel、row-parallel 与 all-reduce 的组合，以及 backward 对 upstream gradient 的要求。}
+
+\subsection{为什么还需要 Sequence Parallelism}
+
+纯 TP 常在 residual、dropout、layer norm 等区域恢复完整激活，并假设 ranks 执行相同工作。这些 replicated activation 会在长 sequence 或大 micro-batch 下占用大量 HBM。Sequence Parallelism（SP）把这部分 activation 沿 sequence 维切分，让 rank 在非 TP 区域处理不同 token positions。
+
+\lecturefigure{slide-062.jpg}{TP+SP 动机：避免 residual/layer-norm 区域复制大激活}{CS25 V6 official deck, p.~62}
+
+关键代数是
+\[
+\operatorname{AllReduce}(x)
+=\operatorname{AllGather}(\operatorname{ReduceScatter}(x)).
+\]
+其中，$x$ 是各 rank 的局部部分和；reduce-scatter 既完成求和又把 sequence shard 留在不同 rank，all-gather 在进入需要 hidden-sharded 输入的 TP 区域前恢复布局。通信总量与原 all-reduce 同阶，但中间 activation 不再完整复制。
+
+\lecturefigure{slide-065.jpg}{TP+SP：在 hidden-shard 与 sequence-shard 布局之间切换}{CS25 V6 official deck, p.~65}
+
+backward 中，all-gather 与 reduce-scatter 的角色反向出现。由此，layer norm 等区域的 gradient 同步不再依赖“所有 rank 恰好做相同工作”的隐式 identity；collective 本身承担正确性。
+
+\lecturefigure{slide-066.jpg}{TP+SP backward：all-gather 与 reduce-scatter 的配对}{CS25 V6 official deck, p.~66}
+
+\lecturefigure{slide-067.jpg}{TP+SP 的最终取舍：激活更省，通信仍在 block critical path}{CS25 V6 official deck, p.~67}
+
+\begin{warningbox}{Sequence Parallelism 与 Context Parallelism 不同}
+本节 SP 通常与 TP 配套，在 layer 内的不同区域切换 hidden/sequence 布局，目的是避免 replicated activation；后面的 CP 是为超长上下文把 attention sequence 本身跨更大设备组切分，并需要跨 rank 交换 K/V。名字都含 sequence，但作用范围与通信模式不同。
+\end{warningbox}
+
+\subsection{把并行轴写成 device mesh}
+
+前面分别讨论了 DP group 与 TP group，但真实训练中的同一 rank 同时属于多个 group。本节把“沿哪个轴通信”显式写成 device mesh，避免用 world-size 全局 collective 破坏其他分片语义。DP 与 TP 可看作二维 mesh：batch shard 沿 DP 轴变化、沿 TP 轴复制；model shard 沿 TP 轴变化、沿 DP 轴复制。collective 必须在正确 process group 上执行，错误的 group 会把本应独立的维度混在一起。
+
+\lecturefigure{slide-068.jpg}{组合 DP 与 TP：数据轴和模型轴互相正交}{CS25 V6 official deck, p.~68}
+
+\lecturefigure{slide-069.jpg}{代码接口：在 device mesh 上选择 collective 轴}{CS25 V6 official deck, p.~69}
+
+\begin{lstlisting}[language=Python,caption={二维 device mesh 上选择 DP/TP process group}]
+mesh = init_device_mesh(
+    "cuda", (dp_size, tp_size), mesh_dim_names=("dp", "tp")
+)
+dp_group = mesh.get_group("dp")
+tp_group = mesh.get_group("tp")
+
+all_reduce(gradients, group=dp_group)   # combine data shards
+all_reduce(partial_outputs, group=tp_group)  # combine model shards
+\end{lstlisting}
+
+\teachervoice{00:37:52--00:41:22，课堂建议把 TP 限制在单节点或快链路域内，并用 process group/device mesh 表达组合关系。并行布局不是纯数学问题；同一分解放到慢网络上会完全失去意义。}
+
+\subsection{本章小结}
+
+TP 把矩阵计算分解到多个 rank，SP 进一步分片非 TP 区域的 activation。它们突破 DP 的 global-batch 上限，却把通信放入每层关键路径。下一类 Pipeline Parallelism 不切矩阵，而是沿网络深度分配 layer，并把问题转化为 micro-batch schedule。
+

@@ -1,0 +1,121 @@
+\section{模型与 inference engine：先选问题，再选实现}
+
+Benchmark 方法确定之后，模型和 engine 才能被放进同一个决策框架。模型决定质量上限、参数规模、tokenizer 与 KV 结构；engine 决定请求如何排队、batch、缓存和落到 GPU。生产上最常见的错误，是先被某个 leaderboard 或框架吸引，再倒推一个 workload 来证明选择正确。
+
+\subsection{Efficiency-bound 与 capability-bound}
+
+讲者把模型选择分成两个 regime。Efficiency-bound 表示已有多种模型能通过应用 eval，主要矛盾变成成本与性能；capability-bound 表示最强模型仍可能不够好，质量优先于成本。两类系统会自然走向不同的参数规模、GPU 数、供应方式与替换频率。
+
+\lecturefigure{slide-017.jpg}{不同约束会导向不同模型选择}{官方 deck 第 17 页；课堂 00:23:00--00:25:58}
+
+\begin{knowledgebox}{读图：bound 指当前最紧的约束，不是模型的永久标签}
+同一个模型在文档抽取任务上可能 capability 充足、进入 efficiency-bound；在复杂代码 agent 的 orchestrator 上又可能质量不足、进入 capability-bound。判断方法不是看参数量，而是先运行 application eval：若多个候选都过线，再优化成本；若没有候选过线，继续压价格没有意义。
+\end{knowledgebox}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{L{3cm}YY}
+\toprule
+维度 & Efficiency-bound & Capability-bound \\
+\midrule
+首要目标 & 在质量 gate 之上降低 cost/latency & 尽可能提高任务成功率或智能上限 \\
+模型选择 & 多个 open model family、尺寸与模态可选 & 少量最大/最新模型，常先用 proprietary API \\
+典型 replica & 单 GPU；低延迟时可多 GPU & 多 GPU，必要时多 node \\
+应用位置 & data processor、background subagent & chatbot+、background agent orchestrator \\
+迁移策略 & 频繁 benchmark 与替换 & fine-tune 后切换成本高，需更强回归 eval \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Efficiency-bound：单 GPU 不等于不需要并行}
+
+在能力已经足够的任务里，常见模型可以放进一张 GPU 的 HBM（High Bandwidth Memory，高带宽 DRAM 显存），工程目标是以尽可能少的资源达到足够性能。但如果 voice agent 需要约百毫秒级响应，即使容量上单卡可放下模型，也可能用 tensor parallelism 把权重读取分散到多条 HBM 通道，以金钱换 latency。
+
+\lecturefigure{slide-018.jpg}{能力足够后，成本成为主要驱动}{官方 deck 第 18 页；课堂 00:25:58--00:28:47}
+
+\begin{knowledgebox}{术语：多 GPU 的两种完全不同动机}
+\textbf{Capacity parallelism} 是因为模型或 KV cache 放不进一张卡，必须切分；\textbf{latency parallelism} 是模型本来放得下，但希望多张卡并行读取权重或计算以缩短关键路径。两者都可能使用 tensor parallelism，却有不同的成本合理性与通信容忍度。
+\end{knowledgebox}
+
+\teachervoice{00:27:09--00:27:28，老师用 voice agent 举例：任务可能不需要“超级智能”，却要求极低响应延迟，因此会出现 efficiency-bound 模型配多 GPU 的反直觉部署。}
+
+\subsection{Capability-bound：把最强模型放在 orchestrator}
+
+能力受限时，模型往往大到必须跨 GPU 或跨 node。Agent 系统常把最强模型放在 orchestrator，负责分解任务、分配权限与整合结果，再让更快、更便宜的 subagent 执行局部工作。这种层次结构也改变 serving：tool call 让同一前缀反复出现，prefix cache 更有价值；工具延迟从毫秒到小时不等，模型 token latency 只是端到端 TTLT 的一部分。
+
+\lecturefigure{slide-019.jpg}{能力不足时，latency 与多 GPU 成为主要约束}{官方 deck 第 19 页；课堂 00:28:47--00:32:12}
+
+\begin{warningbox}{不要把“大模型 orchestrator + 小模型 subagent”当成免费路由}
+分层模型需要可靠的任务分解、权限隔离、上下文传递与失败升级。小模型若错误地执行高风险工具，或 orchestrator 无法检测错误，节省的推理成本会转化为更高的业务损失。模型路由必须由 task-level eval 和 trace 支持。
+\end{warningbox}
+
+\subsection{市场 frontier 只能做候选生成}
+
+Artificial Analysis 一类工具把能力代理指标与 provider price 放在同一张图上，适合快速发现候选与判断市场移动方向。然而 y 轴“intelligence”是多个 benchmark 的压缩，x 轴价格来自共享 provider；它们没有直接包含你的 prompt 分布、structured output 约束、cache hit、工具调用或自托管利用率。
+
+\lecturefigure{slide-020.jpg}{能力--价格平面上的 provider snapshot}{官方 deck 第 20 页；课堂 00:32:12--00:33:12}
+
+\begin{knowledgebox}{读图：第一眼看 Pareto frontier，第二眼看缺失变量}
+优先关注没有被另一模型同时在能力和价格上支配的点，再把这些点带回 application eval。图中不能回答 self-hosting 是否更便宜，因为自托管成本取决于 GPU 填充率、运维、故障和峰谷流量；讲者的经验是“击败 provider price 很难但并非不可能”，前提是有足够稳定负载填满硬件。
+\end{knowledgebox}
+
+\subsection{Inference engine 到底包含什么}
+
+Engine 不是一组 CUDA kernel 的别名。外层 server 处理 HTTP/RPC、streaming、authentication 与 metrics；tokenizer 把字符串变成 token ID；scheduler 决定哪些 sequence 在本轮进入 batch；model worker 在一张或多张 GPU 上执行 forward；detokenizer 再把 ID 变回文本。CPU host 与 GPU data path 之间的协调常常就是性能瓶颈。
+
+\lecturefigure{slide-022.jpg}{一个现代 inference engine 的完整进程结构}{官方 deck 第 22 页；课堂 00:33:20--00:35:10}
+
+\begin{knowledgebox}{读图：沿一条请求追踪 CPU 与 GPU 边界}
+请求先进入 server I/O process，再并行 tokenization；scheduler 维护 sequence 状态、KV block 与 batch，向 model worker 发出本轮工作；GPU 完成 logits/采样后，token ID 回到 host，被 detokenize 并流式发送。图中红色循环表示 decode 会重复经过这条控制路径，因此每 token 的 Python、IPC 与 launch overhead 都可能累积。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Inference engine 的简化控制循环}]
+while active_requests:
+    arrivals = server.poll()
+    scheduler.add(tokenize_in_parallel(arrivals))
+    batch = scheduler.select_next_step()
+    token_ids = model_workers.forward(batch)
+    scheduler.update_kv_and_finished(token_ids)
+    server.stream(detokenize(token_ids))
+\end{lstlisting}
+
+\begin{importantbox}{Continuous batching 与 PagedAttention 的位置}
+Continuous batching（连续批处理）允许每个 decode iteration 都加入新请求、移除已完成请求，而不是等整个 static batch 一起结束。PagedAttention 把 KV cache 切成 block，并通过类似页表的映射避免为每个 sequence 预留连续大块显存。前者解决调度粒度，后者解决 KV memory fragmentation；它们互补但不是同一个机制。
+\end{importantbox}
+
+\subsection{TRT-LLM、vLLM 与 SGLang 的选择维度}
+
+三个 engine 都能运行 Transformer，却代表不同工程折中。TRT-LLM 的 compiled C++ runtime 可以降低 host overhead，但开发和扩展成本高；vLLM 强调模型/API 兼容与开放生态；SGLang 强调快速性能迭代、RadixAttention 和 program-aware serving。实际选择还要看 model support、quantization、speculation、distributed execution、observability 与团队维护能力。
+
+\lecturefigure{slide-023.jpg}{三类主流 inference engine 的直观定位}{官方 deck 第 23 页；课堂 00:35:10--00:35:55}
+
+\begin{knowledgebox}{读图：Logo 不是 benchmark}
+这页用风格化语言概括生态：TRT-LLM 偏低 host overhead 与 NVIDIA stack，vLLM 偏兼容和大规模部署，SGLang 偏激进性能。它没有证明任何 engine 在所有 workload 上更快。必须用同一模型、精度、prompt/output 分布和 SLO 重跑单副本 frontier。
+\end{knowledgebox}
+
+\lecturefigure{slide-024.jpg}{Engine 的 runtime、文化、部署者与治理差异}{官方 deck 第 24 页；课堂 00:35:55--00:38:55}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{L{2.4cm}YYY}
+\toprule
+维度 & TRT-LLM & vLLM & SGLang \\
+\midrule
+典型优势 & 编译 runtime、低 host overhead、NVIDIA 新特性 & 模型/API 兼容、PagedAttention、广泛部署 & RadixAttention、快速纳入新优化、性能文化 \\
+典型代价 & 开发调试复杂、绑定 NVIDIA stack & 通用性可能增加路径与 host 工作 & 快速变化带来版本与兼容维护成本 \\
+适用判断 & 小 batch/低延迟、团队能承受编译栈 & 需要广泛模型支持与成熟生态 & prefix-heavy 或愿意跟随高频优化 \\
+验证方式 & 真实 workload benchmark + correctness eval & 同左 & 同左 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\lecturefigure{slide-025.jpg}{通过简化实现与源码 walkthrough 理解 engine}{官方 deck 第 25 页；课堂 00:38:55--00:39:45}
+
+\begin{importantbox}{学习 engine 的正确顺序}
+先用 mini-sglang、nano-vllm 等简化实现建立 server--scheduler--worker--KV 的 mental model，再读生产仓库的具体实现；最后用本地代码 agent 或 profiler 回答“这条请求为何经过这些函数”。只看架构图容易忽略 backpressure、memory ownership 与失败路径，只看源码又容易失去系统边界。
+\end{importantbox}
+
+\subsection{本章小结}
+
+模型选择由 application eval 划分为 capability-bound 与 efficiency-bound；engine 选择由 workload、SLO、支持特性和团队约束决定。把二者分开测量：先确认模型质量，再在固定模型上比较 engine；否则质量差异会被误报成 serving 性能差异。
+
