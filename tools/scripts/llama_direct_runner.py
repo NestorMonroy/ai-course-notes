@@ -107,6 +107,10 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     url = os.environ.get("LLAMA_DIRECT_URL", DEFAULT_URL).rstrip("/")
     model = os.environ.get("LLAMA_DIRECT_MODEL", DEFAULT_MODEL)
+    # El --timeout del ciclo (900 s) es el de un ítem agéntico. En CPU, a unos
+    # 4 tokens/s, un fragmento de 5.9 KB lo agotó con prefill y salida; aquí
+    # manda el plazo propio, y el del ciclo sólo si es mayor.
+    timeout = max(args.timeout, int(os.environ.get("LLAMA_DIRECT_TIMEOUT", "3600")))
     template = args.prompt.read_text(encoding="utf-8")
     args.out.mkdir(parents=True, exist_ok=True)
     items = [Path(line.strip()) for line in sys.stdin if line.strip()]
@@ -123,7 +127,7 @@ def main(argv: list[str]) -> int:
                 print(f"llama-direct: {n}/{len(items)} reutilizado {zh.name}", file=sys.stderr, flush=True)
                 continue
             try:
-                reply = chat(url, model, build_message(template, zh), args.timeout)
+                reply = chat(url, model, build_message(template, zh), timeout)
                 record = {
                     "result": reply.get("message", {}).get("content", ""),
                     "model": model, "runtime": "llama-direct",
