@@ -1,0 +1,70 @@
+\section{RT-1: el aprendizaje por imitación multitarea formulado como un Transformer en tiempo real}
+
+El diseño de RT-1 no parte de una tabla de clasificación de modelos, sino que se deduce hacia atrás a partir de un conjunto de restricciones reales: hay 130,000 demostraciones existentes que deben aprovecharse, la recolección de datos nuevos es costosa, los vision backbone de uso general son demasiado lentos, la task está condicionada por lenguaje y, además, el robot debe ejercer control en lazo cerrado con una frecuencia estable. La arquitectura solo tiene sentido si satisface a la vez el rendimiento de procesamiento, la temporización, la precisión de las acciones y la generalización.
+
+\subsection{De la Agenda al Skill Learning}
+
+La Agenda coloca a RT-1 como el primer caso de sistema, porque todos los planner de alto nivel terminan por invocar skills ejecutables. Si la policy de bajo nivel solo puede realizar tres acciones, incluso el LLM más capaz únicamente podrá reordenar esas tres acciones; por ello, el curso primero amplía la skill library y después analiza cómo el lenguaje las combina.
+
+\lecturefigure{slide-13-agenda-rt1.jpg}{Agenda: RT-1 como la capa de skill learning de la receta de foundation model para robótica}{Diapositiva V013 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+\subsection{First Principles: las restricciones anteceden a la Architecture}
+
+La slide 14 reúne tres tipos de restricciones de entrada. El modelo debe ser robust / generalize; los off-the-shelf vision models no satisfacen la inferencia en tiempo real del mundo físico; los datos incluyen language conditioning, por lo que se requiere multi-modality. La lesson de la derecha traduce estas restricciones en attention y tokenización, en lugar de elegir primero un Transformer grande y luego buscarle una aplicación.
+
+\lecturefigure{slide-14-rt1-first-principles.jpg}{First principles de RT-1: la robustez, la visión en tiempo real y el condicionamiento por lenguaje determinan en conjunto la arquitectura}{Diapositiva V014 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+\begin{warningbox}{El control en tiempo real no se mide con la latency promedio}
+El control de robots atiende la tail latency y la estabilidad del ritmo de ejecución. Un retraso largo ocasional puede hacer que la pinza no alcance el objeto o que el controlador use una imagen desactualizada; por eso, el compact backbone, TokenLearner y el diseño del decoder del artículo no solo ahorran FLOPs, sino que protegen la temporización del lazo cerrado.
+\end{warningbox}
+
+\subsection{RT-1 Architecture: tokens de imagen, lenguaje y acción}
+
+RT-1 recibe como entrada un historial de seis cuadros de imagen y una instrucción en lenguaje natural. Las imágenes se comprimen mediante un EfficientNet FiLM-conditioned y TokenLearner, y luego ingresan, junto con el condicionamiento por lenguaje, a un Transformer decoder-only, que produce tokens de acción discretizados. El modelo predice las dimensiones de control de forma autorregresiva, de modo que el control multimodal puede expresarse como una likelihood unificada sobre una secuencia.
+
+\lecturefigure{slide-15-rt1-architecture.jpg}{Arquitectura de RT-1: FiLM EfficientNet, TokenLearner, Transformer y action tokens}{Diapositiva V015 recuperada de la grabación oficial; Brohan et al., 2022}
+
+Si la secuencia de entrada se escribe como $x=(x_1,\ldots,x_n)$, que contiene visual, language y action tokens, el objetivo autorregresivo es
+\begin{equation}
+p_{\theta}(x)=\prod_{j=1}^{n}p_{\theta}(x_j\mid x_{<j}).
+\end{equation}
+Durante el entrenamiento, la pérdida principal de control se calcula solo sobre los action token; la visión y el lenguaje aportan el condicionamiento. Esta unificación no implica que las tres modalidades contengan la misma cantidad de información; TokenLearner existe precisamente para comprimir la secuencia de patches de alta dimensión de la imagen hasta un tamaño procesable en tiempo real.
+
+\subsection{Action Discretization y el presupuesto de 3 Hz}
+
+Cada dimensión de acción continua se asigna a 256 bins. Si una dimensión de acción cumple $a\in[a_{\min},a_{\max}]$, se puede usar
+\begin{equation}
+b(a)=\operatorname{round}\left(
+255\frac{a-a_{\min}}{a_{\max}-a_{\min}}
+\right)
+\end{equation}
+para obtener el token discreto; después de la inferencia, este se vuelve a convertir en control continuo. La cuantización transforma la regresión multidimensional en una categorical prediction, lo que facilita la decodificación con el Transformer, pero también introduce precisión finita y dependencias entre los tokens de las distintas dimensiones.
+
+\lecturefigure{slide-16-rt1-design-takeaways.jpg}{Design takeaway de RT-1: inferencia de 100 ms, historial de seis cuadros, 81→8 patch, 256 bins, 35M parámetros}{Diapositiva V016 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+\begin{knowledgebox}{Lectura de la figura: tres escalas de tiempo distintas}
+El ciclo de control opera a unos 3 Hz, es decir, alrededor de 333 ms por paso; el presupuesto para la pasada hacia adelante del modelo es de unos 100 ms, lo que deja margen para la percepción, la comunicación y la ejecución; el historial de seis cuadros solo abarca una ventana de tiempo muy corta y sirve para estimar la tendencia del movimiento, no como memoria de largo plazo de la tarea. Los 35M parámetros son un compromiso para el despliegue en tiempo real y no pueden compararse directamente con la cantidad de parámetros de los grandes VLM fuera de línea posteriores.
+\end{knowledgebox}
+
+\teachervoice{El ponente vuelve una y otra vez a la context length: si se enviaran al Transformer todas las image patches de cada cuadro, la secuencia crecería de forma desmedida de inmediato. TokenLearner conserva solo unos cuantos tokens visuales pertinentes para la tarea en curso; es una condición necesaria para «poder funcionar en el robot», no una técnica de compresión opcional.}
+
+\begin{lstlisting}[caption={RT-1-style tokenized imitation loop},label={lst:rt1-loop}]
+for observation_history, instruction, expert_action in dataset:
+    image_features = film_efficientnet(observation_history, instruction)
+    visual_tokens = token_learner(image_features, output_tokens=8)
+    language_tokens = sentence_encoder(instruction)
+    action_tokens = discretize(expert_action, bins=256)
+
+    context = concat(language_tokens, visual_tokens)
+    loss = autoregressive_action_loss(transformer, context, action_tokens)
+    update(loss)
+
+def act(observation_history, instruction):
+    context = encode(observation_history, instruction)
+    predicted_tokens = transformer.decode(context)
+    return undiscretize(predicted_tokens)
+\end{lstlisting}
+
+\subsection{Resumen de la sección}
+
+RT-1 formula la imitation multitarea como control autorregresivo tokenizado, pero su aportación central es también el resource accounting: el historial de seis cuadros, la compresión con TokenLearner, los 35M parámetros y la cuantización de acciones satisfacen en conjunto el lazo cerrado en tiempo real. La siguiente sección examina si estas decisiones de diseño realmente se traducen en generalización entre tareas y entre escenarios.

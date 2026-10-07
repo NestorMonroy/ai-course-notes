@@ -1,0 +1,76 @@
+\section{Symbolic Knowledge Distillation}
+
+El crowdsourcing manual aporta esquemas y conocimiento semilla de alta calidad, pero difícilmente cubre la cola larga. Pedirle directamente a GPT-3 que genere en gran cantidad, en cambio, produce un volumen enorme de ruido. Symbolic Knowledge Distillation combina estos dos hechos en un pipeline: el general LM se encarga de la escala, el critic de la selección, el symbolic corpus de ofrecer una capa intermedia con capacidad de auditoría y el student model de un uso de bajo costo.
+
+\subsection{Por qué Smaller and Better no es una Distillation ordinaria}
+
+La slide que plantea el problema pregunta con un embudo: ¿es posible hacer más pequeño a GPT-3 y, al mismo tiempo, mejor que el teacher? La knowledge distillation ordinaria suele hacer que el student se aproxime a la teacher distribution, por lo que la reducción de capacidad tiende a venir acompañada de una reducción de calidad. Aquí el avance no consiste en copiar con más precisión todo el teacher, sino en destilar un solo aspecto (el causal commonsense) y descartar las muestras de baja calidad del teacher.
+
+\lecturefigure{slide-18-symbolic-distillation-smaller-better-question.jpg}{El objetivo contraintuitivo de Symbolic KD: un student más pequeño y también mejor}{Diapositiva recuperada del video oficial V018; West et al., 2022}
+
+El pipeline completo envía las GPT-3 samples al critic; tras el filtrado se forma un knowledge graph de alta calidad de unos 6.5M, con el que después se entrena el student commonsense model. El circuito amarillo de la figura significa que los datos pueden guardarse, revisarse y reutilizarse; el conocimiento no existe solo como neural weights. Ese es el sentido central del término «symbolic», y no que el proceso de generación se realice por completo con reglas escritas a mano.
+
+\lecturefigure{slide-19-symbolic-kd-pipeline.jpg}{Symbolic Knowledge Distillation: teacher, critic, knowledge graph y student}{Diapositiva recuperada del video oficial V019; West et al., 2022}
+
+\begin{importantbox}{Los tres recursos deben contabilizarse por separado}
+El teacher compute determina el costo de generar candidatos; las critic labels determinan la calidad del filtrado; el student training determina el costo de despliegue. Informar solo la cantidad de parámetros del student oculta las llamadas previas al teacher y la critic supervision humana. Que el sistema sea más barato suele significar que la inference repetida es más barata, no que todo el proceso de producción de conocimiento tenga costo cero.
+\end{importantbox}
+
+\subsection{De la Distribution Matching a las Symbolic Samples}
+
+La destilación clásica hace que la student distribution $P_S$ coincida con la del teacher $P_T$:
+\begin{equation}
+H(P_T,P_S)=-\sum_{y\in\mathcal{Y}}P_T(y)\log P_S(y).
+\end{equation}
+En las tareas de clasificación, $\mathcal{Y}$ es enumerable; el espacio de oraciones, en cambio, es exponencialmente grande. Symbolic KD aproxima la esperanza con teacher samples y, al mismo tiempo, organiza los sampled strings como tripletas de conocimiento; así, cada sample es a la vez una aproximación para la optimización y un corpus publicable.
+
+\lecturefigure{slide-20-knowledge-distillation-formula-symbolic-output.jpg}{Sequence-level distillation: aproximación por muestreo y el symbolic corpus como subproducto}{Diapositiva recuperada del video oficial V020; West et al., 2022}
+
+Si $y^{(k)}\sim P_T(\cdot\mid x)$, puede usarse la aproximación de Monte Carlo
+\begin{equation}
+H(P_T,P_S)\approx -\frac{1}{K}\sum_{k=1}^{K}
+\log P_S\!\left(y^{(k)}\mid x\right).
+\end{equation}
+$K$ es la cantidad de teacher samples por query. Depender solo del muestreo hereda fielmente el ruido del teacher, por lo que también se necesita el critic score $c_\phi(x,y)$.
+
+\subsection{Loose Teacher y Critical Teacher}
+
+La comparison slide distingue entre loose teacher y critical teacher. El loose teacher conserva más GPT-3 generations: mayor escala, pero más ruido; el critical teacher conserva solo el subset que aprueba el critic: menos datos, pero más precisos. La comparación central no es «con o sin GPT-3», sino «si las teacher samples pasaron o no por el filtro de un modelo de calidad independiente».
+
+\lecturefigure{slide-21-loose-critical-teacher-comparison.jpg}{Loose teacher y critical teacher: el intercambio entre cantidad y calidad}{Diapositiva recuperada del video oficial V021; West et al., 2022}
+
+El corpus filtrado puede escribirse como
+\begin{equation}
+\mathcal{D}_{\tau}=\{(x,y):y\sim P_T(\cdot\mid x),\ c_{\phi}(x,y)\ge\tau\},
+\end{equation}
+donde $\tau$ es el umbral de aceptación. Elevar $\tau$ suele reducir la cantidad de datos y aumentar la precision, pero puede perder conocimiento poco frecuente aunque correcto. El critic se entrena con unas 10,000 moderate-size human labels; no es un truth oracle, sino un quality gate explícito y medible.
+
+\begin{lstlisting}[caption={Flujo de datos y entrenamiento de Symbolic Knowledge Distillation}]
+def symbolic_distill(queries, teacher, critic, threshold):
+    accepted = []
+    for query in queries:
+        for candidate in teacher.sample(query, many=True):
+            if critic.score(query, candidate) >= threshold:
+                accepted.append(to_typed_triple(query, candidate))
+    knowledge_graph = deduplicate_and_validate(accepted)
+    student = train_commonsense_model(knowledge_graph)
+    return knowledge_graph, student
+\end{lstlisting}
+
+\subsection{Resultados: por qué el Student puede superar al Teacher}
+
+El lado izquierdo de la slide de resultados compara human-authored, GPT-3 loose teacher y critical teacher; el lado derecho compara los students correspondientes. Al leer la figura, primero observe la proporción verde de good knowledge y después las student bars. Aunque el critical teacher tiene menos datos, permite que el student alcance una human-judged accuracy más alta, lo que indica que el filtering cambió la distribución de entrenamiento, en lugar de simplemente comprimir el comportamiento del teacher.
+
+\lecturefigure{slide-22-critic-student-results.jpg}{El critical teacher produce conocimiento de mayor calidad y un student más fuerte}{Diapositiva recuperada del video oficial V022; West et al., 2022}
+
+La página siguiente compara el ATOMIC 2020 human-authored con el ATOMIC10x machine-authored en cuatro ejes: accuracy, scale, value y diversity. Las barras verdes son en general más altas, lo que respalda la ganancia de escala y calidad de la destilación automática en los tipos de relación especificados. La acotación de la parte inferior es muy importante: el experimento se centra en siete tipos de causal commonsense relation y no puede extrapolarse a «el conocimiento generado por máquinas es mejor que el humano en todos los dominios».
+
+\lecturefigure{slide-23-atomic10x-human-vs-machine.jpg}{Comparación de accuracy, scale, value y diversity entre ATOMIC10x y el ATOMIC manual}{Diapositiva recuperada del video oficial V023; West et al., 2022}
+
+\begin{warningbox}{El Critic convierte los sesgos en Corpus Policy}
+Las etiquetas de entrenamiento, el umbral y la definición de ejemplos negativos del critic determinan qué conocimiento se conserva. Si el critic prefiere expresiones comunes, la cultura dominante u oraciones cortas, el filtered corpus perderá sistemáticamente los puntos de vista minoritarios. La symbolic layer con capacidad de auditoría facilita detectar el problema, pero no hace que desaparezca por sí solo.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Lo central de Symbolic KD no es el lema genérico de «el modelo grande enseña al modelo pequeño», sino un diseño de recursos en cuatro etapas: teacher generation, critic filtering, symbolic corpus y student deployment. Que el student supere al teacher se debe a la especialización en la tarea y a la selección de datos, no a que la cantidad de parámetros cree por sí misma conocimiento adicional.
