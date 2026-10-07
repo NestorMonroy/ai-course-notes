@@ -1,0 +1,108 @@
+\section{Búsqueda, Critique y Preference Learning: el mecanismo de entrenamiento de AgentQ}
+
+El artículo de AgentQ combina tres mecanismos: Monte Carlo Tree Search (MCTS) amplía la exploración, la LLM critique ofrece retroalimentación de proceso sobre los nodos intermedios y un objetivo al estilo de Direct Preference Optimization (DPO) aprende de las trayectorias mejores y peores. Los tres resuelven, respectivamente, los problemas de «no hay exploración», «no se sabe dónde está el error» y «la experiencia exitosa no se consolida».
+
+\lecturefigure{slide-34-agentq-methods-paper.jpg}{Los tres componentes de AgentQ: MCTS, self-critique/process supervision y DPO}{00:20:47}
+
+\subsection{MCTS: conservar ramas alternativas para tareas largas}
+
+La búsqueda en árbol conserva varias acciones candidatas en un mismo estado, en lugar de comprometerse de forma voraz con la primera ruta. La fórmula de selección UCT típica es
+
+Este paso retoma la autocorrección vista en la demo: si la policy emite una sola acción cada vez, después de un fallo solo puede volver a muestrear desde el mismo contexto, y es fácil que repita la ruta original; la estructura de árbol, en cambio, guarda de forma explícita «qué ya se probó, qué ramas tienen mayor valor y dónde todavía vale la pena explorar». Al leer una figura de MCTS, primero se identifican la root, las ramas candidatas y los nodos hoja, y después se distingue entre la value estimate y el resultado real de la ejecución. Para un agent web, el árbol de búsqueda debe desplegarse de preferencia en un simulador o en una copia que admita reversión; en el sitio real solo se ejecuta un número reducido de acciones ya filtradas.
+\[
+a^*=\arg\max_a\left[Q(s,a)+c\sqrt{\frac{\ln N(s)}{N(s,a)+1}}\right].
+\]
+$Q(s,a)$ es la estimación de valor actual, $N(s)$ es el número de visitas al estado padre, $N(s,a)$ es el número de visitas a la acción y $c$ controla la exploration. El primer término favorece las rutas que ya se sabe que son buenas; el segundo incentiva probar las acciones menos visitadas.
+
+\lecturefigure{slide-35-mcts-search.jpg}{MCTS equilibra exploración y explotación en el árbol de decisiones del Agent}{00:21:40}
+
+\begin{warningbox}{MCTS en entornos web no es un retroceso gratuito}
+Muchas acciones son irreversibles: enviar un pedido, mandar un mensaje o realizar un pago no se pueden deshacer como en un tablero de ajedrez. Una implementación segura debe buscar en un entorno simulado o desplegar solo estados que admitan reversión; la exploración en el entorno real debe tener límites de permisos, de presupuesto y de sandbox.
+\end{warningbox}
+
+\subsection{Process feedback: recompensar las decisiones intermedias, no solo el desenlace}
+
+Usar únicamente el éxito final $r_{\text{outcome}}$ produce una señal dispersa y, además, puede etiquetar como ejemplo positivo una trayectoria que «tuvo éxito por casualidad, pero con un proceso peligroso». La recompensa de proceso puede escribirse como
+\[
+R(\tau)=\alpha r_{\text{outcome}}+
+\sum_{t=1}^{T}\beta_t r_{\text{process},t}-\lambda C(\tau),
+\]
+$\tau$ es la trayectoria completa, $r_{\text{process},t}$ evalúa si el paso $t$ es razonable y $C(\tau)$ registra el costo de las herramientas, las infracciones o el riesgo irreversible. $\alpha,\beta_t,\lambda$ determinan el equilibrio entre resultado, proceso y costo.
+
+\lecturefigure{slide-36-self-critique-process.jpg}{La LLM critique ofrece retroalimentación de proceso sobre las acciones candidatas}{00:22:58}
+
+\begin{knowledgebox}{Los tres niveles de la critique}
+La \textbf{syntax critique} revisa el formato de la acción; la \textbf{state critique} revisa si la acción es coherente con la página actual y sus restricciones; la \textbf{goal critique} revisa si la acción sigue sirviendo al objetivo original del usuario. Una critique que solo evalúa la fluidez del lenguaje no puede detectar errores de fecha, identidad, permisos ni presupuesto.
+\end{knowledgebox}
+
+\subsection{Construir preferencias a partir de ramas exitosas y fallidas}
+
+AgentQ ordena las ramas que produce la búsqueda en preferred y rejected, y después actualiza la policy con un objetivo de preferencias fuera de línea. La forma habitual de DPO es
+\[
+\mathcal{L}_{\text{DPO}}(\theta)
+=-\mathbb{E}\log\sigma\!\left(
+\beta\left[
+\log\frac{\pi_\theta(y^+\mid x)}{\pi_{\text{ref}}(y^+\mid x)}-
+\log\frac{\pi_\theta(y^-\mid x)}{\pi_{\text{ref}}(y^-\mid x)}
+\right]\right).
+\]
+$x$ es el estado junto con el contexto de la tarea, $y^+$ es la acción o trayectoria mejor, $y^-$ es la rama peor, $\pi_{\text{ref}}$ es la política de referencia y $\beta$ controla la intensidad de la preferencia. En el caso de los agents, las preferencias no pueden provenir solo de la captura de pantalla final de la página; deben combinarse con la critique de proceso, los errores de las herramientas y las restricciones de seguridad.
+
+\lecturefigure{slide-37-rlhf-preference-learning.jpg}{Construir señales de aprendizaje de preferencias a partir de trayectorias de búsqueda y critique}{00:23:23}
+
+\teachervoice{00:20:47--00:23:24, el ponente explica AgentQ mediante MCTS, LLM critique y preference learning. El docente enfatiza: tanto las trayectorias exitosas como las fallidas deben entrar en el aprendizaje; sobre todo, hay que lograr que el modelo aprenda a hacer backtrack y recover en entornos complejos.}
+
+\subsection{La trayectoria de OpenTable en siete pasos: el éxito final no oculta los errores intermedios}
+
+Este conjunto de figuras debe leerse como una secuencia de transiciones de estado, no como siete capturas parecidas. La trayectoria primero navega hacia el restaurante objetivo, entra a la página principal, localiza el restaurante y luego selecciona una fecha equivocada; después abre el selector de fechas, corrige la fecha y completa la reservación. El error ocurre en el cuarto paso, la recuperación en el quinto y el sexto, y la confirmación final en el séptimo.
+
+El valor didáctico de esta trayectoria es que incluye a la vez la \textbf{conservación del objetivo} y la \textbf{corrección local}. El sistema no se puso a buscar otro restaurante porque la fecha estuviera mal, ni redujo la solicitud del usuario a «basta con reservar en cualquier restaurante»; conservó el restaurante, el número de personas y el rango de horario, y solo modificó el campo erróneo. Al leer cada figura conviene seguir tres líneas: el estado actual de la página, la siguiente acción que el agent declara y las restricciones del objetivo original que todavía no se cumplen. Solo así se puede juzgar si la recuperación es una corrección real o si se llegó por casualidad a un resultado que podía completarse.
+
+\lecturefigure{slide-38-opentable-step1-navigate.jpg}{Paso 1: navegar al restaurante y al sitio objetivo}{00:24:10}
+
+\lecturefigure{slide-39-opentable-step2-homepage.jpg}{Paso 2: entrar a la página principal de OpenTable e iniciar la búsqueda}{00:24:15}
+
+\lecturefigure{slide-40-opentable-step3-restaurant.jpg}{Paso 3: localizar la página de La Pizza \& La Pasta}{00:24:42}
+
+\lecturefigure{slide-41-opentable-step4-wrong-date.jpg}{Paso 4: se seleccionó una fecha equivocada; la trayectoria presenta un fallo diagnosticable}{00:24:49}
+
+\lecturefigure{slide-42-opentable-step5-date-selector.jpg}{Paso 5: volver a abrir el selector de fechas}{00:24:52}
+
+\lecturefigure{slide-43-opentable-step6-correct-date.jpg}{Paso 6: corregir la fecha y entrar al flujo de confirmación}{00:24:54}
+
+\lecturefigure{slide-44-opentable-step7-confirmed.jpg}{Paso 7: la reservación se completa; la página de confirmación aporta la evidencia final}{00:24:56}
+
+\begin{importantbox}{Trajectory-level acceptance}
+Registrar el éxito final como $s_T=1$ todavía no basta. Se recomienda reportar al mismo tiempo: el número de acciones erróneas, el número de recuperaciones, el número de acciones irreversibles, el número de confirmaciones del usuario, el costo total de las herramientas y la latencia hasta completar la tarea. Solo así se distingue entre «completarse sin contratiempos a la primera» y «dar rodeos, hacer clics erróneos, pero acabar teniendo éxito por casualidad».
+\end{importantbox}
+
+\begin{lstlisting}[caption={Pseudocódigo de verificación y recuperación de trayectorias}]
+for step in range(max_steps):
+    observation = environment.observe()
+    action = policy.propose(goal, observation, memory)
+    if not permission_check(action):
+        action = request_user_confirmation(action)
+    result = environment.execute(action, idempotency_key=step)
+    if postcondition_holds(goal, result):
+        return SUCCESS
+    if repeated_state(result) or budget_exhausted():
+        return HUMAN_FALLBACK
+    memory.record(observation, action, result)
+return TIMEOUT
+\end{lstlisting}
+
+\subsection{Página de resultados: las cifras deben ir ligadas a la configuración experimental}
+
+La gráfica de tasa de éxito en OpenTable que se mostró en clase compara varias configuraciones y destaca la mejora que aportan componentes como AgentQ y online search. El artículo reporta que Llama-3 70B sin ejemplos pasa de 18.6\% a 81.7\%, y que al agregar online search alcanza 95.4\%. Estas cifras son resultados bajo una tarea, una recolección de datos, un modelo y un método de evaluación específicos; respaldan que «la búsqueda y el aprendizaje son eficaces», pero no que «todas las tareas web ya son confiables al 95\%».
+
+Al leer la gráfica de barras, primero se compara el cambio al agregar componentes sobre el mismo base model y después las diferencias entre modelos distintos; no hay que atribuir a un solo algoritmo la diferencia entre todas las barras. También hay que revisar si el criterio de éxito considera solo la página final, si se permite búsqueda humana o externa, cuántos datos de interacción usó cada configuración y si los fallos provienen de la misma distribución de tareas. Si las configuraciones experimentales difieren, la altura de las barras solo puede tomarse como el resultado de la combinación del sistema; de ella no se puede deducir directamente la contribución causal independiente de un solo módulo de MCTS, DPO o search.
+
+\lecturefigure{slide-45-agentq-real-world-benchmark.jpg}{Comparación de la tasa de éxito de AgentQ en escenarios reales de reservación}{00:26:41}
+
+\begin{warningbox}{No hay que confundir la mejora relativa con la confiabilidad absoluta}
+Pasar de 18.6\% a 81.7\% es un enorme avance de investigación, pero 81.7\% significa que aproximadamente una de cada cinco tareas sigue fallando. Incluso con 95.4\%, si se ejecutan cien acciones de alto riesgo al día, el número esperado de fallos sigue siendo inaceptable. El umbral para llevarlo a producción debe considerar la frecuencia, la gravedad y la posibilidad de recuperación.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La cadena de mecanismos de AgentQ es la siguiente: la búsqueda en árbol genera ramas diversas, la process critique evalúa los pasos intermedios, el objetivo de preferencias reincorpora a la política las ramas buenas y malas, y la evaluación a nivel de trayectoria revisa a la vez el resultado y el proceso. El caso de OpenTable muestra que los errores no son lo preocupante; los defectos sistémicos son no poder detectarlos, no poder recuperarse de ellos y no poder aprender de ellos.

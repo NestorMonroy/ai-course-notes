@@ -1,0 +1,119 @@
+\section{Original DiT: de ViT a un eliminador de ruido condicional}
+
+La fuerza de la DiT original viene de la contención: patch embedding, position embedding, self-attention y MLP se toman casi sin cambios de ViT, y lo nuevo se concentra en el timestep/class conditioning y en la decodificación de la salida. Para entenderla no conviene memorizar el diagrama; hay que deducirla a partir de la tensor shape y la residual equation.
+
+\subsection{Patchify y los dos tipos de condición}
+
+La sección anterior solo indicó la dirección de «sustituir la U-Net por un Transformer»; esta sección concreta esa idea como transformaciones de tensores: cómo un latent bidimensional se convierte en tokens y cómo el timestep y la class label entran en la misma secuencia de encoder blocks. Al leer las figuras conviene seguir a la vez el número de tokens, la dimensión del embedding y la ruta del condicionamiento, porque las tres determinan juntas la calidad, el costo de cómputo y si el modelo puede reutilizar los componentes estándar de ViT.
+
+Sea el latent $x_t\in\mathbb R^{B\times C\times H\times W}$ y el patch size $P$; entonces el número de tokens es
+\[
+N=\frac{H}{P}\frac{W}{P},
+\]
+y cada token se proyecta linealmente a la dimensión $D$. Cuanto mayor es $P$, menor es el cómputo, pero más difícil resulta recuperar los detalles locales.
+
+\begin{knowledgebox}{El patch size ajusta a la vez la calidad de generación y el costo del sistema}
+Duplicar $P$ reduce a la mitad el número de tokens tanto en altura como en anchura, de modo que el total de tokens baja a cerca de una cuarta parte y el término dominante de la attention cuadrática puede bajar a cerca de un dieciseisavo; el costo es que cada token debe resumir una región espacial más grande. Por eso el patch size no es un simple parámetro de preprocesamiento, sino una decisión de arquitectura que vincula la fidelidad del detalle, la longitud de la secuencia y el presupuesto de cómputo.
+\end{knowledgebox}
+
+\lecturefigure{slide-22.jpg}{Forward pass clásico de ViT: patchify, codificación posicional, encoder blocks y head}{22}
+
+Esta diapositiva de código es la baseline: los patches de la imagen se aplanan y se proyectan, se les añaden la codificación posicional y el class token, y luego pasan por blocks de estructura idéntica. DiT elimina el objetivo de clasificación, pero conserva la tokenización y la red troncal del encoder. Al leer el código, primero hay que seguir las shapes, no los nombres de las funciones.
+
+\lecturefigure{slide-23.jpg}{De ViT a la DiT class-conditional: la red troncal casi no cambia; solo se sustituyen el condicionamiento y la salida}{23}
+
+DiT sigue aplicando embedding a los latent patches; añade un embedder de $t$ y un embedder de $y$; la head final no produce una clase, sino que decodifica cada token como la predicción de los patch pixels/latents. Así, la tarea de generación puede formularse como una «token sequence regression condicional».
+
+\lecturefigure{slide-24.jpg}{Estructura general del block de la DiT original y de la head de salida}{24}
+
+Cada block contiene self-attention, MLP y adaptive LayerNorm; la condición $c$ influye a la vez en los parámetros de normalización y en la residual gate. La capa de salida además debe aplicar el patchify inverso para volver a un tensor espacial. En la figura no hay cross-attention, porque tanto la class label como el timestep pueden comprimirse en un solo vector de condición.
+
+\lecturefigure{slide-25.jpg}{Timestep embedding: llevar el tiempo de ruido escalar a una representación continua de alta dimensión}{25}
+
+El sinusoidal embedding habitual es
+\[
+e_{2k}(t)=\sin(t/\omega_k),\qquad
+e_{2k+1}(t)=\cos(t/\omega_k),
+\]
+y después pasa por un MLP para obtener la condición. Cada paso de tiempo corresponde a una relación señal-ruido distinta, y la red debe saber si en ese momento tiene que recuperar la estructura general o los detalles; $t$ no es un índice ordinario, sino la variable de estado de la tarea de eliminación de ruido.
+
+\lecturefigure{slide-26.jpg}{Class embedding: la clase discreta se convierte en vector de condición mediante una embedding table}{26}
+
+La clase $y$ se mapea a $D$ dimensiones mediante `nn.Embedding`. Para la classifier-free guidance, durante el entrenamiento se descarta la clase con cierta probabilidad, de modo que se aprende la unconditional branch. En inferencia pueden combinarse la predicción condicional y la incondicional para mejorar la prompt/class adherence, aunque una guidance demasiado fuerte sacrifica diversidad.
+
+\lecturefigure{slide-27.jpg}{Fusión de condiciones: los embeddings de class y timestep se suman para obtener $c=y+t$}{27}
+
+La suma requiere que ambas condiciones ya estén proyectadas a la misma dimensión y supone que un solo vector basta para controlar toda la capa. Aquí no hay un problema de alineación a nivel de token, por lo que la suma simple es eficiente. Más adelante, el condicionamiento por texto es más rico, y PixArt y MMDiT modificarán esta ruta.
+
+\begin{importantbox}{Lista mínima de modificaciones de DiT}
+Respecto a ViT se necesitan cuatro interfaces nuevas: la patchification del noisy latent, el timestep embedding, el embedding de la condición de la tarea y una head que decodifique los tokens de vuelta a una predicción espacial. La red troncal Self-attention/MLP no se vuelve misteriosa por tratarse de «difusión».
+\end{importantbox}
+
+\subsection{AdaLN-Zero: cómo entra la condición en cada block}
+
+La Original DiT no usa cross-attention; en su lugar, la condition genera la scale, el shift y las residual gates de LayerNorm. Así, el costo del condicionamiento no depende del número de tokens, lo que resulta especialmente adecuado para el control de baja dimensión por class/timestep. La pregunta central de esta sección es la siguiente: la condición debe influir en cada block sin romper la estabilidad al inicio de una red profunda; AdaLN-Zero responde a la vez «cómo inyectarla» y «cómo arrancar de forma segura» mediante parámetros de modulación y una residual gate inicializada en cero.
+
+\lecturefigure{slide-28.jpg}{Cada block obtiene por regresión, a partir del vector de condición, los parámetros de modulación de AdaLN}{28}
+
+La Adaptive LayerNorm puede escribirse como
+\[
+\operatorname{AdaLN}(h;c)=
+(1+s(c))\odot\frac{h-\mu(h)}{\sqrt{\sigma^2(h)+\epsilon}}+b(c),
+\]
+donde $s(c)$ y $b(c)$ son, respectivamente, la scale y el shift generados por la condición. Sumar $1$ hace que, con inicialización en cero, se reduzca a una normalización ordinaria.
+
+\lecturefigure{slide-29.jpg}{Block AdaLN-Zero: la condición modula a la vez la attention, el MLP y la residual gate}{29}
+
+Una capa puede resumirse como
+\[
+h'=h+g_{\mathrm{msa}}(c)\odot
+\operatorname{MSA}(\operatorname{AdaLN}_1(h;c)),
+\]
+\[
+h''=h'+g_{\mathrm{mlp}}(c)\odot
+\operatorname{MLP}(\operatorname{AdaLN}_2(h';c)).
+\]
+Seis grupos de parámetros controlan la scale, el shift y la gate de las dos subcapas. Por ello la condición puede influir de manera continua en el cómputo a lo largo de la profundidad, en lugar de concatenarse una sola vez en la entrada.
+
+\lecturefigure{slide-30.jpg}{Capa de salida: decodificar los tokens $(B,N,D)$ en patches y aplicar unpatchify para volver al espacio}{30}
+
+Si los canales de salida son $C_o$, cada token debe predecir $P^2C_o$ valores. La capa lineal produce $(B,N,P^2C_o)$, que después se reorganiza con reshape como $(B,C_o,H,W)$. La salida puede contener noise/velocity y también puede predecir al mismo tiempo la variance, según la parametrización de entrenamiento.
+
+\lecturefigure{slide-31.jpg}{Estrategia de inicialización: AdaLN y la final layer se inicializan en cero para que el punto de partida de la red sea cercano a la identity}{31}
+
+Si en una red residual profunda cada capa reescribe la señal de forma considerable desde el inicio, la optimización puede volverse inestable. Inicializar en cero las gates y la final projection hace que cada block sea al principio aproximadamente $h\mapsto h$, y el modelo aprende gradualmente a apartarse de la identity. Es un detalle de implementación importante para el éxito del entrenamiento de DiT, no un cosmetic trick.
+
+\lecturefigure{slide-32.jpg}{El valor de AdaLN-Zero y la línea posterior de parámetros compartidos}{32}
+
+AdaLN-Zero es más barato que la cross-attention, porque la red de condicionamiento no crece de forma cuadrática con el número de tokens; posteriormente, PixArt además comparte los parámetros de AdaLN entre distintos blocks, lo que reduce todavía más los parámetros y el cómputo. El costo es que la compresión en una condición de baja dimensión puede no ser adecuada para la alineación fina con textos largos.
+
+\teachervoice{00:24:53--00:32:56, el docente enfatiza que la Original DiT no usó la cross-attention que se ocurriría de forma natural, sino LayerNorm y gates dirigidas por la condición; la zero init hace que cada block parta de la identity y es un mecanismo de estabilización muy práctico.}
+
+\begin{lstlisting}[language=Python,caption={Cómputo central del block DiT con AdaLN-Zero}]
+def dit_block(tokens, condition):
+    shift1, scale1, gate1, shift2, scale2, gate2 = modulator(condition)
+    attn_input = layer_norm(tokens) * (1 + scale1) + shift1
+    tokens = tokens + gate1 * self_attention(attn_input)
+    mlp_input = layer_norm(tokens) * (1 + scale2) + shift2
+    return tokens + gate2 * mlp(mlp_input)
+\end{lstlisting}
+
+\subsection{Scaling: ¿más compute se traduce de forma estable en mejor calidad?}
+
+El resultado importante del artículo de DiT no es una muestra vistosa, sino que, al aumentar el tamaño del modelo y el compute de entrenamiento, métricas como FID mejoran de forma relativamente suave. El block uniforme hace que este experimento de escalamiento sea más controlable que con una U-Net muy personalizada. Por eso esta sección no trata la diapositiva de resultados como una tabla de posiciones, sino como evidencia de escalamiento: primero se confirman los ejes horizontal y vertical y las variables de control, y después se distingue entre «la tendencia observada en un intervalo» y «una ley que puede extrapolarse sin límite».
+
+\lecturefigure{slide-33.jpg}{Resultados de DiT: la calidad de generación mejora de forma sostenida al aumentar el tamaño del modelo y el cómputo}{33}
+
+El gráfico de burbujas suele codificar a la vez el tamaño del modelo, los GFLOPs y el FID. Primero hay que confirmar la dirección de los ejes y luego comparar las series bajo la misma configuración de entrenamiento. La tendencia respalda la escalabilidad, pero no permite concluir un escalamiento ilimitado; la calidad de los datos, el VAE bottleneck y el algoritmo de muestreo terminarán siendo limitaciones.
+
+\lecturefigure{slide-34.jpg}{La eficiencia compute-quality de DiT y sus limitaciones class-conditional}{34}
+
+La Original DiT demuestra eficiencia en ImageNet class-conditional, pero no resuelve directamente el text-to-image de vocabulario abierto. El vector de clase es corto y adecuado para AdaLN; un prompt en lenguaje natural es una secuencia larga que requiere token-level interaction. El siguiente paso, PixArt, no consiste en sustituir simplemente el class id por un vector de oración, sino en introducir un text encoder y cross-attention.
+
+\begin{warningbox}{Que FID mejore no significa que mejoren todas las dimensiones}
+FID es sensible a la feature distribution, pero no mide por completo el texto, el conteo, las relaciones de composición, las preferencias humanas ni la seguridad. Al leer un scaling plot también deben revisarse el número de pasos de inferencia, la guidance, los datos de entrenamiento y la resolución.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La Original DiT trata los latent patches como tokens, usa el timestep/class embedding para generar los parámetros de AdaLN-Zero y decodifica los tokens de salida de vuelta al espacio. Su estructura es cercana a ViT, y las innovaciones principales se concentran en la modulación por condición y en la identity initialization. La evidencia de scaling demuestra que la estructura es escalable, pero todavía no resuelve el condicionamiento por lenguaje natural.

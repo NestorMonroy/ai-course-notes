@@ -1,0 +1,66 @@
+\section{De un token al programa interno que «crece»}
+
+La sección anterior explicó por qué no basta con observar la salida; esta sección fija primero el objeto de estudio: qué ocurre exactamente al generar un token. Solo si se separan la probabilidad autorregresiva, los estados ocultos y las funciones de la atención y de la MLP, los conceptos posteriores de feature, transcoder y attribution graph no se reducirán a metáforas vagas.
+
+\subsection{La generación autorregresiva es una repetición de propagaciones hacia adelante}
+
+Dada una secuencia de tokens de entrada $x_{1:n}$, el modelo genera la secuencia siguiente según la factorización autorregresiva:
+\[
+p_\theta(x_{n+1:n+T}\mid x_{1:n})
+=\prod_{t=1}^{T}p_\theta(x_{n+t}\mid x_{1:n+t-1}).
+\]
+Aquí $\theta$ son los parámetros fijos tras el entrenamiento, $T$ es el número de tokens nuevos generados y $x_{1:n+t-1}$ es el prefijo completo que puede leer la $t$-ésima predicción. Por cada token adicional hay que ejecutar de nuevo una propagación hacia adelante; por lo tanto, «una respuesta» contiene muchos pasos de cómputo discretos.
+
+\lecturefigure{slide-05-how-one-token-is-produced.jpg}{Punto de partida: cómo genera un token un modelo de lenguaje grande}{00:08:22}
+
+\lecturefigure{slide-06-autoregressive-forward-passes.jpg}{Por cada token nuevo, el modelo se ejecuta otra vez con un prefijo más largo}{00:08:50}
+
+La figura 5 plantea la cuestión de la granularidad, y la figura 6 descompone la respuesta en múltiples pasadas (pass). Aquí hay que distinguir dos tipos de paralelismo: en la dimensión de la secuencia, el siguiente token sigue avanzando en el tiempo; pero dentro de cada pasada pueden ocurrir simultáneamente miles de features y operaciones matriciales. Lo que esta clase llama «parallel computation» se refiere principalmente al segundo tipo, no a generar la oración completa de una sola vez.
+
+\begin{lstlisting}[language=Python,caption={Pseudocódigo mínimo de decodificación autorregresiva: cada token corresponde a una nueva propagación hacia adelante}]
+context = tokenize(prompt)
+for step in range(max_new_tokens):
+    logits, internal_state = transformer(context)
+    next_token = sample(softmax(logits[-1]))
+    context.append(next_token)
+\end{lstlisting}
+
+\subsection{Los estados ocultos comprimen el prefijo en la distribución del siguiente paso}
+
+En una sola propagación hacia adelante, el flujo residual de la capa $\ell$ puede escribirse como una actualización simplificada:
+\[
+h_i^{(\ell+1)}=h_i^{(\ell)}
++\operatorname{Attn}^{(\ell)}_i(H^{(\ell)})
++\operatorname{MLP}^{(\ell)}(h_i^{(\ell)}),
+\qquad
+p(x_{n+1}=v)=\operatorname{softmax}(W_U h_n^{(L)})_v.
+\]
+Aquí $h_i^{(\ell)}$ es el vector del residual-stream (flujo residual) en la posición $i$ y la capa $\ell$, $H^{(\ell)}$ es el conjunto de vectores de todas las posiciones, $\operatorname{Attn}$ se encarga de seleccionar y trasladar información entre posiciones, $\operatorname{MLP}$ se encarga de la transformación no lineal posición por posición, $W_U$ proyecta el estado de la última capa a los logits del vocabulario y $v$ es un token candidato.
+
+\lecturefigure{slide-07-single-forward-pass-vectors.jpg}{Los vectores de entrada atraviesan las capas ocultas y forman al final la distribución de puntuaciones del siguiente token}{00:09:42}
+
+Al leer la figura, observe primero cómo se codifican como vectores los tokens de la izquierda, luego cómo las capas intermedias reescriben una y otra vez la representación y, por último, la score de cada palabra candidata a la derecha. La probabilidad de salida es solo la proyección final; lo que realmente hay que explicar es cómo las capas intermedias hacen que «assist» obtenga una puntuación más alta. Un attribution graph intenta precisamente recuperar esta cadena de influencias desde las features de entrada hasta el logit de salida.
+
+\begin{knowledgebox}{Primera aparición de términos: residual stream, neuron y feature}
+El \textbf{residual stream} es el canal de estado de alta dimensión que comparten todas las capas; tanto la attention como la MLP leen de él y escriben en él. \textbf{Neuron} suele designar una sola coordenada de la capa oculta de la MLP. \textbf{Feature}, en cambio, es una dirección del espacio de activaciones que los investigadores intentan identificar y que representa algún concepto u operación; una feature puede abarcar varias neurons, y una neuron también puede participar en varias features.
+\end{knowledgebox}
+
+\subsection{«Crecer» no es misticismo, sino un hecho de ingeniería}
+
+La arquitectura define el contenedor del cómputo que puede aprenderse; los datos de entrenamiento y el descenso de gradiente determinan qué algoritmo se forma finalmente dentro de ese contenedor. Los ingenieros conocen las dimensiones de las matrices, el número de capas y la función de pérdida, pero por lo general no saben por qué el modelo, ante cierto prompt, activa una combinación específica de Dallas, Texas, capital y Austin. El objetivo del análisis inverso es convertir esa brecha de «escribimos el proceso de entrenamiento, pero no el programa interno» en un objeto verificable.
+
+\lecturefigure{slide-08-models-grown-not-built.jpg}{Metáfora central: los modelos de lenguaje son grown, no built módulo por módulo}{00:09:51}
+
+\lecturefigure{slide-09-architecture-versus-grown-model.jpg}{Las personas construyen la arquitectura; el entrenamiento hace crecer los mecanismos internos de una forma difícil de leer directamente}{00:10:20}
+
+El límite de lo que estas dos figuras demuestran es importante: no significan que el modelo sea incomprensible, ni que cualquier explicación basada en la atribución de rasgos humanos sea válida. Al contrario, «grown» exige una reverse engineering más rigurosa: proponer componentes, medir conexiones, hacer intervenciones, registrar los fracasos y reconocer que los métodos actuales solo pueden explicar una parte del cómputo.
+
+\begin{importantbox}{Sentido operativo de «Grown not built»}
+Podemos conocer con exactitud el código de entrenamiento y, aun así, no saber qué algoritmo interno adopta la red entrenada ante una entrada concreta. Por eso la interpretabilidad se centra en el \textbf{post-training program discovery}: recuperar, sobre pesos fijos, estructuras de cómputo locales y condicionadas por la entrada.
+\end{importantbox}
+
+\teachervoice{00:09:47--00:10:20, el docente usa grown, not built para distinguir el diseño de la arquitectura de la formación de los algoritmos internos. Nota de clase: no se trata de volver místico al modelo, sino de señalar que la revisión tradicional de código no puede decirnos directamente qué hace la red después del entrenamiento.}
+
+\subsection{Resumen de la sección}
+
+Una respuesta se compone de múltiples propagaciones hacia adelante, una por token, y cada propagación hacia adelante contiene a su vez cómputo paralelo a gran escala. Lo que los métodos posteriores deben explicar no es qué palabra eligió al final la softmax, sino qué features se activan en los estados ocultos y cómo, mediante la attention y la MLP, modifican juntas la salida.

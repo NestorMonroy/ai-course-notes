@@ -1,0 +1,57 @@
+\section{Hacia Transformer multimodales a gran escala}
+
+Los modelos anteriores procesan por separado los genes espaciales, el condicionamiento por H\&E o el vecindario local. La siguiente etapa consiste en integrar estos módulos en una misma representación del paciente y permitir que el modelo traduzca entre modalidades, resuelva ambigüedades y simule intervenciones. Esta sección compara arquitecturas unimodales y multimodales y después explica una demo counterfactual multimodal.
+
+\subsection{Datos unificados y columna vertebral unificada}
+
+Lo atractivo de un modelo unificado es que todos los datos entren en un solo Transformer grande; la verdadera dificultad, sin embargo, es que el número de token, los patrones de datos faltantes, la resolución y la señal de supervisión están muy desequilibrados. Con un diseño inadecuado, la modalidad más barata o la que tiene más token dominará el entrenamiento. A continuación se establece primero un baseline diagnosticable con modelos unimodales y después se observa si las capas compartidas aportan realmente una ganancia intermodal, en lugar de solo aumentar el número de parámetros.
+
+\lecturefigure{slide-237-dataset-synthesis.jpg}{Síntesis de datos: H\&E, proteínas, transcriptómica espacial e información genética}{00:50:19}
+
+Esta diapositiva se parece a la anterior de las cuatro modalidades, pero cumple otra función: aquella servía para presentar los datos y esta sirve para decidir las entradas del modelo. H\&E y las proteínas son imágenes espaciales densas; la transcriptómica espacial consiste en conteos de alta dimensión en posiciones dispersas; la información genética se acerca más a una condición a nivel de paciente. Antes de unificarlas hay que definir con claridad la tokenización y la mask policy de cada una.
+
+\lecturefigure{slide-238-unimodal-transformer.jpg}{Transformer unimodal: un flujo de entrada corresponde a una cabeza de predicción}{00:50:25}
+
+La vía unimodal es fácil de entrenar y de diagnosticar, y también sirve como baseline. Responde a la pregunta «¿qué se puede aprender solo con esta modalidad?» y ayuda a medir el valor marginal de cada modalidad añadida. Si el modelo multimodal supera apenas al mejor modelo unimodal, puede indicar que la alineación de los datos es insuficiente, que la fusión no surte efecto o que la modalidad añadida no contiene información sobre la tarea.
+
+\lecturefigure{slide-240-multimodal-transformer.jpg}{Transformer multimodal: varios flujos de codificación convergen en capas de fusión compartidas y un espacio de salida}{00:51:21}
+
+En la figura, los distintos colores representan token de distintas modalidades, y las multimodal layers del centro se encargan de la interacción. La salida puede reconstruir cualquier modalidad o predecir objetivos relacionados con el tratamiento. Durante el entrenamiento hay que equilibrar las distintas funciones de pérdida; de lo contrario, es fácil caer en un desajuste de objetivos del tipo «reconstruye muy bien H\&E, pero rinde muy mal en las tareas moleculares importantes».
+
+\begin{knowledgebox}{La masking policy es un diseño curricular implícito}
+Qué token se enmascaran, cuántos y si falta una modalidad completa determina lo que el modelo se ve obligado a aprender. Enmascarar al azar unos pocos genes enseña sobre todo correlaciones locales; solo enmascarar en bloque una modalidad entera entrena de verdad la translation intermodal; enmascarar a la vez regiones espaciales se acerca más a completar tejido y a razonar a larga distancia.
+\end{knowledgebox}
+
+\subsection{Simulación contrafactual multimodal}
+
+La promesa central de un modelo unificado es que, al cambiar una modalidad o una condición de intervención, las predicciones de las demás modalidades se actualicen de forma coherente. Esto se acerca más a un modelo del mundo que generar por separado un mapa de expresión, pero sigue siendo necesario verificar con rigor que la intervención respete los mecanismos reales. Para entender la demo que sigue, hay que fijar el paciente y el contexto espacial, comparar únicamente la salida conjunta antes y después de modificar la condición y relacionar los cambios en la imagen con desenlaces experimentales medibles.
+
+\lecturefigure{slide-241-counterfactual-architecture.jpg}{Counterfactual multimodal: cambiar una modalidad de entrada y observar el cambio en la predicción conjunta}{00:52:00}
+
+A la izquierda, la entrada incluye imágenes de tejido, mediciones espaciales y posibles condiciones de tratamiento; en el centro está el modelo compartido; a la derecha, la salida es una representación multimodal del paciente. En el caso ideal, el modelo puede responder «si se modifica este gen o este tratamiento, ¿cómo cambiarán en conjunto las proteínas, el RNA y el estado del tejido?». Si el modelo solo realiza una compleción estática, no tiene esta transición de estado coherente.
+
+\lecturefigure{slide-247-counterfactual-results.jpg}{Estado final de la demo contrafactual: tras cambiar la entrada, el mapa de salida muestra diferencias espaciales}{00:53:36}
+
+Para leer la figura, primero hay que ver qué entradas se mantienen fijas y después la modalidad modificada y las diferencias en la salida. Las regiones rojas y verdes muestran la dirección de la predicción, pero no representan directamente eficacia terapéutica. Una validación confiable requiere datos de perturbation conocidos: introducir en el modelo la información previa a una intervención real y comparar la predicción del modelo con las mediciones posteriores a la intervención, en lugar de solo juzgar si la imagen «parece biológica».
+
+\begin{lstlisting}[language=Python,caption={Prioridad de experimentos: considerar a la vez el efecto según el modelo, la incertidumbre y el costo de la validación real}]
+def rank_experiments(candidate_interventions, patient_context):
+    ranked = []
+    for intervention in candidate_interventions:
+        effect, uncertainty = world_model.simulate(
+            patient_context, intervention
+        )
+        novelty = compare_with_existing_evidence(intervention)
+        cost = wet_lab_cost(intervention)
+        score = expected_value(effect, uncertainty, novelty, cost)
+        ranked.append((score, intervention))
+    return sorted(ranked, reverse=True)
+\end{lstlisting}
+
+\begin{importantbox}{El simulador y el selector de experimentos son dos sistemas distintos}
+El modelo del mundo estima «qué pasaría si se hace $a$»; el scientist o el agent decide «qué $a$ vale la pena hacer». Aunque el simulador fuera perfecto, enumerar exhaustivamente todas las combinaciones no es viable. El valor de un experimento depende además de su novedad, de que pueda verificarse, de su costo y de su seguridad.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Un Transformer multimodal a gran escala necesita coordinar token heterogéneos, modalidades faltantes, la masking policy y funciones de pérdida con múltiples objetivos. Los modelos unimodales son un baseline necesario; el valor añadido del modelo unificado debe reflejarse en mejor translation, disambiguation y coherencia ante intervenciones. La demo counterfactual es un generador de mecanismos candidatos, no una prueba de eficacia clínica.

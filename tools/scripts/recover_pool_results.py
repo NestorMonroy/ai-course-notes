@@ -43,6 +43,9 @@ def runtime_index(out_dir: Path) -> Path | None:
 
 def recover(batch: str) -> tuple[int, int]:
     bench = loop.batch_bench(batch)
+    # Un lote que el ciclo aún no preparó no tiene nada que recuperar.
+    if not (bench / "units.tsv").is_file():
+        return 0, 0
     targets = {row[3]: row[4] for row in
                (l.split("\t") for l in (bench / "units.tsv").read_text(encoding="utf-8").splitlines() if l.strip())}
     written = rejected = 0

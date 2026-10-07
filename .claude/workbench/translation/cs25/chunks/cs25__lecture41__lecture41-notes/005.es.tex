@@ -1,0 +1,53 @@
+\section{La limpieza de datos y el entrenamiento progresivo también son arquitectura}
+
+La sección anterior presentó un backbone escalable; esta sección explica por qué la misma arquitectura todavía puede fallar en el entrenamiento. Escalar el video depende de movimiento de alta calidad, nitidez visual, eliminación de duplicados, filtrado de contenido y caption de grano fino; además, el entrenamiento debe avanzar paso a paso desde tareas baratas hasta videos largos de alta resolución. El pipeline de datos y el curriculum determinan qué ve el modelo y a qué costo lo ve.
+
+\subsection{De un volumen masivo de video a clip--prompt pairs entrenables}
+
+El flujo de datos de Movie Gen no consiste en recolectar al azar y entrenar directamente, sino en ir estrechando el conjunto etapa por etapa. Al leer la figura, conviene seguir de izquierda a derecha la falla que resuelve cada filtro: el filtro visual elimina la baja calidad, el filtro de movimiento elimina lo estático o tembloroso, el filtro de contenido atiende la duplicación y el muestreo, y el captioning escribe la cámara y el movimiento en la condición de texto.
+
+\lecturefigure{slide-247-data-curation.jpg}{Limpieza de datos de video: filtros visual, de movimiento y de contenido, y captioning de grano fino}{00:39:11}
+
+Si en la distribución de entrenamiento abundan videos de baja resolución, sin movimiento, con bordes, o cuyo caption solo describe al sujeto y no la acción, el modelo, aunque se amplíe, solo ajustará mejor un objetivo equivocado. La limpieza de datos está ligada a la scaling law: cuando cambia la calidad efectiva de los datos, también cambian la validation loss y la relación compute-optimal.
+
+\begin{importantbox}{El caption forma parte de la supervisión del video}
+Un prompt de video no debe limitarse a «una persona, un auto»; también debe expresar el orden de las acciones, el movimiento de la cámara, la velocidad y las interacciones. Cuando el caption omite las relaciones temporales, el modelo no puede aprender de la supervisión textual a ejecutar con precisión eventos de varias etapas; esta es también una fuente importante de fallas con prompts largos.
+\end{importantbox}
+
+\begin{warningbox}{Que la cola larga aparezca no significa que se pueda controlar de forma confiable}
+Los datos a escala de internet pueden contener algún concepto poco frecuente, pero el número de apariciones, la calidad del caption y la distribución de contextos determinan si es controlable. El pretraining aporta cobertura, y el post-training o los datos de la tarea aportan una invocación estable; no se puede equiparar «lo vio en los datos» con «el modelo lo ejecutará según la instrucción».
+\end{warningbox}
+
+\teachervoice{00:35:20--00:39:11: el docente dice directamente que las scaling laws dependen de que los datos estén limpios; si los datos no están limpios, la ley no se cumple y la calidad de la salida tampoco mejora automáticamente con la escala.}
+
+\subsection{Curriculum progresivo: primero aprender de forma barata, luego refinar de forma costosa}
+
+Entrenar todas las etapas directamente con 768p, 16 segundos y 16 fps desperdiciaría una gran cantidad de compute y además sería más difícil de estabilizar. Movie Gen primero usa imágenes y video de baja resolución para establecer la semántica y el movimiento básico; después aumenta gradualmente la resolución y la duración, y se divide en rutas como personalization, T2V finetuning y video-to-video.
+
+\lecturefigure{slide-250-progressive-training.jpg}{Recipe de entrenamiento: imágenes a 256p, preentrenamiento conjunto, video a 768p y ramas por tarea}{00:40:58}
+
+El curriculum puede abstraerse como un conjunto de workloads $w_k=(r_k,f_k,T_k,b_k)$, que representan respectivamente la resolución, la tasa de cuadros, la duración y el lote. El objetivo de cada etapa es
+\[
+\theta_{k+1}=\operatorname{Train}(\theta_k,\mathcal D_k,w_k),
+\qquad
+\operatorname{cost}(w_{k+1})>\operatorname{cost}(w_k),
+\]
+es decir, los parámetros de la etapa anterior inicializan la etapa más costosa. No se trata de un teorema, sino de una recipe de ingeniería: primero se aprende una distribución amplia con alto rendimiento y luego se concentra el presupuesto en la calidad final.
+
+\begin{lstlisting}[language=Python,caption={Flujo conceptual del entrenamiento progresivo de imagen/video}]
+model = train(text_to_image_256p, model=None)
+model = train(joint_image_video_256_to_768p, model=model)
+video_model = finetune(text_to_video_768p_16s, model=model)
+edit_model = finetune(video_to_video_pairs, model=model)
+personalized_model = finetune(identity_conditioned_pairs, model=model)
+\end{lstlisting}
+
+\begin{knowledgebox}{Cómo entra el context de 73K en el costo de entrenamiento}
+Un video más largo hace que el número de tokens crezca de forma aproximadamente lineal con el número de cuadros, pero el cómputo de la atención completa crece como $N^2$. Si lo demás no cambia, duplicar la duración de 16 a 32 segundos aproximadamente duplica el número de tokens y vuelve cerca de cuatro veces mayor el término principal de attention; por eso el video largo es, ante todo, un problema de sistemas.
+\end{knowledgebox}
+
+\teachervoice{00:39:11--00:40:58: el docente explica el flujo de entrenamiento como una optimización de convergence-speed: primero se hace aprendizaje barato de imagen/video a 256p, luego se sube a 768p y a videos largos, y por último se hace el post-entrenamiento por ramas según la tarea.}
+
+\subsection{Resumen de la sección}
+
+Escalar solo tiene sentido cuando la calidad de los datos está bajo control. Movie Gen construye los pairs de entrenamiento con filtros visuales, de movimiento, de contenido y de caption, y luego usa un curriculum progresivo para pasar de tareas baratas con imágenes a video largo de alta resolución y a ramas de aplicación. Los datos y el curriculum no son una recipe periférica, sino componentes del sistema que determinan los límites de la capacidad del modelo.

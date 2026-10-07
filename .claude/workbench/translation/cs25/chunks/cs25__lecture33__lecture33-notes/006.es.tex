@@ -1,0 +1,78 @@
+\section{Granularidad de la representación, bidirectionality y caché en múltiples turnos}
+
+La sección anterior analizó la separación de parámetros; esta sección aborda las dos estructuras restantes: que el decoder solo lea la capa final del encoder y que el encoder use bidirectional attention. Ambas mejoraron en su momento la calidad en las tareas, pero a medida que las redes se vuelven más profundas y las conversaciones más largas, los problemas de granularidad de la información y de cómputo repetido se vuelven notorios. Aquí se colocan por primera vez la architecture choice y el serving cost en una misma figura.
+
+\subsection{¿Leer solo la última encoder layer crea un cuello de botella de información?}
+
+Esta subsección se centra en el punto desde el que lee la cross-attention. En las redes profundas, las distintas capas suelen representar información de distinta granularidad; si incluso la primera capa del decoder solo puede acceder a la capa final del encoder, la información formal de las capas bajas puede quedar excesivamente comprimida. En los modelos actuales de unas decenas de capas el efecto quizá sea pequeño, pero una red extremadamente profunda podría amplificar este desajuste.
+
+\lecturefigure{hyung-slide-059.jpg}{Segunda suposición: el objetivo solo necesita leer una entrada ya completamente codificada}{Hyung Won Chung official deck, p.~59}
+
+\lecturefigure{hyung-slide-060.jpg}{La cross-attention estándar solo lee las activaciones de la capa final del encoder}{Hyung Won Chung official deck, p.~60}
+
+\lecturefigure{hyung-slide-061.jpg}{En las redes profundas, las capas inferiores y superiores suelen codificar información de distinta granularidad}{Hyung Won Chung official deck, p.~61}
+
+\begin{knowledgebox}{Lectura de la figura: la representation hierarchy es una heurística, no una tabla semántica fija}
+En las redes de visión se suele ilustrar la representación jerárquica con «bordes en las capas bajas, objetos en las capas altas»; en los modelos de lenguaje también puede aparecer una tendencia que va de la forma local a la semántica abstracta. Sin embargo, el significado de cada capa cambia con el objetivo de entrenamiento, las conexiones residuales y la profundidad. Lo que la figura realmente sustenta es que distintas capas pueden aportar información complementaria, por lo que exponer solo la capa final es una decisión estructural que debe someterse a prueba.
+\end{knowledgebox}
+
+\teachervoice{00:32:19--00:33:01, Hyung Won dice que, en los T5 de alrededor de 24 capas que él ha usado, que la layer 1 lea la layer 24 parece no causar problemas; pero si en el futuro hubiera diez o mil veces más profundidad, él «no se sentiría del todo cómodo». Es una pregunta típica de scale extrapolation, no una falla ya observada.}
+
+\subsection{Qué contrafáctico representa la layer-aligned connection}
+
+La subsección anterior señaló el problema de granularidad; esta construye la alternativa mínima: que la capa $\ell$ del decoder lea la capa $\ell$ del encoder. Así, cada etapa recibe una representación de entrada de profundidad similar, lo que también se acerca más a la token interaction en la misma capa de un decoder-only. El valor del contrafáctico está en que permite experimentos controlados, aunque al final no se adopte.
+
+\lecturefigure{hyung-slide-062.jpg}{Tercera suposición: dentro de la entrada se necesita all-to-all bidirectional interaction}{Hyung Won Chung official deck, p.~62}
+
+\lecturefigure{hyung-slide-063.jpg}{Arquitecturas alternativas con layer-aligned connection y causal input}{Hyung Won Chung official deck, p.~63}
+
+\begin{importantbox}{El producto correcto del análisis estructural es un ablation axis}
+De H059--H063 se obtienen dos ejes experimentales independientes: final-layer versus layer-aligned cross-attention, y bidirectional versus causal input mask. Si se cambian ambos a la vez, la diferencia de desempeño no puede atribuirse a ninguno; la derivación en cuatro pasos de la clase sirve precisamente para generar ablations que puedan escalarse por separado.
+\end{importantbox}
+
+\subsection{Beneficio en calidad y costo de sistema de la bidirectionality}
+
+En la época de BERT, el bidirectional encoder era muy importante para las tareas difíciles de comprensión, porque cada token puede aprovechar al mismo tiempo el contexto izquierdo y el derecho. Sin embargo, en el instruction tuning a gran escala, la anecdotal experience del ponente es que la diferencia entre bidireccional y unidireccional es pequeña; al mismo tiempo, el chat de múltiples turnos expone un costo de sistema evidente: cada mensaje nuevo cambia el «futuro» de la entrada anterior, y la representación bidireccional debe volver a codificarse.
+
+\lecturefigure{hyung-slide-064.jpg}{A escala suficiente, el beneficio de la bidirectionality puede reducirse, pero aumenta el costo de la conversación de múltiples turnos}{Hyung Won Chung official deck, p.~64}
+
+\teachervoice{00:33:11--00:33:59, Hyung Won marca explícitamente la conclusión como highly anecdotal: en Flan-2, la diferencia entre el fine-tuning bidireccional y el unidireccional es pequeña. Estas notas conservan ese nivel de evidencia; no debe reescribirse como «se ha demostrado que la bidirectional attention es inútil».}
+
+\subsection{Por qué la causal attention puede reutilizar la KV cache}
+
+Esta subsección convierte la figura en un balance de cómputo. En un causal model, la representación de los tokens anteriores no depende de los tokens nuevos futuros, por lo que sus key/value calculados en el turno previo pueden guardarse en caché; al añadir un mensaje solo se calcula la parte nueva. En un bidirectional encoder, los tokens anteriores pueden leer los tokens nuevos, de modo que tras añadirlos las representaciones previas dejan de ser válidas y normalmente hay que volver a codificar toda la entrada.
+
+\lecturefigure{hyung-slide-066.jpg}{Comparación entre la recodificación bidirectional y la cache reuse unidirectional en una conversación de múltiples turnos}{Hyung Won Chung official deck, p.~66}
+
+Sea $n$ la longitud del contexto existente y $m$ la longitud añadida. Ignorando constantes y el MLP, el costo de rehacer la full attention es aproximadamente
+\[
+O\bigl((n+m)^2\bigr),
+\]
+mientras que la causal KV cache (key-value cache, que guarda los tensores key/value de cada capa para los tokens anteriores) solo necesita calcular, para las nuevas query, la attention sobre la caché anterior y los tokens añadidos, con un costo incremental aproximado de
+\[
+O(nm+m^2).
+\]
+Aquí $n$ es la longitud del contexto anterior y $m$ es el número de tokens añadidos. La caché reduce el cómputo repetido, pero aumenta el uso de memoria de la GPU; el servicio con contextos largos todavía requiere gestionar cache placement, batching y eviction.
+
+\begin{knowledgebox}{Lectura de la figura: la región azul reutilizable corresponde a la invariancia causal}
+En el caso unidirectional, los tokens anteriores no pueden ver el futuro, por lo que la llegada de un mensaje nuevo no cambia sus key/value; en el caso bidirectional, la representación de ``How are you?'' cambia porque después aparece ``Bad''. La ventaja de eficiencia del sistema proviene de la dirección de las dependencias en el grafo de cómputo, no del nombre decoder-only en sí.
+\end{knowledgebox}
+
+\teachervoice{La explicación en clase de 00:34:07--00:35:12 conecta la calidad del modelo con el serving: una estructura que en 2018 mejoró los benchmark puede generar costos de recodificación en la forma de producto de múltiples turnos. La architecture trajectory no la determina solo la accuracy, sino también el patrón de interacción.}
+
+
+\subsection{Conclusión: convertir el análisis histórico en la siguiente ablación}
+
+La última diapositiva no pide a los estudiantes copiar una arquitectura fija, sino volver a su propio problema de investigación: ¿qué estructuras predeterminadas hay en el sistema actual? ¿Por qué eran útiles en el régimen anterior? Al cambiar el cómputo, los datos, la profundidad de la red y la longitud de la interacción, ¿pasarán de ser un atajo a ser un cuello de botella?
+
+\lecturefigure{hyung-slide-067.jpg}{Conclusión: identificar la fuerza dominante y analizar la estructura adicional desde la perspectiva del scaling}{Hyung Won Chung official deck, p.~67}
+
+\teachervoice{00:35:42--00:36:18, al cerrar, Hyung Won pide a los estudiantes que hagan análisis histórico una y otra vez, para entrenarse en identificar «qué suposiciones hay que revisar, por qué, y si pueden sustituirse por un mecanismo más general y hacer scale up». Esto es más importante que recordar que ganó decoder-only.}
+
+\begin{importantbox}{De la conclusión histórica a la pregunta experimental}
+Para cualquier estructura $b$, escriba al menos cuatro elementos: el problema anterior que resolvía, su beneficio actual, el eje de escala que podría limitar y la ablation capaz de aislar esa suposición. Si solo se sabe que «al quitarla baja la puntuación actual», todavía no se ha respondido si cambiará la scaling trajectory a largo plazo.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La jerarquía de representaciones nos recuerda revisar el final-layer bottleneck; la interacción de múltiples turnos nos recuerda considerar la attention direction junto con el costo de la caché; el cierre condensa estos casos en un procedimiento general de investigación: identificar las suposiciones predeterminadas, explicar su beneficio en el entorno anterior y, a lo largo del nuevo eje de escala, comprobar si todavía vale la pena conservarlas.

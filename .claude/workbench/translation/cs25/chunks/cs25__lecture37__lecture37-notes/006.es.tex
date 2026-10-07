@@ -1,0 +1,125 @@
+\section{De la probabilidad de la trayectoria a la probabilidad de la respuesta: Self-Consistency y agregación de texto libre}
+
+Lo que el modelo de lenguaje optimiza de forma nativa es la next-token probability de cada paso. Sin embargo, lo que realmente le importa al usuario suele ser la probabilidad de la respuesta final $a$, y una misma respuesta puede derivarse de muchos reasoning path $r$ distintos. Si solo se elige la respuesta completa con la mayor probabilidad conjunta, se confunde la «trayectoria más probable» con la «respuesta más probable». El punto de partida teórico de Self-consistency es aplicar marginalization sobre las trayectorias latentes.
+
+\subsection{La trayectoria más probable no es la respuesta más probable}
+
+En esta sección se traduce primero a expresiones de probabilidad la intuición gráfica de las slides 33--34. Al leer la figura hay que distinguir la probabilidad conjunta de una respuesta completa de la probabilidad total que resulta cuando varias trayectorias convergen en la misma respuesta; la primera corresponde a «qué trayectoria es la más común», y solo la segunda corresponde a «qué respuesta concentra la mayor masa de probabilidad».
+
+Para una entrada $x$, la probabilidad de la respuesta debe ser
+\[
+p_\theta(a\mid x)=\sum_{r}p_\theta(r,a\mid x)
+=\sum_r p_\theta(r\mid x)p_\theta(a\mid x,r).
+\]
+donde $r$ es el reasoning path latente. Greedy o beam search se acercan más a buscar
+\[
+(r^*,a^*)=\arg\max_{r,a}p_\theta(r,a\mid x),
+\]
+mientras que lo que quiere el usuario es
+\[
+a^*=\arg\max_a\sum_r p_\theta(r,a\mid x).
+\]
+Si la respuesta A tiene diez trayectorias de probabilidad media y la respuesta B solo una trayectoria de probabilidad máxima, la decodificación de una sola trayectoria puede elegir B, aunque la masa de probabilidad total esté concentrada en A.
+
+\lecturefigure{slide-33.jpg}{Desajuste en la decodificación: la trayectoria con máxima probabilidad conjunta no coincide con la respuesta de máxima probabilidad marginal}{33}
+
+\lecturefigure{slide-34.jpg}{Idea de corrección: aplicar marginalization sobre los reasoning path latentes}{34}
+
+\begin{importantbox}{El significado probabilístico de Self-consistency}
+No es una simple «votación por mayoría», sino una aproximación de la probabilidad marginal de la respuesta mediante muestras aleatorias. Cada reasoning path es una variable latente y, al final, solo se agrega por la respuesta normalizada; cuando trayectorias distintas llegan a la misma respuesta, sus masas de probabilidad deben sumarse.
+\end{importantbox}
+
+\teachervoice{00:40:17--00:43:00, el docente describe esto como un desajuste que «se entiende con la probabilidad condicional de preparatoria»: el modelo genera según la probabilidad de la secuencia completa, mientras que la tarea busca el resultado cuya respuesta final tenga la mayor probabilidad. Nota de clase: muchas mejoras en el razonamiento provienen de plantear correctamente el objetivo de optimización, no de introducir arquitecturas complejas.}
+
+\subsection{Self-Consistency: estimar la masa de la respuesta con Monte Carlo}
+
+Tras muestrear $K$ trayectorias $(r^{(k)},a^{(k)})$, el estimador para el escenario exact-answer es
+\[
+\widehat p_K(a\mid x)=\frac{1}{K}\sum_{k=1}^{K}\mathbf 1[a^{(k)}=a],
+\qquad
+\hat a=\arg\max_a\widehat p_K(a\mid x).
+\]
+donde $K$ es el número de muestras, $\mathbf 1[\cdot]$ es la función indicadora y $\widehat p_K$ es la frecuencia con que aparece la respuesta. Conforme aumenta $K$, la varianza de Monte Carlo disminuye, pero el costo crece linealmente; si las muestras están muy correlacionadas o comparten el mismo error, aumentar $K$ tampoco produce evidencia independiente.
+
+\lecturefigure{slide-35.jpg}{Self-Consistency: generar aleatoriamente varias respuestas y elegir la respuesta más común}{35}
+
+\lecturefigure{slide-36.jpg}{Problema de los huevos de pato: agregar la respuesta final, no buscar la trayectoria textual más común}{36}
+
+En el problema de los huevos de pato, de las tres respuestas, dos llegan a 18 y una a 26; la unidad correcta de agregación es la respuesta normalizada 18. Las dos trayectorias correctas tienen textos distintos, pero expresan el mismo cálculo. Si se vota por la cadena completa, no se fusionan; si se normaliza en exceso, se pueden fusionar erróneamente $18$, $18\%$ y $18$ dólares. Por eso, el parser de respuestas forma parte de self-consistency y no es un posprocesamiento ajeno.
+
+\begin{lstlisting}[language=Python,caption={Agregación de self-consistency exact-answer}]
+from collections import Counter
+
+def self_consistency(model, prompt, parse_answer, n=32):
+    counts = Counter()
+    traces = []
+    for sample in model.sample(prompt, n=n, temperature=0.8):
+        answer = parse_answer(sample.text)
+        if answer is not None:
+            counts[answer] += 1
+            traces.append((answer, sample.text))
+    if not counts:
+        raise ValueError("all samples failed answer parsing")
+    answer, votes = counts.most_common(1)[0]
+    return answer, votes / sum(counts.values()), traces
+\end{lstlisting}
+
+\subsection{Cómo leer los resultados de GSM8K y de modelos posteriores}
+
+La slide 37 resume los primeros resultados en GSM8K; lo importante visualmente no es memorizar cada decimal, sino observar que el mismo modelo mejora al agregar CoT y vuelve a dar un salto al añadir self-consistency. La slide 38 cita resultados de aggregation en reasoning model posteriores, lo que muestra que «formar consensus con múltiples muestras» no pierde eficacia porque un modelo individual se vuelva más capaz. Ambas slides abarcan distintos modelos, años y configuraciones, por lo que no deben tomarse directamente como un leaderboard unificado; lo que respaldan es una conclusión sobre el mecanismo: la agregación a nivel de respuesta sigue aprovechando la diversidad de los candidatos.
+
+\lecturefigure{slide-37.jpg}{GSM8K: mejoras por etapas aportadas por CoT y self-consistency}{37}
+
+\lecturefigure{slide-38.jpg}{En reasoning model posteriores, la aggregation sigue aportando beneficios}{38}
+
+\begin{warningbox}{Inference-time scaling debe especificar «qué se amplió»}
+El muestreo múltiple amplía la anchura, el CoT largo amplía la profundidad, tree search amplía la estructura y tool use amplía las capacidades externas. Su latencia, paralelismo, memoria y patrones de error son completamente distintos; escribir solo «se aumentó el test-time compute» no permite reproducir el experimento ni comparar costos.
+\end{warningbox}
+
+\teachervoice{00:44:10--00:47:20, el docente enfatiza que la mejora de self-consistency es grande, pero de inmediato acepta la pregunta de un estudiante sobre el costo: más muestras implican más token. Experiencia práctica: al reportar una mejora, deben indicarse al mismo tiempo el número de muestras, el total de token, la latencia de reloj y las condiciones de concurrencia.}
+
+\subsection{La consistencia puede servir como confianza, pero no se convierte automáticamente en garantía}
+
+La slide 39 muestra que, en esa configuración de GSM8K, cuanto mayor es la consistencia, mayor es en general la exactitud. Puede definirse la consistency
+\[
+c(x)=\max_a\widehat p_K(a\mid x).
+\]
+Un $c(x)$ cercano a 1 indica que la mayoría de las muestras convergen en la misma respuesta; pero solo mide el \textbf{consenso interno}. Si el modelo tiene un sesgo estable hacia el mismo error, $c(x)$ seguirá siendo alto. Antes del despliegue, conviene trazar un reliability diagram en el conjunto de validación y comparar los intervalos de confianza predicha con la tasa real de aciertos, en lugar de tomar la gráfica de correlación vista en clase como prueba de calibración.
+
+\lecturefigure{slide-39.jpg}{En la configuración de GSM8K, una mayor consistencia se correlaciona con una mayor exactitud}{39}
+
+\lecturefigure{slide-40.jpg}{Dos preguntas límite: si hay que muestrear las respuestas directas y si generar varias respuestas en una sola pasada es equivalente}{40}
+
+La primera pregunta distingue entre «no hay reasoning intermedio» y «la respuesta sigue teniendo varios token»: si la respuesta es una sola etiqueta discreta, pueden leerse directamente los logits para obtener la distribución completa, sin necesidad de aproximarla por muestreo; si la respuesta es una cadena larga, la probabilidad de la secuencia sigue requiriendo búsqueda o muestreo. La segunda pregunta distingue el \textbf{muestreo independiente} de «pedir que una misma respuesta enumere varias respuestas»: en este último caso, los candidatos comparten contexto y se influyen entre sí, por lo que ya no son muestras de Monte Carlo independientes de la misma distribución, aunque en la práctica también puedan formar un ensemble.
+
+\begin{knowledgebox}{Consistencia, calibración y corrección}
+La \textbf{Consistency} es el consenso entre muestras; la \textbf{calibration} significa que, de las muestras a las que se atribuye un 80\% de confianza, aproximadamente el 80\% son correctas; la \textbf{accuracy} es la tasa final de aciertos. Las tres están relacionadas, pero no son equivalentes. Los errores con alto consenso, los aciertos con bajo consenso y la deriva de la distribución rompen cualquier correspondencia simple.
+\end{knowledgebox}
+
+\subsection{Cómo agregar texto libre: Universal Self-Consistency}
+
+Las preguntas abiertas no tienen una respuesta estandarizada que pueda contarse directamente. Universal Self-Consistency (USC) sustituye la «votación por cadenas idénticas» por «pedir a un modelo judge que compare varios candidatos y elija la respuesta más consistente, la que mejor representa el contenido común». En el ejemplo del consumo de café de la slide 42, cada respuesta enumera un conjunto distinto de países, por lo que no es posible un exact match; el judge debe identificar los hechos que se superponen, los conflictos y la cobertura.
+
+\lecturefigure{slide-41.jpg}{Universal Self-Consistency: pedir a un LLM que elija la respuesta de texto libre más consistente}{41}
+
+\lecturefigure{slide-42.jpg}{Ejemplo de texto libre: elegir la respuesta representativa a partir de la superposición semántica}{42}
+
+\begin{lstlisting}[language=Python,caption={Implementación estructurada de Universal Self-Consistency para texto libre}]
+def universal_self_consistency(generator, judge, prompt, n=12):
+    candidates = generator.sample(prompt, n=n)
+    packet = {
+        "question": prompt,
+        "candidates": [c.text for c in candidates],
+        "criteria": ["factual overlap", "contradictions", "coverage"],
+    }
+    decision = judge.generate_json(packet)
+    return candidates[decision["selected_index"]], decision
+\end{lstlisting}
+
+USC introduce nuevos puntos de falla: el judge puede preferir textos más largos, más seguros de sí mismos o de estilo parecido al suyo; si los candidatos copian en conjunto el mismo error, el consenso semántico tampoco sirve. Una implementación más robusta debe guardar las justificaciones del judge, aleatorizar el orden de los candidatos, usar un verifier independiente para comprobar los hechos y realizar ablaciones sobre el sesgo de origen común entre el modelo judge y el generator.
+
+\teachervoice{00:47:20--00:51:29, el docente considera la consistency una confidence signal natural, pero en la sesión de Q\&A posterior también admite que self-consistency no es perfecta. Recordatorio de las notas: es un estimador y una herramienta de ingeniería, no un teorema de que «la mayoría siempre tiene la razón».}
+
+\subsection{Resumen de la sección}
+
+Self-consistency corrige el desajuste entre la trayectoria más probable y la respuesta más probable: muestrea varios reasoning path y agrega la masa de probabilidad a nivel de respuesta. Puede elevar de forma notable la exactitud y aportar una señal de consenso, pero sus beneficios dependen de la diversidad de las muestras, del análisis de las respuestas, del presupuesto de costo y de la calibración; la versión de texto libre depende, además, de la fiabilidad del judge.

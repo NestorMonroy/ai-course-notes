@@ -1,0 +1,60 @@
+\section{Cómo encontrar un buen Filter: no confíes en la intuición, haz primero una Ablation}
+
+«Limpiar datos» es lo que con más facilidad se reduce a una lista de reglas, pero lo verdaderamente difícil es juzgar si una regla mejora el modelo. El curso convierte el filter discovery en ciencia experimental: la manual inspection propone candidatos, la small-model ablation estima el efecto causal, y el uso de varias seeds y de high-signal benchmarks reduce el ruido.
+
+\subsection{De la afirmación sobre la calidad a un pipeline ejecutable}
+
+La primera evidence slide cita la postura de Yi/Open Foundation Models: una standard architecture con datos de alta calidad también puede rendir muy bien. Esa slide solo aporta la motivación; la página siguiente muestra stages ejecutables como language filtering, quality rules, dedup y semantic/topic.
+
+\lecturefigure{slide-39.jpg}{Por qué filtrar: el efecto de la data de alta calidad sobre una architecture estándar}{Deck oficial de Loubna Ben Allal, página 39}
+
+\lecturefigure{slide-40.jpg}{Pipeline general de data-cleaning para pretraining}{Deck oficial de Loubna Ben Allal, página 40}
+
+Un rule/perplexity filter común puede escribirse como una condición de conservación
+\[
+\mathbb{1}\{q(x)\in[a,b]\}\cdot \mathbb{1}\{\operatorname{PPL}_{r}(x)<\tau\},
+\]
+donde $q(x)$ es una heuristic como la longitud, las líneas repetidas o la proporción de símbolos, y $r$ es el reference model. Los umbrales $a,b,\tau$ deben calibrarse con muestras y con ablation.
+
+\begin{warningbox}{El doble filo del perplexity filter}
+Una PPL alta puede indicar basura, pero también un idioma poco común, código, fórmulas o conocimiento nuevo; una PPL baja puede indicar plantillas y repetición. Usar la PPL de un reference model introduce su bias en el dataset, por lo que debe combinarse con métricas de diversity/coverage.
+\end{warningbox}
+
+\subsection{En busca de la mejor técnica de filtrado: la manual inspection es solo el punto de partida}
+
+La sección anterior enumeró los stages de language, rule, perplexity y dedup, pero aún no respondió cómo elegir los umbrales. Esta sección convierte el diseño de filters en un experimento refutable: primero se examinan los datos y se explican las anomalías, y después se entrenan modelos pequeños con matched compute para verificarlo; para la evaluación se eligen benchmarks que ya dan signal en el early training, y se usan distintas seeds para no confundir el optimizer noise con una filter gain.
+
+\lecturefigure{slide-42.jpg}{Filter discovery: inspección manual, ablation con modelos pequeños, benchmarks de alta signal y múltiples seeds}{Deck oficial de Loubna Ben Allal, página 42}
+
+Si la diferencia de puntuación entre el filter $f$ y el baseline es $\Delta_s$, la media y el error estándar a lo largo de $k$ seeds pueden escribirse como
+\[
+\bar\Delta=\frac{1}{k}\sum_{s=1}^{k}\Delta_s,
+\qquad
+\operatorname{SE}(\bar\Delta)=\frac{\operatorname{sd}(\Delta_s)}{\sqrt{k}}.
+\]
+Solo cuando el effect supera el noise vale la pena aplicar la regla a un TB-scale corpus.
+
+\begin{lstlisting}[caption={Protocolo experimental mínimo de una ablation de filtrado de datos}]
+for filter_candidate in candidates:
+    subset = apply_filter(raw_subset, filter_candidate)
+    for seed in seeds:
+        model = train_small_model(subset, matched_tokens, seed)
+        scores[filter_candidate, seed] = evaluate(high_signal_suite)
+compare_mean_variance_cost_and_retained_diversity(scores)
+\end{lstlisting}
+
+\teachervoice{00:27:10--00:30:00, la ponente presenta dos resultados negativos: filtrar por comment density casi no produjo mejora; eliminar los repositorios con menos de 5 stars retiró más del 70\% de los datos y dio la peor ablation. La intuición debe ceder ante el experimento.}
+
+\subsection{Las 200+ ablations de FineWeb: la recipe de datos también necesita un search budget}
+
+El equipo de FineWeb entrenó más de 200 ablation models de alrededor de 1B de parámetros y alrededor de 30B tokens para elegir los filters. Esta escala muestra que la data research no es un preprocesamiento barato; requiere model-training budget, un benchmark harness y disciplina estadística.
+
+\lecturefigure{slide-43.jpg}{FineWeb: búsqueda de la filtering recipe con 200+ ablation models}{Deck oficial de Loubna Ben Allal, página 43}
+
+\begin{importantbox}{Tratar la data recipe como una hyperparameter search}
+Filter type, threshold, dedup radius, language mixture, source weights y sampling temperature son todos hiperparámetros. Igual que en la architecture search, hay que evitar el test-set tuning, conservar una held-out evaluation y registrar los experimentos fallidos.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Un buen filter no es aquel cuya regla parece razonable, sino aquel que mejora el modelo con matched compute, múltiples seeds y varios early-signal benchmarks, y que al mismo tiempo preserva los objetivos de diversity y governance. El fracaso del star filtering es una de las lecciones prácticas más importantes de esta clase.

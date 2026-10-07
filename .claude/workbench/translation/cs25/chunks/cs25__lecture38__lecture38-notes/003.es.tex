@@ -1,0 +1,113 @@
+\section{De la neuron al attribution graph}
+
+La sección anterior presentó el soporte del cómputo; esta sección entra en el núcleo del método. La conferencia sigue una ruta de tres pasos: «primero encontrar features más interpretables, después conectar esas features en un prompt-specific graph y, por último, volver al modelo original para hacer una intervention». Cada paso introduce aproximaciones y corresponde a una evidencia de distinta solidez.
+
+\subsection{Por qué una sola neuron no suele ser la unidad adecuada}
+
+Si se enumeran los ejemplos de mayor activación de una neuron, es común ver mezclados fragmentos de código, lenguaje natural, símbolos y temas. Esta polysemanticity (polisemia) indica que una sola coordenada no necesariamente corresponde a un solo concepto. Un enfoque más sólido consiste en buscar direcciones dispersas dentro de las activaciones de alta dimensión, de modo que la combinación lineal de un grupo de neurons represente en conjunto un patrón más coherente, como «Golden Gate Bridge».
+
+\lecturefigure{slide-10-what-does-neuron-do.jpg}{Pregunta ingenua: ¿qué representa realmente esta neuron?}{00:11:50}
+
+\lecturefigure{slide-11-single-neuron-top-activations.jpg}{Los ejemplos de alta activación de una sola neuron mezclan varios contextos sin relación entre sí}{00:13:07}
+
+La figura 11 debe leerse como un contraejemplo y no como una conclusión de fracaso: que las top activations de una neuron no sean coherentes no significa que la red carezca de estructura conceptual; significa que el sistema de coordenadas puede no ser el adecuado. Los investigadores necesitan buscar una basis (base) más apropiada. Al mismo tiempo, el feature label sigue siendo un nombre comprimido por una persona; no debe confundirse «parece Texas» con un valor de verdad semántico único en sentido matemático.
+
+\lecturefigure{slide-12-golden-gate-feature.jpg}{La combinación de varias neurons puede formar una feature de Golden Gate Bridge más estable}{00:15:21}
+
+\begin{warningbox}{No trate una feature como un campo de base de datos}
+Una feature es una dirección en el espacio de activaciones junto con su interpretación empírica, no una variable booleana con nombre predefinido dentro de la red. Puede tener límites difusos y varios usos semánticos, y también puede variar según el prompt, la capa o el modelo. La etiqueta es una interfaz de investigación, no una demostración ontológica.
+\end{warningbox}
+
+\subsection{Modelo de reemplazo disperso: reescribir una MLP densa como unas pocas features}
+
+Sea $y\in\mathbb{R}^d$ la salida de la MLP en algún punto del modelo original; el modelo de reemplazo la reconstruye con activaciones dispersas no negativas $a\in\mathbb{R}^m$ y un diccionario de features $D\in\mathbb{R}^{d\times m}$:
+\[
+\hat y=Da,\qquad
+a=\sigma(Ex+b),\qquad
+\mathcal{L}=\lVert y-\hat y\rVert_2^2+\lambda\lVert a\rVert_1.
+\]
+Aquí $x$ es el estado de entrada, $E$ es el encoder, $b$ es el sesgo y $\sigma$ es la no linealidad que produce activaciones dispersas; el primer término es el reconstruction error y el segundo controla la dispersión mediante $\lambda$. El objetivo no es copiar a la perfección cada neuron, sino equilibrar la fidelidad con el número de features legibles.
+
+«Finding and connecting features in Claude 3.5 Haiku» comprende dos etapas que no pueden fusionarse. Finding aprende primero las features a partir de una gran cantidad de ejemplos de activación y revisa en qué tokens y contextos aparece cada dirección; connecting calcula después, para el prompt actual, la influencia entre esas direcciones. La primera responde a una pregunta de diccionario; la segunda, a una pregunta de programa. Aunque los top examples de una feature sean muy claros, si esta no se activa en el prompt objetivo o no transmite contribución hacia las etapas posteriores, no debe incluirse en el grafo explicativo.
+
+\lecturefigure{slide-13-finding-features-haiku.jpg}{Objeto de estudio: encontrar y conectar features en Claude 3.5 Haiku}{00:16:47}
+
+\textbf{Finding and connecting features in Claude 3.5 Haiku} no es un flujo que «genere explicaciones con un clic». El equipo de investigación primero aprende direcciones candidatas sobre una gran cantidad de activaciones y luego asigna a cada dirección una etiqueta provisional con ejemplos automáticos y revisados por personas; después vuelve a un prompt específico y conserva solo los nodos que realmente se activan y contribuyen a la salida objetivo. Por último, todavía debe revisar el reconstruction error, la estabilidad de los pesos de las aristas y las intervenciones en el modelo original. Este orden evita un sesgo frecuente: saber de antemano que se quiere ver la historia Dallas--Texas--Austin y luego escoger, entre una enorme cantidad de nodos, las partes que parecen respaldarla. Los resultados de interpretabilidad deben provenir de reglas de selección y validación definidas de antemano, no de armar el rompecabezas a posteriori.
+
+\lecturefigure{slide-14-dallas-austin-prompt.jpg}{Se usa la pregunta por la capital del estado donde está Dallas para construir una cadena factual de varios pasos que pueda rastrearse}{00:17:29}
+
+Este grupo de figuras aplica el método a un prompt verificable: la entrada menciona Dallas, la salida debe ser Austin y los conceptos intermedios incluyen Texas y state capital. Una explicación ideal no solo descubre que estas palabras están relacionadas, sino que muestra cómo la feature de Dallas eleva la feature de Texas y cómo Texas y capital elevan en conjunto la feature say-Austin.
+
+\begin{lstlisting}[language=Python,caption={Extracción de features dispersas: aproximar la salida densa de la MLP con unas pocas direcciones no nulas}]
+def sparse_features(hidden_state):
+    activations = relu(encoder @ hidden_state + bias)
+    active = top_sparse_entries(activations)
+    reconstruction = decoder[:, active] @ activations[active]
+    return active, reconstruction
+\end{lstlisting}
+
+\subsection{Cross-Layer Transcoder y prompt-specific graph}
+
+Un per-layer transcoder común solo explica la entrada y la salida de la MLP de una misma capa; el Cross-Layer Transcoder (CLT) permite que las features de capas tempranas escriban directamente en varias capas posteriores, con lo que la amplificación repetida entre capas se comprime en rutas más cortas. Para un solo prompt, los investigadores conservan únicamente las features que realmente se activan y tienen una influencia considerable, y así forman el attribution graph.
+
+\lecturefigure{slide-15-prompt-computational-graph.jpg}{Extraer un prompt-specific computational graph a partir de miles de activaciones}{00:22:13}
+
+\lecturefigure{slide-16-cross-layer-transcoder.jpg}{CLT: una feature lee de una capa y puede escribir en varias capas posteriores}{00:23:51}
+
+\lecturefigure{slide-17-replacement-model-comparison.jpg}{Comparación entre el Transformer original y un modelo de reemplazo disperso e interpretable}{00:24:49}
+
+La ventaja del CLT es que las rutas son más cortas y hay menos features repetidas; el costo es que el reemplazo entre capas puede sacrificar fidelidad local. Más importante aún, el modelo de reemplazo de esta conferencia reconstruye principalmente las contribuciones de la MLP: la attention del modelo base se conserva y se usa para propagar la influencia, pero no se explica en términos de features. Por ello, la «acción de selección» que falta en el grafo podría realizarla precisamente la attention.
+
+La figura comparativa revela además un problema de medición que suele pasarse por alto: el replacement model no traduce uno por uno los parámetros de la red original a etiquetas en lenguaje natural, sino que entrena un sustituto más disperso junto al cómputo original. Que la salida del sustituto se aproxime a la de la MLP original no garantiza que sus rutas internas correspondan nodo por nodo; distintos diccionarios, penalizaciones de dispersión o formas de conexión entre capas pueden producir grafos distintos con un comportamiento similar. Por ello, la evaluación no puede basarse solo en la reconstruction loss; también debe considerar las probabilidades de los tokens posteriores, las predicciones de las intervenciones, la longitud de las rutas y los prompts en los que el método falla. Cuanto mayor sea la legibilidad, más necesario es comprobar activamente si se obtuvo a costa de perder el mecanismo real.
+
+\begin{warningbox}{Primer límite de la evidencia: el método no explica la attention}
+Más adelante, las notas mostrarán que «dos estrategias coexisten y una de ellas se impone». El grafo actual describe bastante bien cómo las features de la MLP ejecutan una estrategia, pero no necesariamente explica cómo la attention selecciona información, enruta posiciones o decide qué estrategia predomina. Un grafo corto no equivale a un mecanismo completo.
+\end{warningbox}
+
+\teachervoice{00:22:28--00:25:22, el docente dice explícitamente «primero olvidemos la attention» y enfatiza que usaron la attention del modelo original sin intentar explicarla. Esta restricción debe mantenerse en todas las conclusiones posteriores sobre planning y unfaithfulness.}
+
+\subsection{Del reconstruction error a la intervention en el modelo original}
+
+El modelo de reemplazo siempre deja un residuo. Si la salida de la MLP original se escribe como $y=\hat y+e$, donde $e$ es el reconstruction error, y $e$ sigue influyendo de manera significativa en los nodos posteriores, entonces debe aparecer explícitamente en el grafo, en lugar de fingir que las features interpretables ya cubren todo el cómputo. A continuación, se seleccionan los nodos según su contribución, se fusionan las features similares y, en el modelo original, se aumenta o disminuye la activación a lo largo de la dirección de la feature para verificar si la predicción se cumple.
+
+\lecturefigure{slide-18-reconstruction-error.jpg}{Los nodos de error de reconstrucción registran la contribución del modelo original que el modelo de reemplazo no explica}{00:26:55}
+
+\lecturefigure{slide-19-select-top-contributors.jpg}{Seleccionar las features más importantes según su contribución a la salida objetivo}{00:27:35}
+
+\lecturefigure{slide-20-group-similar-features.jpg}{Agrupar varias features de Texas similares en un supernode legible}{00:28:49}
+
+Si la influencia local del nodo $i$ sobre el nodo $j$ se aproxima como
+\[
+A_{i\to j}=a_i\left\langle d_i,\nabla_h a_j\right\rangle,
+\]
+donde $a_i$ es la activación de la feature de origen, $d_i$ es la dirección en que esta escribe en el residual stream y $\nabla_h a_j$ es el gradiente local de la feature de destino respecto al estado $h$. $A_{i\to j}$ es un attribution score, no una constante causal permanente; depende del prompt actual, de la aproximación lineal local y del modelo de reemplazo.
+
+\lecturefigure{slide-21-interventions-original-model.jpg}{Escribir la dirección de una feature en el modelo original y observar si la salida cambia según lo previsto}{00:30:27}
+
+Esta figura marca un punto de inflexión en la solidez de la evidencia: si, al cambiar la feature de Texas por la de California, la respuesta cambia en la dirección prevista, esto respalda una explicación causal más que el simple hecho de que «dos nodos estén conectados en el grafo». Aun así, hay que tener presente que una intervención exitosa muestra que esa dirección basta para influir en el comportamiento, pero no demuestra que la etiqueta sea única, que las rutas estén agotadas ni que, en su funcionamiento natural, el modelo use solo este circuito.
+
+\begin{lstlisting}[language=Python,caption={Intervention test mínimo: sumar y restar a lo largo de la dirección de la feature en las activaciones del modelo original y comparar las salidas}]
+base_logits = model(prompt)
+for alpha in [-strength, 0.0, strength]:
+    edited_logits = model(prompt, edit=(layer, feature_direction, alpha))
+    record(alpha, edited_logits[target_token])
+check_monotonic_prediction()
+\end{lstlisting}
+
+\begin{importantbox}{Escalera de evidencia en tres niveles}
+\textbf{Feature interpretation} responde «a qué se parece esta dirección»; \textbf{attribution graph} responde «cómo podría influir en las etapas posteriores en este prompt»; \textbf{original-model intervention} responde «si se cambia activamente esa dirección, ¿cambia el comportamiento según lo previsto?». Los tres deben usarse en conjunto; ninguno sustituye a los demás.
+\end{importantbox}
+
+\lecturefigure{slide-22-lecture-agenda.jpg}{Ruta de los casos: representaciones abstractas, procesamiento en paralelo y planificación}{00:32:44}
+
+El mapa de ruta lleva de la etapa de método a la etapa de descubrimientos. A partir de aquí ya no se presentan las herramientas una por una, sino que se ponen a prueba tres tipos de cómputo interno con distintas tareas. El lector debe tener siempre presentes dos preguntas: qué mecanismo muestra el grafo, y mediante qué intervención se validó ese mecanismo y qué deja fuera.
+
+\lecturefigure{slide-23-attribution-graph-overview.jpg}{Vista general del attribution graph Dallas-to-Austin}{00:33:24}
+
+\lecturefigure{slide-24-texas-austin-route.jpg}{Ruta representativa: Dallas activa representaciones relacionadas con Texas, que a su vez impulsan la salida Austin}{00:33:41}
+
+Las dos últimas figuras muestran la misma cadena factual a distintas escalas. La vista general indica que la red real no es un programa simbólico de tres nodos, sino que muchas features similares y rutas secundarias contribuyen en conjunto; la vista ampliada ofrece una ruta comprimida que puede enseñarse. Una buena explicación debe ir y venir entre ambas: no debe tratar el grafo complejo como ruido ilegible ni tomar la ruta comprimida Dallas→Texas→Austin como la única ruta de ejecución.
+
+\subsection{Resumen de la sección}
+
+El flujo de trabajo completo de circuit tracing es: buscar features dispersas, entrenar un modelo de reemplazo entre capas, registrar el reconstruction error, calcular la attribution específica del prompt, seleccionar y agrupar nodos, y volver al modelo original para intervenir. Es más estructurado que una lista de neurons y está más cerca de la causalidad que la visualización pura, pero sigue limitado por el error de reemplazo, la aproximación local, las etiquetas de las features y la attention que queda sin explicar.

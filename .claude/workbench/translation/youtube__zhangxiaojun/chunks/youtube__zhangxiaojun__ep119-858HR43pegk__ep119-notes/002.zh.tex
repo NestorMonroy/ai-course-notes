@@ -1,0 +1,46 @@
+\section{Attention 的问题地图：长 CoT、KV Cache 与 Decoding}
+
+上一章说为什么要重新研究 Attention，本章先把问题拆开。Full Attention 的好处是表达力强、训练稳定、经验成熟；坏处是在长序列下计算和显存都贵。长 CoT 和 Agentic AI 会生成几万 token 的推理链，decoding 逐 token 生成，KV cache 越来越大，推理成本成为真实瓶颈。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.96\textwidth]{attention-problem-map.png}
+\caption{Attention 问题地图：长上下文推理把 KV cache、decoding 和全局注意力推到瓶颈。自制概念图，依据 00:12:20--00:14:39 对谈内容整理。}
+\end{figure}
+
+\begin{knowledgebox}{读图：长上下文不是只增加输入长度}
+长 CoT 会让模型在生成阶段持续产出 token。Full Attention 每一步要和历史上下文交互，KV cache 要保存历史 key/value，decoding 成本随上下文变长而增加。新 Attention 的目标，就是降低这些成本而不明显掉性能。
+\end{knowledgebox}
+
+\subsection{Full Attention 的粗略复杂度}
+
+标准自回归 Softmax Attention 中，给定序列长度 \(L\)，模型会构造 \(QK^\top\) 得到 \(L \times L\) 的注意力分数矩阵，再做 causal mask、softmax 和乘以 \(V\)。因此训练或 prefill 阶段的注意力计算通常有平方复杂度：
+\[
+\text{cost}_{\text{full}} = O(L^2).
+\]
+其中，\(L\) 表示序列长度；\(Q,K,V\) 分别是 query、key、value 表示；\(O(L^2)\) 表示成本随序列长度平方增长。
+
+\begin{warningbox}{复杂度不是唯一指标}
+Full Attention 理论复杂度高，但它由大矩阵乘法构成，硬件亲和很好。很多线性或稀疏算法虽然理论复杂度更低，但如果并行性差、kernel 难写、内存访问不友好，实际速度未必更好。
+\end{warningbox}
+
+\subsection{KV Cache 为什么重要}
+
+KV cache 是推理时保存历史 key/value 的缓存。它让模型在生成新 token 时不必重复计算全部历史表示，但代价是显存随层数、序列长度、batch size 和隐藏维度增长。混合线性注意力路线的一个优点，是大量层可以像 RNN 递推状态一样工作，从而减少 KV cache；稀疏注意力路线则更多通过只关注 Top-K 或窗口 token 来减少每步计算。
+
+\begin{knowledgebox}{KV cache 的粗略账本}
+如果一个模型有 \(N\) 层，每层保存 key 和 value，序列长度为 \(L\)，batch size 为 \(B\)，每个 token 的 KV 表示维度为 \(d\)，那么 KV cache 的量级可写成：
+\[
+\text{KV cache} \propto 2 \times N \times B \times L \times d.
+\]
+其中，前面的 2 来自 key 和 value 两份缓存。这个式子说明：只要上下文长度 \(L\) 或 batch size \(B\) 增长，显存压力就会线性增加；如果每一层都保留 Full Attention 的 KV cache，长上下文推理会非常贵。
+\end{knowledgebox}
+
+\begin{importantbox}{为什么省 KV cache 会提高吞吐}
+KV cache 变小以后，同样显存里可以放下更大的 batch size；更大的 batch size 又能提高服务端吞吐。因此 Kimi 这类 hybrid linear 路线不只是减少显存，还会影响推理服务的经济性。
+\end{importantbox}
+
+\subsection{本章小结}
+
+Attention 的瓶颈不是单一 FLOPs 问题，而是长序列下的计算、显存、batch size、decoding 延迟和硬件效率共同作用。理解这些约束，才能理解 Kimi、DeepSeek、MiniMax 为什么选择不同路线。
+
