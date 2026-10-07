@@ -176,7 +176,11 @@ def cmd_prepare(args) -> int:
         note_id = rel(zh, root)[:-len(".tex")].replace("/", "__")
         # `localize` reescribe preámbulos; en un capítulo sin `\documentclass` sus
         # reglas de metadatos caían sobre la prosa (`。` → `.` en el cuerpo).
-        text = map_inputs(localize(original) if "\\documentclass" in original else original)
+        # Un preámbulo compartido (`\usepackage` sin `\begin{document}`) también se
+        # localiza: sin esto conservaba `ctex` y, al ensamblar, pisaba el
+        # `.es-mx.tex` curado con polyglossia (cs25-preamble, 2026-10-07).
+        is_preamble = "\\usepackage" in original and "\\begin{document}" not in original
+        text = map_inputs(localize(original) if "\\documentclass" in original or is_preamble else original)
         marker = "\\begin{document}"
         cut = text.find(marker)
         if cut >= 0:

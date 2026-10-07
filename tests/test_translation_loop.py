@@ -209,8 +209,9 @@ def test_the_shipped_policy_allows_only_qwen_without_fallback() -> None:
     assert policy["fallback"] == {"enabled": False}
     assert policy["allowed"] == [
         {"runtime": "ollama", "repository": "Qwen/Qwen2.5-7B-Instruct-GGUF", "quantization": "Q4_K_M"},
-        {"runtime": "ollama", "repository": "library/qwen2.5-7b-instruct", "source": "ollama", "quantization": "Q4_K_M"},
         {"runtime": "ollama", "repository": "Qwen/Qwen3-4B-GGUF", "quantization": "Q4_K_M"},
+        {"runtime": "ollama", "repository": "library/qwen2.5-7b-instruct", "source": "ollama", "quantization": "Q4_K_M"},
+        {"runtime": "ollama", "repository": "unsloth/Qwen3.5-9B-GGUF", "quantization": "q4_k_m", "source": "hf"},
     ]
 
 
