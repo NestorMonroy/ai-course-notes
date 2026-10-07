@@ -1,0 +1,640 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+\usepackage{multicol}
+
+\renewcommand{\notetitle}{Lecture 41: el Transformer en la generación de video: representación, Flow Matching y sistemas a escala en Movie Gen}
+\renewcommand{\noteauthors}{Elaborado a partir de la conferencia oficial de Andrew Brown (Meta) en Stanford CS25 V5, sus subtítulos hechos por personas y el artículo original de Movie Gen}
+\renewcommand{\notedate}{CS25 V5 · versión reescrita source-first de 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{Clase: 2025-06-03; publicación: 2025-07-03}
+\renewcommand{\videoduration}{1:13:35}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=YGHF8_tf--g}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.97\textwidth,height=0.49\textheight,keepaspectratio]{slides-images/#1}
+  \caption{#2}
+  \figsource{Andrew Brown, official Stanford CS25 recording, #3}
+\end{figure}
+}
+
+\let\standardtableofcontents\tableofcontents
+\renewcommand{\tableofcontents}{%
+  \small
+  \setlength{\parskip}{0pt}
+  \standardtableofcontents
+  \normalsize
+  \setlength{\parskip}{0.25em}
+}
+
+\begin{document}
+\makecscover
+
+\section{El progreso de la generación de video no es solo «una imagen más nítida»}
+
+Esta clase comienza con varios videos generados, pero la pregunta de fondo no es elegir cuál fotograma es el más bello, sino entender por qué entre 2022 y 2024 progresaron al mismo tiempo el movimiento, los reflejos, el lenguaje de cámara, el apego al texto y la capacidad de edición. El hilo conductor que propone el ponente es sobrio: comprimir el medio en una secuencia de tokens manejable, entrenar con Flow Matching un Transformer grande y unificado, y hacer crecer en conjunto los datos, el cómputo y el tamaño del modelo. Más adelante se desglosa esta frase en representación, objetivo de aprendizaje, arquitectura, datos y sistema de evaluación, cada uno cuantificable.
+
+\subsection{Qué demuestra cada uno de los tres ejemplos iniciales}
+
+Los ejemplos iniciales cumplen tres papeles distintos como evidencia: el koala que surfea muestra un sujeto complejo en movimiento, el fantasma en el espejo muestra coherencia geométrica y de reflejos, y la edición del corredor muestra la conservación del contenido del video de entrada y el control mediante instrucciones. Esta sección establece primero un marco de lectura de figuras: primero preguntar «cuál es la tarea», luego «qué propiedades se conservaron» y por último «si se trata de una capacidad estable»; de lo contrario, unos cuantos fragmentos exitosos se presentan fácilmente, por error, como confiabilidad completa, y tampoco aportan evidencia para los juicios sobre la arquitectura que vienen después.
+
+\lecturefigure{slide-064-moviegen-demo-koala.jpg}{Ejemplo de texto a video: el sujeto, la cámara, las olas y el movimiento de surf deben mantenerse en conjunto}{00:01:50}
+
+La dificultad del fragmento de surf no es generar un koala, sino lograr que la apariencia del sujeto, la tabla, las olas, la distancia de la cámara y el movimiento continuo sean coherentes a lo largo de varios fotogramas. Un modelo de imagen de un solo fotograma solo necesita optimizar la plausibility espacial; un modelo de video, además, debe controlar en el eje temporal la estabilidad de la identidad, la continuidad del movimiento y la recuperación tras oclusiones.
+
+\lecturefigure{slide-091-moviegen-demo-ghost.jpg}{Ejemplo del espejo: el reflejo, el punto de vista y la identidad del sujeto forman restricciones entre regiones}{00:02:22}
+
+La escena del espejo exige que el modelo vincule el «sujeto real» y el «sujeto en el espejo» como un mismo objeto, respetando a la vez los cambios de punto de vista. Esto respalda que el modelo ya aprendió ciertas regularidades visuales, pero no demuestra que tenga un motor óptico explícito; una prueba más confiable requiere cambiar el ángulo del espejo, las oclusiones y la posición del sujeto, y observar si la regularidad se generaliza de manera sistemática.
+
+\lecturefigure{slide-112-moviegen-editing-intro.jpg}{Edición de video por instrucciones: sobre una misma entrada se agrega un objeto, se cambia la ropa y se modifica el entorno}{00:02:48}
+
+Las dimensiones de evaluación de la tarea de edición difieren de las de la generación pura. Además de si la salida se ve bien, hay que verificar si las regiones no editadas se conservan, si la región objetivo cumple estrictamente la instrucción, si el ritmo del movimiento continúa y si la modificación persiste a lo largo de todo el video. Más adelante se verá que este tipo de capacidad no surge automáticamente del modelo T2V base, sino que requiere una ruta de entrenamiento adicional.
+
+\begin{warningbox}{Un ejemplo exitoso no es confiabilidad a nivel de distribución}
+Una demostración en video puede probar que «existe al menos una salida exitosa», pero no que el modelo sea estable frente a la distribución de prompts, las semillas aleatorias, los objetos de cola larga y las interacciones complejas. Una evaluación confiable requiere un conjunto fijo de prompts, muestras de fallos públicas, varias semillas aleatorias y comparaciones humanas por pares; si solo se muestran los mejores ejemplos, no es posible estimar la tasa de éxito.
+\end{warningbox}
+
+\teachervoice{00:01:13--00:03:42, el docente usa tres demos iniciales para distinguir calidad de generación, reflejos complejos y edición por instrucciones. Enfatiza que la mejora de los últimos dos años no es la estética de un solo fotograma, sino que los modelos empezaron a manejar movimiento, relaciones y control.}
+
+\subsection{De Make-A-Video a Movie Gen: qué cambió realmente}
+
+Las dos figuras siguientes reúnen la línea de tiempo y las conclusiones de la clase. La primera compara las diferencias visibles entre 2022 y 2024; la segunda atribuye la mejora a una arquitectura unificada y al escalamiento, no a algún trick aislado. Para entender esta historia, conviene considerar los algoritmos, los datos, el hardware, la infraestructura de entrenamiento y los métodos de evaluación como variables conjuntas.
+
+\lecturefigure{slide-150-video-generation-progress.jpg}{Comparación directa del progreso en dos años: Make-A-Video y Movie Gen}{00:03:35}
+
+El modelo temprano de la izquierda ya podía generar contenido dinámico, pero los bordes del sujeto, la estabilidad del movimiento y la continuidad de los detalles son claramente más débiles; Movie Gen, a la derecha, es más sólido en las olas complejas, el seguimiento de cámara y la coherencia del sujeto. La figura respalda que «la frontera de capacidades se desplazó de forma notable», pero a partir de la sola comparación visual no es posible separar qué parte de la ganancia proviene de la arquitectura y qué parte de la escala de entrenamiento.
+
+\lecturefigure{slide-155-moviegen-paper-thesis.jpg}{Tesis central de la clase: un Transformer sencillo con datos, cómputo y parámetros escalados también funciona para video}{00:05:02}
+
+Aquí «sencillo» es relativo a las cascadas de U-Net y a los módulos de video altamente especializados, y no significa que el sistema sea barato. Movie Gen sigue necesitando TAE, varios codificadores de texto, Flow Matching, paralelismo distribuido, limpieza de datos, entrenamiento progresivo y postentrenamiento. La simplificación central ocurre en el backbone: reutilizar en lo posible un Transformer cuyo escalamiento es predecible, en lugar de reinventar la red para cada resolución y modalidad.
+
+\begin{importantbox}{Implicaciones de ingeniería de unificar la arquitectura}
+Unificar la arquitectura no significa que «todas las modalidades sean idénticas», sino concentrar la complejidad propia de cada modalidad en el encoder, el decoder y la conditioning interface, de modo que el tronco siga usando Transformer blocks escalables. Así se pueden reutilizar el modelo, los kernels, las estrategias de paralelismo y la infraestructura de entrenamiento, y la dirección de escalamiento también queda más clara.
+\end{importantbox}
+
+\subsection{Trayectoria histórica: de modelos pequeños especializados a modelos grandes unificados}
+
+Los ejemplos anteriores mostraban resultados; esta sección pasa a la historia de los mecanismos. La línea de tiempo debe responder dos preguntas: en qué estructuras especializadas se apoyaban los métodos tempranos y por qué los modelos grandes de 2024 prefieren un Transformer unificado. Al leer la figura, no hay que equiparar automáticamente «nuevo» con «mejor»; lo decisivo es qué sesgo se beneficia de manera más sostenida una vez que cambian la escala de entrenamiento y la infraestructura.
+
+\lecturefigure{slide-174-video-generation-history.jpg}{Trayectoria de la generación de video: difusión, cascadas de U-Net y unificación con Transformer/Flow Matching}{00:09:39}
+
+Los primeros Video Diffusion, Make-A-Video e Imagen Video solían combinar U-Net, difusión, interpolación de fotogramas y superresolución en varias etapas dentro de un pipeline complejo. Con líneas como Sora y Movie Gen, el foco de la investigación se desplazó hacia un backbone unificado de tokens, Flow Matching y entrenamiento a mayor escala. El cambio no es que todos los módulos antiguos desaparezcan, sino que el sistema empieza a dar prioridad a reducir las bifurcaciones de la arquitectura.
+
+\lecturefigure{slide-175-moviegen-overview.jpg}{Panorama de Movie Gen Video: escala, tareas y datos de entrenamiento}{00:10:37}
+
+Movie Gen Video es un joint text-to-image/text-to-video foundation model de unos 30B parámetros, con un contexto máximo de unos 73K video tokens, que corresponde a una configuración de entrenamiento con videos de hasta 16 segundos a 16 fps. El ponente describe el volumen de datos con órdenes de magnitud de $O(100\mathrm{M})$ videos y $O(1\mathrm{B})$ imágenes; son cifras de escala y no deben interpretarse como conteos exactos publicados.
+
+\begin{knowledgebox}{Por qué entrenar imágenes y video de forma conjunta}
+Los datos de imagen son más abundantes y tienen una cobertura semántica más amplia, lo que ayuda al modelo a aprender objetos, estilos y composición; los datos de video aportan movimiento y relaciones temporales. El entrenamiento conjunto permite que un mismo backbone absorba a la vez regularidades espaciales y espaciotemporales, y también que una imagen entre en la representación unificada como un video de un solo fotograma.
+\end{knowledgebox}
+
+\teachervoice{00:07:57--00:11:19, el docente resume la trayectoria como el paso de «arquitecturas especializadas y de pequeña escala» a «arquitectura unificada, Transformer sencillo y escalamiento». Al mismo tiempo da la workload real de 30B, 73K tokens, 16 segundos y 16 fps, y advierte que unificar no equivale a abaratar.}
+
+\subsection{Resumen de la sección}
+
+El progreso de la generación de video abarca calidad espacial, coherencia temporal, relaciones complejas y edición controlable. La tesis central de Movie Gen es unificar el backbone con un Transformer escalable, pero el sistema completo sigue dependiendo de la compresión de la representación, el objetivo de aprendizaje, los datos, el paralelismo y la evaluación. Los ejemplos son evidencia de capacidad, no prueba suficiente de confiabilidad ni de un modelo causal del mundo.
+\section{Primero se elige la representación y después el Transformer}
+
+La sección anterior explicó por qué las arquitecturas tienden a unificarse; esta sección responde la pregunta previa más importante a esa unificación: qué es exactamente lo que debe modelar el Transformer. El video RGB original es continuo y redundante; si se despliega directamente por píxeles, la longitud de la secuencia hace inviable el entrenamiento. Movie Gen usa un Temporal Autoencoder (TAE, autocodificador temporal) para comprimir tanto el espacio como el tiempo en un espacio latent (de variables latentes) y después convierte el latent en patches que se usan como token.
+
+\subsection{Qué variable aleatoria aprende el modelo generativo}
+
+«Aprender la distribución de los videos» exige definir primero la variable aleatoria $x$. Puede tratarse de píxeles, códigos discretos, un latent continuo o una representación multiescala. Las dos diapositivas siguientes comparan el texto con los medios audiovisuales: los token del lenguaje se prestan casi de forma natural al modelado de secuencias, mientras que el video necesita eliminar antes una gran cantidad de redundancia predecible.
+
+\lecturefigure{slide-177-architecture-questions.jpg}{Las tres preguntas de la arquitectura de Movie Gen: representación, objetivo de aprendizaje y backbone}{00:11:19}
+
+Estas tres preguntas organizan toda la clase: la representation determina la longitud en token y la pérdida de información; el learning objective determina qué predice la red; la architecture determina cómo entran las condiciones y cómo escala el cómputo. Las tres se restringen entre sí, por lo que no tiene sentido comparar de forma aislada «qué bloque de Transformer es más potente».
+
+\lecturefigure{slide-178-representation-definition.jpg}{El punto de partida del aprendizaje de representaciones: para aprender $P(x)$ hay que definir primero $x$}{00:11:43}
+
+El texto puede convertirse en token discretos mediante un tokenizer; el video, en cambio, es un tensor continuo de $T_0\times3\times H_0\times W_0$. Si cada valor RGB se tratara como un token, la dimensión de los datos y la longitud de la secuencia superarían con mucho las del texto, y además los píxeles y los cuadros contiguos son altamente redundantes.
+
+\lecturefigure{slide-181-text-vs-media-representation.jpg}{La representación del texto es compacta y discreta; la de los medios audiovisuales es continua y redundante}{00:13:36}
+
+Al leer la figura, conviene comparar primero la «densidad semántica»: un token de palabra puede resumir un concepto complejo, mientras que un píxel solo expresa un color local. El objetivo de la representación de medios no es comprimir sin pérdida todos los detalles, sino conservar, con un error de reconstrucción aceptable, los objetos, las texturas, el movimiento y la estructura temporal que necesita la tarea de generación.
+
+\begin{importantbox}{Elegir la representación es repartir el presupuesto de cómputo}
+Una compresión más fuerte acorta la secuencia y reduce el costo del Transformer, pero puede perder objetos pequeños, movimientos rápidos y texturas finas; una compresión más débil conserva información, pero traslada el costo a la atención, las activaciones y la comunicación. La representación no es un preprocesamiento de datos, sino la primera capa de la arquitectura del sistema generativo.
+\end{importantbox}
+
+\subsection{Por qué no generar píxeles directamente}
+
+La sección anterior mostró la redundancia de los medios; esta convierte esa redundancia en número de token. Sea el video de entrada
+\[
+V\in\mathbb R^{T_0\times 3\times H_0\times W_0},
+\]
+donde $T_0$ es el número de cuadros, $H_0,W_0$ son el alto y el ancho en píxeles, y el número de canales es 3. Si se desplegara directamente cada posición, el tamaño de la secuencia sería aproximadamente $T_0H_0W_0$, lo cual es inviable incluso ignorando los canales de color.
+
+\lecturefigure{slide-182-latent-representation.jpg}{Modelar directamente los píxeles es conceptualmente sencillo, pero el video de alta resolución requiere un sobremuestreo complejo o una cantidad enorme de cómputo}{00:15:52}
+
+Movie Gen elige un latent continuo en lugar de los píxeles directos. El encoder del TAE transforma la entrada en
+\[
+X=E(V)\in\mathbb R^{T\times C\times H\times W},
+\qquad
+\frac{T_0}{T}=\frac{H_0}{H}=\frac{W_0}{W}=8,
+\]
+donde $C=16$ es el número de latent channels. Cada uno de los tres ejes se comprime 8 veces, de modo que el número de posiciones espaciotemporales se reduce aproximadamente $8^3=512$ veces.
+
+\lecturefigure{slide-185-temporal-autoencoder.jpg}{El TAE comprime el video RGB en un latent espaciotemporal continuo y el decoder recupera los píxeles}{00:19:17}
+
+Para un video de 256 cuadros y $768\times768$, tras la compresión quedan unas $32\times96\times96$ posiciones espaciotemporales; si cada posición correspondiera a un token, entonces
+\[
+N=\frac{256}{8}\cdot\frac{768}{8}\cdot\frac{768}{8}
+=294{,}912.
+\]
+El context de 73K del artículo incluye además un patchify adicional, por lo que el número de token disminuye todavía más. Este ejemplo muestra que una «compresión de 8 veces» debe precisar sobre qué ejes actúa; no debe interpretarse como si la compresión total fuera de solo 8 veces.
+
+\begin{knowledgebox}{Cómo el TAE admite a la vez imágenes y videos}
+El TAE añade una convolución temporal unidimensional después de la convolución espacial bidimensional, y una atención temporal después de la atención espacial. Una imagen se trata como un video de un solo cuadro; mediante una codificación de longitud variable y el descarte de los cuadros decodificados sobrantes, el mismo encoder/decoder puede procesar imágenes y videos de cualquier longitud.
+\end{knowledgebox}
+
+\begin{warningbox}{Una tasa de compresión alta no conserva la información sin costo}
+Una pérdida de reconstrucción baja no significa que se conserven todas las propiedades relevantes para la generación. Los movimientos rápidos, las líneas finas, el texto, los rostros pequeños y las texturas parpadeantes pueden promediarse en el latent. El TAE debe evaluarse a la vez en reconstrucción espacial, consistencia temporal y calidad de la generación posterior; no basta con reportar el PSNR de cuadros individuales.
+\end{warningbox}
+
+\subsection{La pérdida del TAE y los límites de la adversarial loss}
+
+El TAE pertenece a la línea de los VAE, pero el artículo añade además objetivos como la pérdida perceptual, la del discriminator y la outlier penalty. Para la reconstrucción $\hat V=D(E(V))$, el objetivo global puede escribirse como
+\[
+\mathcal L_{\mathrm{TAE}}
+=\lambda_{\mathrm{rec}}\mathcal L_{\mathrm{rec}}
++\lambda_{\mathrm{perc}}\mathcal L_{\mathrm{perc}}
++\lambda_{\mathrm{adv}}\mathcal L_{\mathrm{adv}}
++\lambda_{\mathrm{KL}}\mathcal L_{\mathrm{KL}}
++\lambda_{\mathrm{OPL}}\mathcal L_{\mathrm{OPL}}.
+\]
+Cada $\lambda$ es un peso de la pérdida; el término de reconstrucción restringe el contenido, el término perceptual restringe la similitud visual semántica, el término adversarial favorece el realismo, el término KL regulariza el latent y el OPL penaliza los latent dots con norma anormalmente alta.
+
+\begin{knowledgebox}{Primera aparición: adversarial loss}
+Aquí la adversarial loss proviene de un discriminador que se usa para mejorar el realismo de la decodificación y la capacidad de compresión del autoencoder; no significa que el generador principal de Movie Gen sea una GAN. El generador principal se sigue entrenando con Flow Matching. En la sesión de Q\&A, el docente enfatiza que añadir este tipo de pérdida permite que el decoder no tenga que copiar la entrada píxel por píxel, lo que hace posible una compresión mayor.
+\end{knowledgebox}
+
+\teachervoice{01:07:20--01:09:23, el docente explica que la pérdida del discriminador del TAE proviene de la línea de VQGAN: la restricción L1 a nivel de píxel es demasiado rígida, mientras que la adversarial loss da a la reconstrucción más libertad perceptual y aporta una ganancia adicional de compresión; esto es algo distinto de «generar video con una GAN».}
+
+\begin{lstlisting}[language=Python,caption={Cálculo mínimo de la compresión de video y del token accounting}]
+latent = temporal_autoencoder.encode(video)  # [T/8, C=16, H/8, W/8]
+tokens = patchify(latent, patch_t, patch_h, patch_w)
+sequence_length = tokens.shape[0]
+attention_pairs = sequence_length ** 2
+report(sequence_length, attention_pairs, reconstruction_error)
+\end{lstlisting}
+
+\subsection{Resumen de la sección}
+
+Movie Gen no hace que el Transformer modele directamente los píxeles: primero usa el TAE para comprimir 8 veces cada uno de los ejes de tiempo, alto y ancho, y después aplica patchify para obtener token. La compresión vuelve factible el cómputo, pero también introduce la reconstrucción y un cuello de botella de información. Que el TAE use adversarial loss no significa que el generador principal sea una GAN; el objetivo de aprendizaje del backbone generativo es el Flow Matching de la sección siguiente.
+\section{Flow Matching: transportar el ruido hasta el video a lo largo de un campo de velocidades}
+
+Con un latent manejable, el siguiente paso es definir qué predice la red. Flow Matching (emparejamiento de flujos) formula la generación como un transporte en tiempo continuo: parte del ruido gaussiano $X_0$ y avanza, a lo largo del campo de velocidades que aprende el modelo, hacia el latent de datos $X_1$. Al igual que diffusion, aprende el proceso generativo inverso, pero su objetivo de entrenamiento y la interpretación del muestreo se acercan más a las ecuaciones diferenciales ordinarias.
+
+\subsection{De la intuición de diffusion al campo de velocidades}
+
+La sección anterior ya comprimió los píxeles en un latent modelable; esta sección responde a la pregunta «cómo obtener ese latent a partir del ruido». La figura general que sigue presenta primero la estructura común: el proceso directo conecta los datos con el ruido y la red neuronal aprende el camino inverso. La diferencia principal no es «si hay o no eliminación de ruido en varios pasos», sino cómo se definen el camino intermedio, el objetivo de predicción y el método de integración numérica.
+
+\lecturefigure{slide-187-flow-matching-overview.jpg}{Diffusion y Flow Matching aprenden el proceso inverso que regresa del ruido a los datos}{00:22:06}
+
+El camino lineal más sencillo se escribe como
+\[
+X_t=(1-t)X_0+tX_1,
+\qquad t\sim\mathcal U(0,1),
+\]
+donde $X_0\sim\mathcal N(0,I)$ es el ruido, $X_1$ es el latent de un video real y $t$ es el tiempo continuo. La velocidad objetivo de este camino es
+\[
+V_t=\frac{dX_t}{dt}=X_1-X_0.
+\]
+El camino lineal simplifica el objetivo de velocidad, pero en el entrenamiento real también pueden modificarse el muestreo del tiempo y la parametrización del camino.
+
+\begin{importantbox}{Qué aprende Flow Matching en el entrenamiento}
+El modelo no predice directamente el video final ni clasifica el timestep; aprende hacia qué dirección debe moverse en cualquier estado intermedio $X_t$ y bajo cualquier condición $c$. El campo de velocidades condicional $v_\theta(X_t,t,c)$ vincula el texto, el tiempo y el noisy latent actual.
+\end{importantbox}
+
+\subsection{Entrenamiento: supervisión local sobre un camino muestreado al azar}
+
+La sección anterior definió el campo de velocidades continuo; esta explica cómo se convierte en una supervisión ejecutable por minibatch. El entrenamiento no necesita simular la trayectoria completa de 0 a 1: en cada paso se muestrean datos, ruido y un instante de tiempo, se construye $X_t$ y se supervisa la velocidad local. La slide y la fórmula siguientes desarrollan «cómo las regresiones locales se integran en un transporte global».
+
+\lecturefigure{slide-188-flow-matching-training.jpg}{Entrenamiento de Flow Matching: datos, ruido, muestreo del tiempo y regresión de la velocity}{00:23:58}
+
+La pérdida típica es
+\[
+\mathcal L_{\mathrm{FM}}(\theta)
+=\mathbb E_{X_1,X_0,t,c}
+\left[\left\|v_\theta(X_t,t,c)-(X_1-X_0)\right\|_2^2\right].
+\]
+$\theta$ son los parámetros del Transformer, $c$ es la condición de texto y la esperanza abarca los datos de entrenamiento, el ruido y el muestreo del tiempo. El modelo solo ve estados locales, pero a partir de la supervisión en todos los instantes de tiempo compone el campo de transporte global.
+
+\begin{lstlisting}[language=Python,caption={Pseudocódigo de un paso de entrenamiento de Flow Matching condicional}]
+video, prompt = sample_batch()
+x1 = tae.encode(video)
+x0 = randn_like(x1)
+t = sample_time(batch_size)
+xt = (1 - t) * x0 + t * x1
+target_velocity = x1 - x0
+prediction = transformer(xt, timestep=t, text=encode_text(prompt))
+loss = mse(prediction, target_velocity)
+loss.backward()
+\end{lstlisting}
+
+\subsection{Inferencia: la discretización de la ODE es un presupuesto de latencia}
+
+Lo que se obtiene del entrenamiento es la dirección local en cualquier instante de tiempo; para generar una muestra hay que acumular esas direcciones a lo largo del camino. Esta sección lleva el objetivo continuo a un sistema discreto: qué timesteps elegir, qué solver usar y cuántas veces ejecutar el backbone son decisiones que modifican a la vez el error de la trayectoria, la latencia en tiempo de reloj y el uso de memoria de la GPU.
+
+Una vez entrenado el campo de velocidades, el muestreo parte de $\hat X_0\sim\mathcal N(0,I)$ y resuelve
+\[
+\frac{d\hat X_t}{dt}=v_\theta(\hat X_t,t,c).
+\]
+La actualización de Euler de primer orden más sencilla es
+\[
+\hat X_{t_{k+1}}
+=\hat X_{t_k}+\Delta t_k\,v_\theta(\hat X_{t_k},t_k,c),
+\qquad \Delta t_k=t_{k+1}-t_k.
+\]
+$k$ denota el paso discreto de resolución; en general, más pasos dan una mejor aproximación, pero cada paso requiere ejecutar una vez un Transformer grande.
+
+\lecturefigure{slide-189-flow-matching-inference.jpg}{Inferencia de Flow Matching: iterar con un ODE solver desde el ruido hasta el latent de datos}{00:24:41}
+
+\begin{warningbox}{Entrenar en tiempo continuo no equivale a calcular en tiempo continuo}
+Durante el entrenamiento el modelo puede muestrear $t$ continuo, pero en la inferencia real todavía hay que elegir un número finito de instantes de tiempo y un solver. Muestrear con pocos pasos reduce la latencia pero aumenta el error de discretización; muestrear con muchos pasos eleva el costo. Al reportar la velocidad de «generar un video» deben indicarse también la resolución, el número de cuadros, el solver y el número de pasos.
+\end{warningbox}
+
+\teachervoice{00:32:28--00:33:54, pregunta de seguimiento en la sesión de preguntas sobre los denoising steps. El docente explica que la variable de tiempo es continua durante el entrenamiento y que en la inferencia solo se muestrea un conjunto de puntos discretos; más pasos se acercan más a la trayectoria objetivo, pero aumentan directamente la latency.}
+
+\subsection{Resumen de la sección}
+
+Flow Matching construye una supervisión local de velocidad a partir del camino entre el ruido aleatorio y el latent de datos, y en la inferencia obtiene las muestras integrando con un ODE solver. Que la fórmula sea sencilla no significa que la inferencia sea barata: en cada paso de tiempo hay que ejecutar un backbone del orden de 30B, por lo que el número de pasos discretos es el principal parámetro de ajuste entre calidad y latencia.
+\section{Cómo convertir Llama en un Transformer de generación de video}
+
+Solo después de fijar la representación y el objetivo de aprendizaje llega el turno del backbone. Movie Gen no transfiere directamente los pesos de un modelo de lenguaje al video, sino que elige los bloques Llama-style y la infraestructura de entrenamiento que ya conoce, y entrena desde una inicialización aleatoria. Para adaptarse a Flow Matching condicional, agrega cross-attention de texto y AdaLN de timestep, y sustituye la causal GQA por MHA bidireccional completa.
+
+\subsection{Por qué elegir la forma de Llama y no los pesos de Llama}
+
+El criterio de ingeniería del ponente es «elegir una forma que ya se sabe cómo escalar». Los kernels, las estrategias de paralelismo, el monitoreo y la experiencia con fallas del Transformer Llama-style ya están maduros; el valor de esa infraestructura puede superar la ventaja local de algún módulo visual especializado. La figura de la llama que sigue es una metáfora de arquitectura, no evidencia de transferencia de conocimiento lingüístico.
+
+\lecturefigure{slide-193-llama-backbone.jpg}{El latent del video se divide en patches y se envía a un Transformer Llama-style con inicialización aleatoria}{00:27:15}
+
+\begin{warningbox}{Movie Gen no es «hacer fine-tuning de Llama para obtener un modelo de video»}
+Este proyecto usa un backbone Llama-style con inicialización aleatoria. En clase alguien preguntó si se había inicializado a partir de pretrained Llama, y el docente respondió con claridad que eso no se intentó en este proyecto. Si es posible transferir entre modalidades distintas y objetivos distintos sigue siendo una pregunta de investigación abierta.
+\end{warningbox}
+
+\teachervoice{00:25:12--00:27:15, el docente explica que la razón principal para elegir la forma de Llama es que la ruta de escalamiento y la infraestructura ya son conocidas; esto no significa que se hayan usado en Movie Gen los pesos preentrenados con texto.}
+
+\subsection{Modificación uno: el texto entra mediante cross-attention}
+
+La sección anterior eligió la estructura principal Llama-style; en esta se empiezan a reincorporar, una por una, las condiciones de generación. Los tokens de video y los de texto tienen longitudes distintas, y al texto no hace falta añadirle ruido como en Flow Matching; el problema central es cómo hacer que cada posición del video lea el significado de las palabras relevantes sin comprimir un prompt largo en un solo vector. Movie Gen usa tres encoders de texto complementarios para producir la representación condicional, y luego deja que el flujo de video la lea mediante cross-attention.
+
+\lecturefigure{slide-194-text-conditioning.jpg}{Las tres representaciones de texto se concatenan y condicionan el Transformer de video mediante cross-attention}{00:29:23}
+
+Para los hidden states del video $H$ y la representación del texto $P$, la cross-attention puede escribirse como
+\[
+Q=HW_Q,\quad K=PW_K,\quad V=PW_V,
+\qquad
+\operatorname{CA}(H,P)=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt d}\right)V.
+\]
+$W_Q,W_K,W_V$ son matrices de proyección y $d$ es la head dimension. La longitud de la salida sigue siendo igual al número de tokens de video; el texto actúa como memory condicional y la misma capa no le añade ruido en sentido inverso.
+
+\begin{knowledgebox}{Por qué se necesitan varios text encoders}
+Cada encoder destaca en una escala distinta: uno aporta semántica global, otro conserva prompts largos y relaciones a nivel de palabra, y otro está alineado con la semántica visual. Concatenar varias representaciones aumenta la capacidad condicional, pero también la memoria de GPU, la latencia y la complejidad de la interfaz; su beneficio debe verificarse con estudios de ablación.
+\end{knowledgebox}
+
+\subsection{Modificación dos: AdaLN escribe el paso de tiempo en cada block}
+
+La ruta del texto ya responde «qué generar»; esta sección pasa a «en qué punto de la eliminación de ruido se está». Estos dos tipos de condición tienen estructuras de información distintas, por lo que no deben compartir mecánicamente la misma interfaz. Movie Gen retoma de DiT la Adaptive LayerNorm (AdaLN, normalización de capa adaptativa): el embedding del tiempo produce scale y shift, de modo que el mismo block ejecuta cálculos distintos según el nivel de ruido.
+
+\lecturefigure{slide-195-adaptive-layernorm.jpg}{AdaLN usa el timestep para generar el scale y el shift de cada capa}{00:30:04}
+
+Si $h$ es el hidden state de un token y $e_t$ es el embedding del tiempo, entonces
+\[
+\operatorname{AdaLN}(h;t)
+=\gamma(e_t)\odot\operatorname{LN}(h)+\beta(e_t),
+\]
+donde $\gamma,\beta$ son salidas de redes pequeñas y $\odot$ es la multiplicación elemento a elemento. El costo de AdaLN no crece con la longitud del texto, por lo que es adecuada para una condición de timestep de baja dimensión; el texto sigue conservando su estructura de secuencia mediante cross-attention.
+
+\begin{importantbox}{Las interfaces de condición se reparten según la estructura de la información}
+El texto en forma de secuencia larga requiere una lectura token-to-token selectiva, por eso pasa por cross-attention; una sola variable de tiempo continua solo necesita modular las estadísticas de cada capa, por eso pasa por AdaLN. Comprimir todas las condiciones en un vector o concatenarlas todas como tokens haría perder esta división estructurada del trabajo.
+\end{importantbox}
+
+\subsection{Modificación tres: de causal GQA a bidirectional MHA}
+
+Un modelo de lenguaje solo puede ver los tokens a su izquierda porque su objetivo es predecir la siguiente palabra; Flow Matching actualiza al mismo tiempo todo el noisy latent, así que no existe un orden causal. Movie Gen usa full bidirectional attention y elige MHA en lugar de GQA, de modo que cada query head conserve sus propias key/value heads.
+
+\lecturefigure{slide-196-bidirectional-attention.jpg}{Flow Matching de video usa atención bidireccional, no la causal mask de los modelos de lenguaje}{00:30:38}
+
+\begin{knowledgebox}{Primera aparición: MHA y GQA}
+MHA (Multi-Head Attention) asigna K/V heads independientes a cada query head; GQA (Grouped-Query Attention) hace que varias query heads compartan menos K/V heads, principalmente para reducir la KV cache autoregresiva. Movie Gen no genera de forma autoregresiva token por token y durante el entrenamiento tampoco depende de una KV cache de largo plazo, por lo que adopta MHA bidireccional, que tiene mayor capacidad expresiva.
+\end{knowledgebox}
+
+\subsection{Arquitectura completa y el costo de sistema de 73K tokens}
+
+Solo al encadenar TAE, patchify, ruido, condición de texto, timestep y decoder se obtiene el sistema de generación completo. Al leer la figura conviene seguir la forma de los datos de izquierda a derecha: el video se codifica primero como latent, el latent y el ruido gaussiano forman $X_t$, el Transformer predice la velocidad y, por último, el decoder de TAE devuelve el video en píxeles.
+
+\lecturefigure{slide-244-full-architecture.jpg}{Arquitectura completa de Movie Gen Video: TAE, patchify, Transformer condicional y decoder}{00:35:12}
+
+El término dominante de la atención completa es aproximadamente
+\[
+\operatorname{FLOPs}_{\mathrm{attn}}=O(LN^2d),
+\qquad
+\operatorname{Memory}_{\mathrm{attn}}=O(N^2),
+\]
+donde $L$ es el número de capas, $N$ la longitud de la secuencia y $d$ la head dimension. Con $N=73{,}000$, un solo attention map completo tiene unos $5.3\times10^9$ elementos y no puede almacenarse de forma ingenua en una sola GPU.
+
+Por ello el entrenamiento requiere varios tipos de paralelismo: data parallel replica el modelo y procesa las muestras por lotes; tensor parallel divide las multiplicaciones de matrices; sequence/context parallel fragmenta a lo largo de la dimensión de tokens. Aquí sharding (fragmentación) significa repartir parámetros, activaciones o secuencias entre varias GPU, de modo que cada una guarde solo una parte en lugar de una copia completa. Las collectives (comunicación colectiva) incluyen all-reduce, all-gather, reduce-scatter y otras primitivas de comunicación entre varias GPU, que se usan para agregar o intercambiar resultados fragmentados.
+
+\begin{warningbox}{El número de parámetros no es la única escala del sistema}
+Los 30B parámetros describen la capacidad de los pesos, el context de 73K describe las activaciones y la attention de una sola muestra, y el número de pasos de muestreo describe cuántas veces se repite la pasada hacia adelante. El costo de despliegue debe calcular a la vez la memoria de GPU de los pesos, las activaciones, los buffers temporales, la comunicación colectiva y los ODE steps; reportar solo el número de parámetros subestima gravemente la generación de video.
+\end{warningbox}
+
+\teachervoice{00:33:59--00:35:12, el docente atribuye el progreso de dos años al cambio conjunto de arquitectura, datos, escala del modelo, compute y hardware. El valor de la arquitectura completa no está en un block nuevo, sino en que todas estas partes por fin pueden escalar juntas dentro de un sistema unificado.}
+
+\subsection{Resumen de la sección}
+
+Movie Gen usa un backbone Llama-style con inicialización aleatoria, no una transferencia de pesos de lenguaje. Las tres modificaciones principales son la cross-attention de texto, la AdaLN de timestep y la MHA bidireccional. El verdadero cuello de botella del sistema completo proviene de la secuencia de 73K tokens, la attention cuadrática, la comunicación de la fragmentación entre varias GPU y la inferencia ODE de múltiples pasos, no solo de los 30B parámetros.
+\section{La limpieza de datos y el entrenamiento progresivo también son arquitectura}
+
+La sección anterior presentó un backbone escalable; esta sección explica por qué la misma arquitectura todavía puede fallar en el entrenamiento. Escalar el video depende de movimiento de alta calidad, nitidez visual, eliminación de duplicados, filtrado de contenido y caption de grano fino; además, el entrenamiento debe avanzar paso a paso desde tareas baratas hasta videos largos de alta resolución. El pipeline de datos y el curriculum determinan qué ve el modelo y a qué costo lo ve.
+
+\subsection{De un volumen masivo de video a clip--prompt pairs entrenables}
+
+El flujo de datos de Movie Gen no consiste en recolectar al azar y entrenar directamente, sino en ir estrechando el conjunto etapa por etapa. Al leer la figura, conviene seguir de izquierda a derecha la falla que resuelve cada filtro: el filtro visual elimina la baja calidad, el filtro de movimiento elimina lo estático o tembloroso, el filtro de contenido atiende la duplicación y el muestreo, y el captioning escribe la cámara y el movimiento en la condición de texto.
+
+\lecturefigure{slide-247-data-curation.jpg}{Limpieza de datos de video: filtros visual, de movimiento y de contenido, y captioning de grano fino}{00:39:11}
+
+Si en la distribución de entrenamiento abundan videos de baja resolución, sin movimiento, con bordes, o cuyo caption solo describe al sujeto y no la acción, el modelo, aunque se amplíe, solo ajustará mejor un objetivo equivocado. La limpieza de datos está ligada a la scaling law: cuando cambia la calidad efectiva de los datos, también cambian la validation loss y la relación compute-optimal.
+
+\begin{importantbox}{El caption forma parte de la supervisión del video}
+Un prompt de video no debe limitarse a «una persona, un auto»; también debe expresar el orden de las acciones, el movimiento de la cámara, la velocidad y las interacciones. Cuando el caption omite las relaciones temporales, el modelo no puede aprender de la supervisión textual a ejecutar con precisión eventos de varias etapas; esta es también una fuente importante de fallas con prompts largos.
+\end{importantbox}
+
+\begin{warningbox}{Que la cola larga aparezca no significa que se pueda controlar de forma confiable}
+Los datos a escala de internet pueden contener algún concepto poco frecuente, pero el número de apariciones, la calidad del caption y la distribución de contextos determinan si es controlable. El pretraining aporta cobertura, y el post-training o los datos de la tarea aportan una invocación estable; no se puede equiparar «lo vio en los datos» con «el modelo lo ejecutará según la instrucción».
+\end{warningbox}
+
+\teachervoice{00:35:20--00:39:11: el docente dice directamente que las scaling laws dependen de que los datos estén limpios; si los datos no están limpios, la ley no se cumple y la calidad de la salida tampoco mejora automáticamente con la escala.}
+
+\subsection{Curriculum progresivo: primero aprender de forma barata, luego refinar de forma costosa}
+
+Entrenar todas las etapas directamente con 768p, 16 segundos y 16 fps desperdiciaría una gran cantidad de compute y además sería más difícil de estabilizar. Movie Gen primero usa imágenes y video de baja resolución para establecer la semántica y el movimiento básico; después aumenta gradualmente la resolución y la duración, y se divide en rutas como personalization, T2V finetuning y video-to-video.
+
+\lecturefigure{slide-250-progressive-training.jpg}{Recipe de entrenamiento: imágenes a 256p, preentrenamiento conjunto, video a 768p y ramas por tarea}{00:40:58}
+
+El curriculum puede abstraerse como un conjunto de workloads $w_k=(r_k,f_k,T_k,b_k)$, que representan respectivamente la resolución, la tasa de cuadros, la duración y el lote. El objetivo de cada etapa es
+\[
+\theta_{k+1}=\operatorname{Train}(\theta_k,\mathcal D_k,w_k),
+\qquad
+\operatorname{cost}(w_{k+1})>\operatorname{cost}(w_k),
+\]
+es decir, los parámetros de la etapa anterior inicializan la etapa más costosa. No se trata de un teorema, sino de una recipe de ingeniería: primero se aprende una distribución amplia con alto rendimiento y luego se concentra el presupuesto en la calidad final.
+
+\begin{lstlisting}[language=Python,caption={Flujo conceptual del entrenamiento progresivo de imagen/video}]
+model = train(text_to_image_256p, model=None)
+model = train(joint_image_video_256_to_768p, model=model)
+video_model = finetune(text_to_video_768p_16s, model=model)
+edit_model = finetune(video_to_video_pairs, model=model)
+personalized_model = finetune(identity_conditioned_pairs, model=model)
+\end{lstlisting}
+
+\begin{knowledgebox}{Cómo entra el context de 73K en el costo de entrenamiento}
+Un video más largo hace que el número de tokens crezca de forma aproximadamente lineal con el número de cuadros, pero el cómputo de la atención completa crece como $N^2$. Si lo demás no cambia, duplicar la duración de 16 a 32 segundos aproximadamente duplica el número de tokens y vuelve cerca de cuatro veces mayor el término principal de attention; por eso el video largo es, ante todo, un problema de sistemas.
+\end{knowledgebox}
+
+\teachervoice{00:39:11--00:40:58: el docente explica el flujo de entrenamiento como una optimización de convergence-speed: primero se hace aprendizaje barato de imagen/video a 256p, luego se sube a 768p y a videos largos, y por último se hace el post-entrenamiento por ramas según la tarea.}
+
+\subsection{Resumen de la sección}
+
+Escalar solo tiene sentido cuando la calidad de los datos está bajo control. Movie Gen construye los pairs de entrenamiento con filtros visuales, de movimiento, de contenido y de caption, y luego usa un curriculum progresivo para pasar de tareas baratas con imágenes a video largo de alta resolución y a ramas de aplicación. Los datos y el curriculum no son una recipe periférica, sino componentes del sistema que determinan los límites de la capacidad del modelo.
+\section{De la T2V básica a la edición, la personalización y el audio}
+
+Las regularidades visuales que aprende el modelo base pueden sustentar diversas aplicaciones, pero cada tarea requiere una interfaz de entrada y unos datos de entrenamiento distintos. Esta sección distingue seis estados representativos: la generación a partir de solo texto se centra en la plausibility espaciotemporal; la edición, en la conservación del contenido; la personalización, en la identidad; el audio, en la sincronización entre modalidades. Llamarlos a todos «Movie Gen» puede ocultar las diferencias de entrenamiento dentro de la familia de modelos.
+
+\subsection{¿El modelo aprendió realmente el «mundo visual»?}
+
+Las secciones anteriores sobre arquitectura y datos explicaron cómo se entrena el modelo; esta sección vuelve a las salidas para examinar qué aprendió en realidad. El ponente usa dos ejemplos para mostrar que un modelo a gran escala puede generar movimientos de cámara, movimientos de objetos y ciertas relaciones físicas. Al leer estas figuras conviene buscar continuidad e interacciones, no solo la textura de un fotograma aislado; al mismo tiempo, hay que respetar los límites de la evidencia: los datos observacionales pueden producir un ajuste sólido de regularidades, pero no generan automáticamente un modelo del mundo causal sobre el que se pueda intervenir.
+
+\lecturefigure{slide-257-learned-visual-world.jpg}{Ejemplo de la carrera con papalote: el sujeto, el papalote, la playa y el movimiento de cámara evolucionan en conjunto}{00:41:17}
+
+Este fragmento exige que el modelo mantenga la identidad y la ropa de la persona, que el papalote se coordine con la dirección del movimiento y que resuelva el seguimiento de la cámara. Muestra una generación conjunta de múltiples factores, pero no permite saber si variables latentes como la fuerza del viento o la tensión del hilo están representadas de forma explícita.
+
+\lecturefigure{slide-305-physics-sample.jpg}{Ejemplo de la alberca: la superficie del agua, la dona, el perezoso y la bebida forman relaciones de contacto y de flotación}{00:42:11}
+
+Que las relaciones de contacto sean visualmente razonables indica que el modelo aprendió una gran cantidad de sentido común estadístico. Una evaluación física más rigurosa debería poner a prueba contrafactuales: cambiar la masa de los objetos, el líquido, la velocidad de colisión o las restricciones, y observar si el resultado sigue las leyes de manera estable, en lugar de solo parecer razonable en escenas comunes.
+
+\begin{warningbox}{«World model» tiene al menos tres grados de exigencia}
+La definición débil es poder generar futuros visualmente razonables; la intermedia exige mantener la coherencia ante intervenciones y contrafactuales; la fuerte exige además que sirva para planificar y predecir. Los ejemplos de Movie Gen respaldan el primer nivel y rozan fenómenos del segundo, pero no basta con demostraciones para afirmar que se cuenta con un simulador causal completo.
+\end{warningbox}
+
+\teachervoice{00:41:11--00:42:52, el docente dice que el modelo parece haber aprendido objetos, movimiento y leyes físicas a partir de ver videos; lo considera una sorpresa del escalamiento, no una demostración de razonamiento físico explícito.}
+
+\subsection{Edición precisa: además de la calidad de generación, hay que preservar el video original}
+
+La generación a partir de solo texto solo necesita construir un mundo razonable; la edición, además, debe respetar un mundo que ya existe. Por eso esta sección divide la evaluación en «qué se cambió correctamente» y «qué se cambió por error»: el modelo de edición recibe a la vez el video original y la instrucción de texto, y debe limitar los cambios a la región y los atributos objetivo. Las dos cuadrículas de cuatro paneles que siguen muestran sustituciones locales, eliminaciones, adiciones y cambios de estilo; son más adecuadas que una salida única para comprobar qué contenido se conserva.
+
+\lecturefigure{slide-337-precise-editing-vr.jpg}{Edición de una escena de VR: sustituir, retirar el visor y añadir efectos visuales}{00:42:54}
+
+Que una misma entrada admita múltiples instrucciones indica que la interfaz de edición puede desacoplar el source content del edit intent. La evaluación debe separarse en edit fidelity y preservation: la primera examina el cambio objetivo; la segunda, si la persona, la acción, el fondo y la toma derivan de forma no intencionada.
+
+\lecturefigure{slide-374-precise-editing-penguin.jpg}{Edición del video de pingüinos: vestimenta, objetos del entorno y estilo de dibujo a lápiz}{00:43:54}
+
+Las ediciones de estilo global y las de objetos locales tienen dificultades distintas. Añadir un paraguas es una modificación estructural local; ponerles ropa exige sincronizarla con el movimiento; el estilo a lápiz vuelve a dibujar todo el cuadro, pero debe conservar la disposición de la escena. Una puntuación única ocultaría estos modos de falla.
+
+\begin{knowledgebox}{Por qué escasean los datos de edición}
+En el mundo real casi no existen pairs naturales de «el mismo video antes/después de la edición + instrucción precisa». En clase se indicó que Movie Gen usa una construcción autosupervisada para producir la señal de entrenamiento. Sin este diseño de datos, un modelo T2V básico, por bueno que sea generando, difícilmente conservaría con precisión el contenido de entrada.
+\end{knowledgebox}
+
+\subsection{La personalización y el audio son rutas de condicionamiento distintas}
+
+Después de la tarea de edición, esta sección compara dos extensiones de condicionamiento completamente diferentes: el video personalizado añade una reference identity y la generación de audio añade un condicionamiento video/text-to-audio. Ambas amplían la capacidad de generación básica, pero persiguen objetivos distintos: la personalización debe equilibrar identidad y acción; el audio debe alinearse con los eventos visuales, el ritmo y la semántica del entorno. Por eso no pueden resumirse con una misma puntuación de «calidad de video».
+
+\lecturefigure{slide-388-personalization.jpg}{Video personalizado: el retrato de referencia y el prompt de texto determinan juntos el sujeto y la escena}{00:44:12}
+
+La imagen de referencia de la esquina superior derecha aporta la información de identidad, y el video principal debe conservar esa identidad con nuevas poses, iluminación y escenas. Copiar sin más la textura del rostro produce un movimiento rígido; obedecer en exceso al texto, en cambio, hace perder la identidad. Hay que medir a la vez identity similarity, motion quality y prompt adherence.
+
+\lecturefigure{slide-419-synchronized-audio.jpg}{Movie Gen Audio genera truenos y música de fondo sincronizados a partir del video y el texto}{00:44:43}
+
+El modelo de audio necesita saber cuándo cae el rayo, cuál es el ánimo de la escena y qué sonidos pertenecen al interior del cuadro (diegetic) o al exterior. La conferencia señala explícitamente que el modelo T2V mostrado antes produce por sí mismo video sin sonido; el audio sincronizado proviene de un modelo independiente, Movie Gen Audio.
+
+\begin{importantbox}{Movie Gen es una familia de modelos, no una sola red}
+La T2V básica, video editing, personalization y audio generation comparten una línea de investigación, pero difieren en entradas, objetivos, datos y posentrenamiento. Al evaluar o desplegar, hay que indicar qué modelo y qué pipeline se usan; no se pueden atribuir todas las capacidades de la familia al backbone T2V de 30B.
+\end{importantbox}
+
+\teachervoice{01:11:28--01:13:20, al final el docente vuelve a aclarar: el modelo principal de la clase genera video sin sonido y el audio proviene de un modelo independiente. En teoría, la generación conjunta de audio y video podría compartir información, pero los datos de alineación de alta calidad son más escasos que los de video por sí solo.}
+
+\subsection{Resumen de la sección}
+
+La familia Movie Gen abarca la generación pura, la edición, la personalización y el audio, pero estas capacidades no provienen de un mismo objetivo de entrenamiento. La T2V básica muestra un ajuste sólido de regularidades visuales; la edición enfatiza la conservación del contenido; la personalización, la identidad; el audio, la sincronización entre modalidades. El nombre de cada capacidad debe vincularse al modelo y a la ruta de datos concretos.
+\section{Evaluación y scaling: cómo debe leerse la evidencia}
+
+Las secciones anteriores mostraron capacidades; esta sección examina la evidencia. Las métricas automáticas de video difícilmente miden a la vez el realismo, la naturalidad del movimiento, la completitud del movimiento, el apego al texto y la estética, por lo que Movie Gen se apoya sobre todo en comparaciones humanas por pares; las gráficas de scaling, por su parte, exploran si la tendencia compute-optimal de los modelos de lenguaje puede predecir de forma aproximada la de los modelos de medios. Ambos tipos de evidencia son importantes y ninguno admite una extrapolación excesiva.
+
+\subsection{Cómo se calcula la Net Win Rate}
+
+Lo que se vio antes fueron ejemplos seleccionados; esta subsección pasa a la evidencia humana agregable. La tabla de resultados compara Movie Gen con Runway Gen3, LumaLabs, OpenAI Sora y Kling1.5. La tabla debe leerse en este orden: primero la definición de la métrica, luego el signo y el intervalo de confianza, y por último la comparación de las distintas dimensiones frente a una misma baseline; no basta con tomar el porcentaje más alto ni debe confundirse una preferencia relativa con una calidad absoluta.
+
+\lecturefigure{slide-433-human-evaluation.jpg}{Net Win Rate de la evaluación humana de Movie Gen frente a varios trabajos de prior work}{00:47:24}
+
+Para los modelos A y B, sea $s_i\in\{-1,0,1\}$ la puntuación de consenso de la $i$-ésima muestra, que indica respectivamente que gana B, que hay empate o que gana A; entonces
+\[
+\operatorname{NWR}(A,B)=\frac{100}{M}\sum_{i=1}^{M}s_i.
+\]
+$M$ es el número de muestras evaluadas. Un valor positivo indica que A se prefiere con más frecuencia; uno negativo, que se prefiere B. El artículo construye el 95\% confidence interval mediante remuestreo bootstrap de los item-level scores.
+
+\begin{warningbox}{La Net Win Rate no es una puntuación de calidad absoluta}
+Depende del conjunto de prompts, de la versión de los modelos comparados, de los criterios de evaluación y del grupo de evaluadores. Que A sea positivo frente a B y B sea positivo frente a C no garantiza que las diferencias se sumen para obtener la de A frente a C. Además, las distintas dimensiones de la tabla pueden entrar en conflicto; por ejemplo, la motion completeness puede mejorar mientras la aesthetics empeora.
+\end{warningbox}
+
+\teachervoice{00:45:13--00:47:24, el docente señala que las métricas automáticas de video siguen siendo débiles, por lo que se recurre a comparaciones humanas multidimensionales. También advierte que una comparación justa es difícil: la interfaz del modelo, el prompt rewrite, la configuración de muestreo y la versión accesible influyen en las conclusiones.}
+
+\subsection{Relación entre Movie Gen y la scaling law de Llama 3}
+
+La siguiente figura no demuestra que «el video equivale al texto»; es una sorpresa empírica: el optimal model size de Movie Gen para distintos compute budget se aproxima a la curva ajustada de Llama 3. Esto respalda que un Transformer unificado podría compartir ciertas leyes de escala, aunque los datos, la semántica de los tokens y los objetivos siguen siendo distintos.
+
+\lecturefigure{slide-434-scaling-laws.jpg}{Comparación entre el tamaño de modelo compute-optimal de Movie Gen y la scaling curve de Llama 3}{00:49:13}
+
+El número de parámetros compute-optimal puede resumirse con una ley de potencia:
+\[
+N_{\mathrm{opt}}(C)=aC^b,
+\]
+donde $C$ son los FLOPs de entrenamiento, $N_{\mathrm{opt}}$ es el número óptimo de parámetros para ese presupuesto y $a,b$ se ajustan experimentalmente. En la figura, los puntos azules provienen de experimentos de pequeña escala de Movie Gen y la línea naranja proviene de Llama 3; que se parezcan no implica que $a,b$ sean constantes para todas las resoluciones y distribuciones de datos.
+
+\begin{importantbox}{El uso correcto de una scaling law}
+Una scaling law sirve para elegir la configuración de modelo y datos dentro de un presupuesto y para predecir tendencias; no sustituye la evaluación final en alta resolución. Requiere que la recipe de entrenamiento, la calidad de los datos y la definición de la loss se mantengan relativamente estables; en cuanto cambian la representation, el curriculum o el filtrado de datos, el ajuste anterior puede dejar de ser válido.
+\end{importantbox}
+
+\teachervoice{00:47:26--00:49:13, el docente llama a la curva de Llama 3 un surprisingly reasonable predictor, pero no afirma que los medios y el texto compartan por completo las mismas leyes. La conclusión de la clase es «vale la pena seguir midiendo», no «ya se demostró que es modality independent».}
+
+\subsection{Resumen de la sección}
+
+Movie Gen compensa las limitaciones de las métricas automáticas con evaluaciones humanas por pares multidimensionales, aunque la Net Win Rate sigue sujeta al prompt, al protocolo y a la baseline. La comparación de scaling laws muestra que las tendencias empíricas de un Transformer unificado podrían reutilizarse entre modalidades, pero se trata solo de un ajuste en un intervalo específico, que exige que la calidad de los datos y la recipe de entrenamiento sigan siendo comparables.
+\section{Fallas, video largo y los límites de ingeniería en la sesión de Q\&A}
+
+Después de las capacidades y del scaling, al final hay que volver a las fallas. Las colisiones complejas revelan que al modelo le falta una interacción estable entre varios cuerpos; el video largo está limitado por los tokens y por la attention cuadrática; el reasoning requiere traces y verifiers en forma de medios; el despliegue enfrenta además el watermark, la contaminación de datos y una serving architecture no publicada. Esta sección integra en la línea principal los límites expresados de forma oral en la sesión de Q\&A.
+
+\subsection{Por qué las interacciones complejas todavía fallan}
+
+La evaluación y el scaling muestran que el modelo es muy capaz en promedio; esta subsección se dirige a propósito a la parte menos promedio: las fallas en interacciones complejas. El ejemplo de colisión no es una anécdota graciosa, sino un diagnóstico: cuando varios objetos entran en contacto a gran velocidad, se ocultan entre sí y cambian sus relaciones topológicas, la plausibility visual local no basta para garantizar la coherencia del estado global. Al leer la figura, observe si las carrocerías se atraviesan, si el origen de los fragmentos es continuo y si la identidad de cada objeto se mantiene antes y después del choque.
+
+\lecturefigure{slide-460-complex-motion-failure.jpg}{Caso de falla: en una colisión compleja de vehículos aparecen incoherencias geométricas y de interacción}{00:50:04}
+
+\begin{warningbox}{Las fallas de video suelen ser fallas en la gestión del estado}
+El modelo puede generar, cuadro por cuadro, texturas que «parecen una colisión» sin mantener un estado estable de los objetos, las restricciones de contacto ni el orden de los eventos. Aumentar la nitidez de cada cuadro no corrige este tipo de error por sí solo; se necesitan mejores representaciones espaciotemporales, datos, memoria de largo plazo, restricciones o mecanismos de autocorrección.
+\end{warningbox}
+
+\subsection{El video largo es, ante todo, un problema de longitud de secuencia}
+
+Si se producen $n_f$ latent tokens por segundo y la duración es $S$, entonces $N\approx n_fS$. Con atención completa, el término dominante crece con la duración aproximadamente como
+\[
+\operatorname{cost}(S)=O((n_fS)^2d).
+\]
+Al pasar de 16 a 32 segundos, con las demás condiciones iguales, el número de tokens casi se duplica y el término dominante de attention se multiplica por cerca de cuatro; además, hay que mantener una trama, unos personajes y un estado de cámara más largos.
+
+\begin{knowledgebox}{Los tres niveles de dificultad del video largo}
+El primer nivel es el cómputo: crecen el context, las activaciones y la comunicación; el segundo son los datos: es más difícil obtener captions y límites de eventos para videos largos; el tercero es el modelado: el modelo debe mantener la identidad, las cadenas causales y el objetivo narrativo. Una memoria de GPU más grande solo alivia el primer nivel.
+\end{knowledgebox}
+
+\teachervoice{00:57:11--01:00:13, el docente dijo que 73K ya estaba cerca de la longitud de entrenamiento viable en ese momento. Si la duración se duplica, los costos de la secuencia y de la attention aumentan con rapidez; una película larga requiere además un diseño de sistema que vaya más allá de generar ingenuamente toda la secuencia de una sola vez.}
+
+\subsection{Reasoning, verifier y native media generation}
+
+La subsección anterior ya localizó los errores de gestión del estado en las interacciones complejas; esta se pregunta si el sistema puede detectarlos y corregirlos por iniciativa propia. El ponente propone dos direcciones abiertas: primero, que el modelo de video detecte errores evidentes y se autocorrija antes de entregar la salida; segundo, incorporar la generación de video en un LLM multimodal nativo. Ambas deben responder si el objetivo de aprendizaje es unificado y cómo verificar que una salida multimedia es «correcta», algo más difícil de definir que aumentar los parámetros del modelo.
+
+\lecturefigure{slide-464-future-directions.jpg}{Direcciones futuras: continuar con el scaling, reasoning sobre medios y generación multimodal nativa}{00:53:37}
+
+Si se escribe el ciclo generar--revisar--corregir, puede abstraerse como
+\[
+y^{(k)}=G_\theta(z,c,r^{(k)}),\qquad
+e^{(k)}=V_\phi(y^{(k)},c),\qquad
+r^{(k+1)}=R(r^{(k)},e^{(k)}),
+\]
+donde $G$ es el generador, $V$ es el verifier y $R$ actualiza el reasoning state. La dificultad es que el video no cuenta con un criterio de corrección barato y determinista como el de un problema de matemáticas; que una persona note de inmediato que un choque es inverosímil no significa que exista una reward automática entrenable.
+
+\begin{importantbox}{El cuello de botella central del reasoning sobre medios es la verificación}
+Generar «texto de razonamiento» no mejora el video automáticamente. Hay que definir errores detectables (identidad de los objetos, orden de las acciones, geometría, física, restricciones textuales o estética) y demostrar que el verifier se correlaciona con el juicio humano. De lo contrario, el reasoning trace puede ser solo tokens adicionales y no una autocorrección efectiva.
+\end{importantbox}
+
+\subsection{Cinco precisiones de la sesión de Q\&A}
+
+La sesión final de preguntas y respuestas aclaró mejor los límites de la arquitectura, los datos y la gobernanza. Los cinco puntos siguientes no son un apéndice, sino condiciones necesarias para entender las conclusiones de la exposición principal.
+
+\begin{enumerate}
+  \item \textbf{Inductive bias:} las CNN pueden tener ventaja a pequeña escala o en ciertas diffusion policies para robots; el Transformer escala con más facilidad sobre una infraestructura madura, pero el debate no ha terminado.
+  \item \textbf{Physics:} se pueden codificar priors de forma explícita, añadir datos de simulación o confiar en la escala; cuál ruta es la mejor sigue siendo una pregunta abierta, y los ejemplos actuales no demuestran que la física esté resuelta.
+  \item \textbf{Synthetic data:} el contenido generado de baja calidad que entra en el preentrenamiento contamina los datos, pero los datos sintéticos no son dañinos por naturaleza; en el post-training controlado ya es habitual usar muestras generadas por modelos.
+  \item \textbf{Safety:} los deepfakes y el watermarking son problemas independientes de investigación, desarrollo y despliegue, y no pueden sustituirse con métricas de calidad de generación.
+  \item \textbf{Public evidence:} el artículo publica detalles de la infra de entrenamiento, pero en la clase no se presentó la serving architecture completa; no conviene especular cuántas GPU usa una sola solicitud.
+\end{enumerate}
+
+\begin{knowledgebox}{¿En qué nivel debe ubicarse la «unificación»?}
+En la sesión de Q\&A, el docente señaló que, siempre que una nueva modalidad pueda codificarse en tokens, el núcleo Transformer puede reutilizarse; la dificultad real suele estar en la representación y en el objetivo. Un tronco unificado no exige unificar el tokenizer, el decoder, la loss ni el protocolo de evaluación.
+\end{knowledgebox}
+
+\teachervoice{00:54:10--00:56:03, el docente reconoce que el sesgo inductivo de las CNN especializadas puede ser valioso a pequeña escala; la experiencia de Movie Gen es que el Transformer a gran escala escala con más facilidad y cuenta con una infraestructura más madura, pero aclaró de forma explícita que no da por cerrado el debate.}
+
+\teachervoice{01:09:23--01:10:33, sobre la contaminación por datos sintéticos, el docente distingue entre los videos falsos de baja calidad en el preentrenamiento y los datos controlados del post-training: los datos generados no son malos por naturaleza; lo que importa es la calidad, el objetivo y el filtrado.}
+
+\subsection{Resumen de la sección}
+
+Las fallas en interacciones complejas revelan que los modelos de video gestionan el estado de forma insuficiente; el video largo está limitado a la vez por el cómputo cuadrático, los datos y la coherencia de largo plazo; lo decisivo en el reasoning es el verifier, no el texto adicional. La sesión de Q\&A precisó además los límites del Transformer, de los priors físicos, de los datos sintéticos, de la seguridad y de la evidencia pública sobre el sistema.
+\section{Términos clave y síntesis}
+
+Esta clase reúne en un mismo sistema la representación, el objetivo de generación continua, las modificaciones al Transformer, el curriculum de datos y las aplicaciones multitarea. Si solo se memorizan los nombres de los modelos, es fácil confundir qué componente resuelve cada cuello de botella. Primero se reorganizan los términos en un glosario según el esquema «problema--mecanismo--evidencia» y después se presenta una lista de verificación de extremo a extremo.
+
+\subsection{Glosario de alta densidad}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{p{0.18\textwidth} X X}
+\toprule
+\textbf{Término} & \textbf{Problema que resuelve} & \textbf{Mecanismo central y relación con la clase} \\
+\midrule
+TAE & Las secuencias de video en píxeles son demasiado largas & Comprime 8 veces el tiempo, la altura y la anchura; unifica imagen y video con un latent continuo. \\
+Latent & Qué variable aleatoria se entrega al generador & Conserva la información relevante para la generación y descarta parte de la redundancia de píxeles; la tasa de compresión determina el compromiso entre calidad y costo. \\
+Flow Matching & Cómo generar medios a partir de ruido & Aprende un velocity field en tiempo continuo; en la inferencia se integra con un ODE solver. \\
+Cross-attention & Cómo leen el texto los tokens de video & El video actúa como query y tres representaciones de texto como key/value; el texto se mantiene como condición limpia. \\
+AdaLN & Cómo entra el timestep en cada capa & El embedding del tiempo genera el scale/shift de LayerNorm y modula el mismo bloque. \\
+MHA & Interacción espaciotemporal bidireccional & Cada query head tiene sus propias K/V heads; es adecuado para la actualización no autorregresiva de la secuencia completa. \\
+GQA & La KV cache autorregresiva es demasiado grande & Varias query heads comparten K/V; Movie Gen T2V no depende de esta ventaja. \\
+Context parallelism & 73K tokens no caben en una sola GPU & Particiona según la dimensión de token/context e intercambia la información de atención mediante comunicación colectiva. \\
+Curriculum & Entrenar directamente en alta resolución es demasiado caro & A partir de imágenes y video de baja resolución, aumenta progresivamente la resolución, la duración y la complejidad de la tarea. \\
+Net Win Rate & Las métricas automáticas son insuficientes & En preferencias humanas por pares, la proporción de victorias de A menos la de B, con su intervalo bootstrap. \\
+Post-training & Que el pretraining cubra algo no significa que sea controlable & Usa datos de tarea de alta calidad para mejorar el movimiento, la estética, la edición o la preservación de identidad. \\
+World model & Qué tan fuerte es en realidad «parecer razonable» & Hay que distinguir entre plausibility visual, consistencia contrafactual y un modelo causal que permita planificar. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Lista de verificación de ingeniería de extremo a extremo}
+
+\begin{enumerate}
+  \item \textbf{Representation:} ¿se reportan completos la tasa de compresión espaciotemporal, los latent channels y el patch size?
+  \item \textbf{Objective:} ¿se predice noise, velocity o data? ¿Cuáles son el solver y el número de pasos de muestreo?
+  \item \textbf{Conditioning:} ¿cómo se reparten las funciones el encoder de texto, la cross-attention, AdaLN y las reference conditions?
+  \item \textbf{Context:} ¿a cuántos tokens corresponden la resolución, la tasa de cuadros y la duración? ¿Qué tan grandes son los costos de attention y de activaciones?
+  \item \textbf{Data:} ¿son reproducibles los filtros visuales, de movimiento, de contenido, de deduplicación y de captioning?
+  \item \textbf{Curriculum:} ¿qué etapas entrenan imágenes, video de baja resolución, video de alta resolución y las ramas de tareas?
+  \item \textbf{Evaluation:} ¿se reportan a la vez las muestras fallidas, los prompt fijos, las preferencias humanas, el movimiento y el apego al texto?
+  \item \textbf{Deployment:} ¿se hacen públicos los pesos, los ODE steps, la comunicación entre varias GPU, la memoria de video máxima y la evidencia de serving?
+\end{enumerate}
+
+\begin{importantbox}{Conclusión central de la clase}
+La contribución de Movie Gen puede resumirse en una cadena de sistema: TAE comprime los medios en tokens; Flow Matching define un objetivo de transporte continuo; un Transformer bidireccional de estilo Llama con inicialización aleatoria funciona como backbone escalable; la limpieza de datos y un curriculum progresivo hacen viable el entrenamiento con 73K tokens; y un posentrenamiento independiente extiende el sistema a la edición, la personalización y el audio. La mejora de capacidades es real, pero las interacciones complejas, los videos largos, la evaluación, los reasoning verifier y el serving siguen siendo límites abiertos.
+\end{importantbox}
+\section{Síntesis y ampliación}
+
+\subsection{Un eje conductor transferible a otros sistemas generativos}
+
+El método más transferible de esta clase no consiste en copiar los nombres de los modelos de Movie Gen, sino en diseñar el sistema siguiendo el orden de sus dependencias: primero se define la variable aleatoria que se va a generar y después se elige el objetivo de transporte; primero se calcula la longitud en token y después se eligen la attention y el paralelismo; primero se definen las dimensiones de evaluación y después se revisan los ejemplos y el scaling; por último, las aplicaciones se descomponen en distintos problemas condicionales: generación base, edición, identidad y audio.
+
+\subsection{Tres preguntas de investigación abiertas}
+
+Primera: ¿es posible comprimir aún más el latent espaciotemporal o usar attention dispersa o jerárquica sin sacrificar el movimiento de grano fino, para superar así el costo cuadrático de los videos largos? Segunda: ¿qué tipo de estado intermedio debería producir el reasoning sobre medios y cómo se construye un verifier coherente con el juicio humano? Tercera: ¿puede un modelo conjunto nativo de audio y video aprovechar la información entre modalidades y, al mismo tiempo, evitar la escasez de datos alineados y la interferencia entre tareas?
+
+En conjunto, estas preguntas muestran que la siguiente generación de modelos de video no dependerá solo de agrandar el denoiser. Es más probable que los avances provengan del diseño coordinado de representation, data, attention, parallelism, verification y multimodal objective. Al evaluar un sistema nuevo, la pregunta más valiosa no es «qué tan espectaculares son los videos que genera», sino «en qué workload, con qué conjunto de evidencias y dentro de qué límite de costo modifica la Pareto frontier».
+
+\subsection{Lecturas adicionales}
+
+\begin{itemize}[itemsep=0.2em,topsep=0.2em]
+  \item Grabación oficial: \url{https://www.youtube.com/watch?v=YGHF8_tf--g}
+  \item Página del curso CS25 V5: \url{https://web.stanford.edu/class/cs25/past/cs25-v5/}
+  \item Artículo original de Movie Gen: \url{https://ai.meta.com/static-resource/movie-gen-research-paper/}
+  \item Temas para profundizar: Flow Matching, DiT/AdaLN, Temporal Autoencoder, context parallelism, human evaluation y media reasoning verification.
+\end{itemize}
+
+\end{document}

@@ -1,0 +1,722 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+
+\renewcommand{\notetitle}{Lecture 09: Audio Transformers: de la forma de onda y los códigos discretos a una etapa de entrada auditiva adaptativa a la tarea}
+\renewcommand{\noteauthors}{Elaborado a partir de la conferencia de Prateek Verma, los subtítulos oficiales hechos por personas y los tres artículos principales de la clase}
+\renewcommand{\notedate}{CS25 V1 · versión reescrita source-first de 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{2022-07-18}
+\renewcommand{\videoduration}{48:18}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=wvE2n8u3drA}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.96\textwidth]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\begin{document}
+\makecscover
+
+\section{Auditoría de fuentes y eje del curso: por qué el audio es una prueba de esfuerzo para el Transformer}
+
+Esta clase no se limita a trasladar el Transformer de NLP al sonido; plantea una pregunta de diseño más básica: el sonido es continuo, tiene una frecuencia de muestreo alta y abarca varias escalas de tiempo; ¿cómo debe representarse primero y qué objetivo de predicción debe recibir después? Prateek Verma enlaza tres trabajos que abarcan raw waveform synthesis, self-supervised representation learning y large-scale audio understanding. Las tres líneas parecen corresponder por separado a generación, representación y clasificación, pero en realidad comparten la misma cadena de ingeniería: la \term{representation} determina la longitud de la secuencia y la pérdida de información, el \term{objective} determina qué conserva el modelo y la \term{metric} determina qué es lo que realmente demostramos.
+
+La página oficial del curso registra esta clase el 2021-11-29, y Stanford Online no subió la grabación hasta el 2022-07-18. El artículo Audio Transformers que corresponde al video estaba en su versión v1 de 2021 al momento de la clase; arXiv publicó después, en 2025, una versión v2. Estas notas usan solo la v1 para explicar los experimentos de la clase; no se puede proyectar hacia atrás una revisión de cuatro años después como si fuera evidencia con la que el expositor ya contaba. El video no publicó un PDF independiente de las diapositivas, por lo que, de los 1,449 puntos muestreados de la grabación oficial en 1080p, se seleccionaron manualmente 47 teaching states, y se usaron los 981 subtítulos oficiales hechos por personas para recuperar las explicaciones orales del docente.
+
+\lecturefigure{slide-01-title-understanding-to-synthesis.jpg}{El título de la clase resume el eje así: de language modeling a understanding y, después, a synthesis.}{Video oficial de Stanford Online, 00:00:24--00:00:47.}
+
+Los tres verbos de la diapositiva de título no son una clasificación publicitaria. \emph{Synthesis} exige generar formas de onda de alta frecuencia; \emph{understanding} exige comprimir una señal larga en una representación útil para las etiquetas; \emph{language modeling} exige convertir primero el sonido continuo en símbolos discretos predecibles. Al leer lo que sigue conviene preguntarse continuamente: ¿el sistema actual procesa un sample, un spectrum, un embedding o un code index? Si esa capa no queda clara, el llamado «Audio Transformer» es solo un nombre ambiguo.
+
+\teachervoice{Desde el inicio, Verma llama a esta clase ``buffet style'': no va a demostrar que una arquitectura unificada gana siempre, sino que usará tres artículos para mostrar varias ideas combinables. Por eso estas notas se organizan por problemas comunes y no dividen los capítulos mecánicamente según los resúmenes de los artículos.}
+
+\subsection{Cómo forman los tres artículos una cadena de diseño}
+
+El primer trabajo hace next-sample prediction sobre raw samples de 8 bits y compara WaveNet con un causal Transformer; el segundo convierte primero el audio continuo en codebook tokens y luego compara contrastive learning con next-code prediction; el tercero hace que el Transformer aprenda directamente representaciones para clasificación a partir de la raw waveform, y añade pooling o una Haar wavelet sobre el embedding intermedio. Los puntos de conexión entre los tres trabajos son los siguientes:
+
+\lecturefigure{slide-02-talk-roadmap.jpg}{Hoja de ruta de la clase: fundamentos de representación, raw synthesis, representation learning con tokens discretos y raw-waveform understanding.}{Video oficial de Stanford Online, 00:01:08--00:01:45.}
+
+\begin{knowledgebox}{Lectura de la figura: no confundir las tres rutas con «el mismo Transformer»}
+La salida de raw synthesis es el siguiente sample cuantizado; la salida de representation learning puede ser una code prediction o un linear probe posterior; la salida de audio understanding son sound-event scores multietiqueta. Comparten attention, pero difieren en la granularidad de la entrada, la señal de supervisión, la longitud de la secuencia y la métrica de evaluación. La unidad de comparación correcta no es el nombre del modelo, sino la terna «representación--objetivo--métrica».
+\end{knowledgebox}
+
+\begin{warningbox}{Límite temporal de la clase}
+En 2021 el expositor describió el Transformer como «la tendencia del momento» en varios campos y usó «Adieu WaveNet?» y «Adieu Convolutions» como títulos provocadores. Estos títulos solo explican los tres grupos de experimentos controlados de entonces; de ellos no se puede concluir que en 2026 todos los sistemas de voz, música, codec o generación deban abandonar las convoluciones, los modelos de espacio de estados o los modelos de difusión.
+\end{warningbox}
+
+\subsection{Con qué grado de solidez debe leerse la evidencia}
+
+Lo que sigue incluye hechos algebraicos, pero también benchmark tables, visualizaciones de filtros y juicios del expositor sobre el futuro. Para no presentarlos como conclusiones de la misma solidez, esta clase adopta cuatro niveles de evidencia: si algo es realizable en cuanto a estructura, si mejora en experimentos controlados, si la representación interna es interpretable y si la conclusión puede extrapolarse a la calidad perceptual o a otras tareas. Ningún nivel sustituye automáticamente al siguiente.
+
+\begin{table}[H]
+\centering
+\small
+\caption{Evidencia frecuente en esta clase y conclusiones que puede sustentar.}
+\begin{tabularx}{\textwidth}{L{0.21\textwidth}L{0.29\textwidth}X}
+\toprule
+Evidencia & Ejemplo & Conclusión razonable \\
+\midrule
+Estructura y complejidad & $n=f_sT$, attention es $O(n^2)$ & Explica por qué el raw audio requiere ventanas locales, compresión o estructuras dispersas. \\
+Métricas controladas & top-5 accuracy o mAP con los mismos datos & Describe el desempeño de predicción/clasificación en esa configuración; no equivale a calidad de audio subjetiva ni a una ventaja arquitectónica universal. \\
+Sondas de representación & Linear probe, análisis de respuesta en frecuencia de los filtros aprendidos & Indica que la representación contiene información utilizable o que aparecen estructuras semejantes al procesamiento de señales clásico; no demuestra que una sola neuron tenga un significado único. \\
+Extrapolación y juicio & «Más datos reducirán el gap», «el Transformer no es el punto final» & Son hipótesis o líneas de investigación; deben separarse de los resultados medidos. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Resumen de la sección}
+
+El objeto de esta clase no es un modelo único, sino el espacio de diseño del modelado de audio. La fecha de la clase, la fecha de publicación del video y la fecha de revisión del artículo deben mantenerse separadas; los resultados de los tres trabajos también deben interpretarse dentro de sus respectivas representaciones de entrada, funciones objetivo y alcances de las métricas.
+\section{Transformer Revolution: qué es lo que se transfiere entre dominios}
+
+Antes de entrar al procesamiento de señales, el ponente explica primero por qué el Transformer se traslada una y otra vez a nuevos dominios. Lo que realmente se puede transferir no es el lema «sustituir token por waveform», sino tres tipos de capacidades estructurales: el direccionamiento por contenido entre posiciones arbitrarias, una representación compartida que se actualiza capa por capa, y el entrenamiento de pilas profundas con ayuda de residual/normalization. El Audio amplifica a la vez estas capacidades y su costo, porque la frecuencia de muestreo convierte un segundo de señal en decenas de miles de posiciones.
+
+\subsection{Las familias de modelos se parecen a mareas, no a un desenlace definitivo}
+
+En la diapositiva, CNN, RNN y Transformer aparecen dibujados como un diagrama de evolución animal, para subrayar que la comunidad de investigación concentra recursos con rapidez en torno a un nuevo paradigma. Al leer la figura, «fashion» debe entenderse como la concentración de la atención de la investigación y de las cadenas de herramientas, no como que los mecanismos anteriores dejen de funcionar de inmediato; de hecho, más adelante el VQ encoder, el baseline de WaveNet, la front-end layer y el pooling siguen usando componentes que no son de attention.
+
+\lecturefigure{slide-03-transformer-revolution-model-zoo.jpg}{La marea de las familias de modelos: el desplazamiento del foco de investigación entre CNN, RNN y Transformer.}{Video oficial de Stanford Online 00:01:45--00:02:35.}
+
+\teachervoice{El ponente dice que las familias de modelos se ponen «de moda» y luego «se retiran». Esta broma es importante: la clase mostrará varias tablas en las que gana el Transformer, pero la conclusión del curso no es que «todo sonido debe tokenizarse y procesarse con attention global».}
+
+\subsection{Cada capa de attention vuelve a decidir qué es importante}
+
+Los primeros encoder--decoder solían colocar la attention después de terminar la codificación; el Transformer introduce el direccionamiento por contenido en cada capa, de modo que las representaciones intermedias pueden agregar repetidamente información lejana. La intuición del ponente es «cascading self-attention with feature learning»: cada capa direcciona y, al mismo tiempo, escribe el contenido relevante para la tarea en una nueva representation. Esta formulación es sugerente, pero el residual stream no elimina realmente todo el contenido «no importante»; solo hace que ciertas direcciones tengan más influencia en los cálculos posteriores.
+
+\lecturefigure{slide-04-transformer-architecture.jpg}{De la terminal attention a la attention capa por capa: el direccionamiento de información entra en cada capa.}{Video oficial de Stanford Online 00:03:00--00:03:50.}
+
+\lecturefigure{slide-05-early-transformer-history.jpg}{La transición histórica de BiLSTM-with-attention a la pila de autoatención multicapa.}{Video oficial de Stanford Online 00:03:50--00:04:28.}
+
+Las dos figuras deben leerse en secuencia: la primera responde «dónde se coloca la attention» y la segunda, «por qué las secuencias largas necesitan rutas de información más cortas». La RNN comprime las dependencias de largo alcance en el estado recurrente; la self-attention permite que dos posiciones temporales interactúen directamente dentro de una sola capa, a costa de construir explícitamente una gran cantidad de pairwise scores.
+
+\lecturefigure{slide-06-usual-transformer-tricks.jpg}{Multi-head attention, skip connection y normalization forman una receta de entrenamiento reutilizable.}{Video oficial de Stanford Online 00:04:30--00:05:12.}
+
+\begin{knowledgebox}{Términos clave: niveles de objetos en el Audio Transformer}
+\small
+\begin{tabularx}{\textwidth}{L{0.20\textwidth}L{0.27\textwidth}X}
+\toprule
+Término & Problema que resuelve & Significado concreto en esta clase \\
+\midrule
+Waveform sample & ¿Cómo se digitaliza la presión sonora continua? & Amplitud de un único instante discreto a una frecuencia de muestreo $f_s$; la raw synthesis la cuantiza en 256 clases. \\
+Receptive field & ¿Qué tan lejos en el pasado puede ver una salida? & En WaveNet lo fija la dilation; en la attention lo eligen pesos dependientes de los datos, pero la selección global es más costosa. \\
+Residual stream & ¿Cómo comparten las capas la representación actual? & Cada capa suma su update de attention/MLP a la representación común, lo que permite combinar información local y de largo alcance. \\
+Spectrogram & ¿Cómo se convierte una señal en el dominio del tiempo en un mapa tiempo-frecuencia? & Se aplica la Fourier transform a ventanas deslizantes y se apilan las magnitude; la resolución temporal y la frecuencial se limitan mutuamente. \\
+Filterbank & ¿Cómo se analiza el sonido por un conjunto de bandas de frecuencia? & Puede ser un banco de filtros fijo, como mel/constant-Q, o aprenderse de extremo a extremo con una red de front-end. \\
+Codebook token & ¿Cómo se convierte un embedding continuo en un símbolo discreto? & Se elige el índice del code vector más cercano, para que el Transformer haga next-code language modeling. \\
+Linear probe & ¿La representación ya contiene información de la tarea? & Se congela el encoder y solo se entrena una cabeza de clasificación lineal; mide qué tan legible es linealmente, no todas las capacidades posteriores. \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\teachervoice{Verma enfatiza que multi-head, skip connection y normalization no sirven solo al Transformer; son técnicas de entrenamiento y de representación que pueden transferirse a otras redes. Que cambie el nombre no significa que todos los mecanismos empiecen desde cero.}
+
+\subsection{El scaling amplifica las capacidades y también la brecha de recursos}
+
+Aquí la curva de escala de los modelos cumple un papel de contexto: la mejora del compute y la inversión de grandes instituciones permiten entrenar objetivos de predicción muy simples a escalas enormes, de lo que después surgen representation transferibles. En el Audio, esta lógica choca de inmediato con el muro de la frecuencia de muestreo: una oración de texto puede tener unas decenas de tokens, mientras que diez segundos de audio a 16 kHz tienen 160,000 samples. La escala no es una variable independiente: la representation determina cuántas sequence positions requiere un mismo contenido.
+
+\lecturefigure{slide-07-model-scaling.jpg}{Crecimiento de la escala de modelos y de cómputo: objetivos simples, más datos y más recursos impulsan juntos el aprendizaje de representaciones.}{Video oficial de Stanford Online 00:05:03--00:06:17.}
+
+\begin{warningbox}{Antes de «más grande», pregunta qué es un token}
+Si cada sample se trata como un token, la longitud crece linealmente con la frecuencia de muestreo y el número de pares de attention crece con el cuadrado de la longitud; si primero se hace un spectrogram patch o un VQ code, la longitud disminuye, pero cambian el detalle y el sesgo inductivo. La curva de escala de parámetros no puede interpretarse al margen de la granularidad de la representación.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Lo que se transfiere entre dominios es el direccionamiento por contenido, la actualización de representaciones profundas y una receta de entrenamiento madura, no la attention global incondicional. La alta frecuencia de muestreo del Audio amplifica el costo de la pairwise interaction; por eso, desde el primer paso, la elección de la representación queda ligada a la viabilidad del sistema.
+\section{De la waveform al spectrogram: primero se decide qué ve el modelo}
+
+El sonido es, ante todo, una amplitud que varía en el tiempo, no una imagen bidimensional ni un vocabulario discreto por naturaleza. Antes de entregárselo al modelo, se puede conservar la raw waveform o proyectarla sobre sinusoidal bases, perceptual filterbanks o learned features. Cada transformación responde dos preguntas: qué variaciones deben considerarse cercanas y qué detalles pueden comprimirse. Entender estas decisiones es el conocimiento previo más importante para comprender los tres trabajos que siguen.
+
+\subsection{Frecuencia de muestreo y longitud de la secuencia}
+
+Sea $x(t)$ la señal continua, $f_s$ la frecuencia de muestreo y $T$ la duración observada en segundos; la longitud de la secuencia discreta es
+\[
+n=f_sT.
+\]
+Aquí $n$ es el número de samples. Con $f_s=16\,000\ \mathrm{Hz}$, un segundo tiene $16\,000$ posiciones y diez segundos tienen $160\,000$ posiciones. Si cada posición calcula attention con todas las posiciones anteriores, el número de scores de una sola capa es aproximadamente
+\[
+N_{\mathrm{pair}}\approx \frac{n(n+1)}{2}=O(n^2).
+\]
+Una señal de diez segundos produce alrededor de $1.28\times10^{10}$ causal pairs, y eso sin contar heads, layers, lote ni activation memory.
+
+\begin{importantbox}{Restricción fundamental}
+En audio, la «secuencia larga» no es un adjetivo abstracto: la determina directamente la frecuencia de muestreo. Toda solución ejecutable tiene que elegir entre ventanas locales, submuestreo, patches, attention dispersa, latent code o modelos de secuencia alternativos.
+\end{importantbox}
+
+\subsection{Fourier basis y análisis de corto plazo}
+
+La Fourier transform discreta representa una ventana de longitud $N$ como coeficientes complejos de distintas frecuencias:
+\[
+X[k]=\sum_{n=0}^{N-1}x[n]e^{-j2\pi kn/N},
+\qquad k=0,\ldots,N-1.
+\]
+Aquí $x[n]$ es el $n$-ésimo sample, $k$ es el bin de frecuencia y el número complejo $X[k]$ contiene a la vez magnitude y phase. Los sonidos reales suelen ser no estacionarios, por lo que no basta con aplicar una sola transform a toda la señal; la short-time Fourier transform (STFT) usa una ventana $w[n]$ para repetir el análisis en distintos cuadros temporales $m$:
+\[
+X[m,k]=\sum_n x[n]w[n-mH]e^{-j2\pi kn/N},
+\]
+donde $H$ es el hop size. El spectrogram suele graficarse como
+\[
+S[m,k]=|X[m,k]|^2
+\quad\text{o}\quad \log(|X[m,k]|+\epsilon).
+\]
+El eje temporal corresponde a $m$, el eje de frecuencia a $k$ y el color a la energía. Cuanto más larga es la ventana, más fina es la resolución en frecuencia, pero peor la localización en el tiempo; con ventanas más cortas ocurre lo contrario.
+
+\lecturefigure{slide-08-spectrogram-overview.jpg}{Spectrogram: tras aplicar ventanas a la waveform, los espectros de corto plazo se apilan a lo largo del tiempo.}{Video oficial de Stanford Online 00:06:20--00:10:58.}
+
+\begin{knowledgebox}{Lectura de la figura: cuatro pasos de la waveform a la imagen bidimensional}
+Primero se cortan ventanas superpuestas sobre el eje horizontal; después se aplica la Fourier transform a cada ventana; luego se toma la magnitude o la power; por último, las ventanas contiguas se ordenan en el tiempo. La textura de la imagen permite usar modelos vision-like, pero si no se registran la phase, la función de ventana y el hop size, la imagen bidimensional no permite reconstruir sin pérdida la waveform original.
+\end{knowledgebox}
+
+\teachervoice{El ponente dice a propósito «batches» y luego se corrige a «windowing»: quienes vienen del aprendizaje automático suelen tratar la STFT como una caja negra de preprocesamiento, mientras que la perspectiva del procesamiento de señales exige precisar la longitud de la ventana, el traslape y la basis.}
+
+\subsection{Representaciones fijas, representaciones perceptuales y learned front end}
+
+Los Fourier bins están espaciados uniformemente, pero la percepción de la frecuencia en el oído humano no es lineal; los filterbanks mel y constant-Q redistribuyen las bandas para afinar las frecuencias bajas o hacer más estable el harmonic spacing en la música. La raw waveform conserva toda la información de muestreo, pero expone al modelo a la secuencia más larga. El learned front end, en cambio, deja que la pérdida de la tarea determine los filtros, y puede producir representaciones intermedias entre el DSP clásico y las características de caja negra.
+
+\lecturefigure{slide-09-audio-representations.jpg}{Audio representations: spectrogram, filterbank, raw waveform y learned features.}{Video oficial de Stanford Online 00:10:58--00:12:50.}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Principales compromisos de las representaciones de audio más comunes.}
+\begin{tabularx}{\textwidth}{L{0.19\textwidth}L{0.22\textwidth}L{0.22\textwidth}X}
+\toprule
+Representación & Ventajas & Principal pérdida/sesgo & Efecto en el Transformer \\
+\midrule
+Raw waveform & Conserva el detalle a nivel de muestra y la phase & Secuencias larguísimas; oscilaciones locales complejas & Requiere context local, compresión o attention eficiente. \\
+STFT magnitude & Estructura tiempo-frecuencia intuitiva; herramientas maduras & Compromiso entre resolución temporal y frecuencial; la phase suele omitirse & Puede tokenizarse por frame/patch, con una reducción notable de la longitud. \\
+Mel / constant-Q & Más cercana a la percepción o a la estructura musical & Bandas definidas de antemano; puede perder detalles relevantes para la tarea & Da al modelo un inductive bias más fuerte y menos grados de libertad. \\
+Learned filterbank & Se adapta a la tarea & Requiere datos y regularización; la interpretabilidad no está garantizada & El front end y el Transformer pueden optimizarse juntos de extremo a extremo. \\
+Discrete codebook & Produce directamente un vocabulario finito & Error de cuantización/reconstrucción; colapso del libro de códigos & Permite usar objetivos de modelado de lenguaje y token dependencies de largo alcance. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Un mismo sonido contiene varias escalas temporales a la vez}
+
+La clase usa una animación rápida que acerca la misma waveform de un segundo a cien milisegundos, diez milisegundos y un milisegundo. Esta secuencia no es un efecto visual: un segundo puede contener ritmo o eventos, cien milisegundos se acercan a fonemas o transitorios, en diez milisegundos se aprecia la periodicidad y un milisegundo cubre solo unas cuantas oscilaciones de alta frecuencia. Una sola ventana o un solo receptive field difícilmente ofrece la mejor resolución para todas estas estructuras a la vez.
+
+\lecturefigure{slide-10-waveform-100ms.jpg}{Unos 100 ms: empiezan a verse la envolvente local, los transitorios y la estructura a nivel de fonemas cortos.}{Video oficial de Stanford Online 00:11:50--00:11:53.}
+
+\lecturefigure{slide-11-waveform-1ms.jpg}{Alrededor de 1 ms: cubre solo unas cuantas oscilaciones rápidas; sirve para observar la estructura local de alta frecuencia.}{Video oficial de Stanford Online 00:11:54--00:11:55.}
+
+\lecturefigure{slide-12-waveform-10ms.jpg}{Unos 10 ms: la periodicidad y la estructura local de la frecuencia fundamental se reconocen con más facilidad.}{Video oficial de Stanford Online 00:11:56--00:11:57.}
+
+\lecturefigure{slide-13-waveform-1s.jpg}{Alrededor de 1 s: predominan la envolvente de los eventos y las estructuras más lentas del habla o la música.}{Video oficial de Stanford Online 00:11:58--00:12:53.}
+
+\begin{knowledgebox}{Lectura de la figura: multiescala no significa «poner más imágenes»}
+Las cuatro figuras sustentan una conclusión de modelado: el detalle de alta frecuencia requiere ventanas cortas, y la semántica y el ritmo requieren context largo. WaveNet usa dilation para construir un receptive field multiescala; el conditioned Transformer comprime el context lejano; wavelet/pooling reduce la resolución temporal en las capas intermedias; y la hierarchical VQ construye varios niveles de escala temporal en el token space.
+\end{knowledgebox}
+
+\teachervoice{El ponente alterna repetidamente la waveform entre varias escalas para que el lector «vea» el problema de representación: el modelo tiene que distinguir las oscilaciones locales y, al mismo tiempo, entender estructuras que ocurrieron varios segundos antes. Los tres trabajos que siguen abordan este conflicto en distintos puntos.}
+
+\subsection{Resumen de la sección}
+
+La waveform, el spectrogram, el filterbank y el discrete code no son formatos de entrada equivalentes. Cambian la longitud de la secuencia, la reversibilidad, la resolución tiempo-frecuencia y el sesgo inductivo. La primera decisión de arquitectura de un Audio Transformer suele tomarse antes de la attention.
+\section{Raw Audio Synthesis: la siguiente sample como problema de clasificación}
+
+El primer trabajo elige la representación más difícil y también la más directa: no calcula antes un spectrogram ni aprende antes un codec, sino que predice de forma autorregresiva la siguiente sample cuantizada al nivel de la waveform. La ventaja es que el objetivo es claro y la aplicación es general; la desventaja es que hay que hacer decenas de miles de predicciones por segundo y que los errores se van retroalimentando en el context posterior. Esta sección establece primero una definición rigurosa de la tarea y después examina si el Transformer realmente «vence» a WaveNet.
+
+\lecturefigure{slide-14-audio-transformer-paper-title.jpg}{Primer trabajo: modelar la raw audio generation con una Transformer architecture.}{Video oficial de Stanford Online 00:13:10--00:14:27; Verma y Chafe, arXiv:2106.16036.}
+
+\subsection{Por qué un waveform generator es un componente de uso general}
+
+Los generadores del tipo WaveNet no sirven solo para reproducir sonido directamente. Siempre que un sistema anterior produzca algún tipo de condition, el generador puede funcionar como vocodificador, eliminador de ruido, decoder de separación de fuentes, compensador de pérdida de paquetes o etapa final de una transformación de audio, y convertir una latent/spectral representation de vuelta en una waveform en el dominio del tiempo. Por eso, mejorar el next-sample model significa algo más que un demo de generación musical.
+
+\lecturefigure{slide-15-raw-audio-synthesis-background.jpg}{Contexto de aplicación de la raw synthesis: speech, music, denoising, transforms, vocoders, etc.}{Video oficial de Stanford Online 00:13:12--00:14:30.}
+
+\teachervoice{El ponente llama a WaveNet el «core building block» de muchos sistemas. Esta frase le recuerda al lector que el generador suele ser el decoder de un pipeline grande; al comparar generators por separado, hay que indicar si la condition, los datos y el front-end son los mismos.}
+
+\subsection{Por qué la tarea es difícil: longitud, causalidad y sensibilidad al error}
+
+La waveform cuantizada se denota $x_1,\ldots,x_T$, con cada $x_t\in\{0,\ldots,255\}$. Un causal autoregressive model descompone la distribución conjunta como
+\[
+p(x_{1:T})=\prod_{t=1}^{T}p(x_t\mid x_{<t}).
+\]
+El entrenamiento suele minimizar la entropía cruzada
+\[
+\mathcal{L}_{\mathrm{NLL}}
+=-\sum_{t=1}^{T}\log p_\theta(x_t\mid x_{<t}).
+\]
+Aquí $T$ es el número de samples, $x_{<t}$ son las muestras anteriores y $p_\theta$ entrega probabilidades sobre 256 clases. Durante la generación, el modelo muestrea o selecciona $x_t$ y luego lo devuelve al context; por eso, un error local puede alterar la distribución de las entradas futuras.
+
+\lecturefigure{slide-16-raw-audio-synthesis-difficulty.jpg}{Dificultades de la raw audio generation: dependencias locales y globales, secuencias extremadamente largas, líneas base WaveNet/SampleRNN.}{Video oficial de Stanford Online 00:14:30--00:16:24.}
+
+\begin{importantbox}{Por qué diez segundos son 160,000 decisiones}
+A 16 kHz, diez segundos de waveform tienen $16\,000\times10=160,000$ samples. Con cuantización de 8 bits, cada paso es una 256-way classification. Aunque la precisión de cada paso sea muy alta, el rollout autorregresivo requiere 160,000 predicciones condicionales; esto es una forma de propagación de errores completamente distinta de la de generar unas cuantas decenas de tokens de texto.
+\end{importantbox}
+
+\teachervoice{Verma explica la sensibilidad perceptual con la idea de que «el ojo quizá no note un pixel, pero el oído detecta enseguida una desviación de unas cuantas samples». Es una intuición, no una ley psicoacústica rigurosa, pero señala con precisión que la relación entre la next-sample metric y la calidad audible es compleja.}
+
+\subsection{Preguntas del artículo y comparación controlada}
+
+El artículo plantea dos preguntas: con los mismos datos y un número de parámetros similar, ¿puede un causal Transformer predecir la next sample mejor que el WaveNet clásico?; y si el context de la full attention resulta demasiado costoso, ¿se puede usar como condition un historial más largo y comprimido? La primera pregunta compara arquitecturas; la segunda compara diseños de context. Ninguna de las dos es un veredicto general de «cualquier Transformer contra cualquier WaveNet».
+
+\lecturefigure{slide-17-paper-contributions.jpg}{Aportaciones del artículo: comparación controlada, conditional raw-audio Transformer e interfaz de generación de uso general.}{Video oficial de Stanford Online 00:16:24--00:17:11.}
+
+\lecturefigure{slide-18-dataset-and-setup.jpg}{Datos y objetivo: unas 840 grabaciones de piano, 56 horas, 16 kHz, 8-bit quantization, 100 ms de context.}{Video oficial de Stanford Online 00:17:12--00:18:14.}
+
+A 16 kHz, 100 ms corresponden a $1\,600$ samples. El artículo usa grabaciones reales de piano, con distintos artistas, condiciones de grabación y estructuras mono/polyphonic; esto hace que los datos sean más complejos que un sonido sintético único, pero también limita las conclusiones a esa distribución. La Top-5 metric se define como
+\[
+\mathrm{Acc}_{5}
+=\frac{1}{T}\sum_{t=1}^{T}
+\mathbf{1}\!\left[x_t\in\operatorname{Top5}\bigl(p_\theta(\cdot\mid x_{<t})\bigr)\right].
+\]
+Verifica si el valor real cae entre las cinco clases de mayor probabilidad, no si el sonido generado es natural.
+
+\begin{lstlisting}[caption={Cálculo de la next-sample top-5 accuracy de una waveform cuantizada.}]
+def top5_next_sample_accuracy(model, contexts, targets):
+    logits = model(contexts)          # [batch, 256]
+    top5 = logits.topk(k=5, dim=-1).indices
+    hits = (top5 == targets[:, None]).any(dim=-1)
+    return hits.float().mean()
+\end{lstlisting}
+
+\begin{warningbox}{La top-5 accuracy no es una calificación de calidad auditiva}
+Este indicador sirve para comparar la local predictive distribution dentro de una misma tarea y evita depender solo de la negative log-likelihood, que es difícil de interpretar de forma intuitiva; pero ignora la estrategia de muestreo, la estructura musical de largo alcance, la coherencia de fase, el error acumulado y la human preference. Todas las menciones posteriores de «74\% a 85\%» se refieren únicamente a este indicador experimental.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La raw synthesis plantea la waveform directamente como un problema autorregresivo de 256 clases; a cambio gana generalidad, pero carga con una longitud extrema y con la retroalimentación de errores. Una comparación justa exige fijar los datos, el context y el indicador; la next-sample accuracy aporta evidencia local, pero no basta por sí sola para demostrar una generación de alta fidelidad.
+\section{Transformer frente a WaveNet: direccionamiento adaptativo y Context Conditioning}
+
+Una vez definida con claridad la tarea, la diferencia de arquitectura puede concretarse. WaveNet establece de antemano, mediante dilated causal convolutions, qué offsets del historial se combinan; el Transformer asigna pesos dinámicamente a la entrada actual mediante query--key scores. El primero tiene un sesgo inductivo fuerte, local y multiescala, y un cómputo lineal sobre la secuencia; el segundo direcciona con más flexibilidad, pero con un pairwise cost más alto. El conditional design del artículo busca precisamente un compromiso de ingeniería entre ambos.
+
+\subsection{Cómo predice la waveform un Causal Transformer}
+
+Cada sample cuantizado se busca primero en una tabla para obtener su embedding; después se le suma la codificación posicional y pasa por varias capas de autoatención causal y módulos de propagación hacia adelante; la causal mask garantiza que la posición $t$ solo lea $<t$. La linear layer final produce 256 logits. La estructura multicabeza permite que distintas heads atiendan vecindades periódicas, la envolvente reciente o un context más lejano, pero «poder atender» no significa que el entrenamiento aprenda necesariamente esa división del trabajo interpretable.
+
+\lecturefigure{slide-19-autoregressive-transformer-architecture.jpg}{Causal raw-audio Transformer: sample embedding, masked attention, feed-forward y 256-way output.}{Video oficial de Stanford Online, 00:18:15--00:19:31.}
+
+\begin{knowledgebox}{Lectura de la figura: diferencia entre dilation fija y learned attention}
+El edge pattern de WaveNet lo determinan el kernel size y el dilation schedule; entradas distintas comparten la misma topología. En el Transformer, en teoría, todas las posiciones permitidas pueden conectarse, y los pesos reales los determina el contenido. La flexibilidad amplía la function class, pero también aumenta la necesidad de datos, la dificultad de optimización y el costo $O(n^2)$; no basta con enumerar las ventajas.
+\end{knowledgebox}
+
+\subsection{Por qué puede ser más flexible que un WaveNet fijo}
+
+El ponente describe la attention como la capacidad de asignar «weightage» a cualquier posición del historial de la waveform. Para una señal aproximadamente periódica, esto significa que el modelo puede buscar directamente las muestras relacionadas con la fase, el tono o el estado de ejecución actuales, sin esperar a que la información se propague por un dilation tree fijo. Por otro lado, la translation equivariance y el bias local de la convolución son muy valiosos para el audio; si hace falta un adaptive routing global debe decidirlo el objetivo de datos y de latency.
+
+\lecturefigure{slide-20-why-better-than-wavenet.jpg}{Comparación intuitiva: la attention aprende un routing dependiente del contenido; WaveNet usa una dilated topology fija.}{Video oficial de Stanford Online, 00:19:32--00:20:09.}
+
+\teachervoice{El ponente dice que el Transformer puede asignar pesos a cualquier parte de la waveform; este es un representational argument, no la tabla de resultados en sí. Una lectura de calidad reconoce primero la diferencia de capacity y después usa experimentos controlados para juzgar si el entrenamiento realmente la aprovecha.}
+
+\subsection{El Quadratic bottleneck obliga a jerarquizar el Context}
+
+Para un local context de 100 ms, $n=1\,600$, y la attention matrix de una sola head ya tiene $2.56$ millones de entradas; si el context se amplía a un segundo, el tamaño de la matriz se multiplica por cien. Ampliar directamente la raw-sample window se vuelve inviable muy pronto; por eso el artículo comprime primero el historial lejano en una condition y deja que el local predictor procese los samples de alta resolución.
+
+\lecturefigure{slide-21-quadratic-bottleneck.jpg}{Cuello de botella principal: la memory/compute de la raw-sample attention es $O(n^2)$.}{Video oficial de Stanford Online, 00:20:10--00:20:17.}
+
+\lecturefigure{slide-22-conditioned-transformer.jpg}{Conditioned Transformer: un context summary adicional amplía el historial visible.}{Video oficial de Stanford Online, 00:20:18--00:20:59.}
+
+Formalmente, se denota la ventana reciente de alta resolución como $x_{t-L:t-1}$ y el historial más lejano como $x_{t-R:t-L-1}$. Primero un compresor $g$ produce
+\[
+c_t=g(x_{t-R:t-L-1}),
+\]
+y después se predice
+\[
+p(x_t\mid x_{t-L:t-1},c_t).
+\]
+La ruta local conserva el sample detail y la condition path transporta la estructura más lenta. Si el compresor es demasiado débil, pierde información; si es demasiado pesado, traslada el costo a otra red. El valor aquí está en repartir de forma explícita el trabajo entre escalas temporales distintas.
+
+\lecturefigure{slide-23-context-conditioning-architecture.jpg}{Context conditioning architecture: el historial amplio se comprime primero y luego se inyecta en el autoregressive Transformer local.}{Video oficial de Stanford Online, 00:21:00--00:22:07.}
+
+\begin{importantbox}{El patrón común de lo multiescala}
+Raw context conditioning, WaveNet dilation, VQ hierarchy, pooling y wavelet hacen lo mismo: conservar alta resolución para lo cercano y representar lo lejano con menor ancho de banda. La diferencia está en si la compresión ocurre sobre samples, latent codes o intermediate embeddings.
+\end{importantbox}
+
+\teachervoice{En clase, «conditioning on the context itself» puede entenderse fácilmente como un eslogan místico. El mecanismo real consiste en submuestrear o codificar el historial más lejano como side information, para evitar que todos los raw samples hagan full attention entre sí.}
+
+\subsection{Tabla de resultados: cuánto mejora la predicción local}
+
+Ya se explicaron la architecture capacity y el context design; solo en esta sección se pasa a la empirical evidence. Al leer la tabla conviene fijar primero tres cosas: todos los modelos predicen el 8-bit next sample sobre los mismos datos de piano, la evaluación es siempre top-5 accuracy y las cifras no incluyen pruebas de escucha subjetivas. Después se comparan por separado WaveNet frente a un Transformer de tamaño equivalente, el 3-layer model conditioned frente al unconditioned y el efecto de aumentar la profundidad. Solo dentro de este límite controlado tiene un significado preciso decir «cuál es mejor».
+
+El artículo reporta, con el mismo next-sample setup: vanilla WaveNet, 74\%; stacked WaveNet, 76\%; 3-layer Transformer, 80\%; con la wider-context condition, 82\%; y los Transformer más profundos de 6/8 capas alcanzan 84\%/85\%. Estas cifras respaldan que «con estos datos y esta métrica, la Transformer family es más fuerte», y muestran que la context condition aporta unos 2 puntos porcentuales a igual profundidad.
+
+\lecturefigure{slide-24-controlled-results.jpg}{Resultados controlados: top-5 accuracy de WaveNet, de Transformer de distintas profundidades y del conditioned model.}{Video oficial de Stanford Online, 00:22:08--00:22:35; tabla de arXiv:2106.16036.}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Raw-audio next-sample top-5 accuracy (configuración del artículo).}
+\begin{tabular}{lr}
+\toprule
+Modelo & Accuracy \\
+\midrule
+Vanilla WaveNet $(d=2,N=10,F=128)$ & 74\% \\
+Stacked WaveNet $(d=2,N=30,F=128)$ & 76\% \\
+3-layer Transformer $(H=4,E=128)$ & 80\% \\
+Conditioned 3-layer Transformer & 82\% \\
+Large 6-layer Transformer $(H=8,E=128)$ & 84\% \\
+Large 8-layer Transformer $(H=8,E=128)$ & 85\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\teachervoice{La diapositiva de resultados dice «Adieu WaveNet? Seems like it.», lo que refleja el tono entusiasta del ponente en clase; aun así, lo que compara sigue siendo el mismo next-sample benchmark. Las notas conservan el tono, pero deben conservar también los límites del benchmark.}
+
+\begin{warningbox}{Cómo no debe leerse «Adieu WaveNet?»}
+No demuestra que la convolución haya quedado obsoleta para el raw audio: los datos son grabaciones de piano, la métrica es teacher-forced next-sample top-5 accuracy, y no se comparan attention eficiente moderna, velocidad de generación en paralelo, pruebas de escucha subjetivas, distintas frecuencias de muestreo ni latencia de despliegue. La conclusión más prudente es esta: en esta configuración controlada, la adaptive attention y los modelos más profundos mejoraron la predicción local.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La ventaja del Transformer proviene del direccionamiento dependiente de la entrada; la de WaveNet, del bias multiescala fijo y de una complejidad más favorable. El Conditioning comprime el historial lejano y lo inyecta en el predictor local, lo que equivale a una asignación explícita de ancho de banda entre el raw detail y el long context.
+\section{Cómo el sonido continuo se convierte en «lenguaje»: VQ, Codebook y Hierarchy}
+
+El segundo trabajo pasa de la generación a la representation learning. El obstáculo central es el siguiente: un modelo de lenguaje predice sobre un vocabulario finito, mientras que la waveform/embedding de audio es continua y de alta frecuencia. Si se quiere usar un next-token objective, primero hay que definir el «audio token». La Vector quantization asigna el encoder output continuo a un index discreto mediante un codebook, lo que hace posible el sequence modeling, pero al mismo tiempo introduce problemas nuevos como el reconstruction error, la code utilization y el collapse.
+
+\lecturefigure{slide-25-contrastive-audio-representations-title.jpg}{Segundo trabajo: generative y contrastive audio representation learning.}{Video oficial de Stanford Online 00:22:36--00:22:44; Verma y Smith, arXiv:2010.11459.}
+
+\subsection{Por qué aprender una Audio Representation}
+
+La Acoustic scene understanding busca identificar el entorno o los eventos a partir del sonido, sin necesidad de generar cada sample. El ponente da ejemplos como emergency vehicle, music recommendation y health monitoring: una buena representation debe comprimir la estructura relevante para la decisión y mantener una invariancia adecuada frente a los detalles de grabación irrelevantes. Sin embargo, estas aplicaciones también tienen costos distintos de falsos positivos, por lo que no basta con usar una accuracy uniforme en lugar de la calidad real de las decisiones.
+
+\lecturefigure{slide-26-applications-overview.jpg}{Aplicaciones de la Acoustic scene understanding: tránsito, recomendación, medicina y percepción del entorno.}{Video oficial de Stanford Online 00:22:45--00:24:32.}
+
+\teachervoice{El ejemplo de los micrófonos de Waymo subraya que el sonido puede revelar una sirena con anticipación, fuera del campo visual; el ejemplo de la tos y los estornudos en medicina recuerda que la representation llega a decisiones de alto riesgo. El significado aguas abajo determina qué información vale la pena conservar.}
+
+\subsection{Del espacio continuo a un vocabulario finito}
+
+Sea un encoder que asigna el fragmento $x$ a $z_e(x)\in\mathbb{R}^d$, con codebook $\{e_1,\ldots,e_K\}$. La Vector quantization elige el code más cercano:
+\[
+k^*(x)=\operatorname*{argmin}_{k\in\{1,\ldots,K\}}
+\|z_e(x)-e_k\|_2^2,
+\qquad z_q(x)=e_{k^*(x)}.
+\]
+El token discreto es el index $k^*$, y el decoder reconstruye la waveform o el spectrum a partir de $z_q$. Lo que ve el Transformer es la index sequence, no el sonido original; el paso temporal y la capacidad del codebook determinan el token rate y el límite superior de la reconstrucción.
+
+\lecturefigure{slide-27-discrete-audio-language-modeling.jpg}{Requisito previo del Audio language modeling: convertir primero el sonido continuo en una code sequence discreta.}{Video oficial de Stanford Online 00:24:33--00:25:57.}
+
+\lecturefigure{slide-28-vector-quantization-recipe.jpg}{VQ/VQ-VAE, k-means y los métodos tipo wav2vec ofrecen distintas vías de discretización.}{Video oficial de Stanford Online 00:25:58--00:26:53.}
+
+\begin{knowledgebox}{Términos clave: los cuatro objetos de un sistema de Codebook}
+El encoder determina el feature continuo; el quantizer elige el code más cercano; el codebook almacena un número finito de prototypes; el decoder determina si la información conservada en el code permite reconstruir la señal. Un modelo de lenguaje puede predecir el Code index, pero su «semántica» depende del objetivo de entrenamiento y no tiene por qué corresponder a fonemas, notas musicales ni eventos con nombre humano.
+\end{knowledgebox}
+
+\subsection{Voronoi cell, reconstrucción y Codebook Collapse}
+
+Desde el punto de vista geométrico, cada code vector posee una Voronoi region, y los encoder outputs que caen en esa región comparten el mismo index. Un $K$ demasiado pequeño produce un quantization error alto; un $K$ demasiado grande o una optimización desequilibrada hace que muchos codes nunca se elijan, lo que da lugar al codebook collapse. El entrenamiento también debe equilibrar reconstruction, codebook update y commitment, para que el encoder no oscile arbitrariamente entre las fronteras de los codes.
+
+\lecturefigure{slide-29-vq-voronoi.jpg}{La Vector quantization vista desde Voronoi: el espacio continuo se divide según el code más cercano.}{Video oficial de Stanford Online 00:26:54--00:27:55.}
+
+\lecturefigure{slide-30-vq-autoencoder-transformer.jpg}{Encode--quantize--predict--decode: la combinación de un VQ autoencoder y un Transformer.}{Video oficial de Stanford Online 00:27:56--00:29:55.}
+
+\begin{lstlisting}[caption={Flujo conceptual del modelado con audio-tokens discretos.}]
+def audio_token_pipeline(waveform, encoder, codebook,
+                         transformer, decoder):
+    continuous = encoder(waveform)
+    token_ids = nearest_code_indices(continuous, codebook)
+    predicted_ids = transformer.autoregressive(token_ids)
+    quantized = codebook[predicted_ids]
+    reconstructed = decoder(quantized)
+    return token_ids, reconstructed
+\end{lstlisting}
+
+\begin{warningbox}{Los tokens discretos no son una compresión gratuita}
+Un token rate más bajo reduce la longitud que procesa el Transformer, pero pierde timing, phase, timbre o transitorios pequeños; un token rate más alto mejora la reconstrucción, pero vuelve a introducir secuencias largas. Al evaluar un codec/tokenizer hay que reportar a la vez la calidad de reconstrucción, la code utilization, el bitrate y el desempeño aguas abajo.
+\end{warningbox}
+
+\subsection{Hierarchical Codes: cada nivel se encarga de una escala temporal distinta}
+
+Los sistemas del tipo Jukebox usan VQ de varios niveles: los tokens de nivel alto y baja frecuencia capturan la estructura musical más lenta, los tokens de nivel bajo y alta frecuencia completan los detalles acústicos locales, y después el decoder sintetiza la waveform. La Hierarchy convierte la tensión multiescala vista antes en varias token streams; el costo es que el entrenamiento, el sampling y la coherencia entre niveles se vuelven más complejos.
+
+\lecturefigure{slide-31-jukebox-hierarchical-tokens.jpg}{Jukebox-style hierarchy: los codes de varios niveles se reparten el trabajo entre la compresión temporal y los detalles de reconstrucción.}{Video oficial de Stanford Online 00:29:56--00:30:24.}
+
+\begin{knowledgebox}{Lectura de la figura: por qué la Hierarchy reduce la long-range burden}
+Si cada token del nivel más alto cubre un intervalo de tiempo más largo, el Transformer puede modelar la estructura a nivel de canción con una sequence más corta; los niveles inferiores solo tienen que completar los detalles bajo la condition del nivel superior. No elimina el cómputo, sino que asigna la planeación global y la reconstrucción local a resoluciones distintas.
+\end{knowledgebox}
+
+\teachervoice{El ponente califica la VQ como «powerful and under-utilized». Lo que realmente vale la pena conservar de la clase no es el calificativo, sino la forma de combinar: convertir el continuous audio en codes y luego hacer que el Transformer aprenda la long dependency de esos codes.}
+
+\subsection{Resumen de la sección}
+
+El Audio language modeling depende del tokenizer. La VQ permite que el sonido continuo entre en un vocabulario finito, pero el token rate, el codebook size y el decoder determinan en conjunto qué estructura de largo alcance puede aprenderse y qué detalles acústicos pueden recuperarse. La Hierarchy es una asignación explícita de ancho de banda en varias escalas.
+\section{Representation Learning: Contrastive y Predictive Objectives}
+
+Una vez que se tienen code discretos, el segundo artículo compara dos rutas que no dependen de etiquetas. El contrastive learning acerca entre sí distintas augmentation de un mismo sonido y aleja los sonidos diferentes; el generative/predictive learning, en cambio, exige que el latent code prediga el futuro. Ambos buscan aprender una representation transferible, pero conservan información distinta: el primero codifica la invariancia que se define, y el segundo codifica el estado útil para que el futuro sea predecible.
+
+\subsection{Qué acerca el Contrastive Learning}
+
+Para un anchor $x$, una positive augmentation $x^+$ y un conjunto de negatives $x_j^-$, puede escribirse un InfoNCE-style objective:
+\[
+\mathcal{L}_{\mathrm{NCE}}
+=-\log
+\frac{\exp(\mathrm{sim}(f(x),f(x^+))/\tau)}
+{\exp(\mathrm{sim}(f(x),f(x^+))/\tau)
++\sum_j\exp(\mathrm{sim}(f(x),f(x_j^-))/\tau)}.
+\]
+Aquí $f$ es el encoder, $\mathrm{sim}$ es la similitud y $\tau$ es la temperature. La augmentation no es una operación neutral: si un pitch shift se trata como positive, la representación ignorará más la altura tonal; esto puede favorecer la scene classification, pero perjudicar la pitch estimation.
+
+\lecturefigure{slide-32-contrastive-architecture.jpg}{Contrastive audio representation: augmentation pairs, encoder y objetivo de similitud.}{Video oficial de Stanford Online 00:30:25--00:32:25.}
+
+\begin{warningbox}{Invariant to what?}
+El contrastive objective no descubre automáticamente la «semántica correcta»: aprende la invariancia que define la augmentation. En audio, si pitch, tempo, timbre, noise y time shift deben ignorarse depende de la tarea posterior; una augmentation equivocada elimina activamente información esencial.
+\end{warningbox}
+
+\subsection{La estructura común de Generative, Clustering y Speech Models}
+
+En clase se colocan Jukebox, VQ-VAE, k-means, wav2vec-like codes, Tacotron y los generative speech models en un mismo diagrama comparativo. Aunque son muchos nombres, el problema puede reducirse a tres columnas: quién produce las latent units, quién modela las units y quién se encarga de la reconstrucción o la lectura. Solo así se ve que «el Transformer predice code» y «el Transformer produce directamente la waveform» se sitúan en niveles de abstracción distintos.
+
+\lecturefigure{slide-33-audio-methods-comparison.jpg}{Audio methods comparison: cómo se reparten el trabajo los distintos sistemas entre encoder, discretizer, sequence model y decoder.}{Video oficial de Stanford Online 00:31:58--00:33:21.}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Comparación de mecanismos de las rutas autosupervisadas/generativas para audio.}
+\begin{tabularx}{\textwidth}{L{0.20\textwidth}L{0.22\textwidth}L{0.24\textwidth}X}
+\toprule
+Ruta & Señal de aprendizaje & Contenido que principalmente conserva & Riesgo principal \\
+\midrule
+Contrastive & Distinguir el positive de los negatives & Atributos que permanecen estables tras la augmentation & False negatives, invariance equivocada, dependencia del lote. \\
+Next-code prediction & Predecir los codes discretos futuros & Estados con poder predictivo sobre el futuro & Tokenizer bottleneck, exposure bias, atajos locales. \\
+Waveform prediction & Predecir el siguiente sample & Detalle a nivel de muestra y dinámica local & Secuencias extremadamente largas; desajuste entre la metric y la percepción auditiva. \\
+Reconstruction & Recuperar la entrada a partir del latent & Lo que el decoder puede reconstruir & Tiende a conservar detalles de bajo nivel e ignorar la semántica de la tarea. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\lecturefigure{slide-34-textless-nlp.jpg}{Textless NLP / generative speech: modelado de secuencias con speech units discretas y su posterior decodificación.}{Video oficial de Stanford Online 00:33:22--00:33:41.}
+
+\subsection{Por qué predecir el futuro puede producir un Summary}
+
+Si el latent state actual puede predecir con exactitud los codes futuros, debe comprimir la información de la historia que es relevante para lo que sigue. El ponente lo llama «better prediction, better summarization». Formalmente, se busca que la representation $h_t$ cumpla
+\[
+p(z_{t+1:t+K}\mid z_{\le t})
+\approx p(z_{t+1:t+K}\mid h_t),
+\]
+donde $z_t$ es un code discreto. Esta aproximación expresa el objetivo del predictive state; no garantiza que $h_t$ sea suficiente para todas las tareas futuras, y también puede ocurrir que solo aprenda patrones predecibles de corto plazo presentes en los datos.
+
+\lecturefigure{slide-35-long-dependency-cluster-model.jpg}{Aprender long-term dependency con una cluster-code sequence: la capacidad predictiva como indicador sustituto de la representation quality.}{Video oficial de Stanford Online 00:33:42--00:34:51.}
+
+\teachervoice{«Cuanto mejor la predicción, mejor el summary» es un supuesto central del curso, no una definición. Si el futuro depende sobre todo de la textura local, el modelo puede obtener un buen prediction loss sin comprender la semántica de la escena.}
+
+\subsection{Cómo comparar con equidad las Learned Representations}
+
+El artículo procura fijar el dataset y la encoder family, y entrena una linear head sobre la representación congelada. Si la representación es $h=f_\theta(x)$, el linear probe es
+\[
+\hat{y}=\operatorname{softmax}(Wh+b),
+\]
+y durante el entrenamiento solo se actualizan $W,b$. Si la accuracy es alta, la información de las etiquetas puede leerse linealmente; si es baja, puede deberse a que falta información o simplemente a que se requiere un nonlinear readout. Fijar el encoder y los datos reduce el confounding, pero el objective de preentrenamiento, la augmentation, la hyperparameter search y el code rate siguen influyendo en los resultados.
+
+\lecturefigure{slide-36-unsupervised-representation-evidence.jpg}{Diseño de la controlled comparison: same encoder, same dataset, linear readout.}{Video oficial de Stanford Online 00:34:52--00:36:07.}
+
+\lecturefigure{slide-37-same-encoder-same-data-surface.jpg}{Resultados de la representación: supervised 71.3\%, contrastive 55.6\%, next-code Transformer 60.1\%.}{Video oficial de Stanford Online 00:36:08--00:37:09; arXiv:2010.11459.}
+
+\begin{knowledgebox}{Lectura de la figura: primero el control, después el gap}
+Usar el mismo encoder y el mismo dataset hace que el objective sea la principal fuente de variación. El next-code Transformer supera a ese contrastive setup, pero sigue unos 11.2 points por debajo del supervised baseline. La surface de datos de entrenamiento/hidden-size de la derecha muestra que la escala modifica el error, pero no demuestra directamente que «más datos sin etiquetar eliminan necesariamente el gap»; esa es la scaling hypothesis que plantea el ponente.
+\end{knowledgebox}
+
+\begin{warningbox}{Los límites de las conclusiones del linear probe}
+71.3\%, 55.6\% y 60.1\% son la accuracy para el dataset/encoder/probe actual. No comparan generation quality, few-shot transfer, robustness, calibration ni compute efficiency, y tampoco permiten afirmar que la supervised representation y la unsupervised representation difieran solo en un porcentaje fijo.
+\end{warningbox}
+
+\teachervoice{Verma sitúa explícitamente «más datos reducirán el gap del 10\%» después de los resultados, como una conjetura. Estas notas conservan ese orden: primero se reporta la tabla controlada y después se discute el scaling, en lugar de presentar la conjetura como una conclusión ya verificada por el artículo.}
+
+\subsection{Resumen de la sección}
+
+El contrastive learning define la invariance mediante la augmentation; el predictive learning define el estado suficiente mediante los future codes. El VQ tokenizer, el objective y el probe determinan juntos el resultado; el control con los mismos datos y el mismo encoder es importante, pero aun así no permite extrapolar la linear accuracy a una representation quality general.
+\section{Audio Transformers: Raw Waveform y representaciones multiescala}
+
+El tercer trabajo ya no predice el siguiente sample, sino que reconoce sound events a partir de un segundo de raw waveform. Retoma la idea central de ViT: dividir la entrada en patches, mapearlos a embeddings mediante un learned front end y después agregarlos con un Transformer; además, usa pooling o wavelet para que las capas posteriores vean un rango temporal más amplio. Aquí, «raw» todavía incluye la división en bloques y la proyección lineal del front end; no significa aplicar global attention a los 16,000 samples sin modificación alguna.
+
+\lecturefigure{slide-38-audio-transformers-title.jpg}{Tercer trabajo: large-scale raw-audio understanding sin convoluciones.}{Video oficial de Stanford Online 00:37:50--00:38:21; Audio Transformers v1, arXiv:2105.00335v1.}
+
+\subsection{La tarea FSD50K y los límites de una comparación justa}
+
+En clase se usa FSD50K: unos cincuenta mil sound events human-labeled y unas 200 clases. La configuración de clase que muestra la slide es de unos 40,000 training clips y 10,000 validation/test clips, alrededor de cien horas en total; la entrada se submuestrea a 16 kHz y la muestra básica es una waveform de un segundo. El objetivo es multi-label audio content classification, no waveform reconstruction.
+
+\lecturefigure{slide-39-fsd50k-dataset-setup.jpg}{FSD50K y configuración experimental: raw waveform, duración fija, multi-label content prediction.}{Video oficial de Stanford Online 00:37:54--00:38:42.}
+
+Para una muestra $x$ y $C$ etiquetas, el modelo produce logits $s_c$; lo habitual es usar binary cross-entropy:
+\[
+\mathcal{L}_{\mathrm{BCE}}
+=-\sum_{c=1}^{C}
+\left[y_c\log\sigma(s_c)+(1-y_c)\log(1-\sigma(s_c))\right].
+\]
+donde $y_c\in\{0,1\}$ indica si la clase $c$ está presente. La evaluación usa mean average precision (mAP), que integra el precision--recall ranking de cada clase y después promedia sobre las clases; por eso no puede compararse directamente con la top-5 next-sample accuracy de las secciones anteriores.
+
+\begin{warningbox}{Ambas se llaman Accuracy, pero las tareas son completamente distintas}
+La raw synthesis anterior hace single-label next-step prediction entre 256 sample states; aquí, FSD50K es multi-label event detection y se reporta mAP. Las magnitudes numéricas de ambas no son comparables: no puede decirse que 0.537 sea «menor» que 85\%.
+\end{warningbox}
+
+\subsection{Por qué hacer Multi-Scale sobre el Intermediate Embedding}
+
+La raw waveform contiene estructura a múltiples escalas, desde los transitorios hasta los eventos. Si solo se apilan Transformer layers de la misma longitud, aunque en teoría cada capa puede direccionar globalmente, la dimensión de la representación y la token rate no forman una jerarquía por sí solas. El artículo introduce pooling o wavelet para reducir la resolución temporal entre algunas capas, de modo que las capas superiores agreguen un rango temporal más largo con menos positions.
+
+\lecturefigure{slide-40-wavelet-motivation.jpg}{Wavelet motivation: construir explícitamente una jerarquía multiescala sobre los intermediate embeddings.}{Video oficial de Stanford Online 00:38:43--00:39:28.}
+
+\begin{knowledgebox}{Concepto previo: Receptive field y Resolution}
+Receptive field es el rango temporal de la entrada del que puede depender una representación de alto nivel; resolution es cuántas posiciones conserva todavía el eje temporal. El pooling amplía lo que cubre cada posición, pero pierde el detalle fino; la wavelet produce a la vez una approximation de baja frecuencia y un detail de alta frecuencia, por lo que en teoría conserva más variación que un promedio simple, aunque la forma de combinarlos sigue determinando si la información realmente se aprovecha.
+\end{knowledgebox}
+
+\teachervoice{El ponente describe la wavelet como «aprender una hierarchy en forma de árbol dentro de una capa». Esto no significa que el modelo aprenda los parámetros de la wavelet; en clase se usa una Haar-like operation fija, y el aprendizaje ocurre en los Transformer embeddings y en las capas posteriores.}
+
+\subsection{Haar Wavelet: promedio y diferencia}
+
+Para embeddings adyacentes $h_{2i},h_{2i+1}\in\mathbb{R}^d$, la Haar transform más simple puede escribirse como
+\[
+a_i=\frac{h_{2i}+h_{2i+1}}{\sqrt{2}},
+\qquad
+d_i=\frac{h_{2i}-h_{2i+1}}{\sqrt{2}}.
+\]
+$a_i$ es la approximation de baja frecuencia, que resume el promedio local; $d_i$ es el detail, que conserva la variación entre vecinos. Si el sistema solo conserva el promedio, equivale a un pooling de submuestreo; si conserva o combina el detail, puede transportar las diferencias transitorias. Cuando la longitud pasa de $L$ a aproximadamente $L/2$, el número de attention pairs posteriores baja de $L^2$ a aproximadamente $L^2/4$.
+
+\lecturefigure{slide-41-wavelet-in-transformer.jpg}{Inserción de una Haar wavelet/average pathway entre Transformer layers.}{Video oficial de Stanford Online 00:39:29--00:41:18.}
+
+\begin{importantbox}{Por qué «sin parámetros nuevos» aún cambia el modelo}
+La Haar transform no tiene learned weights, pero cambia la sequence length, la respuesta en frecuencia, el attention graph posterior y el gradient path. Que el número de parámetros no cambie no implica que no cambien el cómputo, la información ni el inductive bias.
+\end{importantbox}
+
+\subsection{Architecture: Front End, Transformer y Temporal Reduction}
+
+El modelo primero introduce los waveform patches en un learned feed-forward front end, que los comprime en embeddings de menor dimensión; después pasan por varias Transformer layers, con average pooling o wavelet pathway entre ellas; al final se agregan y se producen los scores multietiqueta. El large model del artículo usa 6 layers, 64-dimensional embeddings, 8 heads y feed-forward blocks, con unos 2.3M parámetros; lo importante es comparar la eficiencia de representación con los baselines convolucionales de la misma tabla.
+
+\lecturefigure{slide-42-audio-transformer-architecture.jpg}{Audio Transformer sobre raw waveform: front-end patches, attention layers, temporal reduction y classifier.}{Video oficial de Stanford Online 00:41:19--00:42:21.}
+
+\lecturefigure{slide-43-learned-front-end.jpg}{Methodology: el front end aprende la representación tiempo-frecuencia, el Transformer aprende el embedding y pooling/wavelet amplían la escala.}{Video oficial de Stanford Online 00:42:22--00:44:01.}
+
+\begin{knowledgebox}{Lectura de la figura: no confundir el Front End con «sin convoluciones no hay preprocesamiento»}
+La parte izquierda todavía organiza la waveform en patches y usa un 2048-unit front end y una 64-dimensional projection para generar tokens; lo que recibe el Transformer son learned embeddings. Cuando el artículo dice que no hay convolution, se refiere a que no hay un convolutional backbone tradicional, no a que los samples de entrada no pasen por ningún mapeo local.
+\end{knowledgebox}
+
+\subsection{Tabla de resultados: eficiencia de parámetros y alcance de las métricas}
+
+La tabla de la slide y del artículo muestra: VGG-like obtiene 0.434 mAP; el small Transformer, 0.469; el large 6-layer Transformer, 0.525, y el modelo del mismo tamaño con pooling, 0.537. CRNN, ResNet-18 y DenseNet-121 obtienen en esa tabla 0.417, 0.373 y 0.425, respectivamente. Los resultados respaldan que el raw-waveform Transformer es competitivo en esta configuración de FSD50K y también sugieren que la temporal reduction ayuda.
+
+\lecturefigure{slide-44-results-table.jpg}{Resultados de audio understanding: baselines convolucionales, Transformer y variantes con pooling/multi-scale.}{Video oficial de Stanford Online 00:44:02--00:44:35; Audio Transformers v1, tabla 1.}
+
+\begin{table}[H]
+\centering
+\small
+\caption{FSD50K classroom-era comparison (mAP; el número de parámetros proviene de la source table).}
+\begin{tabular}{lrr}
+\toprule
+Modelo & mAP & Parameters \\
+\midrule
+CRNN & 0.417 & 0.96M \\
+VGG-like & 0.434 & 0.27M \\
+ResNet-18 & 0.373 & 11.3M \\
+DenseNet-121 & 0.425 & 12.5M \\
+Small Transformer & 0.469 & 0.9M \\
+Large 6-layer Transformer & 0.525 & 2.3M \\
+Large 6-layer Transformer with pooling & 0.537 & 2.3M \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{warningbox}{La conclusión razonable de «Adieu Convolutions»}
+La tabla muestra que, con estos datos, esta training recipe y este rango de parámetros, las Transformer variants alcanzan un mAP más alto; no controla todos los convolutional baselines modernos ni compara streaming latency, energy, robustness o preentrenamiento con más datos. El título es una declaración sobre una dirección de investigación, no un teorema general.
+\end{warningbox}
+
+\teachervoice{Al ponente le sorprendió la mejora que aportan pooling/wavelet, porque añaden muy pocos learned parameters. Debe entenderse como inductive-bias evidence: cambiar la jerarquía temporal en sí puede importar más que simplemente añadir parámetros.}
+
+\subsection{Resumen de la sección}
+
+Raw-waveform understanding no equivale a conectar globalmente todos los samples entre sí. El learned front end primero forma tokens, y después pooling/wavelet reducen la resolución temporal. Los resultados respaldan el uso de Transformer y del multi-scale bias en FSD50K, pero la conclusión sigue limitada por los datos, las métricas y el alcance de los baselines.
+\section{Qué «oído» aprendió el modelo: Inspecting the Learned Front End}
+
+El mAP por sí solo todavía no dice cómo representa el modelo el sonido. El artículo examina además los filters de la primera capa: a cada learned filter se le aplica la Fourier transform, se ordenan por center frequency y luego se observan la densidad de bandas de frecuencia y la filter shape. Este proceso convierte los parámetros de la red neuronal en respuestas en frecuencia, que los lectores de procesamiento de señales ya conocen, y es la parte de esta clase más cercana a la mechanistic inspection.
+
+\subsection{De la Filter Impulse Response a la Frequency Response}
+
+Si los pesos en el dominio del tiempo del $j$-ésimo filter del front end son $h_j[n]$, su respuesta en frecuencia es
+\[
+H_j(\omega)=\sum_n h_j[n]e^{-i\omega n}.
+\]
+La posición del pico permite definir una center frequency aproximada
+\[
+\omega_j^*=\operatorname*{argmax}_{\omega}|H_j(\omega)|.
+\]
+Al ordenar los filters según $\omega_j^*$, un Fourier bank fijo se distribuye de manera uniforme, aproximadamente a lo largo de una recta; si el learned bank asigna más filters a ciertas bandas de frecuencia, la curva se dobla o presenta un step pattern, lo que indica que el modelo redistribuye la resolution en frecuencia según la tarea.
+
+\lecturefigure{slide-45-ideal-time-frequency.jpg}{Comparación entre un Fourier bank fijo ideal y una learned task-specific frequency organization.}{Video oficial de Stanford Online, 00:44:36--00:46:09.}
+
+\begin{knowledgebox}{Lectura de la figura: qué representan el eje horizontal, el eje vertical y la curva}
+El eje horizontal es el filter index después del ordenamiento; el eje vertical es la center frequency en la que cada filter tiene su respuesta máxima. Una recta indica una distribución uniforme de frecuencias; una curva indica que ciertas bandas reciben filters más densos. Que tareas distintas produzcan curvas distintas respalda que «el front end se adapta a la tarea», pero la curva por sí misma no dice qué representación es más robusta fuera de la distribución.
+\end{knowledgebox}
+
+\teachervoice{Verma describe este fenómeno como una computadora que «ajusta sus propios oídos» según la tarea. Esta frase es más precisa que «el modelo aprendió un spectrogram»: lo que aprende es un conjunto de analysis filters no uniformes y dependientes de la tarea, no una copia de una STFT fija.}
+
+\subsection{DSP-like Filters: Onset, Window y Sinusoid}
+
+Al visualizar los individual filters se observan formas semejantes a un onset detector, a una windowing function y a una sinusoidal basis; en una misma banda de frecuencia también pueden aparecer varios filters con fases distintas. Esto muestra que el gradient descent redescubrió varios building blocks clásicos de DSP y, al mismo tiempo, combinó formas que una basis fija no prevé.
+
+\lecturefigure{slide-46-learned-filter-bank.jpg}{Learned filters: patrones onset-sensitive, window-like, sinusoidal y phase-diverse.}{Video oficial de Stanford Online, 00:46:10--00:47:18.}
+
+\begin{warningbox}{La visual resemblance no es una prueba completa del mecanismo}
+Que un filter se parezca a una Hamming window o a una sinusoid solo indica que la shape/response es similar. Para demostrar una causal function se requieren además intervention, ablation, pruebas con entradas sintetizadas y estabilidad entre checkpoints; varios filters también pueden implementar en conjunto una distributed feature.
+\end{warningbox}
+
+\begin{importantbox}{Relación entre el DSP tradicional y el End-to-End Learning}
+La conclusión más valiosa de esta clase no es que «las redes neuronales sustituyen al procesamiento de señales», sino que ambos pueden formar un ciclo cerrado: el DSP aporta bases interpretables, multi-scale transforms y herramientas de diagnóstico; el end-to-end learning redistribuye las bandas de frecuencia y combina filters según la tarea; y los resultados del análisis orientan, a su vez, el diseño de la architecture.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La Fourier inspection proyecta los learned weights sobre la center frequency y la filter shape, y muestra que el front end forma un filterbank dependiente de la tarea y reproduce parte de la DSP structure clásica. Es una evidencia sólida sobre la representación, pero todavía falta un paso para llegar a un causal circuit completo.
+\section{Síntesis y ampliación}
+
+Esta clase parte de tres trabajos de 2021 y propone un marco de modelado de audio que sigue vigente: primero se deciden la resolución temporal y la representation; después, el objetivo de predicción y la context hierarchy; por último, se evalúa con una metric adecuada a la tarea y se verifica si el modelo aprendió una estructura intermedia razonable. El Transformer es solo el sequence operator dentro de ese marco; lo que determina realmente las propiedades del sistema es cómo se conecta con la waveform, el spectrogram, el codebook, el pooling, la wavelet y el decoder.
+
+\lecturefigure{slide-47-final-thoughts.jpg}{Conclusión de la clase: el Transformer es un avance importante, pero no debe considerarse el punto final de la evolución de las arquitecturas.}{Video oficial de Stanford Online 00:47:19--00:48:13.}
+
+\teachervoice{Al final, el ponente dice que el Transformer parece «ahora puede resolverlo todo», pero espera que no sea el punto final, e invita al público a buscar la siguiente arquitectura de mayor impacto. La revisión del artículo cuatro años después y la evolución posterior de los modelos de audio confirman que se trata de una actitud de investigación y no de una declaración de victoria.}
+
+\subsection{Los tres artículos condensados en un ciclo de ingeniería}
+
+Los tres trabajos pueden unificarse en cinco pasos: primero, identificar la escala temporal que la tarea realmente requiere; elegir una representation de waveform, de espectro o de códigos; asignar un ancho de banda distinto al context local y al global; elegir una metric que permita poner a prueba una hipótesis en lugar de producir cifras vistosas; por último, verificar si la representación interna forma una estructura interpretable. Este ciclo es más reutilizable que «usar Transformer».
+
+\begin{table}[H]
+\centering
+\small
+\caption{Comparación unificada de las tres líneas de trabajo de esta clase.}
+\begin{tabularx}{\textwidth}{L{0.17\textwidth}L{0.30\textwidth}L{0.18\textwidth}>{\raggedright\arraybackslash}X}
+\toprule
+Línea & Entrada y mecanismo de largo alcance & Métrica principal & Limitación más importante \\
+\midrule
+Generación de forma de onda cruda & Muestras discretas de 8 bits; attention local más condition comprimida & Predicción de muestras Top-5 & No es una métrica perceptual; el error de generación se acumula. \\
+Aprendizaje de representaciones & VQ codes o vistas aumentadas; objetivo predictivo/contrastivo & Exactitud de sondeo lineal & El tokenizer y la augmentation determinan qué información se puede aprender. \\
+Comprensión de audio & Patches de forma de onda aprendibles; jerarquía de pooling/wavelet & mAP multietiqueta & Datos y gama de líneas base limitados; no cubre el costo en streaming. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Lista de errores frecuentes}
+
+\begin{warningbox}{Seis errores de razonamiento que deben evitarse}
+\begin{enumerate}
+  \item Llamar «audio tokens» por igual a la raw waveform, al spectrogram y a los VQ token, sin precisar la token rate ni la pérdida de información;
+  \item Usar la top-5 sample accuracy para inferir la calidad perceptual de música o voz;
+  \item Usar una misma etiqueta $O(n^2)$ que ignora la estructura real de la local window, el downsampling y la hierarchy;
+  \item Tomar la supervised/unsupervised linear-probe gap como una diferencia fija para todas las tareas posteriores;
+  \item Afirmar que el modelo reproduce por completo la audición humana porque los learned filter se parecen a una sinusoid;
+  \item Interpretar el título «Adieu» de 2021 como un rechazo de todas las arquitecturas convolucionales o híbridas posteriores.
+\end{enumerate}
+\end{warningbox}
+
+\subsection{Conexión con cursos posteriores y sistemas modernos}
+
+Este marco se extiende de forma natural a los neural audio codecs, las speech units, el audio-language pretraining, la generación por diffusion/flow, el streaming recognition y los modelos eficientes de secuencias largas. Al estudiar estos sistemas conviene plantear las mismas preguntas: cuál es el codec bitrate, si el tokenizer pierde phase/prosody, en qué escala interactúa el context, si el generador es paralelo y si la evaluación mide reconstruction, perception, semantic accuracy o human preference. Los nombres de los modelos nuevos no eliminan las restricciones de siempre.
+
+\begin{importantbox}{Conclusión didáctica final}
+Lo esencial del Audio Transformer no es que «attention también puede procesar sonido», sino lo siguiente: la representación convierte una señal física continua en una secuencia que se puede aprender; la estructura multiescala separa en niveles el detalle de alta frecuencia y la semántica de largo alcance; la función objetivo determina qué conserva la representación; y los límites de la métrica determinan qué podemos afirmar.
+\end{importantbox}
+
+\subsection{Lecturas adicionales}
+
+\begin{itemize}
+  \item \href{https://arxiv.org/abs/2106.16036}{Verma and Chafe, \emph{A Generative Model for Raw Audio Using Transformer Architectures}}: Transformer a nivel de muestra (sample-level) y context conditioning.
+  \item \href{https://arxiv.org/abs/2010.11459}{Verma and Smith, \emph{A Framework for Generative and Contrastive Learning of Audio Representations}}: representation learning contrastive y de next-code.
+  \item \href{https://arxiv.org/abs/2105.00335v1}{Verma and Berger, \emph{Audio Transformers} v1}: la raw-waveform understanding, el pooling, la wavelet y el learned front end que corresponden a la clase.
+  \item \href{https://arxiv.org/abs/1609.03499}{van den Oord et al., \emph{WaveNet}}: línea base de dilated causal convolution.
+  \item \href{https://arxiv.org/abs/1711.00937}{van den Oord et al., \emph{Neural Discrete Representation Learning}}: VQ-VAE y codebook learning.
+  \item \href{https://arxiv.org/abs/2005.00341}{Dhariwal et al., \emph{Jukebox}}: hierarchical discrete music tokens.
+  \item \href{https://arxiv.org/abs/2010.00475}{Fonseca et al., \emph{FSD50K}}: fuente del conjunto de datos de los experimentos de clasificación de la clase.
+\end{itemize}
+
+\end{document}

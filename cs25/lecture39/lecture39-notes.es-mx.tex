@@ -1,0 +1,726 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+\usepackage{multicol}
+
+\renewcommand{\notetitle}{Lecture 39: modelos de mundo multimodales para el descubrimiento de fármacos}
+\renewcommand{\noteauthors}{Elaborado a partir de la conferencia oficial de Eshed Margalit (Noetik.ai) en Stanford CS25 V5 y de sus subtítulos hechos a mano}
+\renewcommand{\notedate}{CS25 V5 · versión reescrita source-first de 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{Clase: 2025-05-20; publicación: 2025-06-13}
+\renewcommand{\videoduration}{1:11:02}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=8kXIaUM3h1E}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.97\textwidth,height=0.49\textheight,keepaspectratio]{slides-images/#1}
+  \caption{#2}
+  \figsource{Eshed Margalit, Stanford CS25 V5 official recording, #3}
+\end{figure}
+}
+
+\let\standardtableofcontents\tableofcontents
+\renewcommand{\tableofcontents}{%
+  \small
+  \setlength{\parskip}{0pt}
+  \standardtableofcontents
+  \normalsize
+  \setlength{\parskip}{0.25em}
+}
+
+\begin{document}
+\makecscover
+
+\section{De los modelos del mundo al aprendizaje multimodal}
+
+Esta clase no aplica a la fuerza un Transformer a datos de cáncer. Parte de una pregunta más general: cuando varios sensores observan la realidad al mismo tiempo y las acciones modifican el futuro, ¿cómo debe un modelo formar un estado interno que sirva para simular? El cáncer es solo uno de los casos más difíciles y más valiosos de esta pregunta. Por eso, la nota primero da definiciones operativas de world model (modelo del mundo) y de multimodality (multimodalidad), y después pasa a las arquitecturas concretas y a los datos biológicos.
+
+\subsection{Las tres partes de esta clase y el compromiso con el lector}
+
+La ruta de la clase tiene tres partes: los mecanismos multimodales, el escenario del cáncer y los sistemas futuros que todavía están en desarrollo. El orden importa. Si primero no se entiende «por qué fusionar», más adelante H\&E, las proteínas y el RNA quedan como una simple lista de nombres. Si no se entiende el problema clínico, los diagramas de arquitectura pierden las restricciones que impone la tarea. El lector debe seguir siempre el mismo hilo conductor: qué tipo de incertidumbre reduce cada nuevo dato o módulo y si cambia las opciones experimentales que se pueden llevar a cabo.
+
+\lecturefigure{slide-038-agenda.jpg}{Ruta de la clase: mecanismos multimodales, contexto del cáncer y trabajo futuro}{00:01:47}
+
+Al leer la figura, primero hay que observar cómo dependen entre sí las tres partes. La primera aporta el lenguaje de translation, disambiguation y fusion. La segunda asocia esos conceptos con los datos tumorales. Solo la tercera trata modelos más grandes, simulación contrafactual e interpretabilidad. No son tres temas independientes, sino una cadena: «definir el problema, construir los datos, entrenar el simulador, comprobar los límites».
+
+\lecturefigure{slide-040-audience-assumptions.jpg}{Supuestos sobre el público: conoce los fundamentos del Transformer, pero no se presupone formación en inmunología del cáncer}{00:02:37}
+
+Esta diapositiva de supuestos define el nivel de detalle de la nota. Más adelante se conservarán los términos técnicos en inglés, pero se explicarán la primera vez que aparezcan H\&E, spatial transcriptomics, imputation, counterfactual y calibration. En cambio, la autoatención no se vuelve a explicar desde la multiplicación de matrices. La explicación se centra en lo que ocurre cuando distintas modalidades entran en $Q/K/V$.
+
+\lecturefigure{slide-056-talk-goals.jpg}{Los tres niveles de persuasión que el ponente busca establecer}{00:04:17}
+
+La primera afirmación es que los Transformers multimodales todavía tienen un amplio espacio de diseño abierto. La segunda es que la biología del cáncer ofrece justamente un substrate de datos de alta dimensión, espacial y multiescala. Solo la tercera plantea si Noetik ya se acerca a aportar valor en el descubrimiento de fármacos. Las tres afirmaciones tienen un respaldo de distinta solidez. El mecanismo de la arquitectura puede explicarse con fórmulas y experimentos. El valor de los datos de cáncer para la investigación puede explicarse por la estructura de las mediciones. En cambio, el valor terapéutico requiere validación en experimentos de laboratorio, estudios en animales y ensayos clínicos.
+
+\teachervoice{00:01:05--00:04:17: el docente enfatiza que la primera mitad debe ser útil por sí misma aunque no se hable de cáncer. Lo que de verdad quiere que acepte el público es, ante todo, que «el aprendizaje automático multimodal todavía deja mucho espacio a la creatividad», y no que primero acepte el discurso sobre el producto de una empresa.}
+
+\begin{importantbox}{Niveles de evidencia de la nota}
+De aquí en adelante se distinguen con claridad tres tipos de afirmaciones. Las \textbf{definiciones de mecanismo} explican cómo calcula el modelo. Los \textbf{resultados de investigación} describen lo que se observó en un conjunto de datos y un experimento concretos. Las \textbf{afirmaciones clínicas} requieren una validación causal y de seguridad que va más allá de la clase. Mezclar los tres tipos es uno de los errores más peligrosos al estudiar AI for Science.
+\end{importantbox}
+
+\subsection{Modelos del mundo: observación, acción y estado futuro}
+
+Un modelo del mundo no es lo mismo que «tener un latent space grande». La definición que se dio en clase pone el énfasis en la intervención: el modelo recibe la observación actual y además debe poder predecir cómo cambiará el mundo si se realiza cierta acción. Una red que solo hace clasificación estática puede aprender representaciones muy ricas sin que eso la convierta en un modelo del mundo útil para planificar. A continuación, primero se expresan la observación, la acción y el estado futuro como una distribución condicional. Después se explica por qué varios sensores deben aparecer juntos en esa distribución.
+
+\lecturefigure{slide-059-world-model-definition.jpg}{Definición operativa de un modelo del mundo: el futuro se condiciona a la vez en las observaciones de los sensores y en la acción}{00:05:35}
+
+La relación de la figura puede escribirse como
+\[
+p_\theta(s_{t+1}\mid o_{\le t}^{(1:M)},a_t),
+\]
+donde $s_{t+1}$ es el estado futuro, $o_{\le t}^{(1:M)}$ representa las observaciones de $M$ modalidades hasta el instante $t$, $a_t$ es la acción candidata y $\theta$ son los parámetros del modelo. Cuando el modelo se usa para tomar decisiones, no se compara un futuro incondicional, sino las distribuciones del futuro que inducen las distintas acciones.
+
+\begin{importantbox}{Criterio mínimo de un world model}
+Como mínimo, el modelo debe responder: «con la evidencia actual, si se realiza la acción $a$, ¿cómo cambiará el estado futuro?». Si solo codifica observaciones y no tiene condicionamiento en la acción ni transición de estados, conviene llamarlo representation model y no un modelo del mundo completo.
+\end{importantbox}
+
+\lecturefigure{slide-063-multimodal-perception.jpg}{La visión, el audio y el texto apoyan juntos la consulta previa a una acción}{00:07:00}
+
+El ejemplo de la glorieta hace intuitiva la definición abstracta. La cámara indica dónde están los vehículos. El micrófono indica a qué velocidad se acerca algo desde una dirección que no se ve. El texto puede aportar un conocimiento previo como «esta glorieta es peligrosa en horas pico». Para responder «¿qué pasará si entro ahora a la glorieta?», el modelo debe combinar evidencias con formatos, niveles de ruido y escalas de tiempo distintos, en lugar de decidir por mayoría simple.
+
+\lecturefigure{slide-064-modality-fusion.jpg}{La operación central del aprendizaje multimodal: hacer que la información de distintos sensores interactúe de forma entrenable}{00:07:17}
+
+La flecha amarilla representa la fusion (fusión). Las modalidades no solo se codifican por separado para combinar sus puntuaciones al final, sino que un flujo puede modificar la representación de otro. Si se denota con $z$ la variable latente después de la fusión, una formulación general es
+\[
+p(y\mid o^{(1)},\ldots,o^{(M)})
+=\int p(y\mid z)\,p_\theta(z\mid o^{(1)},\ldots,o^{(M)})\,\mathrm{d}z.
+\]
+$z$ no tiene que ser un único vector explícito. Puede ser un conjunto de tokens, los estados de cross-attention en varios niveles o toda una ruta de cálculo modulada por normalización condicional.
+
+\begin{knowledgebox}{Por qué lo multimodal no es «más entradas»}
+Añadir canales de entrada no produce por sí solo razonamiento multimodal. Lo que importa es si el modelo aprende qué evidencias pueden traducirse entre sí, cuáles solo sirven para eliminar ambigüedades cuando se combinan, qué modalidades faltan en una muestra determinada y cómo se propaga el error de cada sensor hasta la acción final.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Esta sección estableció el lenguaje común que se usará después. Un modelo del mundo es un simulador del futuro condicionado en las acciones. El aprendizaje multimodal consiste en que varios flujos de observación formen un estado conjunto que sirva para esa simulación. La dificultad de la tarea del cáncer no está en «introducir juntas las imágenes y las tablas», sino en encontrar el nivel de observación, el punto de fusión, el objetivo de predicción y el ciclo de validación adecuados.
+\section{Translation, disambiguation y mecanismos de fusión}
+
+Una vez fijado el objetivo del modelo del mundo, el siguiente paso no es elegir de inmediato una arquitectura, sino preguntar primero qué información aporta realmente la multimodalidad. La clase ofrece una dicotomía muy útil: translation (traducción) busca el contenido compartido entre modalidades; disambiguation (desambiguación) aprovecha la información adicional de una modalidad para completar otra. Esta distinción determina directamente la función de pérdida y el punto de fusión.
+
+\subsection{Dos tipos de valor multimodal: hechos compartidos y evidencia complementaria}
+
+Las tareas de tipo traducción suponen que dos modalidades describen el mismo hecho subyacente, por lo que una puede predecirse a partir de la otra; las tareas de desambiguación reconocen que ciertos hechos existen solo en una de las modalidades y que solo la observación conjunta basta para determinar la respuesta. Los sistemas reales suelen contener ambas. Para no confundirlas bajo la idea de que «después de fusionar el resultado mejora», a continuación se examinan por separado la información compartida, la información exclusiva de cada modalidad y sus distintos efectos sobre la distribución posterior del objetivo.
+
+\lecturefigure{slide-065-translation.jpg}{Translation: dos modalidades comparten una intersección amplia de información}{00:07:47}
+
+La intersección del diagrama de Venn representa el contenido que puede recuperarse entre modalidades. Por ejemplo, el «vehículo rojo» de una imagen puede corresponder al mismo objeto en un texto; la voz y los subtítulos también pueden expresar una semántica similar. El objetivo de entrenamiento suele favorecer que las muestras correspondientes queden cerca y las no correspondientes se separen, o bien generar directamente la otra modalidad.
+
+\lecturefigure{slide-066-translation-vs-disambiguation.jpg}{Diferencia geométrica entre translation y disambiguation}{00:08:18}
+
+La figura de la derecha subraya que el estado real es más amplio que cualquier observación individual. El azul y el amarillo cubren cada uno una parte de la realidad, y la región gris es la parte compartida; si la tarea solo se ocupa de la región gris, translation basta; si la respuesta depende de las regiones exclusivas azul o amarilla, se necesita disambiguation. Esto es especialmente cierto en los datos de cáncer: H\&E muestra la morfología y el RNA muestra los programas de expresión; ambos se traslapan, pero de ningún modo son equivalentes.
+
+\lecturefigure{slide-067-translation-example.jpg}{Aprendizaje multimodal de tipo traducción: construir una representación unificada de la muestra entre modalidades}{00:08:50}
+
+El ejemplo generativo de personas de la figura conlleva una advertencia importante: distintas modalidades pueden alinearse en estilo o en apariencia superficial sin capturar la estructura causal subyacente. Que un modelo genere a partir de un texto una imagen aparentemente relacionada no demuestra que entienda el estado real; el éxito de translation indica, ante todo, que la información compartida es recuperable.
+
+\lecturefigure{slide-068-disambiguation.jpg}{Disambiguation: una modalidad aporta hechos que la otra no tiene}{00:08:57}
+
+La desambiguación exige que el modelo admita «evidencia asimétrica». Cuando la cámara no ve la fuente del sonido de una alarma, el audio no es una traducción de la imagen, sino que agrega nuevas restricciones sobre el estado del mundo. Matemáticamente, su valor puede explicarse con la entropía condicional: si
+\[
+H(Y\mid X_1,X_2)<H(Y\mid X_1),
+\]
+entonces la modalidad $X_2$, dada $X_1$, aún aporta información adicional sobre el objetivo $Y$.
+
+\lecturefigure{slide-069-disambiguation-example.jpg}{Ejemplo de una escena de película: ver a alguien correr no determina el tipo de peligro}{00:09:43}
+
+Si solo se ve a una persona corriendo, podría tratarse de un incendio, una persecución, un simulacro o una comedia; los efectos de sonido, el diálogo y las pistas del entorno son los que permiten al modelo actualizar sus hipótesis. Al leer esta figura, no hay que entender la «fusión» como un aumento en el número de características, sino preguntarse: ¿qué modalidad hace que qué explicaciones candidatas pierdan masa de probabilidad? Esta es precisamente la lógica con la que, más adelante, la vecindad espacial ayuda a determinar el estado celular.
+
+\teachervoice{00:07:18--00:09:31, el docente distingue repetidamente entre translation y disambiguation: la primera enfatiza el mismo hecho entre modalidades; la segunda, que una modalidad contiene información clave que la otra no tiene. Esta distinción es el eje de toda la clase.}
+
+\begin{warningbox}{Un error frecuente: un embedding compartido equivale a comprensión}
+Una pérdida de alineación puede hacer que los pares imagen-texto queden cerca en el espacio vectorial y, aun así, perder información que es clave para la acción pero que existe en una sola modalidad. Si el modelo del mundo solo conserva la intersección, mostrará un exceso de confianza justo en los escenarios donde más se necesita evidencia complementaria.
+\end{warningbox}
+
+\subsection{Cinco vías de fusión}
+
+Solo después de definir el papel de la información se pasa a la elección de arquitectura. La clase enumera cinco tipos de soluciones, pero aclara que no es una clasificación exhaustiva: pueden combinarse, o bien implementar un condicionamiento similar en distintas capas y con distintos presupuestos de cómputo. Para una comparación justa no basta con fijarse en el nombre del módulo; hay que examinar a la vez qué tan temprano ocurre la fusión, cuánto detalle local se conserva, cómo se maneja la modalidad faltante y el costo computacional que impone la longitud de la secuencia.
+
+\lecturefigure{slide-070-fusion-options.jpg}{Cinco tipos de fusión: alineación, concatenación, cross-attention, token adicional y normalización condicional}{00:10:59}
+
+Estos métodos pueden ordenarse en un espectro de temprano a tardío: la concatenación a nivel de entrada es la más temprana y la alineación tras codificaciones independientes es la más tardía; cross-attention intercambia información de forma explícita en un punto intermedio; el bonus/CLS token y adaptive LayerNorm comprimen la información de la modalidad en una señal de control. Cuanto más temprana es la fusión, más completa es la interacción de grano fino, pero también más complejos resultan el costo computacional y el manejo de modalidades faltantes.
+
+\lecturefigure{slide-072-contrastive-embedding.jpg}{Solución uno: el aprendizaje contrastivo lleva las modalidades emparejadas a un espacio compartido}{00:13:33}
+
+Tomando como ejemplo un objetivo tipo CLIP, dentro del lote los pares positivos $(i,i)$ deben ser más similares que los pares negativos $(i,j)$. Una pérdida simétrica puede escribirse como
+\[
+\mathcal{L}_{\mathrm{clip}}
+=-\frac{1}{2N}\sum_{i=1}^{N}\left[
+\log\frac{e^{s_{ii}/\tau}}{\sum_j e^{s_{ij}/\tau}}
++\log\frac{e^{s_{ii}/\tau}}{\sum_j e^{s_{ji}/\tau}}
+\right],
+\]
+donde $s_{ij}$ es la similitud entre las salidas de los dos codificadores y $\tau$ es la temperatura. Es eficaz para la recuperación y la semántica compartida, pero no conserva automáticamente todo el detalle local.
+
+\lecturefigure{slide-073-direct-concatenation.jpg}{Solución dos: concatenar directamente las entradas sobre una cuadrícula espacial compartida}{00:14:30}
+
+Cuando las imágenes RGB y de profundidad están alineadas píxel a píxel, la concatenación es muy natural: cada posición tiene directamente los canales de color y de distancia. Su premisa es que las modalidades compartan una unidad de muestreo común y un registration (registro) confiable. Si las coordenadas espaciales de los spots de RNA, los contornos celulares y los patches de H\&E no coinciden, la concatenación directa confundirá el error de medición con una diferencia biológica.
+
+\lecturefigure{slide-074-cross-attention-examples.jpg}{Solución tres: cross-attention establece consultas entre dos flujos de tokens}{00:15:35}
+
+La figura enumera usos frecuentes en modelos de visión y lenguaje y en Transformers de múltiples flujos. Lo esencial de cross-attention no es «tener un módulo de attention más», sino la división de papeles: un flujo emite las queries y el otro aporta las keys/values. Así, un token de célula puede consultar el tejido circundante, o un patch de imagen puede consultar el contexto de expresión génica.
+
+\lecturefigure{slide-076-multihead-self-attention.jpg}{Repaso de la autoatención multicabeza: $Q/K/V$ se generan dentro de la misma secuencia}{00:16:01}
+
+Self-attention calcula, para la entrada $X$,
+\[
+Q=XW_Q,\qquad K=XW_K,\qquad V=XW_V,
+\]
+\[
+\operatorname{Attn}(X)=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_h}}\right)V.
+\]
+$d_h$ es la dimensión de cada head. Varias heads permiten modelar distintas relaciones en paralelo, pero toda la información sigue proviniendo del mismo conjunto de tokens.
+
+\lecturefigure{slide-077-cross-attention-mechanism.jpg}{Cross-attention: la query proviene de un flujo y las key/value, de otro}{00:16:18}
+
+Si $X$ es el flujo objetivo y $Y$ el flujo de condición, entonces
+\[
+Q=XW_Q,\qquad K=YW_K,\qquad V=YW_V.
+\]
+La longitud de la salida sigue a $X$, pero su contenido está modulado por la información recuperable de $Y$. La dirección no puede ignorarse a la ligera: que H\&E consulte el RNA y que el RNA consulte H\&E difieren en costo computacional, en granularidad de la salida y en el comportamiento ante modalidades faltantes.
+
+\begin{knowledgebox}{Preguntas de diseño de collective fusion}
+Al elegir la capa de fusión hay que preguntar, como mínimo: ¿el número de tokens difiere en varios órdenes de magnitud? ¿Las coordenadas espaciales se corresponden una a una? ¿Qué flujo debe conservar la resolución de salida? ¿Se permite que falte alguna modalidad? ¿Una modalidad visible durante el entrenamiento pero no disponible en el despliegue provocará information leakage?
+\end{knowledgebox}
+
+\subsection{Condicionamiento por token y Adaptive LayerNorm}
+
+A veces no es necesario que todos los tokens interactúen entre sí por pares; basta con que una condición compacta modifique el cómputo de la red troncal. El token adicional y adaptive LayerNorm pertenecen a este enfoque de «señal de control»: el primero entra en la secuencia de atención y el segundo modifica directamente la escala y el sesgo después de la normalización. La pregunta siguiente es si la condición comprimida conserva aún las señales locales poco frecuentes, y si el ahorro en costo de atención se paga con una pérdida de capacidad expresiva.
+
+\lecturefigure{slide-079-cls-token-fusion.jpg}{Solución cuatro: inyectar en la red troncal una condición de modalidad o de clase mediante un token adicional}{00:17:54}
+
+Un lado de la figura muestra el CLS token del Vision Transformer; el otro muestra cómo se concatenan a la secuencia tokens de texto, tokens de imagen o tokens de condición. La ventaja del token adicional es que reutiliza el Transformer estándar; la desventaja es que la información debe comprimirse primero, y el costo de atención en secuencias largas puede ser muy alto. Si un solo token representa todo un microambiente tumoral, si logra conservar las señales de células poco frecuentes es algo que requiere verificación empírica.
+
+\lecturefigure{slide-080-adaptive-layernorm.jpg}{Solución cinco: Adaptive LayerNorm permite que la condición controle la escala y el desplazamiento de las características en cada capa}{00:19:24}
+
+LayerNorm primero estandariza el vector oculto y luego aplica parámetros aprendibles. Adaptive LayerNorm hace que esos parámetros se generen a partir de la condición $c$:
+\[
+\operatorname{AdaLN}(h;c)=\gamma(c)\odot
+\frac{h-\mu(h)}{\sqrt{\sigma^2(h)+\epsilon}}+\beta(c).
+\]
+La red de condición produce la escala $\gamma(c)$ y el desplazamiento $\beta(c)$; estos pueden provenir de otra modalidad, del paso de tiempo o de la vecindad espacial. Este método no aumenta la longitud de la secuencia principal y suele requerir menos cómputo que una cross-attention completa, pero la información de la condición queda comprimida en los parámetros de modulación.
+
+\lecturefigure{slide-082-fusion-summary.jpg}{Repaso de las soluciones de fusión: ningún método único domina todas las tareas}{00:20:18}
+
+Lo que más vale la pena leer en la diapositiva de resumen es el juicio medio en broma «everything is just token soup»: muchos métodos terminan decidiendo qué información se convierte en token, cuándo se mezcla y cuándo se comprime. En la sesión de preguntas se señaló además que la red de condición de adaptive LayerNorm puede contener a su vez cross-attention; por lo tanto, estos nombres no son escuelas mutuamente excluyentes, sino componentes combinables.
+
+\begin{lstlisting}[language=Python,caption={Pseudocódigo unificado de un fusionador multimodal: conserva explícitamente la modalidad faltante y la dirección}]
+def fuse(target_tokens, context_tokens, context_available):
+    if not context_available:
+        return target_tokens
+    context_summary = context_encoder(context_tokens)
+    target_tokens = cross_attention(
+        queries=target_tokens,
+        keys=context_tokens,
+        values=context_tokens,
+    )
+    scale, shift = condition_to_layernorm(context_summary)
+    return adaptive_layernorm(target_tokens, scale, shift)
+\end{lstlisting}
+
+\teachervoice{00:20:18--00:21:31, una pregunta en clase indaga la relación entre cross-attention y LayerNorm. La respuesta del docente: la rama de condición puede ser muy compleja, e incluso aplicar primero cross-attention y después generar la escala y el desplazamiento; lo que realmente hay que comparar es la capacidad expresiva, el número de parámetros y la eficiencia computacional.}
+
+\begin{warningbox}{El nombre de una arquitectura no es una conclusión experimental}
+«Usar cross-attention» no indica si el modelo aprendió a fusionar correctamente. Es necesario examinar modalidades faltantes, coordenadas desajustadas, atajos unimodales, la extrapolación a otros pacientes y la estabilidad tras una intervención. El diagrama de la arquitectura solo define las vías de información posibles; no demuestra que se usen correctamente.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Translation y disambiguation son herramientas de análisis más estables que los nombres de arquitecturas. El aprendizaje contrastivo enfatiza la información compartida, la concatenación depende de un registro preciso, cross-attention permite consultas direccionales, y el token adicional y adaptive LayerNorm comprimen la condición en una señal de control. Un sistema real puede combinarlos, pero la elección debe girar en torno a las carencias de información de la tarea y a las restricciones de despliegue.
+\section{Reformular el cáncer como un problema de modelo del mundo}
+
+Las dos secciones anteriores siguen siendo válidas para robots, video o voz. A partir de esta sección se explica por qué la biología tumoral no es una aplicación elegida al azar: es un sistema dinámico multiescala y, a la vez, dispone de varios sensores complementarios pero costosos. Lo que de verdad importa en la clínica no es «a qué clase pertenece esta imagen», sino «si a este paciente se le administra cierto tratamiento, ¿el tumor cambiará de forma favorable?».
+
+\subsection{Correspondencia entre el mundo macroscópico y el mundo tumoral}
+
+Del paisaje urbano al tumor, la estructura se mantiene: el estado real no puede observarse por completo, los sensores aportan evidencia parcial, las acciones modifican el futuro y la consulta determina el objetivo de la simulación. La diferencia es que las variables de estado del tumor abarcan varias escalas: paciente, órgano, tejido, célula y molécula. A continuación, mediante tres figuras (el mundo macroscópico, el microambiente inmunitario y el simulador de pacientes), los componentes abstractos se asignan paso a paso a objetos medibles y a preguntas clínicas.
+
+\lecturefigure{slide-092-macroscopic-world-model.jpg}{Modelo del mundo macroscópico: cámara, micrófono y texto responden en conjunto a consultas sobre acciones}{00:22:46}
+
+Esta diapositiva de repaso recuerda que el valor de un world model proviene del ciclo cerrado: los sensores no sirven para reunir la mayor cantidad posible de datos, sino para responder consultas relacionadas con las acciones. Si una modalidad es costosa pero no cambia el orden de preferencia entre tratamientos, su valor marginal puede ser muy bajo; si una medición poco frecuente permite distinguir dos subpoblaciones con respuestas al tratamiento totalmente opuestas, resulta fundamental.
+
+\lecturefigure{slide-094-cancer-immunology.jpg}{Inmunología del cáncer en una diapositiva: el tumor y el sistema inmunitario interactúan de forma continua en el microambiente}{00:25:04}
+
+Las células de colores de la figura no son decorativas. El Tumor microenvironment (microambiente tumoral) incluye células tumorales, linfocitos T, linfocitos B, macrófagos y estroma, entre otros; el sistema inmunitario puede reconocer y eliminar células anómalas, pero también puede ser suprimido, excluido o reprogramado por el tumor. Por ello, la respuesta al tratamiento depende de la combinación de tipos celulares, posición espacial, estados y vías de señalización.
+
+\begin{knowledgebox}{Primera aparición: inmunoterapia tumoral}
+La Cancer immunotherapy (inmunoterapia contra el cáncer) no busca destruir directamente todas las células tumorales, sino eliminar la supresión inmunitaria, potenciar el reconocimiento o modificar la función de las células inmunitarias. Un mismo fármaco produce respuestas muy distintas en pacientes diferentes, y eso es justamente lo que un modelo del mundo condicionado al paciente pretende explicar.
+\end{knowledgebox}
+
+\lecturefigure{slide-095-patient-simulator.jpg}{Objetivo ideal: partir del tejido del paciente para simular la respuesta a nivel de tejido después del tratamiento}{00:25:20}
+
+En la figura, el tejido del paciente se introduce en el world model y luego se pregunta «¿remitirá el tumor después de administrar el fármaco?». Esto puede formalizarse como
+\[
+p_\theta(R\mid X_{\text{patient}},a_{\text{drug}}),
+\]
+donde $R$ es la respuesta, $X_{\text{patient}}$ es el estado multimodal del paciente y $a_{\text{drug}}$ es la intervención farmacológica. La fórmula parece sencilla; lo realmente difícil es que $X$ no puede medirse por completo, que el efecto del fármaco tarda mucho tiempo en manifestarse, que los datos de entrenamiento carecen de intervenciones aleatorizadas y que las etiquetas de respuesta clínica son escasas.
+
+\lecturefigure{slide-096-dataset-scale.jpg}{Escala de los datos en el momento de la clase: pacientes, cortes, píxeles y mediciones espaciales crecen en conjunto}{00:25:21}
+
+Esta diapositiva de cifras debe leerse en su contexto temporal: describe una instantánea de la investigación en el momento de la clase, en mayo de 2025, no la situación de 2026. Más importante que los conteos concretos es la diferencia entre niveles: del orden de miles de pacientes, miles de cortes, una enorme cantidad de píxeles y de puntos de medición espacial implica que el «tamaño de muestra» no puede evaluarse solo por el número de pacientes ni solo por el número de tokens. La independencia entre pacientes determina la generalización; las células y los píxeles determinan la precisión estadística local.
+
+\teachervoice{00:22:46--00:25:23, el docente condensa el problema en una sola consulta clínica: si a este paciente se le administra cierto tratamiento, ¿remitirá el tumor? Esto restringe los datos y la validación mejor que «construir un modelo fundacional para el cáncer».}
+
+\begin{warningbox}{Un modelo del mundo no equivale a un sistema de decisión clínica}
+Aunque el modelo pueda predecir cambios en el tejido, aún deben considerarse la toxicidad, la dosis, la farmacocinética, las comorbilidades del paciente y la incertidumbre. La simulación a nivel de tejido es evidencia candidata, no una prescripción directa. En estas notas, el «descubrimiento de fármacos» debe entenderse como una etapa del proceso de descubrir y jerarquizar hipótesis.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La biología tumoral puede reformularse como un sistema dinámico parcialmente observable, sujeto a intervención y multiescala. El objetivo real es la respuesta al tratamiento condicionada al paciente, no una clasificación estática. Este objetivo exige que el modelo maneje a la vez modalidades complementarias, estructura espacial, un número limitado de pacientes y una necesidad muy alta de validación causal.
+\section{Construcción de datos multimodales de cáncer alineados espacialmente}
+
+El límite de la capacidad del modelo lo impone primero la ingeniería de datos. La estrategia de Noetik no consiste solo en descargar imágenes públicas, sino en realizar varias mediciones sobre el mismo tejido del paciente y conservar, en la medida de lo posible, la correspondencia espacial. Esta sección recorre la preparación de muestras, la obtención de imágenes, el registro y los niveles de los datos para explicar por qué estos datos son costosos y, a la vez, adecuados para el modelado multimodal.
+
+\subsection{De la muestra de tejido a la laminilla digital}
+
+La cadena de procesamiento de datos comienza con tejido tumoral real. Cada paso puede introducir efectos de lote, deformaciones, deriva de la señal o datos faltantes; por ello, los modelos posteriores no pueden interpretar todas las diferencias como mecanismos biológicos. Para entender el origen de los token finales, a continuación se revisa en orden cómo cada paso físico (procesamiento del tejido, micromatriz, H\&E, inmunofluorescencia y plataforma de datos) deja huellas estadísticas.
+
+\lecturefigure{slide-097-tissue-processing.jpg}{La muestra de tejido entra en el flujo automatizado de procesamiento y corte}{00:25:22}
+
+La figura incorpora un video que muestra el procesamiento en el laboratorio, mientras que a la derecha se conservan los conteos de datos del momento de la clase. La muestra debe fijarse, cortarse, teñirse y digitalizarse; el mismo tejido puede pasar por procesamientos físicos distintos en cada assay. Si el registro es impreciso, la «misma posición» que ve el modelo puede provenir en realidad de poblaciones celulares diferentes.
+
+\lecturefigure{slide-104-tissue-microarray.jpg}{Micromatriz de tejido: numerosas tissue core pequeñas organizadas en una laminilla}{00:25:31}
+
+La tissue microarray dispone en una misma laminilla pequeños núcleos cilíndricos de tejido procedentes de distintos pacientes o regiones, lo que facilita teñirlos y escanearlos por lotes. Aumenta el rendimiento, pero cada core cubre solo una pequeña parte del tumor y no puede representar al paciente completo. El diseño con varios core es un compromiso entre el costo y la heterogeneidad espacial.
+
+\lecturefigure{slide-108-he-tissue-cores.jpg}{Núcleos de tejido con H\&E: una vía de entrada morfológica de bajo costo y amplia cobertura}{00:25:36}
+
+H\&E es la tinción con hematoxylin and eosin (hematoxilina--eosina). La hematoxilina tiñe principalmente los núcleos celulares de azul violáceo, y la eosina tiñe el citoplasma y el estroma de rosa. Es barata, de uso clínico rutinario y cuenta con abundantes datos históricos, pero solo refleja de manera indirecta el tipo celular y el estado molecular; no permite leer todas las proteínas ni la expresión de todos los genes.
+
+\lecturefigure{slide-119-multimodal-core-grid.jpg}{El mismo núcleo de tejido, bajo varias tinciones y canales de imagen, forma datos pareados}{00:25:49}
+
+Esta cuadrícula muestra el verdadero valor de los datos multimodales: no se trata de tomar al azar una imagen de H\&E y una de inmunofluorescencia, sino de lograr, en la medida de lo posible, que las distintas mediciones correspondan al mismo paciente y a regiones cercanas. Estos pares sustentan la translation; las señales exclusivas de cada modalidad sustentan la disambiguation. Los errores de registro, las diferencias entre cortes y la pérdida de tejido deben incluirse en el presupuesto de error.
+
+\lecturefigure{slide-125-data-platform-ui.jpg}{La plataforma de datos organiza varios pacientes, núcleos y canales como objetos navegables}{00:25:57}
+
+La captura de la interfaz muestra que los datos no son una «imagen gigante», sino una base de datos jerárquica: el paciente contiene laminillas, la laminilla contiene core, el core contiene posiciones espaciales y cada posición tiene lecturas de imagen, proteínas y genes. La partición para el entrenamiento debe hacerse a nivel de paciente; si core adyacentes de un mismo paciente quedan repartidos entre entrenamiento y prueba, las métricas se inflan por la filtración de texturas específicas del paciente.
+
+\lecturefigure{slide-129-immunofluorescence.jpg}{La inmunofluorescencia múltiple muestra la combinación espacial de tipos celulares y marcadores proteicos}{00:26:04}
+
+La multiplex immunofluorescence (inmunofluorescencia múltiple) usa varios anticuerpos con marcadores fluorescentes para detectar marcadores proteicos. Los colores ayudan a identificar linfocitos T, linfocitos B, macrófagos o regiones tumorales, pero son solo una visualización; la entrada del modelo suele ser la intensidad continua de cada canal y los resultados de la segmentación. La especificidad de los anticuerpos y la saturación de la imagen limitan la interpretación.
+
+\begin{warningbox}{Primer tipo de filtración de datos: no mezclar pacientes ni laminillas al particionar}
+Los patch espacialmente adyacentes son extremadamente parecidos. Si se particiona al azar por patch, el modelo puede memorizar al paciente, el escáner o el lote de tinción en lugar de aprender regularidades biológicas generalizables. La evaluación debe usar preferentemente held-out patient e informar por separado el desempeño entre lotes y entre instituciones.
+\end{warningbox}
+
+\subsection{Cuatro modalidades y la transcriptómica espacial}
+
+A continuación, la clase agrupa los datos en cuatro tipos: H\&E, imágenes de proteínas, transcriptómica espacial y secuenciación genética. Observan distintos niveles del mismo sistema y difieren en costo, resolución y significado biológico. El problema central aquí no es unificar cuatro formatos de archivo, sino mantener el índice jerárquico patient--core--cell--gene y saber en qué escala espacial y biológica es válida cada medición.
+
+\lecturefigure{slide-134-multimodal-dataset.jpg}{Cuatro tipos de modalidad: H\&E, proteínas, transcriptómica espacial y secuenciación genética}{00:29:19}
+
+La H\&E aporta la morfología; el panel de proteínas, el fenotipo celular; la spatial transcriptomics (transcriptómica espacial) mide la expresión de ARN con coordenadas, y la genetic sequencing (secuenciación genética) aporta información como las mutaciones. Las dos primeras se parecen a imágenes, mientras que las dos últimas se parecen más a conteos dispersos de alta dimensión y a atributos a nivel de paciente; una tokenización unificada debe respetar esta diferencia.
+
+\begin{knowledgebox}{Primera aparición: Spatial transcriptomics}
+La transcriptómica espacial mide al mismo tiempo «cuánto se expresan ciertos genes» y «en qué lugar del tejido ocurre esa expresión». Frente al bulk RNA convencional, conserva el espacio; frente al ARN de célula única, su unidad de medición puede abarcar varias células, y la resolución y la cobertura de genes dependen del assay.
+\end{knowledgebox}
+
+\lecturefigure{slide-135-spatial-transcriptomics.jpg}{Panorama de la transcriptómica espacial: gran cantidad de células y posiciones de expresión superpuestas a la morfología del tejido}{00:29:42}
+
+De lejos se ve un trozo de tejido; de cerca, contiene una cantidad enorme de puntos y células. Al leer la figura conviene tener presentes tres niveles: la estructura del tejido determina la vecindad, el tipo celular influye en la expresión basal y las vías de señalización locales modifican el estado. Si todas las células se dispersan en una tabla sin orden, se pierde información clave, como si las células inmunitarias penetran en el tumor o si se agrupan alrededor de zonas de necrosis.
+
+\lecturefigure{slide-153-live-zoom.jpg}{Acercamiento en tiempo real hasta el nivel celular: la textura macroscópica se compone de una enorme cantidad de mediciones locales}{00:30:47}
+
+El sentido de la demo en vivo no es mostrar la técnica de acercamiento, sino hacer tangible la «longitud de secuencia». Un core puede contener miles o decenas de miles de células, y cada célula tiene más de mil conteos de genes; si todo se desplegara como token, la complejidad cuadrática de la autoatención no podría soportarlo directamente. El sistema debe muestrear, dividir en bloques, comprimir o recurrir a atención jerárquica.
+
+\lecturefigure{slide-175-gene-overlay.jpg}{Superposición de la expresión génica y la identidad celular sobre el espacio del tejido}{00:31:16}
+
+Las etiquetas superpuestas ayudan a los investigadores a remitir las señales moleculares a la ecología espacial. Aquí es fácil caer en una ilusión causal: que un gen se exprese mucho en cierta región puede deberse a que esa región tiene una composición celular distinta, y no necesariamente a que un mismo tipo celular haya cambiado de estado. El modelo debe controlar simultáneamente cell type, neighborhood y patient context.
+
+\lecturefigure{slide-177-patient-cores-gene-table.jpg}{Cada paciente tiene varios core y cada célula corresponde a lecturas génicas de alta dimensión}{00:32:09}
+
+Esta figura de resumen convierte los datos en un tensor: bajo el paciente $p$ hay core $c$, en el core hay células $i$, y cada célula tiene un vector de conteos génicos $x_{p,c,i,g}$. La estructura jerárquica implica que el tamaño efectivo de la muestra cambia según la pregunta: para predecir la distribución local de un gen se pueden aprovechar muchas células, pero predecir la respuesta al tratamiento de un paciente nuevo sigue limitado principalmente por el número de pacientes.
+
+\begin{importantbox}{La jerarquía de los datos determina la unidad estadística}
+No se puede ocultar que «solo hay unos mil pacientes» diciendo que «hay miles de millones de token». Las tareas a nivel de célula y las tareas a nivel de paciente tienen distinto número de muestras independientes; toda métrica que afirme generalización clínica debe especificar la unidad de partición, el número de pacientes y los intervalos de confianza.
+\end{importantbox}
+
+\teachervoice{00:25:23--00:32:10, el docente usa un video completo del laboratorio para enfatizar que el conjunto de datos no es un activo ya disponible: la preparación del tejido, el escaneo, el registro y los múltiples assay forman parte del sistema. Después, mediante acercamientos sucesivos, muestra al público la explosión de escala de patient--core--cell--gene.}
+
+\subsection{Resumen de la sección}
+
+El modelado multimodal del cáncer es, ante todo, un problema de alineación de datos. La H\&E es barata pero indirecta; las imágenes de proteínas se acercan más al fenotipo celular; la transcriptómica espacial conserva la posición y la expresión, y la secuenciación genética aporta variantes a nivel de paciente. Su combinación sustenta la traducción y la desambiguación, pero también introduce errores de registro, efectos de lote, filtración entre pacientes y la ilusión sobre el tamaño de la muestra en una estructura jerárquica.
+\section{Masked Modeling, contexto espacial y células virtuales}
+
+Una vez que se tienen datos espaciales de alta dimensión, la siguiente pregunta es cómo convertirlos en una tarea de entrenamiento. En clase se eligió masked modeling: se ocultan al azar algunos conteos de genes y el modelo los recupera a partir de los genes visibles y del contexto. Este objetivo permite aprovechar datos observacionales a gran escala aun cuando no hay etiquetas de tratamiento, y además ofrece una interfaz unificada para el prompt, la imputation y el counterfactual que se verán más adelante.
+
+\subsection{De los conteos de genes a los tokens}
+
+La palabra «Autoencoder» hace pensar fácilmente en comprimir una imagen completa y reconstruir sus píxeles; aquí se parece más al masked language modeling: la identidad del gen y su conteo se discretizan o se incrustan como tokens, y el modelo solo predice la parte enmascarada. A continuación se precisan primero el token, la máscara y las variables de condición, y después se explica por qué la distribución de los conteos, el orden de los genes y la información visible en el despliegue cambian el sentido del objetivo de entrenamiento.
+
+\lecturefigure{slide-179-masked-autoencoder.jpg}{Masked autoencoding: tokenización, enmascaramiento parcial, troncal Transformer y decodificación}{00:32:36}
+
+El flujo parte de la tabla de gene/count, pasa por la tokenization y el partial masking, entra en la troncal y al final recupera los masked tokens. Si el conjunto enmascarado es $\mathcal{M}$ y el conjunto visible es $\bar{\mathcal{M}}$, el objetivo puede escribirse como
+\[
+\mathcal{L}_{\mathrm{mask}}
+=-\sum_{j\in\mathcal{M}}
+\log p_\theta(x_j\mid x_{\bar{\mathcal{M}}},c),
+\]
+donde $c$ puede incluir el vecindario espacial, el paciente u otras modalidades. La forma de distribución de la función de pérdida debe corresponder a count data, y no al error gaussiano por píxel que se asume por defecto.
+
+\lecturefigure{slide-182-token-masking.jpg}{Convertir los pares gene/read en una secuencia y aplicar MASK a una parte de los conteos}{00:34:06}
+
+En la figura, cada token lleva a la vez la identidad del gen y su lectura. El orden de los genes no tiene una sintaxis como la del lenguaje natural, por lo que el positional encoding requiere cuidado: pueden ordenarse según un gene vocabulary fijo o tratarse los genes como un conjunto. Si las lecturas se discretizan de forma burda, pueden perderse cambios de expresión poco frecuentes pero importantes; si se conservan los valores continuos, la distribución de salida y la normalización se vuelven más complejas.
+
+\lecturefigure{slide-184-prompted-inference.jpg}{En la inferencia, unos cuantos genes conocidos sirven como prompt para predecir las demás lecturas}{00:34:57}
+
+En clase, los marcadores conocidos se escriben como indicación, por ejemplo «esta es una T cell, con los siguientes markers», y todas las demás posiciones se enmascaran. La salida del modelo no es texto libre, sino una distribución condicional de expresión génica. Aquí el prompt representa condiciones de medición estructuradas, y no se pueden trasladar directamente todas las intuiciones sobre instrucciones en lenguaje natural propias de los modelos de lenguaje.
+
+\begin{lstlisting}[language=Python,caption={Modelado de genes enmascarados: la señal de supervisión se calcula solo en las posiciones ocultas}]
+def masked_gene_step(gene_ids, counts, context, mask):
+    visible_counts = counts.clone()
+    visible_counts[mask] = MASK_VALUE
+    hidden = transformer(gene_ids, visible_counts, context)
+    predicted_distribution = decoder(hidden[mask], gene_ids[mask])
+    return count_negative_log_likelihood(
+        predicted_distribution, counts[mask]
+    )
+\end{lstlisting}
+
+\begin{warningbox}{La perplexity no debe trasladarse sin explicación a la predicción de conteos}
+La perplexity (PPL) es la exponencial de la entropía cruzada, es decir, $\operatorname{PPL}=\exp(\text{cross-entropy})$, y puede entenderse intuitivamente como «el número efectivo de opciones en cada posición», pero depende de un espacio de salida discreto. Si los conteos de genes usan una distribución continua o binomial negativa, deben reportarse la likelihood correspondiente, la calibración y el error biológico, en lugar de dar solo una perplexity al estilo de los modelos de lenguaje.
+\end{warningbox}
+
+\subsection{El vecindario espacial como disambiguation}
+
+Unos cuantos markers de una sola célula pueden corresponder a varios estados; las células vecinas, la región del tejido y el microambiente aportan evidencia adicional. En clase, los ocho vecinos más cercanos se comprimen en un solo token de condición, que después se inyecta en la troncal mediante adaptive LayerNorm, tokens adicionales o cross-attention. Este diseño concreta la disambiguation mencionada antes: la propia célula objetivo es el flujo por explicar, y el ecosistema espacial es el flujo de condición que reduce la ambigüedad.
+
+\lecturefigure{slide-186-spatial-neighborhood-conditioning.jpg}{El vecindario espacial pasa por un bottleneck de Transformer y después condiciona a la célula objetivo}{00:36:25}
+
+Si la representación de la célula objetivo es $h_i$ y su vecindario es $\mathcal{N}(i)$, puede escribirse
+\[
+c_i=f_\phi\!\left(\{h_j:j\in\mathcal{N}(i)\}\right),\qquad
+\hat{x}_{i,\mathcal M}=g_\theta(h_i,c_i).
+\]
+$f_\phi$ es el codificador del vecindario y $c_i$ es la condición comprimida. La compresión forma un information bottleneck: mejora la eficiencia, pero puede omitir vecinos poco frecuentes o estructuras a gran distancia; por ello, el tamaño del vecindario y la forma de agregación son variables experimentales.
+
+\teachervoice{00:35:05--00:36:24, el docente dice que el equipo probó adaptive LayerNorm, añadir tokens y cross-attention, y que «todos funcionan; algunos solo son más eficientes». La conclusión más sólida es que el contexto espacial reduce de manera notable la backbone loss, no que gane algún método de fusión en particular.}
+
+\begin{importantbox}{Por qué el contexto espacial permite eliminar la ambigüedad}
+Si una célula solo expresa un número limitado de markers, observarla aislada puede no bastar para distinguir su estado; si las siete células que la rodean presentan rasgos de células T citotóxicas, ese vecindario modifica la probabilidad posterior. Aquí la multimodalidad no se refiere a distintos formatos de archivo, sino a dos fuentes de información: «la propia célula objetivo» y «el ecosistema espacial».
+\end{importantbox}
+
+\subsection{Inferencia de células virtuales a gran escala}
+
+Una vez terminado el entrenamiento, el sistema puede fijar condiciones repetidamente en muchas posiciones del tejido de un paciente y preguntar: «si un tipo de célula estuviera aquí, ¿qué podría expresar?». Estas inferencias se denominan virtual cell simulations, pero siguen siendo predicciones condicionales del modelo, no células generadas realmente en el laboratorio.
+
+\lecturefigure{slide-192-virtual-cell-inference.jpg}{Consulta en lote de los estados de expresión de células virtuales en el espacio del tejido}{00:37:26}
+
+A la izquierda está el tejido real; en el centro se eligen la posición espacial y el vecindario; a la derecha se va completando la predicción de un gen. El ponente informó que en ese momento ya se habían ejecutado consultas del orden de mil millones, lo que muestra un rendimiento de inferencia muy alto; sin embargo, el número de consultas no equivale al número de evidencias biológicas independientes. Muchas posiciones correlacionadas comparten el mismo paciente, el mismo sesgo del modelo y vecindarios similares.
+
+\lecturefigure{slide-194-virtual-cell-model.jpg}{Panorama del modelo de células virtuales: de la posición en el tejido y el prompt al mapa de expresión génica}{00:37:59}
+
+La figura de conjunto une «prompt + neighborhood + backbone + decoder» en un ciclo cerrado. La lectura correcta es que el modelo genera, bajo condiciones específicas, un mapa hipotético de expresión; la lectura equivocada es que el modelo ya observó células futuras. Cualquier jerarquización posterior de fármacos requiere la incertidumbre del modelo, genes de control y verificación experimental.
+
+\lecturefigure{slide-197-cellporter-ui.jpg}{La interfaz de Cellporter organiza las predicciones de células virtuales como una herramienta explorable}{00:39:49}
+
+La interfaz permite al investigador elegir un tejido, una célula o un gen y comparar predicciones. Convertirlo en herramienta es importante, porque los científicos necesitan formular con rapidez hipótesis comprobables; pero la fluidez de la UI no eleva el nivel de evidencia del modelo. La interfaz debería mostrar intervalos de confianza, la distancia a la distribución de entrenamiento, las mediciones faltantes y el estado real de validación, y no solo mapas de calor atractivos.
+
+\subsection{Inactivación contrafactual: de la predicción a la generación de hipótesis}
+
+Una pregunta counterfactual (contrafactual) modifica una condición de entrada y compara después las salidas. Aquí se observa cómo cambia la predicción del tejido mediante un gene knockout hipotético. Esto se acerca más al razonamiento de intervención que un mapa estático de correlaciones, pero una intervención dentro del modelo sigue sin equivaler a una intervención biológica real.
+
+\lecturefigure{slide-199-gene17-knockout.jpg}{Cambios en la predicción espacial tras la inactivación de Gene 17}{00:39:59}
+
+En la figura, a la izquierda están las posiciones del tejido y a la derecha un diagrama de barras que compara los cambios de las distintas salidas. Primero conviene observar ambos lados del cero: el azul y el rojo indican que la predicción baja o sube; después hay que ver si el efecto se concentra en regiones y tipos celulares específicos. Si el modelo solo aprendió correlaciones de coexpresión, inactivar el token de entrada también puede producir una cascada aparentemente razonable pero no causal.
+
+\lecturefigure{slide-205-gene20-knockout.jpg}{La inactivación de otro gen produce patrones espaciales y de salida distintos}{00:40:52}
+
+El segundo ejemplo muestra que el contrafactual no es una plantilla fija: genes distintos deberían afectar posiciones y lecturas posteriores distintas. Comparar varias interventions ayuda a descubrir mecanismos candidatos y a comprobar si el modelo da una respuesta homogénea a todas las perturbaciones. La validación real sigue requiriendo CRISPR, tratamientos con fármacos u otros experimentos que modifiquen el sistema real.
+
+La diferencia contrafactual puede expresarse como
+\[
+\Delta_k(x)=
+\mathbb{E}_\theta[Y\mid X=x,\operatorname{do}_{\text{model}}(G_k=0)]
+-\mathbb{E}_\theta[Y\mid X=x].
+\]
+Aquí se escribe deliberadamente $\operatorname{do}_{\text{model}}$: es una intervención sobre la entrada del modelo y no debe confundirse con el $\operatorname{do}$ de un grafo causal del mundo real.
+
+\begin{warningbox}{Un model counterfactual no es un causal effect}
+El cambio que se produce cuando el modelo elimina un gene token solo indica cómo usa el modelo esa información. Para afirmar un efecto causal biológico se necesitan además intervenciones reales, control de factores de confusión, experimentos repetidos y validación entre pacientes. El contrafactual del modelo resulta más adecuado como herramienta para priorizar experimentos.
+\end{warningbox}
+
+\begin{lstlisting}[language=Python,caption={Contrafactual de células virtuales: se conservan el paciente y el vecindario y solo se modifica la intervención candidata}]
+def virtual_cell_counterfactual(patient, location, prompt, intervention):
+    neighborhood = load_spatial_neighbors(patient, location)
+    baseline = model.predict(prompt, neighborhood)
+    modified_prompt = apply_intervention(prompt, intervention)
+    counterfactual = model.predict(modified_prompt, neighborhood)
+    return counterfactual - baseline
+\end{lstlisting}
+
+\teachervoice{00:38:42--00:43:34, las preguntas de la clase indagan si las muestras son suficientes y cómo se valida. El docente no toma la loss de entrenamiento como punto final, sino que enfatiza el held-out patient, las mediciones dirigidas y los experimentos posteriores; ese es precisamente el límite de evidencia de los resultados de células virtuales.}
+
+\subsection{Resumen de la sección}
+
+El masked modeling convierte el aprendizaje de conteos de genes en una tarea de recuperación condicional; el vecindario espacial aporta información para eliminar la ambigüedad, y la inferencia de células virtuales convierte el mismo modelo en una interfaz de consultas a gran escala. La inactivación contrafactual sirve para generar hipótesis, pero su salida es un cambio condicional dentro del modelo y debe pasar por intervenciones reales para convertirse en evidencia causal.
+\section{De la H\&E de bajo costo a representaciones moleculares ricas}
+
+La sección anterior usó la mask y el contexto espacial dentro de un mismo tipo de datos genéticos. Esta sección vuelve a la translation: ¿es posible predecir mediciones de transcriptómica espacial o de proteínas, costosas y escasas, a partir de imágenes de H\&E, baratas y comunes en la práctica clínica? Si funciona, el modelo puede convertir los datos históricos de patología en representaciones más ricas de los pacientes; si falla, puede producir pseudomapas moleculares sumamente engañosos.
+
+\subsection{La tarea de entrenamiento de la imputación multimodal}
+
+La imputation (imputación) consiste en estimar variables faltantes a partir de las variables observadas. No es copiar el valor promedio, sino aprender una distribución condicional, y debe hacer explícita la incertidumbre de la predicción. Aquí la modalidad faltante es un molecular assay costoso. A continuación se examina, desde tres ángulos (el eje de costo, la arquitectura condicional y la mask de la modalidad completa), si el modelo realmente reproduce las condiciones de información del despliegue clínico, donde solo se dispone de H\&E.
+
+\lecturefigure{slide-213-multimodal-imputation.jpg}{Inferir modalidades moleculares costosas y escasas a partir de la H\&E, barata y común}{00:43:48}
+
+El eje de costo de la figura muestra el valor de la tarea: la H\&E es fácil de obtener y las mediciones moleculares espaciales son costosas. Si el modelo solo se entrena con datos pareados pero se despliega en otros hospitales, con otros protocolos de tinción u otros tipos de tumor, la translation puede colapsar. Por eso el valor proviene de la generalización entre dominios y de la calibración, no solo de reconstruir muestras pareadas.
+
+\lecturefigure{slide-215-he-conditioned-model.jpg}{Modelo masked gene-count condicionado por un codificador de H\&E}{00:44:27}
+
+La arquitectura codifica cada patch de H\&E como condición y la combina con la red troncal de tokens de genes. El H\&E-specific encoder se encarga de las características visuales y la red troncal, de la count prediction. Esta división permite que el mismo modelo genético funcione con o sin imagen, pero también puede llevar al codificador visual a aprender atajos basados en el lote de tinción.
+
+\lecturefigure{slide-218-cross-modal-translation.jpg}{Aplicar mask a toda la entrada genética obliga al modelo a predecir las lecturas moleculares solo a partir de la H\&E}{00:45:00}
+
+Cuando se aplica mask a todos los gene tokens, la salida depende por completo de la condición de H\&E. En ese caso la tarea pasa de disambiguation a una translation más pura. Si se conservan algunas lecturas genéticas reales, el modelo se desplaza entre translation y disambiguation: la imagen aporta una distribución a priori morfológica y los marker medidos corrigen la incertidumbre.
+
+\begin{importantbox}{El objetivo de entrenamiento debe simular lo que estará disponible en el despliegue}
+Si el despliegue clínico solo cuenta con H\&E, la evaluación debe ocultar toda la entrada molecular; si el despliegue admite algunos marker, debe medirse la curva de desempeño con distintos presupuestos de marker. Ver la modalidad molecular completa durante el entrenamiento produce un techo imposible de alcanzar en el despliegue.
+\end{importantbox}
+
+\subsection{Mapas de predicción y estructura del error}
+
+El resultado final no puede evaluarse con un solo mapa de calor de colores parecidos. Hay que comparar la medición real, la baseline de interpolación y la predicción del modelo, y desglosar el error por gen, paciente, región y tipo celular. Además, conviene preguntar si los estados moleculares que no son identificables por la morfología corresponden a intervalos de incertidumbre más amplios, y si el modelo se mantiene calibrado entre hospitales y entre lotes de tinción.
+
+\lecturefigure{slide-224-gene-expression-prediction.jpg}{Predicción, a partir de H\&E, de tipos celulares y de la expresión espacial de genes como KRT19}{00:46:28}
+
+A la izquierda está la H\&E; en el centro, los tipos celulares o el overlay; a la derecha, la expresión predicha. Primero se compara si las estructuras a gran escala coinciden y después se revisan los bordes, las regiones poco frecuentes y los picos locales. Cuando la morfología y la expresión están correlacionadas, el modelo puede desempeñarse muy bien, pero los estados moleculares distintos con la misma morfología pueden seguir siendo imposibles de determinar a partir de la H\&E.
+
+\lecturefigure{slide-225-imputation-accuracy.jpg}{La dificultad de imputación varía notablemente entre genes}{00:47:16}
+
+Las tres filas comparan la detección real, la interpolación y la predicción del modelo. Algunos genes tienen una correspondencia morfológica clara y se predicen bien; otros casi no pueden determinarse de forma única a partir de la H\&E. Las métricas promedio ocultan esta diferencia, por lo que se necesita gene-wise calibration: el modelo debe saber en qué objetivos carece de información identificable.
+
+Si el valor real es $y$, la media de la distribución predicha es $\hat y$ y la desviación estándar es $\hat\sigma$, la calibración no solo exige un error pequeño, sino también
+\[
+\Pr\left(|y-\hat y|\leq 1.96\hat\sigma\right)\approx 0.95.
+\]
+La cobertura de los intervalos debe reportarse por separado para held-out patient, para distintos centros y para distintos genes.
+
+\begin{warningbox}{La predictibilidad a partir de la morfología tiene un límite}
+Si dos regiones de tejido son casi idénticas en la H\&E pero tienen estados de RNA distintos, ningún modelo que solo vea la H\&E podrá distinguirlas de forma confiable. En ese caso, la salida correcta es una incertidumbre alta, no un mapa de calor suavizado generado con el patrón promedio del conjunto de entrenamiento.
+\end{warningbox}
+
+\lecturefigure{slide-234-representation-pipeline.jpg}{De la H\&E a representaciones ricas imputadas por el modelo, y de ahí a hipótesis terapéuticas}{00:50:01}
+
+Esta figura de síntesis deja claro el valor de ingeniería de la translation: primero se construye una representación de alta dimensión del paciente a partir de la H\&E de bajo costo y después se usa para búsqueda, estratificación o hipótesis farmacológicas. Cualquier paso intermedio puede amplificar los sesgos. La imputación del modelo no es un sustituto sin pérdida de la medición real; se parece más a un assay virtual escalable y con incertidumbre.
+
+\teachervoice{00:43:46--00:48:40: el docente enfatiza que la calidad de la predicción no es uniforme entre genes y muestra la detección real, la interpolación y la salida del modelo. La conclusión de la clase no es «recuperar todo a partir de la H\&E», sino identificar qué información molecular puede quedar restringida de forma confiable por la morfología.}
+
+\begin{knowledgebox}{Primera aparición: Calibration}
+La calibration (calibración) exige que la confianza coincida con la tasa real de aciertos. Si el modelo sigue dando intervalos estrechos para genes no identificables, aunque el error promedio sea aceptable, inducirá a error al priorizar experimentos. En AI for Science, «no saber que no se sabe» suele ser más peligroso que un error grande ocasional.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La imputation entre modalidades convierte la ventaja de escala de la H\&E en hipótesis moleculares, pero su límite lo fija la información identificable. Un sistema confiable debe comparar, con particiones a nivel de paciente, la medición real, una baseline simple y la predicción del modelo; reportar el error y la calibración por gen, y tratar los resultados imputados como un assay virtual, no como un experimento real.
+\section{Hacia Transformer multimodales a gran escala}
+
+Los modelos anteriores procesan por separado los genes espaciales, el condicionamiento por H\&E o el vecindario local. La siguiente etapa consiste en integrar estos módulos en una misma representación del paciente y permitir que el modelo traduzca entre modalidades, resuelva ambigüedades y simule intervenciones. Esta sección compara arquitecturas unimodales y multimodales y después explica una demo counterfactual multimodal.
+
+\subsection{Datos unificados y columna vertebral unificada}
+
+Lo atractivo de un modelo unificado es que todos los datos entren en un solo Transformer grande; la verdadera dificultad, sin embargo, es que el número de token, los patrones de datos faltantes, la resolución y la señal de supervisión están muy desequilibrados. Con un diseño inadecuado, la modalidad más barata o la que tiene más token dominará el entrenamiento. A continuación se establece primero un baseline diagnosticable con modelos unimodales y después se observa si las capas compartidas aportan realmente una ganancia intermodal, en lugar de solo aumentar el número de parámetros.
+
+\lecturefigure{slide-237-dataset-synthesis.jpg}{Síntesis de datos: H\&E, proteínas, transcriptómica espacial e información genética}{00:50:19}
+
+Esta diapositiva se parece a la anterior de las cuatro modalidades, pero cumple otra función: aquella servía para presentar los datos y esta sirve para decidir las entradas del modelo. H\&E y las proteínas son imágenes espaciales densas; la transcriptómica espacial consiste en conteos de alta dimensión en posiciones dispersas; la información genética se acerca más a una condición a nivel de paciente. Antes de unificarlas hay que definir con claridad la tokenización y la mask policy de cada una.
+
+\lecturefigure{slide-238-unimodal-transformer.jpg}{Transformer unimodal: un flujo de entrada corresponde a una cabeza de predicción}{00:50:25}
+
+La vía unimodal es fácil de entrenar y de diagnosticar, y también sirve como baseline. Responde a la pregunta «¿qué se puede aprender solo con esta modalidad?» y ayuda a medir el valor marginal de cada modalidad añadida. Si el modelo multimodal supera apenas al mejor modelo unimodal, puede indicar que la alineación de los datos es insuficiente, que la fusión no surte efecto o que la modalidad añadida no contiene información sobre la tarea.
+
+\lecturefigure{slide-240-multimodal-transformer.jpg}{Transformer multimodal: varios flujos de codificación convergen en capas de fusión compartidas y un espacio de salida}{00:51:21}
+
+En la figura, los distintos colores representan token de distintas modalidades, y las multimodal layers del centro se encargan de la interacción. La salida puede reconstruir cualquier modalidad o predecir objetivos relacionados con el tratamiento. Durante el entrenamiento hay que equilibrar las distintas funciones de pérdida; de lo contrario, es fácil caer en un desajuste de objetivos del tipo «reconstruye muy bien H\&E, pero rinde muy mal en las tareas moleculares importantes».
+
+\begin{knowledgebox}{La masking policy es un diseño curricular implícito}
+Qué token se enmascaran, cuántos y si falta una modalidad completa determina lo que el modelo se ve obligado a aprender. Enmascarar al azar unos pocos genes enseña sobre todo correlaciones locales; solo enmascarar en bloque una modalidad entera entrena de verdad la translation intermodal; enmascarar a la vez regiones espaciales se acerca más a completar tejido y a razonar a larga distancia.
+\end{knowledgebox}
+
+\subsection{Simulación contrafactual multimodal}
+
+La promesa central de un modelo unificado es que, al cambiar una modalidad o una condición de intervención, las predicciones de las demás modalidades se actualicen de forma coherente. Esto se acerca más a un modelo del mundo que generar por separado un mapa de expresión, pero sigue siendo necesario verificar con rigor que la intervención respete los mecanismos reales. Para entender la demo que sigue, hay que fijar el paciente y el contexto espacial, comparar únicamente la salida conjunta antes y después de modificar la condición y relacionar los cambios en la imagen con desenlaces experimentales medibles.
+
+\lecturefigure{slide-241-counterfactual-architecture.jpg}{Counterfactual multimodal: cambiar una modalidad de entrada y observar el cambio en la predicción conjunta}{00:52:00}
+
+A la izquierda, la entrada incluye imágenes de tejido, mediciones espaciales y posibles condiciones de tratamiento; en el centro está el modelo compartido; a la derecha, la salida es una representación multimodal del paciente. En el caso ideal, el modelo puede responder «si se modifica este gen o este tratamiento, ¿cómo cambiarán en conjunto las proteínas, el RNA y el estado del tejido?». Si el modelo solo realiza una compleción estática, no tiene esta transición de estado coherente.
+
+\lecturefigure{slide-247-counterfactual-results.jpg}{Estado final de la demo contrafactual: tras cambiar la entrada, el mapa de salida muestra diferencias espaciales}{00:53:36}
+
+Para leer la figura, primero hay que ver qué entradas se mantienen fijas y después la modalidad modificada y las diferencias en la salida. Las regiones rojas y verdes muestran la dirección de la predicción, pero no representan directamente eficacia terapéutica. Una validación confiable requiere datos de perturbation conocidos: introducir en el modelo la información previa a una intervención real y comparar la predicción del modelo con las mediciones posteriores a la intervención, en lugar de solo juzgar si la imagen «parece biológica».
+
+\begin{lstlisting}[language=Python,caption={Prioridad de experimentos: considerar a la vez el efecto según el modelo, la incertidumbre y el costo de la validación real}]
+def rank_experiments(candidate_interventions, patient_context):
+    ranked = []
+    for intervention in candidate_interventions:
+        effect, uncertainty = world_model.simulate(
+            patient_context, intervention
+        )
+        novelty = compare_with_existing_evidence(intervention)
+        cost = wet_lab_cost(intervention)
+        score = expected_value(effect, uncertainty, novelty, cost)
+        ranked.append((score, intervention))
+    return sorted(ranked, reverse=True)
+\end{lstlisting}
+
+\begin{importantbox}{El simulador y el selector de experimentos son dos sistemas distintos}
+El modelo del mundo estima «qué pasaría si se hace $a$»; el scientist o el agent decide «qué $a$ vale la pena hacer». Aunque el simulador fuera perfecto, enumerar exhaustivamente todas las combinaciones no es viable. El valor de un experimento depende además de su novedad, de que pueda verificarse, de su costo y de su seguridad.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Un Transformer multimodal a gran escala necesita coordinar token heterogéneos, modalidades faltantes, la masking policy y funciones de pérdida con múltiples objetivos. Los modelos unimodales son un baseline necesario; el valor añadido del modelo unificado debe reflejarse en mejor translation, disambiguation y coherencia ante intervenciones. La demo counterfactual es un generador de mecanismos candidatos, no una prueba de eficacia clínica.
+\section{Investigación en curso: RNA, interpretabilidad y cuellos de botella jerárquicos}
+
+Al final de la clase, el sistema no se presenta como un producto terminado; en cambio, se muestran varios trabajos en curso: modelar directamente el RNA en bruto, buscar características biológicas dentro del modelo y diseñar cuellos de botella de información jerárquicos que van del paciente a la molécula. En conjunto, muestran que la dificultad de la siguiente generación de sistemas no está solo en tener más parámetros, sino en cómo comprimir sin perder las escalas decisivas.
+
+\subsection{RNA en bruto y curvas de aprendizaje}
+
+Los count data en bruto tienen mucho ruido, alta dimensionalidad y muchos valores cero, y además dependen de la profundidad de secuenciación. Que la curva de entrenamiento descienda solo prueba que la función objetivo se está optimizando; no prueba por sí mismo que la learned representation sea útil para el descubrimiento de fármacos. Aquí conviene separar la métrica de optimización, la extrapolación a otros pacientes, la recuperación del estado celular y la tasa de aciertos en experimentos reales, para no tomar una misma loss curve como sustituto de todo el valor científico.
+
+\lecturefigure{slide-251-raw-rna-training.jpg}{Avance del entrenamiento y curvas sobre datos de RNA transcript en bruto}{00:55:36}
+
+En la figura, las muestras espaciales de la izquierda y las curvas de la derecha ponen lado a lado los datos y la optimización. La evaluación debe observar al mismo tiempo la held-out likelihood, la separación de tipos celulares, la estabilidad entre pacientes y la tasa de aciertos en experimentos posteriores. Si solo se optimiza una mask aleatoria, el modelo puede volverse bueno para recuperar housekeeping genes de alta expresión y, sin embargo, pasar por alto vías terapéuticas poco frecuentes.
+
+\subsection{¿Surgen características biológicas interpretables dentro del modelo?}
+
+La clase retoma el enfoque de la sesión anterior, «La biología de un modelo grande de lenguaje»: ¿es posible encontrar, dentro de un modelo multimodal de cáncer, features internas que correspondan a la respuesta inmunitaria, al estrés celular o a la transición epitelio--mesénquima? No se trata de ponerle un nombre cualquiera a cada neuron, sino de relacionar la activación, el enriquecimiento, la distribución espacial y la intervención. El caso de una sola feature y el feature atlas que siguen deben tomarse como un catálogo de mecanismos candidatos, no como una ontología biológica ya validada.
+
+\lecturefigure{slide-256-feature-interpretation.jpg}{Inferir la semántica biológica a partir de las muestras de alta activación y los conjuntos de genes de una feature del modelo}{00:56:18}
+
+La figura muestra los top cores, los genes relacionados y el resumen semántico de una feature. La cadena de evidencia debe incluir: en qué muestras se activa la feature, qué genes contribuyen más, dónde aparece en el espacio, si es estable entre pacientes distintos y si potenciar o suprimir la feature cambia la salida como se predijo. Las etiquetas generadas por un modelo de lenguaje solo pueden servir como explicaciones candidatas.
+
+\lecturefigure{slide-257-feature-atlas.jpg}{Varias learned features corresponden a programas inmunitarios, de estrés, de proliferación y tisulares}{00:56:38}
+
+El atlas de características muestra que el modelo podría descomponer estados biológicos complejos en direcciones reutilizables, como interferon response, cell proliferation o immune trafficking. Una feature puede mezclar varios programas, y un programa puede repartirse entre varias features; por ello hay una compensación entre dispersión y legibilidad, y la etiqueta no puede tomarse como la única verdad.
+
+\begin{warningbox}{Una etiqueta automática no es el descubrimiento de un mecanismo}
+Que un LLM escriba «respuesta al interferón» a partir de los top genes resulta cómodo, pero puede limitarse a repetir el conocimiento común de las bases de datos, o pasar por alto evidencia en contra. Una explicación confiable requiere análisis de enriquecimiento preregistrado, reproducción en distintas cohort, localización espacial y validación mediante intervención.
+\end{warningbox}
+
+\subsection{Cuellos de botella jerárquicos del paciente a la molécula}
+
+La arquitectura final debe manejar a la vez al paciente, el órgano, el microambiente tumoral, el vecindario celular, la célula individual y la molécula. Si todos los token están completamente conectados, el cómputo resulta inabordable; si se comprime demasiado pronto, desaparecen señales poco frecuentes pero decisivas para la respuesta al tratamiento. Por eso la pregunta central pasa de «qué tan grande debe ser el modelo» a «qué nivel de información necesita la consulta, cuándo agregar y cuándo permitir que los objetivos de alto nivel vuelvan a acceder a los detalles».
+
+\lecturefigure{slide-258-multimodal-bottlenecks.jpg}{Las tres preguntas centrales de un sistema multimodal a gran escala: cuello de botella, tarea y masking policy}{00:57:54}
+
+La jerarquía de la izquierda va de patient a molecules; en el centro se pregunta «cómo construir el information bottleneck», y a la derecha se pregunta por el objetivo de predicción y la mask. En ingeniería pueden emplearse codificación local, pooling, attention dispersa, memory token o recuperación; en lo científico hay que comprobar si la información comprimida incluye células poco frecuentes, subpoblaciones clonales y fronteras espaciales.
+
+\lecturefigure{slide-259-tumor-world-model.jpg}{Visión final: observar el tumor con múltiples sensores y responder consultas de tratamiento condicionadas al paciente}{00:58:01}
+
+La figura final vuelve al punto de partida: la biología del cáncer es el estado oculto; la inmunofluorescencia, la H\&E y el transcriptoma son los sensores; los fármacos son las acciones, y la pregunta es el estado tras el tratamiento. Un ciclo verdaderamente cerrado requiere además llevar las predicciones a experimentos, obtener nuevas mediciones, actualizar el modelo y registrar las hipótesis fallidas. Sin ese ciclo de retroalimentación, el «world model» tiende a degradarse en un codificador multimodal estático.
+
+\teachervoice{00:54:13--00:58:40: el docente califica explícitamente el entrenamiento con RNA y el análisis de features como trabajo en curso, y reduce el problema final a esto: en qué escalas colocar el bottleneck, qué predecir y qué enmascarar. Por eso estas notas no presentan la demo como un sistema clínico maduro.}
+
+\begin{importantbox}{Principios de diseño de un hierarchical world model}
+La capa local aprende las células y sus vecindarios; la capa tisular agrega la ecología espacial; la capa del paciente integra las condiciones genéticas y clínicas. La información debe subir nivel por nivel según lo que necesite la consulta, y también debe permitirse que los objetivos de alto nivel bajen a seleccionar detalles. Un pooling fijo y de una sola vez rara vez sirve para todas las preguntas terapéuticas.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La investigación en curso revela tres fronteras de un sistema unificado: modelar directamente el RNA en bruto con distribuciones adecuadas, buscar dentro del modelo features biológicas verificables y diseñar bottleneck jerárquicos que abarquen las escalas del paciente a la molécula. La escala de parámetros es solo un recurso; las verdaderas preguntas científicas siguen siendo la tarea, las rutas de la información y la validación.
+\section{Límites de la evidencia, Q\&A y sistemas de investigación de ciclo cerrado}
+
+Después del minuto 58, la imagen muestra principalmente al ponente y al público, pero el contenido no es una charla informal que pueda omitirse. Las preguntas y respuestas cuestionan la escala de los datos, los controles sanos, la validación causal, la conversión comercial y el AI scientist. Esta parte vuelve a situar los atractivos diagramas de modelos anteriores frente a las restricciones reales, y es decisiva para juzgar si la nota es confiable.
+
+\subsection{Tamaño de muestra, controles sanos y problemas fuera de distribución}
+
+El público pregunta primero si el número de pacientes es suficiente. La respuesta no se centra en dar un umbral universal, sino en distinguir tareas: la reconstrucción a nivel celular puede beneficiarse de una gran cantidad de mediciones locales, mientras que la extrapolación de la eficacia a nivel de paciente sigue limitada por el número de pacientes independientes y de etiquetas de intervención. Otra carencia fundamental es que las personas sanas normalmente no se someten a biopsias tumorales, por lo que la distribución de entrenamiento está sesgada de origen hacia tejido enfermo.
+
+\teachervoice{00:58:43--01:02:52, el docente reconoce que tanto el tamaño de muestra patient-level como los controles sanos son limitaciones. La falta de tejido sano no solo afecta las preguntas de prevención, sino que también dificulta que el modelo aprenda la transición completa de estados desde el tejido sano hasta el canceroso.}
+
+\begin{warningbox}{Missing not at random}
+La ausencia de datos sanos no es una ausencia aleatoria, sino que la determina el flujo clínico: a las personas sanas normalmente no se les toma tejido. Esto significa que una imputación simple no puede recuperar la distribución de la población no observada; se necesitan cohorts externas, mediciones poco invasivas, datos longitudinales o un modelo explícito del sesgo de selección.
+\end{warningbox}
+
+\subsection{De la predicción del modelo a la causalidad biológica y el valor clínico}
+
+La cadena de descubrimiento de fármacos incluye al menos target hypothesis, intervención experimental, revisión del mecanismo, toxicidad, seguridad y eficacia clínica. Un world model puede reducir el espacio de candidatos, pero no puede saltarse las etapas posteriores. Si el modelo sugiere una diana, el siguiente paso más valioso normalmente no es generar más texto explicativo, sino diseñar experimentos que distingan entre mecanismos competidores.
+
+\teachervoice{01:03:21--01:06:01, la discusión en clase separa «descubrir una diana» de «demostrar que es segura y eficaz». El docente enfatiza que la salida del modelo sigue requiriendo experimentos reales, y que el éxito comercial o clínico no puede deducirse directamente de predicciones virtuales.}
+
+\begin{importantbox}{La validación más sólida es una predicción que puede fallar}
+Un buen world model debe dar, antes del experimento, la dirección, el tamaño del efecto y la incertidumbre; cuando el resultado experimental no coincide, hay que registrarlo y actualizar el modelo. Mostrar solo mapas de calor exitosos y elegir a posteriori casos interpretables convierte un sistema científico en una demostración no falsable.
+\end{importantbox}
+
+\subsection{Por qué un simulador perfecto sigue necesitando un scientist o un agent}
+
+Aunque el simulador pueda ejecutarse mil millones de veces a bajo costo, alguien tiene que definir qué intervenciones vale la pena simular. El espacio combinatorio es enorme, y muchos experimentos, aunque produzcan cambios, no aportan conocimiento nuevo o no pueden verificarse en la realidad. La selección de experimentos es un problema de active learning y de decision-making, no un problema de puro rendimiento de inferencia.
+
+\teachervoice{01:06:01--01:07:34, el docente dice que, incluso con un simulador de pacientes perfecto, se necesita un agent que le indique qué vale la pena simular. Los expertos del dominio suelen tener ya un primer conjunto de hipótesis de alto valor; la función del simulador es compararlas y filtrarlas más rápido.}
+
+\teachervoice{01:07:43--01:10:07, el docente mantiene una postura abierta pero mesurada hacia el AI scientist: la escala no es necesariamente el cuello de botella actual, y los agents existentes tampoco superan de forma significativa los experimentos que los expertos proponen con rapidez; aun así, vale la pena probar herramientas de ciclo cerrado.}
+
+\begin{knowledgebox}{Límites razonables de las funciones de un AI scientist}
+Los papeles más viables a corto plazo incluyen recuperar evidencia existente, proponer controles, invocar simuladores, cuantificar la incertidumbre, generar calendarios experimentales y registrar fracasos. Si puede proponer de forma independiente mecanismos de gran avance debe determinarse mediante evaluaciones ciegas, experimentos prospectivos y comparación con líneas base de expertos, no por la fluidez del texto que genera.
+\end{knowledgebox}
+
+Un ciclo cerrado con capacidad de auditoría debe incluir: versión de los datos, versión del modelo, intervenciones candidatas, intervalos de predicción, justificación de la selección, resultados experimentales y análisis de fracasos. Solo si los resultados negativos también se reincorporan al entrenamiento puede el sistema corregir gradualmente el world model, en lugar de amplificar continuamente el sesgo de confirmación.
+
+\subsection{Términos clave}
+
+Esta sesión abarca el aprendizaje automático y la biología; al final, una tabla vuelve a situar los términos de alta densidad en el problema que cada uno resuelve, para no quedarse solo con los nombres.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{p{0.18\textwidth} X X}
+\toprule
+\textbf{Término} & \textbf{Problema que resuelve} & \textbf{Mecanismo central y relación con la clase} \\
+\midrule
+World model & Cómo cambia el futuro después de una acción & Modela la distribución de estados futuros a partir de las observaciones multimodales actuales y de las acciones candidatas. \\
+Translation & Cómo transferir los hechos compartidos entre modalidades & Usa una modalidad para predecir otra o alinea representaciones compartidas, como de H\&E a expresión génica. \\
+Disambiguation & Cómo eliminar la ambigüedad de una sola modalidad & Usa la información exclusiva de otra modalidad para actualizar la posterior, como el vecindario espacial que ayuda a determinar el estado celular. \\
+Cross-attention & Cómo interactúan de forma dirigida dos flujos de tokens & La query proviene del flujo objetivo y las key/value, del flujo de condición. \\
+Adaptive LayerNorm & Cómo inyectar condiciones sin alargar la secuencia & Una red de condición genera la escala y el desplazamiento de la normalización y controla el cálculo de cada capa de la red troncal. \\
+H\&E & Observar la morfología del tejido a bajo costo & Tinción clínica de rutina, de amplia cobertura pero con información molecular indirecta. \\
+Spatial transcriptomics & Dónde ocurre la expresión génica & Conserva a la vez los niveles de expresión y las coordenadas del tejido, y conecta el estado molecular con la ecología espacial. \\
+Imputation & Cómo estimar modalidades costosas o faltantes & Aprende la distribución condicional e informa la incertidumbre; no puede tomarse como sustituto sin pérdida de una medición real. \\
+Counterfactual & Cómo cambia la predicción del modelo al modificar la entrada & Sirve para ordenar intervenciones candidatas; un cambio dentro del modelo no equivale a un efecto causal real. \\
+Calibration & Si la confianza es creíble & Los intervalos de predicción deben tener la cobertura correcta en held-out patients y en distintos genes. \\
+Information bottleneck & Cómo comprimir enormes cantidades de tokens multiescala & Elige representaciones a nivel de paciente, tejido, vecindario y célula, equilibrando eficiencia y conservación de señales poco frecuentes. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Resumen de la sección}
+
+Las preguntas y respuestas completan los límites reales del sistema: las muestras a nivel de paciente son limitadas, los controles sanos faltan de forma no aleatoria, los contrafactuales del modelo requieren validación experimental y el simulador no elige por sí solo las preguntas valiosas. El papel más razonable a corto plazo para un agent científico es organizar la evidencia y las herramientas de ciclo cerrado, no sustituir el diseño experimental con fluidez lingüística.
+
+\section{Síntesis y ampliación}
+
+\subsection{Una cadena de diseño que atraviesa toda la clase}
+
+Esta clase puede condensarse en ocho pasos: primero, formular la tarea como una predicción del futuro condicionada a la acción; distinguir entre translation y disambiguation; elegir la dirección de la fusión; construir datos alineados espacialmente; aprender la distribución condicional con masked modeling; hacer imputation calibrada a partir de modalidades baratas como H\&E; proponer contrafactuales con un modelo unificado; y, por último, actualizar el modelo de mundo mediante experimentos y datos de fallos. Si se omite cualquiera de estos pasos, el sistema puede degradarse de herramienta científica a demostración vistosa.
+
+\begin{importantbox}{Conclusión central}
+El valor de un modelo de mundo multimodal no está en «meter más datos en un Transformer más grande», sino en organizar la información complementaria de distintos sensores como predicciones de intervenciones que puedan verificarse. El modelo debe saber cuándo puede traducir, cuándo necesita desambiguar y cuándo la información simplemente no es identificable, y debe incorporar la incertidumbre a la selección de experimentos.
+\end{importantbox}
+
+\subsection{La lista de verificación de ingeniería que más vale llevarse}
+
+\begin{enumerate}
+  \item \textbf{Tarea:} ¿el objetivo de predicción corresponde a una decisión real, y no solo a algo fácil de optimizar?
+  \item \textbf{Partición:} ¿se particiona por paciente, centro y tiempo para evitar fugas espaciales y por lote?
+  \item \textbf{Fusión:} ¿la nueva modalidad aporta translation o disambiguation?
+  \item \textbf{Faltantes:} ¿durante el entrenamiento se simula la ausencia de modalidades completas y el presupuesto de medición que habrá en el despliegue?
+  \item \textbf{Calibración:} ¿se reporta la cobertura de la incertidumbre por gen, por paciente y por dominio?
+  \item \textbf{Contrafactuales:} ¿se verifican la dirección y la magnitud del efecto con datos reales de perturbation?
+  \item \textbf{Ciclo cerrado:} ¿los experimentos fallidos se registran y se usan para actualizar el modelo?
+\end{enumerate}
+
+\subsection{Preguntas abiertas}
+
+Primero, ¿cómo asignar el cómputo de forma dinámica entre los niveles patient--organ--tissue--cell--molecule, en lugar de aplicar una compresión fija? Segundo, ¿cómo distinguir los estados moleculares identificables en H\&E de los que no lo son en absoluto? Tercero, ¿cómo alinear los counterfactual del modelo con intervenciones causales reales? Cuarto, ¿cómo modelar el sesgo de selección cuando faltan datos de tejido sano y de tratamientos aleatorizados? Quinto, ¿cómo debe evaluarse el valor de un scientist agent mediante experimentos prospectivos y no mediante benchmarks de texto?
+
+Estas preguntas apuntan en conjunto a un estándar más riguroso de AI for Science: el modelo no solo debe generar respuestas razonables, sino también exponer el origen de la evidencia, la distancia entre distribuciones, los intervalos de predicción y compromisos experimentales que puedan fallar. El destino de un modelo de mundo no es un mapa de calor más realista, sino un sistema de investigación que la realidad pueda corregir de manera continua.
+
+\subsection{Lecturas adicionales}
+
+\begin{itemize}[itemsep=0.2em,topsep=0.2em]
+  \item Página del curso Stanford CS25 V5: \url{https://web.stanford.edu/class/cs25/past/cs25-v5/}
+  \item Video oficial de esta clase: \url{https://www.youtube.com/watch?v=8kXIaUM3h1E}
+  \item Palabras clave de métodos: CLIP (representación compartida), Masked Autoencoder (aprendizaje por enmascaramiento), cross-attention (fusión dirigida), adaptive LayerNorm (modulación condicional). Al evaluar, conviene buscar primero datos reservados a nivel de paciente, intervenciones reales, calibración y reproducción entre centros.
+\end{itemize}
+
+\end{document}

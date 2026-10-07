@@ -1,0 +1,762 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+
+\renewcommand{\notetitle}{Lecture 11: Transformer, de Attention al cómputo general sobre secuencias}
+\renewcommand{\noteauthors}{Elaborada a partir de la conferencia de Andrej Karpathy, los subtítulos oficiales hechos a mano y los artículos originales}
+\renewcommand{\notedate}{CS25 V2 · versión reescrita source-first de 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{Clase: 2023-01-10; publicación: 2023-05-19}
+\renewcommand{\videoduration}{1:11:40}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=XfpMkf4rD6E}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.94\textwidth]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\begin{document}
+\makecscover
+
+\section{Auditoría de fuentes y límites de la clase: una clase introductoria de 2023}
+
+Lo primero que exige esta sesión no son las fórmulas, sino los límites de la evidencia. En los primeros 10 minutos del video, el equipo del curso CS25 presenta los objetivos de la serie; la conferencia principal de Andrej Karpathy empieza hasta el minuto 10:14. La clase se dio el 10 de enero de 2023 y Stanford Online subió el video el 19 de mayo de 2023. La versión anterior daba como fecha de publicación el 23 de febrero de 2023 y añadía mucho contenido que no se vio en clase: gobernanza de RLHF, despliegue en producción, drift detection y procesos de equipo. Por eso esta vez no se trata de pulir lo existente, sino de una reescritura completa basada en el video oficial, los subtítulos revisados manualmente y los artículos originales.
+
+\lecturefigure{slide-01-course-title.jpg}{CS25 Transformers United V2: apertura formal de la serie del curso.}{Video oficial de Stanford Online 00:00:05--00:00:52.}
+
+Esta portada solo identifica el curso, pero también ofrece una indicación de lectura importante: aquí ``Transformers'' no designa un solo modelo de NLP, sino el lenguaje común de una speaker series que abarca varios campos. Más adelante, las notas dividen esta capacidad transversal en tres niveles: cómo se representa la entrada como una secuencia de elementos, cómo se comunican los elementos entre sí mediante attention y cómo la red residual convierte el resultado de esa comunicación en un cálculo entrenable.
+
+\lecturefigure{slide-02-course-content-logistics.jpg}{Contenido y organización del curso: entender el Transformer a través de conferencias de invitados de distintos campos.}{Video oficial de Stanford Online 00:00:52--00:02:53.}
+
+El equipo del curso no promete cubrir todos los detalles en una sola clase; usa esta sesión para establecer un vocabulario común y luego deja que los invitados muestren cómo se adapta el Transformer en distintos campos. Al leer esta diapositiva conviene separar ``arquitectura común'' de ``sistema idéntico'': las distintas conferencias comparten el esqueleto de attention, residual y token/element representation, pero la interfaz de datos, la función objetivo, la mask y el inductive bias siguen siendo muy específicos de cada campo.
+
+\begin{importantbox}{El contrato de evidencia de esta sesión}
+Los recuerdos históricos, las intuiciones de ingeniería y los juicios sobre el futuro que aparecen en clase se marcan como «Nota de clase» o «juicio del ponente»; los mecanismos tomados de los artículos se acompañan de fórmulas, y los hechos posteriores a 2023 no se proyectan hacia atrás sobre lo que el ponente dijo entonces. No existe un PDF de slides publicado por separado, así que las 61 figuras del texto son estados didácticos verificados manualmente a partir del video oficial en 1080p y no pretenden corresponder a la numeración de páginas de un deck oficial.
+\end{importantbox}
+
+\subsection{Qué espera el curso que se lleve el lector}
+
+Esta sección reduce los objetivos a tres preguntas: cómo funciona el Transformer, por qué pudo salir del NLP y qué propiedades lo convierten en una plataforma de investigación que puede seguir escalando. Cada detalle técnico posterior debe servir al menos a una de estas preguntas; si un concepto no explica la comunicación, el cálculo, la optimización o la interfaz de entrada, no debe quedar como un término aislado.
+
+\lecturefigure{slide-03-learning-goals.jpg}{Tres objetivos: mecanismo, aplicaciones en otros campos y frontera de la investigación.}{Video oficial de Stanford Online 00:02:54--00:03:17.}
+
+\begin{knowledgebox}{Lectura de la figura: los tres objetivos no son tres cursos sin relación}
+El primer objetivo, «how Transformers work», aporta un mecanismo ejecutable; el segundo, «beyond NLP», pone a prueba si el mecanismo es transferible; el tercero, «new directions», pregunta dónde falla el mecanismo actual. El orden de estudio correcto es entender primero un decoder mínimo, luego observar cómo cambian la entrada y la connectivity y, al final, discutir límites como context, memory, cost y controllability, en lugar de empezar memorizando una lista de aplicaciones.
+\end{knowledgebox}
+
+\lecturefigure{slide-04-transformers-introduction.jpg}{Tema introductorio: llegar al Transformer a partir de la cronología de attention.}{Video oficial de Stanford Online 00:03:17--00:03:35.}
+
+Esta diapositiva parece un simple título de sección, pero en realidad fija la narración posterior como una «cadena de problemas» y no como una «lista de componentes». Attention no es un módulo que apareció de repente: primero resolvió el cuello de botella del encoder, que comprimía toda la oración en un solo vector; después se elevó a mecanismo principal de comunicación y, por último, se combinó con la posición, las conexiones residuales, la normalización y el MLP para formar la arquitectura completa. Solo al entender esta cadena se sabe por qué existe cada componente.
+
+\lecturefigure{slide-05-attention-timeline.jpg}{Cronología de attention: de los primeros modelos de secuencias al Transformer de 2017.}{Video oficial de Stanford Online 00:03:35--00:05:01.}
+
+\begin{knowledgebox}{Lectura de la figura: la cronología se lee según «cómo se eliminó cada cuello de botella»}
+Las primeras RNN/LSTM procesaban secuencias de longitud variable mediante un recurrent state, pero obligaban a que la información avanzara paso a paso en el tiempo; seq2seq, a su vez, comprimía la oración de origen en un context vector de tamaño fijo; la Bahdanau attention permitió que el decoder revisara en cada paso todos los encoder states; el Transformer eliminó además la recurrent path, de modo que cualquier par de tokens con conexión permitida intercambia información directamente dentro de una sola capa. Cuanto más avanza la cronología, más corto es el camino de la información y mayor el paralelismo, pero también se vuelven más importantes la connectivity explícita y la representación de la posición.
+\end{knowledgebox}
+
+\lecturefigure{slide-06-prehistoric-rnns.jpg}{La «prehistoria»: las RNN/LSTM dominaban el modelado de secuencias, pero estaban limitadas por su camino secuencial.}{Video oficial de Stanford Online 00:05:01--00:06:10.}
+
+Una \term{RNN} (Recurrent Neural Network, red neuronal recurrente) actualiza en cada paso de tiempo el estado oculto a partir del estado anterior y la entrada actual; una \term{LSTM} (Long Short-Term Memory) mejora las dependencias de largo plazo y la propagación del gradiente mediante una estructura de compuertas. Ambas pueden representar secuencias de longitud variable, pero convierten el grafo de cómputo del entrenamiento en una cadena larga y estrecha: la posición $t$ depende de los $t-1$ pasos anteriores, a la GPU le cuesta paralelizar por completo la dimensión temporal y la señal de supervisión tiene que recorrer muchos saltos para volver a las primeras entradas.
+
+\lecturefigure{slide-07-where-we-were-2021.jpg}{La perspectiva del curso en 2021: secuencias largas, AlphaFold, offline RL, few-shot y multimodalidad empiezan a converger.}{Video oficial de Stanford Online 00:06:10--00:06:51.}
+
+Esta diapositiva es una instantánea histórica, no una lista de capacidades de 2026. El punto de inflexión que subraya el equipo del curso es que el Transformer ya se había extendido de la generación de texto a las proteínas, al aprendizaje por refuerzo fuera de línea y a la generación de imágenes a partir de texto, y mostraba zero-shot/few-shot generalization. Lo que el lector debe comparar no es el desempeño absoluto actual, sino la tendencia que los investigadores ya veían entonces: «un solo esqueleto que cubre muchas estructuras de datos».
+
+\lecturefigure{slide-08-where-we-are-2022.jpg}{La expansión de 2022: audio, arte, razonamiento, human feedback y diffusion.}{Video oficial de Stanford Online 00:06:51--00:07:30.}
+
+La clase sitúa ChatGPT, human feedback, multimodal generation y diffusion models en el mismo contexto histórico, pero de ahí no se puede concluir que todos se entrenen con el mismo objetivo. El Transformer es un esqueleto para procesar secuencias; RLHF es un proceso de entrenamiento que incorpora las preferencias humanas al comportamiento del modelo; diffusion es otro tipo de proceso generativo. Mezclar estos niveles es precisamente la causa de fondo de que la versión anterior incluyera tanto contenido de gobernanza sin fuente.
+
+\lecturefigure{slide-09-future.jpg}{Preguntas sobre el futuro a principios de 2023: video, secuencias largas, agent, modelos de dominio, memoria externa y menor costo de cómputo.}{Video oficial de Stanford Online 00:07:30--00:10:12.}
+
+\begin{warningbox}{Al leer la figura hay que conservar la marca de tiempo}
+Las afirmaciones de la diapositiva, como el orden de magnitud de 4,000 tokens, que ChatGPT no tiene memoria de largo plazo o que los modelos de video todavía esperan un avance, son observaciones de la clase de enero de 2023. Su valor didáctico está en identificar problemas estructurales: el costo cuadrático de attention respecto a la longitud, el context limitado, la controlabilidad de salidas aleatorias, la memory externa y la domain specialization; el estado concreto de un producto no debe tomarse como un hecho de 2026.
+\end{warningbox}
+
+\subsection{Dónde empieza la conferencia de Karpathy}
+
+Una vez que el equipo del curso termina de presentar el contexto, Karpathy toma formalmente la palabra. Comenta que, aunque vive cerca y puede llegar caminando a la clase, dedicó diez horas a las slides y, por falta de tiempo, eliminó dos temas que tenía previstos. Esta aclaración verbal es importante: la sesión es un conceptual tour deliberadamente condensado, y lo que sigue no debe fingir que cubre por completo las variantes de codificación posicional, los sistemas de entrenamiento, la alineación o el servicio de inferencia.
+
+\lecturefigure{slide-10-karpathy-title.jpg}{Portada de la conferencia principal de Andrej Karpathy.}{Video oficial de Stanford Online 00:10:14--00:10:39.}
+
+\teachervoice{Karpathy dice explícitamente que simplificará la conferencia y omitirá algunos temas. Por eso estas notas eligen cuatro ejes, «cadena histórica de problemas + explicación gráfica de attention + implementación de extremo a extremo con nanoGPT + transferencia entre modalidades e in-context learning», en lugar de extenderse fuera de la clase hacia la pila completa de un LLM de propósito general.}
+
+\subsection{Resumen de la sección}
+
+Esta sección estableció los límites de tiempo, de quién habla y de la evidencia: los primeros diez minutos corresponden a la introducción del curso y la conferencia principal empieza en el minuto 10:14; la clase se dio en enero de 2023 y el video se publicó en mayo de 2023; los 61 materiales visuales se recuperaron del video oficial. A continuación entramos en el argumento histórico central de Karpathy: el valor del Transformer proviene, ante todo, de que los distintos campos de la IA pasaron de islas de características diseñadas a mano a una arquitectura común y entrenable.
+\section{De las islas de características manuales a una arquitectura unificada}
+
+La sección anterior explicó que esta clase busca responder «por qué existe un curso sobre Transformer». Esta sección da la respuesta histórica: hace más de diez años, cada área no solo usaba datos distintos, sino también características, vocabularios y pilas de software distintos; el aprendizaje profundo unificó primero el paradigma de entrenamiento, y Transformer unificó después la arquitectura troncal. La unificación redujo el costo de aprender de un área a otra y convirtió el cómputo, los datos y la escala en variables comunes.
+
+\subsection{2011: la ingeniería de características ensamblada en un pipeline frágil}
+
+Karpathy parte de su propia llegada a la visión por computadora. El problema no era que los investigadores «no fueran inteligentes», sino que el sistema delegaba el diseño de la representación en una gran cantidad de descriptor manuales: cada artículo aportaba una característica local, y los practicantes las extraían todas, las concatenaban y entrenaban un clasificador encima. Este flujo era difícil de optimizar de forma conjunta y también hacía difícil determinar si un error provenía de las características, de los datos o del clasificador.
+
+\lecturefigure{slide-11-historical-context.jpg}{Contexto histórico: una mirada a 2023 desde el flujo de trabajo de visión de 2011.}{Video oficial de Stanford Online, 00:10:39--00:11:17.}
+
+\teachervoice{Se compara con humor con Bilbo, el personaje de «El Señor de los Anillos» que rememora el pasado, y pregunta a los estudiantes si se dan cuenta de lo afortunados que son al entrar a la IA en 2023. Detrás del humor hay un juicio: la cadena de herramientas unificada que hoy damos por sentada no existió de forma natural, sino que es el resultado gradual del aprendizaje de representaciones, el entrenamiento a gran escala y las arquitecturas compartidas.}
+
+\lecturefigure{slide-12-scene-2011.jpg}{«Scene: it is 2011»: la entrada a la época de los pipelines de visión manuales.}{Video oficial de Stanford Online, 00:11:17--00:11:30.}
+
+Una \term{handcrafted feature} (característica manual) es un estadístico de la imagen definido de antemano por el investigador, como gradientes locales, texturas, histogramas de color o plantillas geométricas; un \term{descriptor} es la regla que codifica una región local como un vector. Contienen un inductive bias fuerte, pero no permiten que todas las etapas se ajusten en conjunto en torno a la pérdida final, como sí lo hace una red neuronal de extremo a extremo.
+
+\lecturefigure{slide-13-old-computer-vision-paper.jpg}{Varias páginas de características y detalles de ingeniería en un artículo de visión de la época anterior.}{Video oficial de Stanford Online, 00:11:30--00:12:11.}
+
+\begin{knowledgebox}{Lectura de la figura: no confundir la densidad de términos con «un modelo más profundo»}
+La densidad de la página proviene sobre todo del feature zoo: cada descriptor extrae por su cuenta bordes, texturas, colores o relaciones espaciales, y luego los vectores se envían a una SVM. Una \term{SVM} (Support Vector Machine, máquina de vectores de soporte) es un modelo supervisado que busca una frontera de clasificación en el espacio de características. Puede ser muy potente, pero la representación de las etapas previas suele estar fija, y el pipeline completo no es un sistema diferenciable optimizado de extremo a extremo por un mismo objetivo.
+\end{knowledgebox}
+
+La crítica aguda de Karpathy es esta: el código se reunía de todas partes, y el sistema no solo era complejo, sino que producía predicciones absurdas que hoy parecerían bugs. En aquel entonces, los practicantes a veces las consideraban fallas ocasionales inevitables. Este contraste refleja un cambio en la cultura de ingeniería: cuando los modelos, los datos y las rutas de entrenamiento están más unificados, es más probable que los errores se localicen, se reproduzcan y se corrijan de manera sistemática.
+
+\lecturefigure{slide-14-old-lstm-paper.jpg}{Artículos antiguos de otra área: los modelos de secuencias tenían su propia terminología, sus propios diagramas y su propia tradición de implementación.}{Video oficial de Stanford Online, 00:12:23--00:12:56.}
+
+Los artículos sobre LSTM y los de visión no solo trataban objetos distintos, sino que también descomponían los problemas de manera distinta. Cuando un investigador de visión veía hidden state, gates y time unrolling, tenía que aprender de nuevo todo un lenguaje; un investigador de secuencias enfrentaba el mismo obstáculo al leer sobre descriptor de visión y pipelines geométricos. Por ello, el costo de transferir conocimiento entre áreas no provenía solo de la dificultad matemática, sino también de la falta de una interfaz conceptual común.
+
+\lecturefigure{slide-15-old-language-model-paper.jpg}{Artículo antiguo sobre modelos de lenguaje: otro conjunto de tareas, notación y tradición de evaluación.}{Video oficial de Stanford Online, 00:12:23--00:12:56.}
+
+El objetivo central de un modelo de lenguaje puede ser muy uniforme: predecir el siguiente token a partir del contexto. Sin embargo, en los primeros artículos, los n-gramas, el suavizado, la morfología, la sintaxis y las características específicas de cada tarea solían formar pilas técnicas independientes. Uno de los avances del aprendizaje profundo fue hacer que el embedding y el predictor se aprendieran juntos a partir de los datos, de modo que «cómo se representa el contexto» dejara de depender por completo de una enumeración manual.
+
+\lecturefigure{slide-16-old-neural-architecture.jpg}{Diagrama de una arquitectura neuronal antigua: las redes de cada área aún mostraban lenguajes estructurales muy distintos.}{Video oficial de Stanford Online, 00:12:23--00:12:56.}
+
+El punto didáctico de esta figura no es identificar cada recuadro, sino observar las rutas de la información. Los sistemas tempranos solían codificar los supuestos de la tarea directamente en la topology: conexiones bidimensionales locales para imágenes, recurrencia temporal para texto y etapas de entrada especializadas para voz. Ese bias puede mejorar la eficiencia de muestreo, pero obliga a rediseñar el esqueleto ante una nueva modalidad, un nuevo sensor o relaciones de largo alcance.
+
+\lecturefigure{slide-17-ai-areas-different.jpg}{Antes de 2012: la visión, el lenguaje, la voz, la traducción y el RL parecían disciplinas distintas.}{Video oficial de Stanford Online, 00:12:56--00:13:17.}
+
+\begin{warningbox}{Unificar no equivale a borrar el conocimiento de cada área}
+Un lenguaje común de redes neuronales reduce la barrera de lectura, pero no implica que todas las áreas requieran el mismo procesamiento de datos. La vecindad bidimensional de las imágenes, la estructura tiempo-frecuencia de la voz, las condiciones de acción del RL y las restricciones geométricas de las proteínas todavía deben incorporarse en la tokenización, el position/type embedding, la mask, el objective o un specialized module. Lo que se unifica es un tronco componible, no el mundo real en sí.
+\end{warningbox}
+
+\subsection{2012: el aprendizaje a gran escala unifica el paradigma de entrenamiento}
+
+El problema anterior era que cada área definía sus representaciones a mano. La época de ImageNet mostró otra ruta: grandes conjuntos de datos, modelos grandes y hardware acelerado podían permitir que la red neuronal aprendiera por sí misma representaciones jerárquicas. Así, el foco de la investigación pasó de «inventar otro descriptor» a «cómo obtener datos, cómputo y una optimización estable», y esta recipe se replicó después en voz, traducción y RL.
+
+\lecturefigure{slide-18-imagenet-2012.jpg}{ImageNet 2012: la escala, los datos y el entrenamiento en GPU cambiaron el foco de la investigación en visión.}{Video oficial de Stanford Online, 00:12:56--00:13:33.}
+
+\begin{knowledgebox}{Lectura de la figura: lo que realmente cambió fue el ciclo de optimización}
+Los píxeles de entrada pasan por una red de varias capas con parámetros compartidos para producir una predicción, y la pérdida de clasificación ajusta todas las capas mediante backpropagation. La representación deja de ser una interfaz manual congelada y se aprende junto con el objetivo de la tarea. Lo decisivo aquí no es solo la convolución en sí, sino que «modelo diferenciable + datos a gran escala + cómputo en paralelo + pérdida de extremo a extremo» forman un ciclo replicable.
+\end{knowledgebox}
+
+\lecturefigure{slide-19-areas-read-more-similar.jpg}{Después del aprendizaje profundo: los artículos de distintas áreas empiezan a compartir parámetros, optimizadores y lenguaje de entrenamiento.}{Video oficial de Stanford Online, 00:13:33--00:14:10.}
+
+Karpathy subraya que de pronto apareció un vocabulario común reconocible en artículos de distintas áreas: parameters, optimizer, loss, neural network. Un marco de representación unificado produce reutilización del conocimiento: los investigadores de visión pueden entender los problemas de optimización de la traducción automática, y los investigadores de NLP pueden tomar las conexiones residuales y el entrenamiento a gran escala. Una cadena de herramientas común adelgaza las fronteras entre áreas y crea las condiciones para la unificación arquitectónica posterior a 2017.
+
+\subsection{2017: incluso la arquitectura troncal empieza a converger}
+
+El aprendizaje profundo unificó primero «cómo entrenar», y Transformer unificó después «qué tipo de tronco entrenar». La aproximación de primer orden de Karpathy es esta: se hace copy-paste de la misma arquitectura a distintas áreas y lo que cambia principalmente es el chunking de los datos y la forma de entrada. La afirmación es exagerada a propósito, pero señala con precisión que la attention permite al modelo aprender relaciones dinámicas sobre un conjunto de elementos.
+
+\lecturefigure{slide-20-transformer-2017.jpg}{Transformer en 2017: un artículo de traducción automática propone un paquete arquitectónico reutilizable.}{Video oficial de Stanford Online, 00:13:57--00:14:21.}
+
+\begin{knowledgebox}{Lectura de la figura: la figura del artículo original no es solo attention}
+Tanto el encoder de la izquierda como el decoder de la derecha contienen embedding, position, multi-head attention, feed-forward, residual add y normalization; el decoder requiere además causal mask y cross-attention. El título destaca la attention porque sustituye a la recurrence como principal vía de comunicación; que el modelo pueda entrenarse y escalarse depende de todo el package.
+\end{knowledgebox}
+
+\lecturefigure{slide-21-transformer-across-fields.jpg}{La misma figura de Transformer aparece una y otra vez en visión, lenguaje, voz, RL y aprendizaje sobre grafos.}{Video oficial de Stanford Online, 00:14:17--00:14:40.}
+
+Esta diapositiva debe leerse como «capa de interfaz — capa compartida — capa de tarea»: la capa de interfaz asigna a vectores un patch, una word/subword, un spectrogram slice, un state/action/reward o un graph element; la capa compartida actualiza los vectores con attention y MLP; la capa de tarea interpreta la salida como clasificación, generación, control o predicción de estructura. La reutilización entre áreas ocurre en la parte intermedia; la entrada y el objetivo siguen determinando qué aprende el modelo.
+
+\lecturefigure{slide-22-brain-unified-compute.jpg}{Analogía con la homogeneidad de la corteza: la atractiva conjetura de un algoritmo de aprendizaje unificado.}{Video oficial de Stanford Online, 00:14:42--00:15:09.}
+
+\teachervoice{Karpathy dice que la corteza visual y la auditiva son similares a escala macroscópica, y que el hecho de que Transformer solo cambie algunos «hiperparámetros» entre áreas tal vez sugiera un algoritmo de aprendizaje unificado y potente. Es una analogía sugerente, no evidencia neurocientífica; el éxito de la transferencia arquitectónica puede deberse a una estructura de cómputo universal, pero también a una solución de ingeniería favorecida en conjunto por los datos y el hardware modernos.}
+
+\subsection{Resumen de la sección}
+
+La IA de 2011 estaba fragmentada por características manuales, vocabularios de cada área y topology especializadas; el aprendizaje profundo a gran escala posterior a 2012 unificó el lenguaje de la optimización de extremo a extremo; y en 2017 Transformer llevó el tronco reutilizable al nivel multimodal. La siguiente sección muestra que esta arquitectura no «cayó del cielo»: evolucionó a lo largo de una cadena de problemas que pasa por los modelos de lenguaje, el bottleneck de seq2seq y la soft alignment.
+\section{La cadena histórica de problemas de la attention: de la ventana fija a la memoria direccionable}
+
+Esta sección parte de la pregunta «¿cómo depende el siguiente token del contexto?». El MLP de ventana fija solo puede ver una vecindad limitada; las RNN/LSTM pueden procesar secuencias de longitud variable, pero comprimen la oración fuente en un único estado final; la Bahdanau attention permite que el decoder haga un direccionamiento diferenciable sobre todos los encoder states; el Transformer eleva después ese direccionamiento a primitiva principal de comunicación en cada capa.
+
+\lecturefigure{slide-23-where-transformer-came-from.jpg}{Transición del problema: ¿de dónde viene el Transformer?}{Video oficial de Stanford Online 00:15:09--00:15:15.}
+
+Esta diapositiva de transición nos recuerda que no conviene memorizar los componentes a partir del diagrama de la arquitectura de 2017. El orden histórico revela qué corrige cada paso: el modelado de lenguaje aporta el objetivo probabilístico, seq2seq aporta entradas y salidas de longitud variable, el soft alignment atenúa el cuello de botella del vector fijo, la autoatención acorta el camino de información entre dos tokens cualesquiera, y las conexiones residuales y la normalización hacen que el apilamiento profundo sea optimizable.
+
+\subsection{2003: el modelo de lenguaje probabilístico neuronal}
+
+Dada una secuencia de tokens $x_{1:T}$, el modelo de lenguaje aprende la descomposición autorregresiva de la probabilidad conjunta:
+
+\[
+p(x_{1:T})=\prod_{t=1}^{T}p(x_t\mid x_{<t}).
+\]
+
+Aquí, $x_t$ denota el $t$-ésimo token y $x_{<t}$ el contexto que lo precede. El modelo de Bengio et al. de 2003 usa una ventana de longitud fija: concatena los embedding de varias palabras y los introduce en un MLP, que produce la distribución de probabilidad de la siguiente palabra. Ya contiene el núcleo de «representación compartida + predictor neuronal», pero la longitud del contexto queda fijada por la ventana.
+
+\lecturefigure{slide-24-neural-probabilistic-language-model.jpg}{2003 neural probabilistic language model: tres palabras predicen la cuarta.}{Video oficial de Stanford Online 00:15:12--00:15:43.}
+
+\begin{knowledgebox}{Lectura de la figura: el embedding resuelve la interfaz con símbolos discretos}
+El ID de una palabra no tiene, por sí mismo, significado de distancia. La embedding table asigna a cada palabra un vector aprendible; los vectores dentro de la ventana pasan por un MLP compartido que produce vocabulary logits, y la softmax los convierte en probabilidades. El modelo puede aprender que «palabras similares usan representaciones similares en la tarea de predicción», pero las dependencias que exceden la ventana no entran directamente en la predicción actual.
+\end{knowledgebox}
+
+\subsection{2014 seq2seq: secuencias de longitud variable y el cuello de botella del vector fijo}
+
+La traducción automática exige que tanto la entrada como la salida tengan longitud variable. El seq2seq clásico usa un encoder LSTM que lee la oración fuente palabra por palabra, toma el último estado oculto como context y luego un decoder LSTM genera la oración destino palabra por palabra. Si se denotan los encoder states como $\mathbf h_1,\ldots,\mathbf h_S$, la interfaz más simple es
+
+\[
+\mathbf c=\mathbf h_S,
+\]
+
+donde $S$ es la longitud de la secuencia fuente y $\mathbf c$ es el único context vector que se pasa al decoder. Toda la información de la fuente debe atravesar este canal estrecho, y en oraciones largas los detalles locales se pierden con facilidad.
+
+\lecturefigure{slide-25-seq2seq-2014.jpg}{2014 seq2seq: el encoder LSTM comprime la oración fuente de longitud variable en un context, y el decoder genera después la oración destino.}{Video oficial de Stanford Online 00:15:43--00:17:02.}
+
+\begin{warningbox}{El encoder bottleneck no se reduce a que «la dimensión del vector sea necesariamente insuficiente»}
+En teoría, un vector real de alta dimensión puede codificar mucha información, pero el entrenamiento debe aprender a comprimir de forma estable todos los detalles relevantes, propagarlos a lo largo de caminos temporales largos y permitir que el decoder los recupere. El cuello de botella real proviene de la capacidad limitada, la dificultad de optimización, los caminos largos y la interfaz de resumen único. El valor de la attention está en permitir que el decoder acceda directamente a múltiples estados de la fuente, no en demostrar que un solo vector sea matemáticamente incapaz de representar una oración.
+\end{warningbox}
+
+\subsection{Bahdanau attention: cada posición de salida hace una búsqueda suave en la secuencia fuente}
+
+El context fijo de la subsección anterior es el mismo para todas las posiciones de salida, por lo que no puede expresar «qué parte de la oración fuente se necesita principalmente al generar esta palabra». La Bahdanau attention convierte esta interfaz en una consulta paso a paso: cada vez que el decoder avanza un paso, vuelve a comparar el estado de generación actual con todos los encoder states y combina un context que sirve solo a la palabra destino actual. Para el paso destino $t$, el alignment model compara primero el estado anterior del decoder $\mathbf s_{t-1}$ con cada encoder state $\mathbf h_s$:
+
+\[
+e_{t,s}=a(\mathbf s_{t-1},\mathbf h_s),\qquad
+\alpha_{t,s}=\frac{\exp(e_{t,s})}{\sum_{j=1}^{S}\exp(e_{t,j})},
+\]
+\[
+\mathbf c_t=\sum_{s=1}^{S}\alpha_{t,s}\mathbf h_s.
+\]
+
+Aquí, $a$ es una compatibility function aprendible, $\alpha_{t,s}$ es el peso normalizado de la posición fuente $s$ y $\mathbf c_t$ es el context dinámico del paso destino actual. El resumen fijo se sustituye por una «memory que puede volver a direccionarse en cada paso».
+
+\lecturefigure{slide-26-neural-machine-translation-2014.jpg}{Bahdanau alignment: el decoder realiza una soft search sobre los encoder states para cada palabra destino.}{Video oficial de Stanford Online 00:17:02--00:18:32.}
+
+\begin{knowledgebox}{Lectura de la figura: primero el camino de la información, después el mapa de calor}
+El encoder sigue produciendo $\mathbf h_s$ de forma secuencial, pero el decoder ya no recibe solo el último estado. Cada paso destino calcula un conjunto de $\alpha_{t,s}$ según lo que necesita en ese momento; las posiciones de peso alto en el mapa de calor indican una lectura de información más intensa. Los pesos pueden ofrecer pistas de alignment, pero no equivalen automáticamente a una explicación humana ni a una atribución causal.
+\end{knowledgebox}
+
+\lecturefigure{slide-27-bahdanau-attention-history.jpg}{Historia oral de la attention: la intuición del alineamiento en traducción, la ponderación con softmax y el proceso de nombrarla.}{Video oficial de Stanford Online 00:18:32--00:20:11.}
+
+\teachervoice{Karpathy relata que le preguntó por correo a Dzmitry Bahdanau: como hablante no nativo de inglés, alineaba mentalmente una y otra vez la oración fuente con la oración destino, y eso inspiró la soft search; según cuenta, el mecanismo funcionó al primer intento; el nombre «attention», más afortunado, provino de una sugerencia de Yoshua Bengio para la versión final. Estas notas conservan esta atribución, pero no amplían un recuerdo personal hasta convertirlo en una priority history completa.}
+
+\subsection{2017 Transformer: convertir la attention en un paquete arquitectónico completo}
+
+El Transformer elimina la recurrent computation, pero no puede quedarse solo con una softmax. Como la attention no tiene noción de orden sobre el conjunto de entrada, es necesario inyectar la position; como la red debe apilarse, se necesitan una residual pathway y normalization; como cada posición requiere además una transformación no lineal, hay que añadir un position-wise MLP; como distintas relaciones pueden modelarse en paralelo, se usan multiple heads; y el decoder debe, además, usar una mask para no leer el futuro.
+
+\lecturefigure{slide-28-transformer-full-package.jpg}{El «paquete completo» del Transformer de 2017: attention, posición, conexiones residuales, normalización, MLP y múltiples cabezas.}{Video oficial de Stanford Online 00:20:11--00:22:31.}
+
+\begin{knowledgebox}{Lectura de la figura: qué partes cambiaron después y cuáles se conservaron}
+Karpathy señala que el post-norm original suele sustituirse por pre-norm, y que la posición sinusoidal absoluta dio lugar a esquemas relative/rotary, entre otros; pero el residual stream, la attention, la feed-forward hidden dimension ampliada unas cuatro veces, las múltiples cabezas y los block repetidos se han conservado durante mucho tiempo. La «resiliencia» de la arquitectura es un hecho empírico, no una demostración de que los hiperparámetros originales sean óptimos a cualquier escala.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El modelo de lenguaje neuronal define el objetivo probabilístico next-token; seq2seq resuelve la entrada y salida de longitud variable, pero genera un context bottleneck único; la Bahdanau attention permite que el decoder lea los estados de la fuente según lo necesite; el Transformer convierte esa lectura en el mecanismo de comunicación troncal y, con posición, conexiones residuales, normalización, MLP, heads y masks, forma un package entrenable. La siguiente sección reinterpreta este mecanismo como paso de mensajes en grafos.
+\section{Attention como fase de comunicación sobre un grafo}
+
+Las fórmulas suelen escribir la attention como una multiplicación de matrices, lo que oculta con facilidad lo que realmente hace. Esta sección adopta la explicación de Karpathy: cada token es un node del grafo y cada node guarda un private state; la attention decide, según el estado actual, qué información recoger y de cuáles vecinos permitidos; la MLP, en cambio, calcula de forma independiente dentro de cada node. Por ello, el bloque Transformer alterna communication y computation.
+
+\subsection{Alternancia entre communication y computation}
+
+Sean las token states de la capa $\ell$ la matriz $X^{(\ell)}\in\mathbb R^{T\times d}$. Un bloque pre-norm puede escribirse como
+
+\[
+\widetilde X^{(\ell)}=X^{(\ell)}+\operatorname{Attn}(\operatorname{LN}(X^{(\ell)})),
+\]
+\[
+X^{(\ell+1)}=\widetilde X^{(\ell)}+\operatorname{MLP}(\operatorname{LN}(\widetilde X^{(\ell)})).
+\]
+
+Aquí, $T$ es el número de tokens, $d$ es la residual width y $\operatorname{LN}$ es LayerNorm. La primera ecuación permite que los tokens intercambien información; la segunda hace que cada token aplique, con los mismos parámetros, una transformación no lineal a la información recogida.
+
+\lecturefigure{slide-29-attention-communication-phase.jpg}{La attention es data-dependent communication; la MLP es la computation independiente de cada node.}{Video oficial de Stanford Online, 00:22:32--00:23:32.}
+
+\begin{importantbox}{Abstracción central: primero enrutar, luego calcular}
+La attention responde «de qué nodes debe leer el node actual y cuánto»; la MLP responde «cómo transformar localmente la información una vez obtenida». La connectivity mask establece qué aristas existen y los attention weights determinan qué tan fuerte es cada una en ese momento. No deben confundirse: un causal graph fijo puede producir intensidades de mensaje que dependen de los datos.
+\end{importantbox}
+
+\subsection{Q/K/V: direccionamiento, coincidencia y transmisión}
+
+La subsección anterior solo identificó la attention como la «fase de comunicación»; esta responde además cómo una ronda de comunicación determina el emisor y el contenido. Lo esencial es proyectar un mismo node state en tres papeles: la query expresa la necesidad actual, la key ofrece una dirección con la cual comparar y el value lleva la información que realmente se agrega. Con los papeles separados, el modelo puede usar un tipo de rasgo para decidir «si debe leer» y otro para decidir «qué lee». A partir del estado $X$, las proyecciones lineales dan
+
+\[
+Q=XW_Q,\qquad K=XW_K,\qquad V=XW_V,
+\]
+
+y se calcula la scaled dot-product attention:
+
+\[
+\operatorname{Attn}(Q,K,V)=
+\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}+M\right)V.
+\]
+
+Aquí, $Q$ indica qué busca cada node, $K$ indica cómo puede compararse cada node, $V$ indica el contenido que realmente se transmite, $d_k$ es la dimensión de key/query y $M$ es la connectivity mask. Dividir entre $\sqrt{d_k}$ sirve para controlar la dot-product variance y evitar que la softmax se sature prematuramente al crecer la dimensión.
+
+\lecturefigure{slide-30-attention-code-and-graph.jpg}{Pseudocódigo de Python y grafo dirigido: una ronda de attention message-passing.}{Video oficial de Stanford Online, 00:23:32--00:25:35.}
+
+\begin{knowledgebox}{Lectura de la figura: recorrer la ruta completa de un node destino}
+Primero se toma la query del node destino; luego se reúnen las keys de todos los nodes origen con aristas de entrada permitidas; el dot product da una affinity sin normalizar; la softmax la convierte en pesos que suman 1; por último, se suman ponderadamente los values de los nodes origen, y el resultado es la actualización del node destino. La estructura del grafo le dice al modelo «a quién puede preguntar», Q/K le dicen «a quién debe preguntar ahora» y V le dice «cuál es el contenido de la respuesta».
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Expresión matricial mínima de la attention de una sola cabeza; una implementación real también requiere las dimensiones de lote/head y dropout.}]
+def attention(x, Wq, Wk, Wv, mask):
+    q = x @ Wq                  # [T, dk]
+    k = x @ Wk                  # [T, dk]
+    v = x @ Wv                  # [T, dv]
+    scores = q @ k.T / sqrt(k.shape[-1])
+    scores = scores.masked_fill(mask == 0, -inf)
+    weights = softmax(scores, dim=-1)
+    return weights @ v          # [T, dv]
+\end{lstlisting}
+
+\subsection{Heads en paralelo, layers en serie; self y cross solo difieren en la fuente de información}
+
+La multi-head attention ejecuta $H$ veces la attention en paralelo con parámetros distintos:
+
+\[
+\operatorname{MHA}(X)=\operatorname{Concat}(\text{head}_1,\ldots,\text{head}_H)W_O.
+\]
+
+Cada head puede aprender una compatibility y un value subspace distintos; las layers, en cambio, se apilan en serie, de modo que la representación recogida en una ronda se convierte en la entrada de comunicación de la siguiente. En la self-attention, $Q,K,V$ provienen del mismo conjunto de states; en la cross-attention, la query proviene del decoder y la key/value del encoder. La operación matemática es la misma; lo que cambia es la memory source.
+
+\lecturefigure{slide-31-parallel-communication-and-compute.jpg}{Comunicación en paralelo y cálculo punto a punto: la connectivity del encoder, del causal decoder y de la cross-attention.}{Video oficial de Stanford Online, 00:25:35--00:31:00.}
+
+\begin{knowledgebox}{Lectura de la figura: tres tipos de connectivity}
+La encoder self-attention suele permitir que todos los tokens se comuniquen entre sí por pares; el causal decoder solo permite que la posición $t$ lea los tokens $\le t$, lo que forma un grafo triangular inferior; el modelo encoder--decoder además permite que las decoder queries lean todas las keys/values del encoder. Tener varias cabezas no cambia el conjunto de aristas permitidas; solo aprende, sobre ese mismo conjunto de aristas, varios juegos de reglas de enrutamiento en paralelo.
+\end{knowledgebox}
+
+\teachervoice{Alguien preguntó la diferencia entre heads y layers, y la respuesta de Karpathy fue muy práctica: «heads es copy-paste in parallel, layers es copy-paste in series». También admitió que la analogía del grafo se le había ocurrido esa misma mañana; por eso la trata como un modelo didáctico y considera el nanoGPT de la sección siguiente como la evidencia ejecutable.}
+
+\subsection{Resumen de la sección}
+
+La attention puede entenderse como data-dependent message passing sobre un grafo dirigido: la mask define las aristas por las que se puede comunicar, Q/K producen la affinity, la softmax normaliza y V transmite el contenido; después, la MLP calcula de forma independiente dentro de cada node. Las heads aportan subespacios de relaciones en paralelo, las layers aportan profundidad de razonamiento en serie, y la self/cross attention solo difieren en la fuente de las key/value.
+\section{nanoGPT: de caracteres a un Decoder-only Transformer capaz de generar}
+
+La explicación anterior basada en grafos todavía puede quedarse en el plano de la intuición. Esta sección sigue el walkthrough de nanoGPT de Karpathy para unir texto, token, batch, block, loss, mask y generation en una ruta ejecutable. El objetivo no es memorizar 300 líneas de código, sino poder responder, para cada dimensión de un tensor, qué representa: qué muestras independientes, qué posiciones temporales, qué heads y qué features.
+
+\subsection{Alcance de la evidencia y Tiny Shakespeare}
+
+Al presentar nanoGPT, Karpathy subraya dos puntos: el código es lo bastante pequeño para que los estudiantes lo lean completo y, a la vez, la implementación es lo bastante rigurosa como para reproducir, en su momento, experimentos de nivel GPT-2 entrenando unas 38 horas con 8 GPU. La demostración de clase usa Tiny Shakespeare y un tokenizer de caracteres para exponer el mecanismo; esto no significa que un GPT de producción use el mismo vocabulary ni la misma configuración de cómputo.
+
+\lecturefigure{slide-32-nanogpt.jpg}{nanoGPT: minimalista, legible y aun así capaz de experimentos serios de reproducción de GPT.}{Video oficial de Stanford Online 00:31:01--00:31:30.}
+
+\teachervoice{Karpathy admite primero que la analogía del grafo «se le ocurrió esta misma mañana» y enseguida pasa a la executable implementation. Vale la pena aprender de este orden: la intuición se encarga de plantear preguntas verificables, y el código y el tensor shape impiden que la intuición se descontrole.}
+
+\lecturefigure{slide-33-tiny-shakespeare-dataset.jpg}{Tiny Shakespeare: el texto de las obras se concatena en una secuencia de caracteres de aproximadamente 1 MB.}{Video oficial de Stanford Online 00:31:31--00:32:00.}
+
+Un modelo de lenguaje no lee el «significado» directamente, sino symbol IDs discretos. Para el conjunto de caracteres $\mathcal V$ se define la correspondencia $\operatorname{encode}:\mathcal V\to\{0,\ldots,|\mathcal V|-1\}$, y el texto completo se convierte en una secuencia unidimensional de enteros. Lo que el modelo aprende es la probabilidad condicional bajo esta codificación y esta distribución de entrenamiento; el «Shakespeare infinito» no es más que muestrear una y otra vez de la learned conditional distribution.
+
+\subsection{Tokenización, límites de documento y secuencia de entrada}
+
+Un \term{token} es la unidad básica discreta que procesa el modelo; puede ser un carácter, un subword, un patch u otro element. El \term{vocabulary} es el conjunto de tokens disponibles. La tokenización por caracteres es sencilla y no tiene unknown words, pero alarga las secuencias; la tokenización por subwords acorta las secuencias, pero sus reglas de codificación son más complejas. El embedding asigna a cada token ID un vector de $d$ dimensiones.
+
+\lecturefigure{slide-34-character-tokenization.jpg}{Tokenizer de caracteres: establece una correspondencia bidireccional entre caracteres e IDs enteros.}{Video oficial de Stanford Online 00:32:00--00:32:31.}
+
+\begin{knowledgebox}{Lectura de la figura: encode/decode no es la inferencia del modelo}
+El tokenizer es solo una deterministic interface: \texttt{encode} convierte una cadena en enteros y \texttt{decode} realiza la correspondencia inversa; el modelado probabilístico real ocurre en el embedding, los Transformer blocks y el output head. El valor numérico de un ID de carácter no tiene semántica: el ID 7 no es «mayor» que el ID 3.
+\end{knowledgebox}
+
+\lecturefigure{slide-35-tokenized-data.jpg}{Tokenized data: un texto largo se convierte en un stream unidimensional de enteros.}{Video oficial de Stanford Online 00:32:27--00:33:00.}
+
+Varios documentos independientes pueden separarse con un special end-of-text token. En clase se dijo de palabra que el modelo debe aprender a «wipe memory» en el límite; una formulación más precisa es esta: el token de límite le da al modelo una señal de segmentación; si la attention mask todavía permite leer a través del límite, que el modelo ignore el texto previo depende de los datos de entrenamiento, del objetivo y de los pesos aprendidos, no de que el token borre automáticamente algún RNN hidden state.
+
+\begin{lstlisting}[caption={Codificación de caracteres de Tiny Shakespeare y construcción del shifted batch.}]
+chars = sorted(list(set(text)))
+stoi = {ch: i for i, ch in enumerate(chars)}
+encode = lambda s: [stoi[ch] for ch in s]
+data = torch.tensor(encode(text), dtype=torch.long)
+
+def get_batch(data, batch_size, block_size):
+    starts = torch.randint(len(data) - block_size - 1,
+                           (batch_size,))
+    x = torch.stack([data[i:i + block_size] for i in starts])
+    y = torch.stack([data[i + 1:i + block_size + 1]
+                     for i in starts])
+    return x, y
+\end{lstlisting}
+
+\subsection{Batch size y block size: no confundir las dos dimensiones}
+
+El \term{block size} es la context length máxima de cada secuencia en un forward pass; el \term{batch size} es el número de secuencias independientes que se procesan en paralelo. Si $B=4,T=8$, la entrada $X\in\mathbb N^{4\times8}$ contiene cuatro fragmentos de ocho tokens que no se comunican entre sí. El paralelismo en la GPU ocurre en varias dimensiones (batch, time, head y feature), pero la attention no debe intercambiar información entre batch elements.
+
+\lecturefigure{slide-36-batch-construction.jpg}{Recorte aleatorio de lotes de entrenamiento de $B\times T$ a partir de un token stream unidimensional.}{Video oficial de Stanford Online 00:33:00--00:33:38.}
+
+\begin{knowledgebox}{Lectura de la figura: las cuatro líneas horizontales no son una secuencia más larga}
+Cada fila es una muestra independiente, cuyo punto de inicio se muestrea al azar del stream de datos; la longitud de cada fila la controla el block size. Confundir la dimensión batch con la dimensión time provoca fugas de información entre muestras. Aumentar el batch mejora sobre todo el aprovechamiento del hardware y la estimación del gradiente; solo aumentar el block size amplía el contexto que una muestra puede usar directamente, y además incrementa de forma notable el cómputo de attention y la memoria de video.
+\end{knowledgebox}
+
+\lecturefigure{slide-37-input-target-tensors.jpg}{Input/target tensors: el objetivo es la entrada desplazada una posición a la derecha en el tiempo.}{Video oficial de Stanford Online 00:33:38--00:35:00.}
+
+Para cada posición $t$, el prefix de entrada es $x_{\le t}$ y la etiqueta de supervisión es $x_{t+1}$. Por ello, un chunk de longitud $T$ aporta a la vez $T$ ejemplos de entrenamiento next-token. Si los logits son $z_{b,t,v}$ y las etiquetas son $y_{b,t}$, la cross-entropy promedio es
+
+\[
+\mathcal L=-\frac{1}{BT}\sum_{b=1}^{B}\sum_{t=1}^{T}
+\log\frac{\exp z_{b,t,y_{b,t}}}{\sum_{v\in\mathcal V}\exp z_{b,t,v}}.
+\]
+
+Aquí, $v$ recorre el vocabulary. En entrenamiento, un solo forward supervisa todas las posiciones temporales, mientras que en generación todavía hay que agregar un token a la vez.
+
+\subsection{Embedding, Block y residual stream}
+
+El token embedding $E_{\text{tok}}[x_t]$ aporta el «qué es» y el position embedding $E_{\text{pos}}[t]$ aporta el «dónde está»:
+
+\[
+\mathbf x_t^{(0)}=E_{\text{tok}}[x_t]+E_{\text{pos}}[t].
+\]
+
+Estos states entran en blocks repetidos y, al final, pasan por LayerNorm y un language-model head lineal que produce los logits sobre el vocabulary. Decoder-only significa que no hay un encoder independiente ni cross-attention; no significa que el modelo «no tenga decoder blocks».
+
+\lecturefigure{slide-38-decoder-missing-gpt.jpg}{GPT decoder-only: conserva masked self-attention y MLP, y elimina encoder/cross-attention.}{Video oficial de Stanford Online 00:35:00--00:38:31.}
+
+\begin{knowledgebox}{Lectura de la figura: las marcas rojas son una resta de arquitectura}
+Cada capa del decoder del Transformer original contiene masked self-attention, cross-attention y feed-forward. GPT no tiene un encoder de secuencia de origen, por lo que elimina la cross-attention; la causal self-attention que queda reúne información del contexto a la izquierda, y el MLP se encarga de la transformación local de cada token. El output head proyecta el hidden state final a los logits del siguiente token.
+\end{knowledgebox}
+
+\lecturefigure{slide-39-block-module.jpg}{Block de nanoGPT: dos residual updates, una de attention con pre-norm y otra de MLP.}{Video oficial de Stanford Online 00:37:08--00:38:31.}
+
+La residual connection suma la salida de la subcapa al stream principal, lo que da al gradiente una ruta corta; \term{LayerNorm} normaliza el state de un token individual en la dimensión feature y estabiliza la escala entre capas; \term{pre-norm} significa normalizar antes de entrar en la subcapa. Los parámetros del Block se comparten entre las distintas posiciones de token, de modo que la misma regla de cálculo puede aplicarse a la representación de cualquier posición.
+
+\lecturefigure{slide-40-mlp-module.jpg}{MLP por token: expansión lineal, GELU, proyección lineal y dropout.}{Video oficial de Stanford Online 00:38:31--00:38:55.}
+
+\term{GELU} es una activación no lineal suave. La feed-forward network clásica amplía la residual width de $d$ a aproximadamente $4d$ y luego la proyecta de vuelta a $d$. El MLP no lee información entre tokens, así que su cálculo para todos los tokens puede hacerse en paralelo por completo; sin embargo, las entradas de los distintos tokens ya mezclaron contexto a través de la attention, por lo que el mismo MLP produce salidas distintas en contextos distintos.
+
+\subsection{Causal self-attention: la mask impide la fuga de la respuesta}
+
+Si la posición $t$ pudiera leer posiciones futuras $s>t$, la etiqueta de entrenamiento ya estaría a la derecha en el tensor de entrada y el modelo haría trampa. La causal mask se define como
+
+\[
+M_{t,s}=\begin{cases}
+0,&s\le t,\\
+-\infty,&s>t.
+\end{cases}
+\]
+
+Al sumarla a los logits antes del softmax, la probabilidad de las posiciones futuras se vuelve cero. La mask forma parte del objetivo de entrenamiento: permite calcular todas las posiciones en paralelo sin dejar de respetar la left-to-right factorization.
+
+\lecturefigure{slide-41-full-implementation.jpg}{Implementación completa de CausalSelfAttention: reshape de Q/K/V, mask, softmax, value aggregation y projection.}{Video oficial de Stanford Online 00:38:55--00:41:34.}
+
+\begin{knowledgebox}{Lectura de la figura: un tensor de alta dimensión es solo el mismo algoritmo procesado por lotes}
+La implementación proyecta $X$ y lo reorganiza (reshape) en batch $B$, heads $H$, time $T$ y head feature $d_h$. Una multiplicación de matrices calcula de una sola vez los query-key dot products de todos los batches, heads y posiciones; \texttt{masked\_fill} fija los logits futuros en $-\infty$; el softmax da los weights; y los weights se multiplican por los values. transpose/contiguous/view sobre todo reordenan dimensiones; no son un nuevo mecanismo de aprendizaje.
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Forward mínimo de causal self-attention con anotaciones de forma.}]
+def forward(self, x):
+    B, T, C = x.shape
+    q = self.q(x).view(B, T, self.n_head, C // self.n_head)
+    k = self.k(x).view(B, T, self.n_head, C // self.n_head)
+    v = self.v(x).view(B, T, self.n_head, C // self.n_head)
+    q, k, v = (z.transpose(1, 2) for z in (q, k, v))
+
+    scores = q @ k.transpose(-2, -1) / math.sqrt(k.size(-1))
+    scores = scores.masked_fill(self.causal[:, :, :T, :T] == 0,
+                                float("-inf"))
+    weights = torch.softmax(scores, dim=-1)
+    y = weights @ v
+    y = y.transpose(1, 2).contiguous().view(B, T, C)
+    return self.proj(y)
+\end{lstlisting}
+
+\subsection{Curva de entrenamiento y autoregressive generation}
+
+Ya construimos la loss de entrenamiento; esta subsección conecta «la loss baja» con «la generación de texto» y precisa qué puede demostrar cada una. Que la curva de entrenamiento baje indica que el modelo predice mejor los tokens held-out, pero no demuestra por sí solo capacidad gramatical, factual ni de razonamiento. En Tiny Shakespeare, una loss más baja hace que la salida aprenda poco a poco nombres de personajes, saltos de línea, formas de palabras y el formato teatral; como los datos son pocos y el context a nivel de caracteres es limitado, la generación todavía puede ser fluida localmente y carecer de sentido en lo global. Al leer la figura, primero hay que ver si el objetivo de optimización mejora y después revisar si el texto muestreado refleja estadística local, estructura de largo alcance o reproducción memorizada.
+
+\lecturefigure{slide-42-training-loss.jpg}{La loss de entrenamiento baja: la next-character prediction mejora de forma continua.}{Video oficial de Stanford Online 00:41:34--00:41:43.}
+
+\begin{warningbox}{Lectura de la figura: la loss es evidencia sobre la función objetivo, no una escala de inteligencia general}
+La cross-entropy mide la log-probabilidad del verdadero token siguiente. Respalda la conclusión de que «el modelo se ajusta mejor a esta distribución de datos», pero por sí sola no demuestra coherencia a largo plazo, exactitud factual, robustez ni seguridad. Además, las curvas de entrenamiento y de validación deben leerse por separado para distinguir memorization de generalization.
+\end{warningbox}
+
+\lecturefigure{slide-43-fake-shakespeare-output.jpg}{«Falso Shakespeare» generado por muestreo: el modelo ya absorbió el formato y la estadística local.}{Video oficial de Stanford Online 00:41:41--00:43:12.}
+
+La generación parte de un token inicial; en cada paso toma los logits de la última posición, muestrea un token nuevo, lo agrega al context y repite. Si el context máximo es $T_{\max}$, en el paso $n$ solo se conserva la ventana más reciente:
+
+\[
+\hat x_{n+1}\sim p_\theta(\cdot\mid \hat x_{\max(1,n-T_{\max}+1):n}).
+\]
+
+\begin{lstlisting}[caption={Autoregressive generation con context cropping limitado.}]
+@torch.no_grad()
+def generate(model, ids, max_new_tokens, block_size):
+    for _ in range(max_new_tokens):
+        context = ids[:, -block_size:]
+        logits, _ = model(context)
+        probs = torch.softmax(logits[:, -1, :], dim=-1)
+        next_id = torch.multinomial(probs, num_samples=1)
+        ids = torch.cat((ids, next_id), dim=1)
+    return ids
+\end{lstlisting}
+
+\teachervoice{En clase, al toy model con block size 8 se le «devuelven» paso a paso los caracteres que predice: el context crece de 1 a 8 y, al rebasarlo, la ventana empieza a deslizarse. Esta demostración importa más que solo decir «autorregresivo», porque expone la tensión entre el entrenamiento en paralelo, la generación en serie y el context limitado.}
+
+\subsection{Resumen de la sección}
+
+La ruta de nanoGPT lleva los mecanismos abstractos al nivel del tensor: el texto pasa por el tokenizer y se convierte en un stream de IDs; el recorte aleatorio forma batches de $B\times T$; la entrada y el objetivo se desfasan una posición; los token/position embeddings entran en decoder blocks repetidos; la causal mask impide la fuga del futuro; la cross-entropy entrena todas las posiciones; y la generation muestrea un token a la vez, limitada por el block size.
+\section{Tres familias de modelos sobre el mismo esqueleto}
+
+La sección anterior implementó un GPT decoder-only. En esta sección solo se cambian la connectivity y el objective, y así se obtienen las familias encoder-only y encoder--decoder. Esta perspectiva unificada es más confiable que memorizar nombres de modelos: primero se pregunta a quién puede ver cada posición, después de dónde vienen las keys/values y, por último, qué salida exige el objetivo de entrenamiento.
+
+\subsection{Encoder: se elimina la causal mask}
+
+La self-attention del encoder permite que cada token lea al mismo tiempo el contexto de la izquierda y el de la derecha, por lo que sirve para generar una contextual representation, para clasificación o para denoising. En el código basta con eliminar la causal mask para que todas las posiciones de la attention matrix participen en el softmax; en cambio, el objetivo ya no puede ser la misma next-token loss left-to-right, porque los token futuros filtrarían la respuesta.
+
+\lecturefigure{slide-44-encoder-blocks.jpg}{Encoder blocks: se elimina el causal masking para que todos los token se comuniquen en ambas direcciones.}{Video oficial de Stanford Online, 00:43:18--00:43:53.}
+
+\begin{knowledgebox}{Lectura de la figura: la misma attention, con restricciones distintas}
+La connectivity triangular inferior de GPT impone la generación causal; la self-attention totalmente conectada de los encoder tipo BERT permite que cada token reúna la información de toda la oración. BERT suele usar masked/denoising objectives: primero se corrompe la entrada y luego se pide al modelo que la recupere o que extraiga una representación. La diferencia de arquitectura no se reduce a «si hay o no mask»: el objective también debe corresponder a la información visible.
+\end{knowledgebox}
+
+\subsection{Cross-attention: el decoder consulta la encoder memory}
+
+Un modelo encoder--decoder primero codifica la secuencia fuente como $H_{\text{enc}}$; el decoder state $X_{\text{dec}}$ produce las queries, mientras que las keys/values provienen del encoder:
+
+\[
+Q=X_{\text{dec}}W_Q,\qquad
+K=H_{\text{enc}}W_K,\qquad
+V=H_{\text{enc}}W_V.
+\]
+
+Así, cada token de destino puede ver el prefijo ya generado mediante la causal self-attention y, además, leer la entrada fuente completa mediante la cross-attention. La traducción automática, la generación de resúmenes y las text-to-text tasks pueden aprovechar este canal de condicionamiento explícito.
+
+\lecturefigure{slide-45-cross-attention.jpg}{Cross-attention: las decoder queries leen la información fuente a partir de las encoder keys/values.}{Video oficial de Stanford Online, 00:43:53--00:44:47.}
+
+\begin{knowledgebox}{Lectura de la figura: la dirección de las flechas indica el origen de la información}
+En la decoder self-attention, Q/K/V provienen de los decoder states; en la cross-attention, la query sigue saliendo del decoder node actual, pero la key/value proviene de la capa superior del encoder. Ambas comparten el dot product, el softmax y la value aggregation. Lo «cross» no es otro algoritmo misterioso, sino la misma operación de direccionamiento aplicada entre dos conjuntos de states.
+\end{knowledgebox}
+
+\subsection{Comparación estructurada de GPT, BERT y T5}
+
+Cuando hay muchos nombres de modelos, conviene reducirlos a su connectivity y su objective. La tabla siguiente describe solo los prototipos clásicos; los modelos reales pueden incorporar span corruption, prefix LM, mixture-of-experts o multimodal adapters, pero al evaluar un modelo nuevo se pueden seguir aplicando las mismas tres preguntas.
+
+\lecturefigure{slide-46-transformer-model-families.jpg}{Las tres grandes familias: GPT decoder-only, BERT encoder-only y T5 encoder--decoder.}{Video oficial de Stanford Online, 00:44:47--00:45:31.}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{L{2.8cm}L{3.5cm}L{3.2cm}X}
+\toprule
+Familia & Connectivity & Objetivo típico & Problemas adecuados \\
+\midrule
+Decoder-only / GPT & Autoatención causal de izquierda a derecha & Predecir el siguiente token & Generación abierta, completar a partir de un prompt \\
+Encoder-only / BERT & Autoatención bidireccional & Recuperación de lo enmascarado, eliminación de ruido o tareas supervisadas & Extracción de representaciones, clasificación, recuperación de información, etiquetado de secuencias \\
+Encoder--decoder / T5 & Codificador totalmente conectado; decodificador causal; atención cruzada & Generación condicionada de secuencias & Traducción, resúmenes, transformaciones estructuradas \\
+\bottomrule
+\end{tabularx}
+\caption{Términos clave: una familia de modelos se define por la información visible y por el objetivo de entrenamiento en conjunto.}
+\end{table}
+
+\teachervoice{En la sesión de Q\&A, Karpathy dijo que no le gusta mucho el proceso autorregresivo en el que cada token muestreado queda comprometido de forma permanente, y que prefiere algo parecido a diffusion: «primero un borrador y luego una revisión». Se trata de una intuición personal de investigación de 2023, no de una dirección de evolución inevitable del Transformer demostrada en esta clase.}
+
+\subsection{Resumen de la sección}
+
+Decoder-only usa causal self-attention para la next-token generation; encoder-only permite la comunicación bidireccional y adopta objetivos de aprendizaje de representaciones que no filtran las etiquetas; encoder--decoder hace que un causal decoder consulte la memory de la fuente mediante cross-attention. Las tres comparten las matemáticas de la attention y solo se reconfiguran en la connectivity, la state source y el objective.
+\section{Transferencia entre modalidades: primero representar el mundo como elementos que pueden comunicarse}
+
+La familia de modelos responde «cómo pueden conectarse los token entre sí»; las aplicaciones entre modalidades dan un paso más y responden «qué cuenta como token». Karpathy resume la receta de transferencia con una frase deliberadamente exagerada: cortar imágenes, voz, trayectorias o estructuras moleculares en elementos, fingir que son texto y dejar que el Transformer modele sus relaciones. La verdadera dificultad de ingeniería se esconde justamente en el paso de «cortar en elementos».
+
+\subsection{Vision Transformer: el patch es el token visual}
+
+El capítulo anterior ya explicó que el encoder permite que un conjunto de token se comunique en ambas direcciones; el primer paso de la transferencia a visión es definir cómo convertir los píxeles bidimensionales en ese conjunto de token. ViT elige la interfaz más directa: divide la imagen en patch de tamaño fijo, aplana cada patch, lo proyecta linealmente a un vector y, tras agregar una representación de posición, lo envía al encoder. Si la imagen mide $H\times W$ y el lado del patch es $P$, el número de token es aproximadamente $N=HW/P^2$. Un patch más pequeño ofrece mayor granularidad, pero hace crecer rápidamente el cómputo $N^2$ de attention y la memoria de GPU; por eso la tokenización determina a la vez la resolución visual y el costo del sistema.
+
+\lecturefigure{slide-47-vision-transformer.jpg}{Vision Transformer: la imagen se corta en una patch sequence y luego el encoder realiza la comunicación global.}{Video oficial de Stanford Online 00:52:41--00:53:42.}
+
+\begin{knowledgebox}{Lectura de la figura: ViT no hace desaparecer la estructura bidimensional}
+El patch ordering y el positional embedding siguen codificando la posición espacial, y el aumento de datos durante el entrenamiento y la escala de los datos también aportan bias visual. Un Transformer puro necesita volver a aprender la localidad y la regularidad ante traslaciones; por eso suele depender más que una ConvNet de los datos o del preentrenamiento. Sin embargo, la attention global permite que patch lejanos se comuniquen directamente desde las capas poco profundas y ofrece una interfaz unificada.
+\end{knowledgebox}
+
+\subsection{Speech: secuencias de spectrogram y bias convolucional local}
+
+La voz puede convertirse primero en un spectrogram de time--frequency y luego cortarse a lo largo del tiempo en tramas o bloques. Conformer no consiste en «solo arrojar el espectrograma a un vanilla Transformer»: además de attention, agrega un convolution module para modelar al mismo tiempo las dependencias globales y los patrones acústicos locales; Whisper también usa una etapa de entrada especializada, encoder--decoder y un objetivo con supervisión débil a gran escala.
+
+\lecturefigure{slide-48-conformer.jpg}{Conformer: combina el modelado global de attention con el bias acústico local de convolution.}{Video oficial de Stanford Online 00:53:42--00:54:00.}
+
+\begin{knowledgebox}{Lectura de la figura: reutilizar entre dominios no significa que cada capa sea idéntica}
+El espectrograma Mel es una representación de la energía de la voz en tiempo y frecuencia; la convolución local capta bien los patrones de tramas vecinas, y la autoatención capta bien las relaciones a larga distancia. La aportación de Conformer es precisamente combinar ambas. Lo que se dijo en clase, «tratarlo como texto», debe entenderse como compartir una interfaz de secuencia, no como borrar la estructura acústica ni las funciones objetivo especializadas.
+\end{knowledgebox}
+
+\subsection{Decision Transformer: escribir trayectorias de control como secuencias}
+
+Decision Transformer intercala return-to-go, state y action, y deja que un causal model prediga la action condicionada al retorno esperado y al historial. Reescribe el offline RL como conditional sequence modeling: los datos de entrenamiento provienen de trayectorias existentes, sin interacción en línea con el entorno; la capacidad de planificación depende de la cobertura de los datos, del return conditioning y de que el modelo logre extraer una política de comportamiento a partir de las estadísticas de la secuencia.
+
+\lecturefigure{slide-49-decision-transformer.jpg}{Decision Transformer: return, state y action forman una secuencia de trayectoria que puede modelarse de forma autorregresiva.}{Video oficial de Stanford Online 00:54:00--00:54:13.}
+
+\begin{knowledgebox}{Lectura de la figura: no trata la recompensa como una palabra cualquiera}
+Cada tipo de elemento tiene una semántica y un embedding distintos, y es necesario codificar el paso de tiempo y la información de modality/type. El modelo aprende una distribución condicional del tipo $p(a_t\mid R_t,s_{\le t},a_{<t})$, en lugar de resolver directamente la Bellman equation. El modelado de secuencias ofrece una interfaz de entrenamiento unificada, pero no elimina el offline data bias ni el riesgo de extrapolation.
+\end{knowledgebox}
+
+\subsection{AlphaFold2: attention dentro de un sistema especializado de estructura biológica}
+
+El Evoformer de AlphaFold2 ejecuta varios tipos de attention y specialized updates entre la multiple-sequence alignment y la residue-pair representation; después, el módulo de estructura produce la conformación tridimensional. Esto muestra que attention puede manejar «qué residuos se relacionan con cuáles», pero no puede reducirse a un GPT que hace next-token prediction ordinaria sobre aminoácidos.
+
+\lecturefigure{slide-50-alphafold.jpg}{AlphaFold2: attention se ubica dentro de un sistema de inferencia de estructura de proteínas altamente especializado en su dominio.}{Video oficial de Stanford Online 00:54:13--00:54:23.}
+
+\begin{warningbox}{Error frecuente al leer la figura: confundir un backbone similar con sistemas equivalentes}
+ViT, Conformer, Decision Transformer y AlphaFold2 usan attention, pero difieren en la unidad de entrada, la position geometry, la función objetivo, la combinación de módulos y la semántica de la salida. Lo que el curso quiere demostrar es que «la primitiva de comunicación direccionable es universal», no que «todos los problemas ya quedaron unificados por el modelado de lenguaje».
+\end{warningbox}
+
+\subsection{Entradas condicionales heterogéneas: por qué es fácil «agregar un sensor» a un Transformer}
+
+El feature map de una red convolucional está estrechamente ligado a la geometría bidimensional; al agregar radar, map, vehicle state o audio hay que decidir en qué capa hacer concatenate o fuse. Un Transformer puede codificar cada tipo de entrada como elementos de un width común, agregar un type embedding para distinguir su origen y luego colocarlos en el conjunto donde se permite la comunicación; attention aprende pesos de fusión que dependen de los datos.
+
+\lecturefigure{slide-51-tesla-input-flexibility.jpg}{Ejemplo de la experiencia en Tesla: la información heterogénea se codifica primero como elementos y luego se entrega a self-attention para fusionarla.}{Video oficial de Stanford Online 00:54:23--00:55:39.}
+
+\begin{knowledgebox}{Términos clave: de dónde viene la libertad en las entradas}
+\begin{itemize}
+  \item \term{type embedding}: indica al modelo si el elemento proviene de image, radar, map o vehicle state;
+  \item \term{positional encoding}: inyecta el tiempo, las coordenadas bidimensionales u otras relaciones geométricas;
+  \item \term{mask/connectivity}: restringe qué elementos pueden comunicarse directamente;
+  \item \term{tokenizer/adapter}: proyecta las distintas dimensiones originales a un residual width compartido;
+  \item \term{inductive bias}: no desaparece, sino que se traslada del core block hacia la interfaz, las posiciones y las reglas de conexión.
+\end{itemize}
+\end{knowledgebox}
+
+\teachervoice{El resumen oral de Karpathy es «cortar todo en pedazos, echarlo a la mezcla y dejar que self-attention decida cómo comunicarse». La frase capta la conveniencia de ingeniería, pero también se presta a malas interpretaciones. Una versión realmente reproducible debe responder: cómo cortar, cómo marcar el origen, qué aristas se permiten, con qué objetivo se supervisa y si el número de token es manejable.}
+
+\subsection{Resumen de la sección}
+
+El patrón común de la transferencia entre modalidades es representar los objetos del dominio como elementos con tipo y posición, y luego encaminar la información con attention. ViT sigue necesitando la posición espacial, Conformer conserva la convolución local, Decision Transformer depende del condicionamiento por trayectorias, AlphaFold2 usa representaciones especializadas de pair/MSA, y los sensores heterogéneos también requieren type embedding y connectivity. Un esqueleto compartido reduce la fricción de la fusión, pero no sustituye el modelado del dominio.
+\section{Por qué funciona el Transformer: expresividad, optimización, hardware y aprendizaje en contexto}
+
+Antes se explicó «qué puede hacer» el Transformer. Esta sección responde una pregunta más difícil: por qué este package sigue adquiriendo capacidades nuevas al escalarse. La respuesta de Karpathy no atribuye todo a un solo factor, la attention, sino a tres propiedades que se cumplen a la vez: el forward pass es lo bastante expressive, residual/normalization vuelven viable la optimización por gradiente y el shallow-wide graph aprovecha la GPU con eficiencia; finalmente, el next-token training a gran escala produce in-context adaptation.
+
+\lecturefigure{slide-52-what-makes-transformer-effective.jpg}{Pregunta central: ¿qué hace exactamente que el Transformer sea tan eficaz?}{Video oficial de Stanford Online, 00:55:39--00:55:48.}
+
+Esta diapositiva de transición debe leerse en cuatro escalas: en la escala de una capa, la attention enruta la información; en la escala de la profundidad, los residual blocks acumulan cómputo; en la escala del entrenamiento, los datos, los parámetros y el compute crecen juntos; en la escala de la inferencia, el prompt modifica las activations, de modo que un mismo conjunto de weights exhibe conductas de tarea distintas. Cualquier teoría que explique el éxito en una sola escala está incompleta.
+
+\subsection{GPT-3: el few-shot prompt revela el in-context learning}
+
+El artículo de GPT-3 coloca en el prompt la descripción de la tarea y varios input--output examples, y logra mejorar la exactitud en ejemplos nuevos sin actualizar parámetros. Aquí, \term{few-shot learning} significa dar unos pocos ejemplos dentro del context; \term{zero-shot}, dar solo la descripción de la tarea; \term{fine-tuning}, en cambio, actualiza de verdad los weights mediante gradient descent. Los tres no deben confundirse.
+
+\lecturefigure{slide-53-gpt3.jpg}{GPT-3: modelo de lenguaje autorregresivo a gran escala y few-shot evaluation.}{Video oficial de Stanford Online, 00:55:43--00:56:31.}
+
+\begin{knowledgebox}{Lectura de la figura: el título del artículo subestima la cuestión del mecanismo}
+«Language Models are Few-Shot Learners» reporta un fenómeno de conducta: más context examples suelen mejorar el desempeño en la tarea. Karpathy prefiere llamarlo in-context learning o meta-learning, porque el modelo parece adaptarse a la tarea dentro de las activations de un solo forward pass. Un fenómeno no equivale a un mecanismo; en cada tarea concreta influyen además el orden de los ejemplos, el formato, las label words y la contaminación de datos.
+\end{knowledgebox}
+
+\lecturefigure{slide-54-chatgpt.jpg}{ChatGPT como caso público de interacción a principios de 2023.}{Video oficial de Stanford Online, 00:55:43--00:56:31.}
+
+El curso coloca ChatGPT después de GPT-3 para mostrar que la prompt-conditioned behavior ya llegó a productos de uso masivo, no para detallar su entrenamiento. En la sesión de Q\&A, Karpathy dice expresamente que no conoce los internals de ChatGPT. Por eso estas notas se limitan al nivel observable: el usuario especifica la tarea mediante un context en lenguaje natural y el modelo, con pesos fijos, produce una salida condicionada; no se especula sobre parámetros ni implementaciones del sistema que no se han publicado.
+
+\subsection{Scaling laws: la mejora del desempeño es una regularidad empírica, no una promesa ilimitada}
+
+La investigación sobre scaling laws describe con funciones empíricas cómo varía la loss según los parámetros $N$, la cantidad de datos $D$ o el compute $C$; por ejemplo, de forma ilustrativa:
+
+\[
+L(N)\approx L_\infty+aN^{-\alpha},\qquad
+L(D)\approx L_\infty+bD^{-\beta}.
+\]
+
+Aquí, $L_\infty$ aproxima la pérdida irreducible, y $a,b,\alpha,\beta$ se ajustan para una familia de modelos y unos datos específicos. La ley de potencias respalda la estrategia de ingeniería de «escalar de forma predecible», pero no garantiza que todas las capacidades sean monótonas, que todos los datos sean homogéneos ni que el costo siempre sea razonable.
+
+\lecturefigure{slide-55-scaling-laws.jpg}{Scaling laws: escalar el modelo, los datos y el cómputo produce tendencias medibles en la loss.}{Video oficial de Stanford Online, 00:56:31--00:57:14.}
+
+\begin{warningbox}{Lectura de la figura: la extrapolación de las curvas tiene un dominio de validez}
+Primero hay que ver si el eje horizontal representa parameters, tokens o compute, y luego si el eje vertical es la loss de entrenamiento/validación o una downstream metric específica; las curvas distintas no son intercambiables. La ley de potencias proviene de un ajuste dentro del intervalo observado; si cambian la architecture, la data quality, el optimizer, el tokenizer o la evaluation, los coeficientes y los puntos de inflexión pueden cambiar.
+\end{warningbox}
+
+\subsection{Outer loop e inner loop: aprendizaje de parámetros y adaptación al contexto}
+
+En la fase de entrenamiento, el outer loop actualiza los parámetros con SGD:
+
+\[
+\theta_{k+1}=\theta_k-\eta\nabla_\theta \mathcal L(\theta_k;\mathcal B_k).
+\]
+
+En la inferencia, los parámetros $\theta$ están fijos; los prompt examples modifican las activations $H^{(\ell)}$ de cada capa y producen una inner-loop adaptation en el plano de la conducta. Llamarlo «aprender en las activations» es una descripción útil; afirmar que ejecuta un gradient descent literal requiere evidencia adicional sobre el mecanismo.
+
+\lecturefigure{slide-56-in-context-learning.jpg}{In-context learning: al aumentar el número de ejemplos, el desempeño en la tarea mejora sin actualizar parámetros.}{Video oficial de Stanford Online, 00:56:31--00:57:23.}
+
+\begin{knowledgebox}{Lectura de la figura: distinguir tres tipos de cambio}
+El outer loop modifica los weights y afecta de forma persistente todas las entradas futuras; la in-context adaptation modifica los hidden states del forward actual y solo tiene efecto mientras dura el context; la retrieval o el tool use modifican además la entrada externa. Los tres pueden mejorar la respuesta, pero corresponden a vías causales distintas. Llamar «fine-tuning» a cualquier efecto del prompt oculta la conducta del sistema.
+\end{knowledgebox}
+
+\subsection{Chain of thought: más tokens intermedios también son más pasos de cómputo}
+
+El chain-of-thought prompting hace que el modelo genere texto de razonamiento intermedio antes de la respuesta final. En un Transformer autorregresivo, cada token nuevo desencadena un nuevo forward step e incorpora al context lo generado antes; por ello, los tokens intermedios no son solo una explicación, sino que también aportan sequential compute adicional y un scratch space legible. Sin embargo, los pasos legibles pueden contener errores y no deben tomarse automáticamente como una cadena causal interna fiel.
+
+\lecturefigure{slide-57-chain-of-thought.jpg}{Chain-of-thought: inducir pasos de razonamiento intermedios con ejemplos mejora el desempeño en algunas tareas.}{Video oficial de Stanford Online, 00:57:23--00:58:16.}
+
+\begin{warningbox}{Lectura de la figura: la respuesta correcta y la explicación fiel son dos métricas distintas}
+El CoT puede mejorar la exactitud en arithmetic, symbolic o compositional tasks, pero también puede producir racionalizaciones a posteriori. Al evaluarlo, conviene separar al menos la final answer, la step validity, la robustness to prompt perturbation y la hidden reasoning fidelity. En clase se usa para respaldar la idea de que «el context permite configurar el cómputo», no para demostrar que los pasos en lenguaje natural equivalen al algoritmo interno real del modelo.
+\end{warningbox}
+
+\subsection{Las tres propiedades deben cumplirse a la vez}
+
+Karpathy resume finalmente el éxito en tres propiedades: expressive, optimizable y efficient. La capacidad expresiva permite que la combinación attention/MLP implemente sequence functions complejas; la optimizabilidad proviene del residual stream, la normalization, rutas de gradiente más cortas y una inicialización madura; la eficiencia proviene de grandes multiplicaciones de matrices paralelas en la dimensión de los tokens durante el entrenamiento. Si falta cualquiera de ellas, se puede obtener un modelo teóricamente potente que no logra entrenarse, uno entrenable pero demasiado lento, o uno eficiente con capacidad expresiva insuficiente.
+
+\lecturefigure{slide-58-karpathy-tweets-transformer-history.jpg}{Síntesis de alto nivel de Karpathy: el Transformer optimiza a la vez la capacidad expresiva, la optimizabilidad y la eficiencia.}{Video oficial de Stanford Online, 00:58:16--00:58:45.}
+
+\begin{knowledgebox}{Términos clave: qué responde cada propiedad}
+\begin{itemize}
+  \item \term{expressive}: si el forward graph puede representar cómputos complejos y dependientes de los datos;
+  \item \term{optimizable}: si el gradient descent puede encontrar de forma estable parámetros útiles;
+  \item \term{hardware-efficient}: si los operadores principales pueden convertirse en operaciones matriciales masivamente paralelas, en las que la GPU sobresale;
+  \item \term{scalable}: si las tres propiedades anteriores siguen dando beneficios predecibles al aumentar parámetros, datos y dispositivos.
+\end{itemize}
+\end{knowledgebox}
+
+\lecturefigure{slide-59-natural-language-model-history.jpg}{Una relectura de la historia de los modelos de lenguaje natural: arquitectura, escala e interfaz de tarea convergen gradualmente.}{Video oficial de Stanford Online, 00:58:45--00:59:17.}
+
+Este conjunto de tuits de alto nivel es una narrativa condensada del ponente dirigida al público general y no sustituye los detalles de los artículos. Su valor está en reescribir la historia, que deja de ser una «cronología de nombres de modelos» para convertirse en «cómo cambia el grafo de cómputo»: la ventana fija se convierte en recurrent state, el estado único se convierte en memory direccionable, la recurrence serial se convierte en attention paralela y el predictor de una sola tarea, a su vez, muestra runtime task adaptation en context de gran escala.
+
+\subsection{Shallow-wide frente a long-thin: la eficiencia de hardware también es una fuente de capacidad del modelo}
+
+La RNN forma en el tiempo un long-thin graph y debe procesar los tokens uno tras otro; el Transformer, durante el entrenamiento, forma un shallow-wide graph en el que todas las posiciones de una misma capa pueden procesarse en paralelo, y hay pocos hops entre capas desde la supervisión hasta la entrada. El costo $T^2$ de la attention sigue siendo alto, pero la dense matrix multiplication se adapta muy bien a la GPU. Un mayor aprovechamiento del dispositivo permite entrenar modelos más grandes, y en el aprendizaje profundo la escala misma modifica el desempeño alcanzable.
+
+\lecturefigure{slide-60-general-purpose-computer.jpg}{GPT como runtime-reconfigurable computer: el prompt es un programa en lenguaje natural y la completion es la traza de ejecución.}{Video oficial de Stanford Online, 00:59:17--01:01:11.}
+
+\begin{importantbox}{«Computadora de propósito general» es una analogía, no una prueba de capacidad ilimitada}
+Un GPT con weights fijos puede, según el prompt, realizar traducción, clasificación, extracción, conversión de formato o generación en varios pasos, de modo similar a un mismo hardware que carga programas distintos. Sin embargo, el context finito, la precision finita, la distribución de entrenamiento, el muestreo aleatorio y la acumulación de errores limitan la fiabilidad. La analogía resalta la runtime reconfiguration; no garantiza que cualquier programa se ejecute correctamente ni que la salida cumpla una especificación formal.
+\end{importantbox}
+
+\teachervoice{En la sesión de Q\&A, Karpathy compara además: aunque la RNN pueda en principio implementar cualquier programa, su long-thin serial graph puede volverla difícil de optimizar y de paralelizar; el shallow-wide graph, las residual pathways y la LayerNorm del Transformer hacen que la supervisión llegue más rápido a la entrada. La tercera propiedad, la «eficiencia de hardware», suele subestimarse, pero determina qué tan grande es el modelo que realmente puede entrenarse.}
+
+\subsection{Resumen de la sección}
+
+El éxito del Transformer proviene de una package-level synergy: attention/MLP aporta la capacidad expresiva, residual/normalization aporta la optimizabilidad, las operaciones matriciales anchas y paralelas aportan la eficiencia de hardware, y el next-token training a gran escala produce una in-context behavior configurable mediante el prompt. Scaling, few-shot y CoT son evidencia de conducta; el «inner optimizer» y la «computadora de propósito general» siguen siendo modelos explicativos que requieren límites.
+\section{Preguntas y respuestas: context finito, memoria externa y siguientes pasos}
+
+La exposición principal termina alrededor de 1:00; las preguntas posteriores se concentran en tres límites: cómo distinguir el origen de los token multimodales, cómo ampliar un context finito y qué investigará Karpathy a continuación. Como algunas preguntas del público no se entienden, esta sección conserva solo los puntos didácticos que pueden reconstruirse con fiabilidad a partir de las respuestas, sin suponer las preguntas que faltan.
+
+\subsection{El context no tiene que crecer sin límite}
+
+Karpathy propone una idea que en ese momento era speculative: mantener finito el context length y enseñar al modelo a emitir instrucciones especiales de scratchpad para escribir en un notebook externo lo que debe recordar y consultarlo después. Así separa el «estado de corto plazo dentro de la cabeza» de una memory externa de lectura y escritura, y anticipa el diseño de interfaz de tool use y de los memory-augmented agent, aunque en clase no presentó ninguna implementación ni experimento.
+
+\teachervoice{Su analogía es esta: una persona no guarda todos los hechos en la cabeza, sino que usa una libreta. El modelo también puede aprender a emitir marcas de inicio y fin (start/end) de scratchpad, y un sistema externo se encarga de guardar, indexar y volver a insertar el contenido. Lo importante es que el protocolo pueda supervisarse, direccionarse y verificarse; darle al modelo un prompt más largo no equivale a tener una memoria de largo plazo confiable.}
+
+\subsection{Epistemic honesty: si no se sabe, se dice claramente}
+
+Cuando le preguntan por los internals de ChatGPT, Karpathy responde directamente que no los conoce; cuando le preguntan por S4, tampoco finge estar familiarizado. Al final vuelve a nanoGPT, en el que trabaja: reescribir minGPT como un código más pequeño, más moderno y con el que sea más fácil reproducir GPT, y dice que le interesa la iteración continua de productos de lenguaje. Esta forma de responder fija el mismo criterio para estas notas: no completar detalles de un sistema más allá de la evidencia pública.
+
+\lecturefigure{slide-61-thank-you.jpg}{Diapositiva final: una vez entendida la arquitectura, «go forth and transform».}{Video oficial de Stanford Online 01:00:31--01:00:45.}
+
+La diapositiva final casi no tiene contenido técnico, pero cumple una función dentro del curso: pasar de una clase introductoria a las clases posteriores sobre cada área. Después de lo expuesto, ``transform'' ya no significa solo cambiar de backbone, sino completar un diseño de cuatro pasos: definir los elementos, inyectar la posición y el tipo, establecer la connectivity y elegir el objective; después, verificar que el enrutamiento de la attention, el cálculo de la MLP, la estabilidad de la optimización y el costo de hardware funcionen en conjunto.
+
+\subsection{Resumen de la sección}
+
+Las preguntas y respuestas convierten los límites de la arquitectura en interfaces de sistema: lo multimodal requiere type/position information, un context finito puede combinarse con memory externa y protocolos de herramientas, y las implementaciones internas desconocidas deben seguir tratándose como desconocidas. nanoGPT ofrece el camino ejecutable más corto para seguir aprendiendo: primero reproducir un modelo pequeño y luego poner a prueba con experimentos las intuiciones sobre attention, mask, context y scaling.
+\section{Síntesis y ampliación}
+
+El hilo principal de esta sesión puede condensarse en nueve conclusiones consecutivas:
+
+\begin{enumerate}
+  \item En sus inicios, el campo de la IA estaba fragmentado por características diseñadas a mano, terminología especializada y distintas topology;
+  \item el aprendizaje profundo a gran escala unificó primero el lenguaje de la optimización de extremo a extremo;
+  \item el context bottleneck fijo de seq2seq impulsó el alignment diferenciable;
+  \item el Transformer elevó la attention a etapa principal de comunicación y la integró con las posiciones, las conexiones residuales, la normalización, la MLP, las heads y las masks en un package completo;
+  \item Q/K/V pueden entenderse como la necesidad de direccionamiento, la etiqueta que puede emparejarse y el contenido que se transmite;
+  \item nanoGPT muestra el ciclo completo de token stream, shifted targets, causal mask, cross-entropy y autoregressive generation;
+  \item GPT, BERT y T5 se distinguen principalmente por la connectivity, la state source y el objective;
+  \item la reutilización entre modalidades depende de la tokenización, del type/position embedding y del bias propio de cada dominio, y no de simplemente convertir todos los problemas en texto;
+  \item la expresividad, la facilidad de optimización, la eficiencia en GPU y la escala producen en conjunto el in-context behavior, lo que permite que el prompt reconfigure el modelo en tiempo de ejecución.
+\end{enumerate}
+
+\begin{warningbox}{Límites finales de la evidencia}
+La clase demostró cómo implementar un Transformer mínimo y presentó ejemplos de primera mano en varios dominios; no demostró que la attention sea la única arquitectura óptima, ni que el scaling pueda continuar indefinidamente, ni que el in-context learning equivalga al descenso de gradiente, ni que los modelos de lenguaje sean ejecutores confiables de programas arbitrarios. Un aprendizaje de calidad debe marcar por separado el «mecanismo ejecutable», el «fenómeno empírico», el «juicio del ponente» y la «conjetura a futuro».
+\end{warningbox}
+
+\subsection{Lecturas adicionales}
+
+Se recomienda leer siguiendo una cadena de preguntas, en lugar de acumular títulos de artículos:
+
+\begin{enumerate}
+  \item Bengio et al., \href{https://www.jmlr.org/papers/v3/bengio03a.html}{\emph{A Neural Probabilistic Language Model}}: modelo de lenguaje neuronal de ventana fija y learned embeddings;
+  \item Sutskever et al., \href{https://proceedings.neurips.cc/paper/2014/hash/a14ac55a4f27472c5d894ec1c3c743d2-Abstract.html}{\emph{Sequence to Sequence Learning with Neural Networks}}: encoder--decoder de longitud variable;
+  \item Bahdanau et al., \href{https://arxiv.org/abs/1409.0473}{\emph{Neural Machine Translation by Jointly Learning to Align and Translate}}: soft alignment y context dinámico;
+  \item Vaswani et al., \href{https://arxiv.org/abs/1706.03762}{\emph{Attention Is All You Need}}: el package completo del Transformer;
+  \item Karpathy, \href{https://github.com/karpathy/nanoGPT}{\emph{nanoGPT}}: conectar datos, modelo, entrenamiento y generación con un código mínimo;
+  \item Dosovitskiy et al., \href{https://arxiv.org/abs/2010.11929}{\emph{An Image is Worth 16x16 Words}}, y Chen et al., \href{https://arxiv.org/abs/2106.01345}{\emph{Decision Transformer}}: comparar cómo distintos dominios definen el token;
+  \item Brown et al., \href{https://arxiv.org/abs/2005.14165}{\emph{Language Models are Few-Shot Learners}} y Wei et al., \href{https://arxiv.org/abs/2201.11903}{\emph{Chain-of-Thought Prompting}}: distinguir entre fenómeno de comportamiento, prompt protocol y explicación del mecanismo.
+\end{enumerate}
+
+El orden de práctica más eficaz es: primero, verificar línea por línea las tensor shapes y la causal mask sobre Tiny Shakespeare; después, cambiar a un subword tokenizer y a un context más largo; luego, implementar por separado el unmasked encoder y la cross-attention; por último, elegir un dominio no textual y escribir explícitamente la element definition, el position/type encoding, la connectivity y el objective. Solo así el lema «Transformer everywhere» se convierte en un método de diseño verificable.
+
+\end{document}

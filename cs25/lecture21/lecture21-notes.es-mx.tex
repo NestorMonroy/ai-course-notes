@@ -1,0 +1,823 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+
+\renewcommand{\notetitle}{Lecture 21: How I Learned to Stop Worrying and Love the Transformer}
+\renewcommand{\noteauthors}{Elaborado a partir de la conferencia de Ashish Vaswani, los subtítulos oficiales hechos por personas, las diapositivas recuperadas y los artículos originales de la serie Transformer}
+\renewcommand{\notedate}{CS25 V3 · versión reescrita source-first de 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{Clase: 2023-11-07; publicación: 2024-01-17}
+\renewcommand{\videoduration}{1:20:38}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=1GbDTTK3aR4}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.94\textwidth,height=0.54\textheight,keepaspectratio]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\let\standardtableofcontents\tableofcontents
+\renewcommand{\tableofcontents}{%
+  \begingroup
+  \footnotesize
+  \renewcommand{\baselinestretch}{0.94}\selectfont
+  \setlength{\parskip}{0pt}
+  \standardtableofcontents
+  \endgroup
+}
+
+\begin{document}
+\makecscover
+
+\section{Auditoría de fuentes: el hilo conductor del Transformer es la Consolidation}
+
+Esta clase no es un libro de texto estándar sobre el Transformer, ni una explicación página por página del artículo «Attention Is All You Need». El coautor Ashish Vaswani parte de la Dartmouth proposal de 1955 y rastrea cómo la inteligencia artificial pasó de un sueño de unified-system a fragmentarse en innumerables pipelines especializados, y cómo, gracias a distributed representation, sequence-to-sequence, attention y el aprendizaje a gran escala, volvió a encaminarse hacia la consolidation. En la segunda mitad, la perspectiva se amplía del algoritmo a position representation, long context, memory bandwidth, tools, data center y el ciclo de retroalimentación del producto.
+
+\subsection{Límites oficiales de la clase y recuperación visual}
+
+Esta reescritura toma como fuente del orden de la clase la grabación oficial de Stanford Online \texttt{1GbDTTK3aR4}; la clase se impartió el 7 de noviembre de 2023. La grabación incluye subtítulos \texttt{en-US} hechos por personas, de los que se analizaron 1,866 cues válidos. En la página oficial, en la descripción de la grabación y en la búsqueda por exact-title no se encontró ningún standalone deck público, por lo que la grabación en 1080p se usa como fuente visual; tras una extracción de alta exhaustividad cada tres segundos, se conservaron manualmente 43 estados didácticos independientes de 87 candidatos, y se omitieron deliberadamente los fotogramas repetidos de speaker-window, las revisitas repetidas, los bumper puros y las páginas de Thanks que aparecen varias veces.
+
+\begin{longtable}{@{}L{0.18\textwidth}L{0.31\textwidth}L{0.40\textwidth}@{}}
+\toprule
+Capa de evidencia & Material local & Función en la nota \\
+\midrule
+Grabación oficial & 1:20:38, 43 estados didácticos independientes & Determina el orden de la clase, la explicación de los gestos, las demos, las Q\&A y la narrativa histórica \\
+Subtítulos hechos por personas & 1,866 cues, transcripciones timed/clean/chunk & Recuperan la motivación, las rutas fallidas, los juicios de ingeniería, las reservas y las líneas de investigación \\
+Primary sources & Seq2Seq, NMT Attention, Transformer, Music Transformer, Routing/Reformer, MQA/GQA, FlashAttention, entre otras & Verifican fórmulas, términos, objetos de los experimentos y límites temporales \\
+Auditoría de cobertura y visual & manifest, selection, coverage, PDF QA & Demuestran que las imágenes y los spoken nodes están planificados, tienen una ubicación y que el producto final es legible \\
+\bottomrule
+\end{longtable}
+
+\begin{warningbox}{Límites históricos y límites de la evidencia}
+Este texto reconstruye la clase del 2023-11-07. Los juicios del ponente sobre future architecture, agents, tools, adaptive thinking y el ciclo cerrado del producto pertenecen a la agenda de investigación de ese momento y no equivalen a algo ya validado por productos posteriores; los primeros resultados en MT/parsing demuestran que el Transformer es eficaz en las tareas dadas, pero por sí solos tampoco demuestran que sea la arquitectura general definitiva.
+\end{warningbox}
+
+\subsection{Dartmouth proposal: el objetivo era acertado, el juicio sobre el camino fue muy erróneo}
+
+La clase usa la Dartmouth proposal para establecer un contraste deliberado. La propuesta de 1955 ya planteaba el ambicioso objetivo de que «en principio, el aprendizaje y la inteligencia pueden describirse con precisión y una máquina puede simularlos», y además consideraba que un grupo de científicos podría lograr avances significativos en un solo verano. El problema no estaba en la ambition, sino en dos juicios: sobrestimaron la capacidad humana para escribir a mano las reglas de la inteligencia y subestimaron la escala que alcanzarían la capacidad de las máquinas, los datos y los sistemas de optimización.
+
+\lecturefigure{slide-01-dartmouth-1955.jpg}{La Dartmouth proposal de 1955 y la visión temprana de una inteligencia unificada}{Diapositiva V001 recuperada de la grabación oficial; 00:01:27}
+
+\begin{knowledgebox}{Lectura de la figura: primero las líneas rojas, después las personas}
+Los tres puntos destacados de la proposal, a la derecha, son «la inteligencia puede describirse con precisión», «en un verano pueden lograrse avances significativos» y «el obstáculo principal no es la machine capacity». Primero compare la tercera frase con la infraestructura actual de los grandes modelos; después, las hand-written rules implícitas en la primera. La figura respalda que los objetivos de la investigación temprana tienen continuidad, pero también muestra que el camino de implementación pasó de la symbolic programming a la data-driven optimization.
+\end{knowledgebox}
+
+\teachervoice{El ponente bromea con que los investigadores de Dartmouth necesitaban un «verano muy, muy largo», y señala que el Transformer actual ya no es una máquina, sino un data center. Su juicio más serio es que todavía no hemos aprendido a escribir todas las reglas de la inteligencia, pero sí hemos aprendido a hacer que los modelos ajusten una gran cantidad de reglas a partir de los datos.}
+
+\begin{importantbox}{La Consolidation Thesis de esta clase}
+La importancia histórica del Transformer no se reduce a ser un sequence model más rápido: las funciones que antes estaban dispersas entre feature engineering, alignment, language modeling, task-specific architecture y el posprocesamiento entran cada vez más en un sistema compartido y entrenable. La Consolidation reduce el número de interfaces, pero no elimina los problemas de datos, optimización, sistemas y evaluación.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Esta sección fijó los límites de la clase y de la evidencia, y volvió a situar el Transformer dentro de la historia más larga de la IA: el objetivo de una inteligencia unificada nunca desapareció; lo que cambió fue la forma de alcanzarlo. Lo que sigue explicará la arquitectura siguiendo el hilo de «cómo los pipelines especializados fueron absorbidos por representaciones generales y grafos de cómputo entrenables», en lugar de tratar la attention como una fórmula aislada.
+\section{Del pipeline vertical al sequence learning general}
+
+Cuando la línea histórica llega al NLP, el cambio más evidente no es el aumento de parámetros de los modelos, sino la reducción de las interfaces del sistema. La traducción automática de 2009 requería word alignment, phrase extraction, reordenamiento, language-model rescoring y una gran cantidad de características independientes; en 2013, la comunidad de investigación también se organizaba por áreas verticales como morphology, dialogue, discourse, sentiment y translation. La sequence formulation general fue convirtiendo poco a poco estas tareas en un problema compartido de aprendizaje de representaciones.
+
+\subsection{2009: la red neuronal es solo un rescorer dentro de un sistema complejo}
+
+La statistical machine translation (SMT, traducción automática estadística) temprana armaba un sistema completo combinando varios módulos interpretables. En esa época, el neural probabilistic language model solía colocarse al final del pipeline para volver a puntuar las traducciones candidatas, no para decidir la salida de extremo a extremo. Una ingeniería así podía funcionar, pero cada interfaz tenía que definir representación, búsqueda, características y propagación de errores, y el conocimiento quedaba encerrado en componentes especializados.
+
+\lecturefigure{slide-02-sequence-models-2009.jpg}{Pipeline de traducción automática de 2009 y neural probabilistic language model}{Diapositiva V002 recuperada del video oficial; 00:05:09}
+
+\begin{knowledgebox}{Lectura de la figura: dónde está realmente la red neuronal}
+La imagen de la izquierda incluye varios módulos, como alignment, phrase table, decoder y rescoring; el neural language model de la derecha solo aporta una de esas puntuaciones. Primero cuente las fronteras del sistema y después observe si el gradiente puede propagarse de extremo a extremo a través de ellas. La figura respalda que el neural component ya tenía valor en ese momento, pero no controlaba la tarea completa, y también explica por qué una consolidation basada en datos traería enormes beneficios de ingeniería.
+\end{knowledgebox}
+
+\teachervoice{Vaswani recuerda que el sistema de MT de cuando hacía el doctorado era aún más complejo que el de la figura, y pide a todo el grupo que encuentre «dónde está la red neuronal». La respuesta es que el Continuous State Language Model se usaba principalmente para rescoring; vista desde hoy, la insistencia del nombre en continuous indica precisamente que el mundo dominante de entonces seguía siendo el del pipeline discreto.}
+
+\subsection{2013: las tareas y las comunidades de investigación se verticalizan}
+
+Cuando los modelos no pueden compartir suficiente representación y estructura de cómputo, cada problema necesita su propio conocimiento del dominio, sus propias características y su propia evaluation culture. Un \term{verticalized system (sistema verticalizado)} es una pila tecnológica construida alrededor de una tarea, con datos, módulos y métricas especializados; permite profundizar en el problema local, pero dificulta la transfer entre tareas y la infraestructura común.
+
+\lecturefigure{slide-03-nlp-2013-verticalized.jpg}{Las líneas de investigación de NLP en 2013 muestran una fuerte verticalización}{Diapositiva V003 recuperada del video oficial; 00:07:03}
+
+\begin{knowledgebox}{Lectura de la figura: el índice de un congreso también es un organigrama técnico}
+La página enumera varios research track relativamente independientes. Primero observe en cuántas tareas se divide un mismo fenómeno lingüístico y luego pregúntese si cada tarea usa feature, modelo y datos propios. Esto no demuestra que la investigación especializada carezca de valor; más bien sugiere que la consolidation necesita una interfaz de cómputo general capaz de manejar en conjunto variable-length input, context y conditional generation.
+\end{knowledgebox}
+
+\subsection{Distributed Representation, Seq2Seq y Attention}
+
+La \term{distributed representation (representación distribuida)} codifica un concepto con varias dimensiones de un vector denso en conjunto, en lugar de mantener una característica simbólica independiente para cada palabra o regla; la \term{contextual representation (representación contextualizada)} va más allá y hace que el vector de un mismo token cambie según el contexto. Seq2Seq unifica tareas como translation, summarization, dialogue y question answering bajo la forma «secuencia de entrada a secuencia de salida», y attention permite que el decoder lea los source states según su contenido.
+
+\lecturefigure{slide-04-general-approaches-2016.jpg}{El paradigma general: de los vectores de palabras a Seq2Seq y Attention}{Diapositiva V004 recuperada del video oficial; 00:09:21}
+
+\begin{knowledgebox}{Términos clave: tres ascensos de abstracción}
+\begin{tabularx}{\textwidth}{@{}L{0.20\textwidth}X X@{}}
+\toprule
+Abstracción & Problema que resuelve & Cuello de botella que persiste \\
+\midrule
+Distributed word vectors & Comparte la estructura estadística de las palabras y la similitud semántica & Una misma palabra sigue siendo bastante fija en contextos distintos \\
+Contextual sequence states & Hace que la representación dependa del contexto anterior y posterior & La recurrent computation sigue siendo secuencial en el tiempo \\
+Seq2Seq + attention & Unifica la generación condicional y lee la source según su contenido & La columna vertebral encoder/decoder suele seguir formada por RNN \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\teachervoice{El ponente describe esta evolución como «general paradigms started coming up». Lo importante no es lo llamativa que resulte el álgebra vectorial de Word2Vec, sino que los investigadores empezaron a creer que, si se lograba aprender de forma estable una variable-length representation, muchas tareas lingüísticas antes independientes podrían compartir una misma forma de modelado.}
+
+\subsection{La variable-length representation es el núcleo común}
+
+Un \term{sequence model (modelo de secuencias)} procesa entradas o salidas ordenadas y de longitud variable. Debe convertir token sequences de longitudes distintas en estados utilizables para la predicción, conservando a la vez el contenido, el orden y las dependencias de largo alcance. La figura siguiente usa un recurrent encoder para representar la ruta clásica: el estado se actualiza paso a paso y el decoder y las tareas posteriores usan la representación final o la de cada posición.
+
+\lecturefigure{slide-05-variable-length-representations.jpg}{Aprender variable-length representations es la base común de las tareas Seq2Seq}{Diapositiva V005 recuperada del video oficial; 00:10:33}
+
+Una recurrent update mínima es:
+\[
+h_t=f_\theta(h_{t-1},x_t),\qquad y_t\sim p_\theta(\cdot\mid h_t).
+\]
+Aquí $x_t$ es el $t$-ésimo token de entrada, $h_t$ es el hidden state que resume el prefijo $x_{1:t}$, $f_\theta$ es la recurrent transition compartida y $y_t$ es la predicción. La recursión permite que el modelo exprese el orden de forma natural, pero obliga a que $h_t$ espere a $h_{t-1}$, por lo que la profundidad de paralelización crece con la longitud de la secuencia.
+
+\begin{importantbox}{El primer paso de la consolidation es unificar la formulación del problema}
+Antes del Transformer, Seq2Seq ya había logrado una abstracción importante: translation, summarization y dialogue podían escribirse como conditional sequence modeling. La aportación del Transformer no fue inventar la unificación desde cero, sino liberar esa interfaz unificada del sequential backbone.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+El pipeline de MT de 2009 y las líneas de investigación verticales de 2013 muestran que la specialization llegó a penetrar cada interfaz del sistema. La distributed/contextual representation, Seq2Seq y attention unificaron primero la forma de las tareas; la siguiente pregunta no es si las RNN tienen capacidad expresiva, sino si esa capacidad expresiva puede entrenarse con eficiencia a gran escala de datos y de hardware.
+\section{RNN, Convolution y Attention: la capacidad y la entrenabilidad son cosas distintas}
+
+La formulation general de la sección anterior todavía depende del backbone. El curso no presenta a LSTM como un modelo fallido; al contrario, enfatiza que la recurrent network es muy expressive, al grado de poder aprender máquinas de estados semejantes a un contador. La motivación del Transformer proviene principalmente del computation graph: la dependency serial en secuencias largas, la path length entre posiciones distantes y el aprovechamiento del hardware limitaban la escala del entrenamiento.
+
+\subsection{LSTM es muy Expressive, pero las actualizaciones de estado deben esperar su turno}
+
+LSTM (Long Short-Term Memory) mitiga, mediante un gated cell state, el problema de los gradientes de largo plazo de la RNN convencional. Puede aprender transition complejas y, tanto en la teoría como en los experimentos, es capaz de simular ciertos comportamientos de conteo, copia y condicionales; sin embargo, cada paso temporal depende del resultado del paso anterior, de modo que, por muy capaz que sea el modelo, no puede calcular simultáneamente todos los hidden states de la secuencia.
+
+\lecturefigure{slide-06-lstm-expressive.jpg}{LSTM puede implementar conteo y transformaciones de secuencias complejas}{Diapositiva recuperada de la grabación oficial V006; 00:12:09}
+
+\begin{knowledgebox}{Lectura de la figura: no confundir un cuello de botella del sistema con falta de capacidad expresiva}
+La tarea de la izquierda muestra que el recurrent state puede representar regularidades estructuradas de una secuencia; el diagrama de compuertas de la derecha indica que la actualización del estado cuenta con varias rutas aprendibles. Primero hay que ver qué puede expresar y después cómo debe programarse el cálculo; la figura respalda que LSTM es potente, pero no cambia el critical path en el que $h_t$ depende de $h_{t-1}$.
+\end{knowledgebox}
+
+\lecturefigure{slide-07-sequential-bottleneck.jpg}{El cuello de botella serial de recurrent reading y writing}{Diapositiva recuperada de la grabación oficial V007; 00:12:33}
+
+\begin{warningbox}{Un lote paralelo no equivale a una secuencia paralela}
+La GPU puede procesar al mismo tiempo muchas oraciones y muchas hidden dimension, pero aun así debe avanzar la recurrence de una misma oración en el orden $t=1,2,\ldots,n$. Aumentar el tamaño de lote no elimina el sequential critical path de cada muestra; las secuencias largas reducen el aprovechamiento del hardware y alargan la ruta de propagación del gradiente.
+\end{warningbox}
+
+\teachervoice{El ponente dice expresamente que las LSTM son «fantastic models» y, con el ejemplo $a^n\mapsto b^n$, muestra que una sola cell puede formar un contador aproximado. Lo que la clase objeta en realidad es atar esta gran capacidad expresiva a una ejecución serial token por token, no negar la recurrence en sí misma.}
+
+\subsection{Convolution: ya es paralela, pero las relaciones a larga distancia dependen de apilar capas}
+
+La convolution unidimensional puede procesar todas las posiciones al mismo tiempo, y cada capa agrega información dentro de una ventana local. El \term{receptive field (campo receptivo)} es el rango de la entrada del que puede depender una posición de salida; para una convolución de $L$ capas con kernel width $k$ y sin dilation, el campo receptivo es aproximadamente:
+\[
+R_L=1+L(k-1).
+\]
+donde $R_L$ es el rango visible en la capa $L$ y $k$ es el kernel width. Si $k=3$, cada capa adicional solo se extiende una posición hacia cada lado, por lo que una dependencia que abarque una longitud $n$ todavía requiere $O(n)$ capas o diseños adicionales como dilation/sparsity.
+
+\lecturefigure{slide-08-convolution-parallel-structure.jpg}{Un convolutional sequence model permite calcular las posiciones en paralelo}{Diapositiva recuperada de la grabación oficial V008; 00:14:09}
+
+En esta diapositiva, primero hay que ver si todas las posiciones pueden entrar simultáneamente a la misma capa y luego cuántos vecinos cubre cada kernel. La convolución elimina la cadena temporal recurrent y se adapta bien a la GPU; pero cada capa solo agrega información local. La figura respalda la mejora en parallelization, pero no muestra que dos tokens cualesquiera interactúen directamente en una sola capa.
+
+\lecturefigure{slide-09-convolution-receptive-field.jpg}{El receptive field de la convolución crece gradualmente con el número de capas}{Diapositiva recuperada de la grabación oficial V009; 00:14:42}
+
+\begin{knowledgebox}{Lectura de la figura: comparar la ruta más corta, no solo contar FLOPs}
+Las rutas azul y roja representan la propagación de la información entre capas. Primero hay que determinar cuántas capas debe atravesar la información entre dos tokens distantes y luego compararlo con la conexión de un solo salto de la self-attention; un path más largo aumenta la dificultad de optimización y la pérdida de información. La dilated convolution puede acelerar la expansión, pero sigue exigiendo que el patrón de conexiones se defina de antemano, y no puede elegir vecinos dinámicamente según el contenido.
+\end{knowledgebox}
+
+\subsection{Encoder--Decoder Attention: leer la Source según su contenido}
+
+La \term{encoder--decoder attention (atención cruzada)} permite que la target position asigne pesos a todos los source states según la decoder query actual. Supera el bottleneck del vector fijo y convierte la word alignment en un cálculo diferenciable. Si el encoder state es $h_j$ y el decoder state es $s_t$, puede escribirse como:
+\[
+e_{tj}=a(s_{t-1},h_j),\qquad
+\alpha_{tj}=\frac{\exp e_{tj}}{\sum_{k}\exp e_{tk}},\qquad
+c_t=\sum_j\alpha_{tj}h_j.
+\]
+donde $e_{tj}$ es el compatibility score, $\alpha_{tj}$ es la alignment normalizada y $c_t$ es el source context que lee el target step $t$. La attention ya accede a la source en paralelo, pero la estructura principal del encoder y del decoder todavía puede ser recurrent.
+
+\lecturefigure{slide-10-encoder-decoder-attention.jpg}{La encoder--decoder attention establece conexiones por contenido entre source y target}{Diapositiva recuperada de la grabación oficial V010; 00:15:54}
+
+\begin{knowledgebox}{Lectura de la figura: las flechas no son conexiones fijas, sino pesos que dependen de los datos}
+La posición objetivo $y_t$ puede conectarse con todos los source states $x_j$; el grosor o la selección lo determina el contenido de la query y la key. Primero hay que ver en qué se distingue del offset fijo de la convolución y después notar que el decoder sigue generando en orden temporal; la figura respalda la content-based retrieval, pero todavía no reemplaza con self-attention el aprendizaje de representaciones de la propia source sentence.
+\end{knowledgebox}
+
+\teachervoice{Vaswani remonta la intuición de la attention a non-local means y a texture synthesis: extraer información de patches lejanos según la similitud de contenido. Esto muestra que «content talks to content» es un motif que surge de forma natural en distintas modalidades; lo esencial del Transformer es convertirlo en la estructura principal, no demostrar que el NLP posee un mecanismo misterioso exclusivo.}
+
+\subsection{Resumen de la sección}
+
+Las RNN aportan una gran capacidad expresiva, pero son seriales; la convolution aporta paralelismo, pero el path entre posiciones distantes sigue creciendo con la profundidad; la encoder--decoder attention, por su parte, demuestra que el content-based global lookup es eficaz. El siguiente paso de la self-attention es que cada token construya directamente una nueva representación a partir de todos los tokens de la misma secuencia.
+\section{El punto de partida de Self-Attention: Content Addressing y Parallel Reading}
+
+La sección anterior ya contaba con attention, pero solo se usaba en la source--target interface. En self-attention, query, key y value provienen de la misma secuencia, de modo que cada token lee directamente cualquier posición dentro de una sola capa. Al mismo tiempo logra un global receptive field, position-parallel computation y multiplicative interaction; el costo es una score matrix de $n\times n$ y la pérdida de la información de orden.
+
+\subsection{El Attention-like Motif ya existía en otras modalidades}
+
+El curso presenta primero non-local means y texture synthesis para oponerse al relato heroico de que «attention surgió de la nada». El \term{content-based addressing (direccionamiento por contenido)} decide qué posición leer según la similitud entre la query actual y el contenido candidato, no según una dirección fija o un offset; es adecuado para la autosimilitud de las imágenes, la recuperación de memoria y la source alignment.
+
+\lecturefigure{slide-11-self-attention-other-modalities.jpg}{Direccionamiento por contenido en non-local means y texture synthesis}{Diapositiva V011 recuperada del video oficial; 00:17:00}
+
+\begin{knowledgebox}{Lectura de la figura: la vecindad fija y la vecindad por contenido son dos supuestos previos distintos}
+A la izquierda, el denoising busca patches similares en toda la imagen; a la derecha, la synthesis busca texturas coincidentes en una base de datos. Primero observe si las posiciones leídas deben ser contiguas y luego quién define la similitud; este mecanismo comparte con attention la estructura de «la query decide la conexión», pero en los algoritmos tradicionales la feature/similarity puede diseñarse a mano, mientras que el Transformer aprende la projection de extremo a extremo.
+\end{knowledgebox}
+
+\subsection{Self-Attention: los tokens de una oración se actualizan entre sí}
+
+La subsección anterior explicó por qué el direccionamiento por contenido puede ir más allá de una vecindad fija; aquí se responde cómo se convierte en un cálculo secuencial entrenable de una capa. Al leer el diagrama de estructura que sigue, primero siga cómo un solo token envía una consulta a toda la oración y luego observe por qué las consultas de todos los tokens pueden resolverse en paralelo, por lotes. La \term{self-attention (autoatención)} hace que cada posición de la secuencia produzca query, key y value, y usa el query--key score para ponderar y agregar los value. Los $Q,K,V$ de todas las posiciones pueden generarse con una sola matrix multiplication, y después la score matrix se calcula en paralelo.
+
+\lecturefigure{slide-12-self-attention-structure.jpg}{Self-attention permite que los tokens de una misma secuencia intercambien información directamente}{Diapositiva V012 recuperada del video oficial; 00:17:27}
+
+\begin{knowledgebox}{Lectura de la figura: dentro de una capa el grafo es fully connected, pero los pesos los determinan los datos}
+La palabra central puede leer cualquier posición de la oración sin pasar por varios recurrent/convolutional step. Primero observe si cada salida puede conectarse con todas las entradas y luego que distintas query obtienen distintos pesos; fully connected significa que las aristas candidatas existen, no que todas tengan el mismo peso, ni que el modelo ya conozca las relaciones sintácticas.
+\end{knowledgebox}
+
+\lecturefigure{slide-13-self-attention-properties.jpg}{Las tres propiedades de diseño de self-attention}{Diapositiva V013 recuperada del video oficial; 00:17:36}
+
+\begin{importantbox}{Tres beneficios y un costo implícito}
+Self-attention es paralelizable, captura directamente la token--token interaction y, mediante el dot product, ofrece un multiplicative gating explícito. El costo implícito es que cada par de tokens produce un score, por lo que en la implementación estándar el cálculo y la logit memory crecen con $n^2$; la «conexión total» es a la vez la fuente de su capacidad y el cuello de botella del long-context.
+\end{importantbox}
+
+\subsection{El objetivo original también incluía Parallel Writing}
+
+La historia simplificada del Transformer suele decir: «las RNN eran demasiado lentas, así que se cambiaron por attention». El curso añade un objetivo original más ambicioso: se buscaba leer la source en paralelo y también escribir el target en paralelo. La \term{autoregressive decoding (decodificación autorregresiva)} reduce el espacio de salida token por token según $p(y_t\mid y_{<t},x)$; si se predicen todos los tokens a la vez, hay que aprender al mismo tiempo qué tokens pueden ser condicionalmente independientes y qué modes decidir primero.
+
+\lecturefigure{slide-14-transformer-original-motivation.jpg}{Motivación original: leer en paralelo e intentar generar en paralelo}{Diapositiva V014 recuperada del video oficial; 00:19:42}
+
+Las factorization autorregresiva y completamente no autorregresiva son, respectivamente:
+\[
+p_{\mathrm{AR}}(y\mid x)=\prod_{t=1}^{m}p(y_t\mid y_{<t},x),\qquad
+p_{\mathrm{NAR}}(y\mid x)=\prod_{t=1}^{m}p(y_t\mid x).
+\]
+Aquí $x$ es la entrada, $y$ es la secuencia de salida y $m$ es la longitud de la salida. La segunda fórmula supone que, dado $x$, cada $y_t$ es condicionalmente independiente, lo que dificulta representar las múltiples formulaciones válidas de una traducción y las restricciones entre ellas; en la práctica, los métodos NAR suelen incorporar una latent variable, iterative refinement o un orden por grupos.
+
+\teachervoice{El ponente admite con franqueza que el planteamiento original de parallel decoding no funcionó: en la decodificación autorregresiva, cada elección de palabra «dobla» la distribución de probabilidad y va fijando un mode paso a paso; el modelo no autorregresivo, en cambio, también tiene que aprender a decidir el orden. Al final, el equipo conservó la parallel reading, pero no logró eliminar la sequential generation.}
+
+\begin{warningbox}{Las rutas fallidas también forman parte de la historia de la arquitectura}
+El éxito del encoder parallelism no debe reescribirse como si hubiera sido el único objetivo inicial. Registrar el fracaso de la parallel writing explica por qué el decoder todavía necesita una causal mask y por qué la speculative decoding tiene valor práctico, y recuerda a los investigadores que deben distinguir entre el paralelismo teórico y la estructura de dependencias de la salida.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Self-attention convierte la content retrieval, común en muchas modalidades, en el sequence backbone, y obtiene global interaction en una sola capa y aprendizaje de representaciones en paralelo. Al mismo tiempo, la fully parallel generation sigue siendo difícil por el mode ordering y la conditional dependence; el triunfo del Transformer fue un éxito tras un proceso de selección, no la consecución simultánea de todos los objetivos originales.
+\section{Scaled Dot-Product Attention y Transformer Architecture}
+
+Con la motivación establecida, el siguiente paso es convertir la «similitud de contenido» en un grafo de cómputo estable y escalable. El curso enfatiza que el Transformer no contiene solo attention: Q/K/V projection, softmax scaling, causal mask, multi-head decomposition, feed-forward block, residual connection, normalization y position signal forman en conjunto un sistema entrenable.
+
+\subsection{Elegir dot product entre varias attention formulations}
+
+Antes del Transformer ya existían varios tipos de attention: location-based, additive, dot-product, scaled dot-product, entre otros. La principal razón de ingeniería por la que el equipo eligió dot product es que se puede mapear a multiplicaciones de matrices eficientes; el scaling $1/\sqrt{d_k}$, por su parte, evita que la varianza del score crezca demasiado al aumentar la dimensión, lo que saturaría en exceso el softmax.
+
+\lecturefigure{slide-15-attention-mechanisms-table.jpg}{La familia de attention mechanisms anterior al Transformer}{Diapositiva V015 recuperada de la grabación oficial; 00:20:33}
+
+\begin{knowledgebox}{Lectura de la figura: comparar la score function, no solo memorizar nombres}
+La columna central de la tabla indica cómo la query y la key producen una scalar compatibility: concatenarlas y pasarlas por un MLP, aplicar directamente dot product, si se escala o no, si depende de la posición. Primero se observa qué métodos admiten matrix multiply por lotes y después el número de parámetros y el numerical behavior. El Transformer no inventó la «alineación», sino que eligió la formulation más adecuada para el hardware y el entrenamiento a gran escala.
+\end{knowledgebox}
+
+Sea la matriz de entrada $X\in\mathbb{R}^{n\times d}$; entonces:
+\[
+Q=XW_Q,\quad K=XW_K,\quad V=XW_V,\qquad
+\operatorname{Attn}(Q,K,V)=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right)V.
+\]
+Donde $n$ es la sequence length, $d$ es la model width, $d_k$ es la key/query head dimension y $W_Q,W_K,W_V$ son learned projections. El elemento $(i,j)$ de la score matrix representa la preferencia de lectura de la position $i$ sobre la position $j$.
+
+\subsection{Encoder Self-Attention y Decoder Causal Mask}
+
+La subsección anterior presentó la scaled dot-product attention sin restricciones, pero en los modelos sequence-to-sequence el encoder y el decoder no comparten la misma regla de visibilidad. Esta sección distingue dos tareas: «comprender la entrada completa» y «generar la salida a partir del prefijo». Al leer las dos figuras, primero se compara con qué keys puede conectarse cada query y después se relaciona la diferencia en las conexiones con la frontera de información durante el entrenamiento. El encoder permite que cada posición lea toda la entrada; durante el entrenamiento, el decoder debe impedir que la posición actual vea los target tokens futuros, pues de lo contrario se produce label leakage. La \term{causal mask (máscara causal)} suma $-\infty$ al score de las posiciones futuras, de modo que tras el softmax el peso correspondiente es cero.
+
+\lecturefigure{slide-16-dot-product-encoder-attention.jpg}{Scaled dot-product self-attention en el encoder}{Diapositiva V016 recuperada de la grabación oficial; 00:21:48}
+
+\begin{knowledgebox}{Lectura de la figura: Q, K y V son funciones, no tres tokens independientes}
+El mismo hidden state, mediante projections distintas, forma respectivamente «qué busco», «qué índice ofrezco» y «qué contenido transmito». Primero se sigue el dot product entre la query y todas las keys; después se observa cómo los pesos del softmax agregan los values. Q/K deciden el enrutamiento; V decide la información que se enruta.
+\end{knowledgebox}
+
+\lecturefigure{slide-17-decoder-self-attention.jpg}{La decoder self-attention solo permite leer la posición actual y el historial a su izquierda}{Diapositiva V017 recuperada de la grabación oficial; 00:21:57}
+
+La attention con mask es:
+\[
+A=\operatorname{softmax}\!\left(\frac{QK^\top+M}{\sqrt{d_k}}\right),\qquad
+M_{ij}=\begin{cases}0,&j\le i,\\-\infty,&j>i.\end{cases}
+\]
+Donde $M$ es la causal mask y $A$ es la row-normalized attention matrix. Durante el entrenamiento todas las filas pueden calcularse en paralelo, pero cada fila depende solo del prefijo válido; en inference, el prefix todavía debe extenderse paso a paso, y se usa la KV cache para evitar recalcular las keys/values del historial.
+
+\begin{lstlisting}[caption={Implementación conceptual de la scaled dot-product attention y la causal mask}]
+def attention(query, key, value, causal=False):
+    scores = query @ key.transpose(-1, -2)
+    scores = scores / sqrt(query.shape[-1])
+    if causal:
+        scores = scores.masked_fill(upper_triangle(scores), -inf)
+    weights = softmax(scores, dim=-1)
+    return weights @ value
+\end{lstlisting}
+
+\subsection{Complexity: Less FLOPs solo se cumple en un regime específico}
+
+El costo de los pairwise scores de la self-attention estándar es de aproximadamente $O(n^2d)$, mientras que el de projection/FFN suele ser $O(nd^2)$. Cuando $n\ll d$, la attention puede resultar más económica que una convolution ancha; cuando el context es extremadamente largo, el término $n^2$ pasa a dominar. El operation count teórico tampoco considera el memory traffic, el kernel launch ni la hardware utilization.
+
+\lecturefigure{slide-18-complexity-less-flops.jpg}{Complejidad y longitud de camino de self-attention, recurrent y convolution}{Diapositiva V018 recuperada de la grabación oficial; 00:22:48}
+
+\begin{knowledgebox}{Lectura de la figura: comparar a la vez complexity, sequential operations y path length}
+La tabla no se reduce a «el que es $O(n^2)$ es peor». Las sequential operations de la self-attention son constantes y su camino de dependencia más largo es $O(1)$, lo que la hace adecuada para el paralelismo; la RNN puede requerir menos cómputo total, pero tiene un critical path de $O(n)$; la convolution queda entre ambas. La elección real depende de $n,d,k$ y del hardware.
+\end{knowledgebox}
+
+\teachervoice{En la diapositiva «Less FLOPs», el ponente añade de inmediato: not all FLOPs are equal. Esta advertencia anticipa toda la segunda mitad de la clase: si una fórmula reduce multiplicaciones y sumas pero introduce accesos irregulares a memoria o activations enormes, el wall-clock puede seguir siendo más lento.}
+
+\subsection{La arquitectura completa: la attention es solo una parte del block}
+
+El Transformer original usa un encoder--decoder stack: el encoder block contiene self-attention y una position-wise FFN; el decoder añade además masked self-attention y cross-attention. Cada sublayer se conecta mediante residual connection y normalization, y la position signal se inyecta en la base.
+
+\lecturefigure{slide-19-transformer-architecture.jpg}{Arquitectura encoder--decoder del Transformer original}{Diapositiva V019 recuperada de la grabación oficial; 00:22:57}
+
+\begin{knowledgebox}{Lectura de la figura: seguir el residual stream capa por capa}
+Primero se entra al encoder desde embedding + position; después se observan los tres tipos de lectura del decoder: el target prefix, la encoder output y la FFN. La attention se encarga del token mixing, la FFN de la position-wise feature transformation y el residual path conserva y acumula la información. Atribuir todas las capacidades a la attention deja fuera la mitad de la arquitectura.
+\end{knowledgebox}
+
+\lecturefigure{slide-20-resnet-structure.jpg}{El Transformer block retoma la idea estructural residual de ResNet}{Diapositiva V020 recuperada de la grabación oficial; 00:23:30}
+
+\begin{knowledgebox}{Lectura de la figura: la innovación arquitectónica suele ser una recombinación entre campos}
+A la derecha, ResNet coloca la transformation junto a la identity path; el Transformer también usa el residual stream para encadenar attention y FFN. Primero se compara la block topology y después se observa que los operators son distintos; la figura respalda un lineage estructural, pero no indica que la vision ResNet y el sequence Transformer tengan el mismo inductive bias.
+\end{knowledgebox}
+
+\teachervoice{Vaswani describe la arquitectura final como una synthesis: la attention formulation ya tenía precedentes, la residual structure proviene de ResNet, y el equipo organizó estos componentes en un sequence model que se entrena de forma eficiente. Este relato se ajusta más al proceso real de investigación que la idea de «una fórmula que cambió el mundo».}
+
+\subsection{Resumen de la sección}
+
+La scaled dot-product attention convierte el content routing en multiplicación de matrices; la causal mask mantiene la autoregressive constraint durante el entrenamiento en paralelo, y residual/FFN/normalization hacen entrenables las redes profundas. La ventaja en complejidad depende de la sequence length y de la width; la systems section posterior explicará con más detalle los costos que van más allá de los FLOPs.
+\section{Por qué se necesita Multi-Head Attention: un Weighted Average no basta}
+
+La sección anterior presentó la fórmula; esta sección explica multi-head con la intuición del mecanismo que da el ponente. La attention de una sola cabeza produce, al final, un solo promedio ponderado; si todas las relations comparten la misma value projection, las relaciones sintácticas, posicionales, de entidades o de copia compiten por el mismo espacio de representación. Multi-head usa varios grupos de projections para aprender en paralelo distintos enrutamientos y transformaciones.
+
+\subsection{La Attention de una sola cabeza es un promedio ponderado con una Value Transform compartida}
+
+Para la posición $i$, la salida de una sola cabeza puede escribirse así:
+\[
+y_i=\sum_{j=1}^{n}\alpha_{ij}W_Vx_j,
+\qquad \sum_j\alpha_{ij}=1,\quad \alpha_{ij}\ge 0.
+\]
+Aquí $W_V$ es compartida por todas las posiciones que se leen, y $\alpha_{ij}$ cambia según el contenido de query/key. El enrutamiento es dinámico, pero el contenido transmitido pasa por la misma transformación lineal; por eso la relation capacity de un solo head es limitada.
+
+\lecturefigure{slide-21-attention-weighted-average.jpg}{La attention de una sola cabeza puede verse como un promedio ponderado dinámico de las values}{Diapositiva V021 recuperada de la grabación oficial; 00:25:30}
+
+\begin{knowledgebox}{Lectura de la figura: lo dinámico son los pesos; lo fijo es la transformación dentro de un mismo head}
+El grosor de cada flecha lo determina $\alpha_{ij}$, y todas las entradas pasan primero por la misma $W_V$. Observe primero que puede tomar información de cualquier posición y después si los distintos offsets o relaciones tienen una transform independiente; esto explica por qué una sola cabeza es más flexible que un pooling fijo, pero aun así puede comprimir varios tipos de relación en el mismo subespacio.
+\end{knowledgebox}
+
+\subsection{La Convolution ofrece una Transform distinta para cada Offset}
+
+La salida de una convolution unidimensional es aproximadamente:
+\[
+y_i=\sum_{\delta\in\mathcal{K}}W_{\delta}x_{i+\delta}.
+\]
+Aquí $\mathcal{K}$ son los kernel offsets, y $W_{\delta}$ puede variar con la posición relativa. En la convolution, las posiciones de conexión son fijas y las transforms son diversas; en la single-head attention, los pesos de conexión son dinámicos y la value transform es compartida. Multi-head busca obtener a la vez enrutamiento dinámico y varios grupos de transforms.
+
+\lecturefigure{slide-22-convolution-linear-transformations.jpg}{La convolution usa una linear transformation distinta para cada posición relativa}{Diapositiva V022 recuperada de la grabación oficial; 00:27:03}
+
+\begin{knowledgebox}{Lectura de la figura: dónde coloca sus grados de libertad la Attention y dónde la Convolution}
+Las aristas de colores representan el kernel weight de cada offset. La convolución puede distinguir «una posición a la izquierda» de «dos posiciones a la derecha», pero el alcance de lectura lo predefine el kernel; la attention puede elegir cualquier posición según el contenido, pero dentro de una sola cabeza comparte la value transform. Solo al entender este contraste se ve que multi-head no es un simple ensemble.
+\end{knowledgebox}
+
+\subsection{Multi-Head: varios Relation Subspaces trabajan en paralelo}
+
+La \term{multi-head attention (atención multicabeza)} usa para cada head sus propias $W_Q^h,W_K^h,W_V^h$ y después concatena las salidas:
+\[
+\operatorname{MHA}(X)=\operatorname{Concat}(H_1,\ldots,H_H)W_O,
+\qquad H_h=\operatorname{Attn}(XW_Q^h,XW_K^h,XW_V^h).
+\]
+Aquí $H$ es el head count y $W_O$ es la projection de salida. Cada head puede aprender relaciones locales, copia, correferencia, posición u otras interactions, pero no hay garantía de que cada head corresponda a un concepto que una persona pueda nombrar.
+
+\lecturefigure{slide-23-multi-head-attention.jpg}{La multi-head attention ofrece varios grupos de enrutamiento y de value transformation}{Diapositiva V023 recuperada de la grabación oficial; 00:28:15}
+
+\begin{importantbox}{Lo esencial de multi-head no es «mirar varias veces»}
+Cada head cambia a la vez el query/key routing y el value feature space. Esto permite al modelo expresar varios tipos de relación en la misma capa y escribir el resultado de vuelta en el residual stream compartido; más heads no es automáticamente mejor: la head dimension, la redundancia, la KV memory y el serving cost determinan en conjunto la escala efectiva.
+\end{importantbox}
+
+\begin{lstlisting}[caption={Estructura conceptual de la multi-head attention y de la KV compartida}]
+for head in query_heads:
+    query = project_q(hidden, head)
+    kv_group = head_to_kv_group(head)  # MHA: one group/head; GQA/MQA: shared
+    key = project_k(hidden, kv_group)
+    value = project_v(hidden, kv_group)
+    head_output[head] = attention(query, key, value, causal=True)
+output = project_o(concat(head_output))
+\end{lstlisting}
+
+\teachervoice{El ponente resume la single-head attention como «un solo weighted average» y luego usa las offset-specific transforms de la convolution para explicar por qué se necesitan varias cabezas. Esta explicación del mecanismo es más precisa que decir que «varias cabezas pueden atender a posiciones distintas»: las cabezas múltiples aportan a la vez distintos espacios de similitud y distintas transformaciones del contenido.}
+
+\subsection{Resumen de la sección}
+
+La single-head attention combina enrutamiento dinámico con una value transform compartida, mientras que la convolution ofrece enrutamiento fijo con offset-specific transforms; la multi-head attention ejecuta en paralelo varios grupos de enrutamiento dinámico y de feature transform. Más adelante, MQA/GQA volverán a decidir qué projections deben ser independientes para reducir la KV memory.
+\section{Evidencia temprana: Machine Translation, Parsing y Attention Pattern}
+
+Que un mecanismo sea razonable no significa que el modelo sea eficaz. El Transformer original mostró primero su calidad y su eficiencia de entrenamiento en WMT machine translation, y después se trasladó a constituency parsing; la attention visualization, por su parte, ofrece indicios locales de interpretabilidad. Esta sección separa tres tipos de evidencia: benchmark improvement, cross-task transfer y qualitative pattern.
+
+\subsection{Machine Translation: mejoran a la vez la calidad y la eficiencia de entrenamiento}
+
+El artículo original compara BLEU, costo de entrenamiento y tamaño del modelo en WMT14 English--German y English--French. Al leer la tabla, primero hay que confirmar si se trata de single model o ensemble y cuál es el presupuesto de entrenamiento, y solo después comparar la calidad. Lo importante del Transformer no es que gane unas cuantas décimas de BLEU, sino que alcanza o supera a los sistemas de la época con una arquitectura más fácil de paralelizar.
+
+\lecturefigure{slide-24-sota-machine-translation.jpg}{Resultados de machine translation del Transformer original}{Diapositiva V024 recuperada de la grabación oficial; 00:28:54}
+
+\begin{knowledgebox}{Lectura de la figura: primero alinear el tipo de modelo y el costo de entrenamiento}
+La tabla incluye a la vez baselines recurrent, convolutional, single-model y ensemble. Primero se comparan configuraciones del mismo tipo y después se revisan los FLOPs o el tiempo de entrenamiento; la evidencia central es que el Transformer obtiene un BLEU alto con un costo de entrenamiento menor. BLEU sigue siendo una corpus-level overlap metric: no abarca toda la semántica, la robustez ni la calidad en un despliegue real.
+\end{knowledgebox}
+
+\subsection{Generalization to Parsing: la arquitectura no sirve solo para traducción}
+
+En constituency parsing, la estructura de entrada y salida es distinta de la de translation. Aplicar la misma architecture a parsing pone a prueba si el motif de cómputo puede reutilizarse entre tareas, en lugar de limitarse a memorizar rasgos de la traducción. Los resultados respaldan que la pila self-attention + FFN es un backbone general de sequence transduction.
+
+\lecturefigure{slide-25-generalization-to-parsing.jpg}{El Transformer generaliza de machine translation a constituency parsing}{Diapositiva V025 recuperada de la grabación oficial; 00:29:45}
+
+\begin{knowledgebox}{Lectura de la figura: el resultado entre tareas valida la architecture reuse}
+Primero se revisan los parsing benchmarks, como WSJ, y sus baselines; después se distingue entre «el mismo block puede entrenarse» y «no se necesitan task-specific data». Parsing conserva su propia representation de salida, sus datos y su objective; la figura respalda la backbone consolidation, pero eso no equivale a que todas las tareas solo requieran un prompt zero-shot.
+\end{knowledgebox}
+
+\subsection{Attention Map: un Pattern legible no es una explicación completa}
+
+Algunas heads muestran dependencias de larga distancia, patrones sintácticos o de copia, por lo que se vuelven una ventana para que los investigadores entiendan el modelo. Sin embargo, el attention weight solo describe los coeficientes de enrutamiento de la layer/head actual: no incluye el value content, la residual contribution ni la nonlinear transformation posterior, y tampoco demuestra directamente importancia causal.
+
+\lecturefigure{slide-26-interpretable-attention-patterns.jpg}{Patterns de larga distancia y sintácticos visibles en un attention map}{Diapositiva V026 recuperada de la grabación oficial; 00:30:48}
+
+\begin{warningbox}{«Parece gramática» no significa que el modelo dependa causalmente de esa Head}
+Para leer la figura, primero se confirman los tokens de los ejes horizontal y vertical, la escala de color y la head/layer; después se observa si los pesos altos son estables entre ejemplos. Para demostrar un mecanismo se requieren además ablation, activation patching, counterfactual intervention o value-path analysis; un solo heatmap solo puede aportar una hypothesis.
+\end{warningbox}
+
+\teachervoice{El ponente mantiene una postura mesurada respecto a la attention interpretability: algunos patterns son muy vistosos y en efecto parecen long-distance dependency, pero la capacidad de la architecture puede deberse a la acción conjunta del enrutamiento de información y de la enorme FFN. No conviene elevar una sola figura a «proceso de pensamiento del modelo».}
+
+\subsection{Resumen de la sección}
+
+La early evidence se divide en tres niveles: la tabla de translation demuestra calidad y eficiencia, parsing demuestra que el backbone es transferible y el attention map ofrece patterns internos que pueden investigarse. Los tres niveles son importantes, pero respaldan conclusiones de distinta solidez; un apunte de calidad debe conservar esta evidence discipline.
+\section{Position Representation: por qué la self-attention debe recuperar el orden}
+
+La self-attention es permutation equivariant respecto a la entrada: si se permutan a la vez los tokens y las posiciones, la attention pura no puede conocer el orden original. El lenguaje, la música y las imágenes dependen de la posición relativa, por lo que el modelo debe inyectar una position signal. El encoding learned/sinusoidal del Transformer original es el punto de partida; después, el relative embedding, el relative bias y la rotation escriben la distancia directamente en la interaction.
+
+\subsection{Absolute Position: Learned y Sinusoidal}
+
+El método original suma un position vector $p_i$ al token embedding $x_i$. Un grupo de dimensiones del sinusoidal encoding es:
+\[
+p_{i,2k}=\sin\!\left(i/10000^{2k/d}\right),\qquad
+p_{i,2k+1}=\cos\!\left(i/10000^{2k/d}\right).
+\]
+Donde $i$ es la posición, $k$ es el índice de frecuencia y $d$ es el model width. No requiere aprendizaje y puede calcularse para cualquier posición, pero que el model realmente extrapole más allá de la longitud de entrenamiento sigue dependiendo del attention behavior y de la distribución de entrenamiento.
+
+\lecturefigure{slide-27-evolution-position-encodings.jpg}{Permutation invariance y el position encoding learned/sinusoidal original}{Diapositiva V027 recuperada de la grabación oficial; 00:33:45}
+
+\begin{knowledgebox}{Lectura de la figura: la position signal debe responder «a qué distancia relativa», no solo «en qué posición absoluta»}
+La arquitectura original, a la derecha, agrega el position encoding en la parte inferior. Primero observe si el index absoluto puede expresar de forma natural $i-j$; después, si hay una estructura estable más allá de la longitud de entrenamiento. El learned embedding queda fácilmente limitado por la max length; la sinusoid tiene forma analítica, pero no garantiza que el modelo aprenda una extrapolation confiable.
+\end{knowledgebox}
+
+\teachervoice{El ponente señala que la position sinusoidal/learned original no captura bien la relative distance ni la extrapolation, y que esto se volvió el foco de la evolución posterior. Ajustar la base frequency puede cambiar el comportamiento ante la longitud, pero el position scheme no es una perilla mágica independiente: debe coordinarse con el context de entrenamiento y la attention scale.}
+
+\subsection{Relative Embedding, Bias y Rotation}
+
+Los métodos relative incorporan la distancia $r=i-j$ directamente en el score o en el value. Una relative-key attention simplificada es:
+\[
+s_{ij}=q_i^\top(k_j+a_{i-j}),
+\]
+donde $a_{i-j}$ es el embedding de la distancia relativa. El relative bias suma un escalar directamente a $s_{ij}$, mientras que el rotary position embedding (RoPE) rota query/key según la posición, de modo que el producto interno contenga la phase relativa; los tres hacen concesiones distintas en parámetros, extrapolación e implementación.
+
+\lecturefigure{slide-28-position-encoding-variants.jpg}{Relative embedding, relative bias y relative rotation}{Diapositiva V028 recuperada de la grabación oficial; 00:36:45}
+
+\begin{knowledgebox}{Términos clave: diferencias de interfaz entre los esquemas de position}
+\begin{tabularx}{\textwidth}{@{}L{0.20\textwidth}X X@{}}
+\toprule
+Esquema & Dónde se coloca la posición & Concesión principal \\
+\midrule
+Absolute embedding & Se suma al hidden state del token & Simple, pero la distancia se aprende de forma indirecta \\
+Relative embedding/bias & Se incorpora al attention score/value pairwise & Expresa la distancia directamente; hay que manejar el rango de distancias \\
+Rotary encoding & Rota el subspace de query/key & El producto interno contiene de forma natural la phase relativa; la extrapolación depende del diseño de frecuencias \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{Music Transformer: cómo la posición relativa mejora la estructura larga}
+
+La generación musical exige que el modelo mantenga el ritmo, los motivos y las estructuras repetidas; las dependencias entre tokens pueden abarcar lapsos muy largos. Music Transformer usa relative attention, lo que facilita al modelo leer la historia según intervalos y relaciones de repetición; muestra que el position mechanism puede cambiar la qualitative coherence, y no solo las cifras de benchmark.
+
+\lecturefigure{slide-29-music-transformer.jpg}{Music Transformer modela la estructura musical de largo alcance con relative attention}{Diapositiva V029 recuperada de la grabación oficial; 00:37:12}
+
+\begin{knowledgebox}{Lectura de la figura: primero la relation, después escuchar/ver el outcome}
+La figura destaca la score decomposition de la relative attention. Primero siga el intervalo temporal entre la note actual y las notes históricas; después compárelo con la vanilla attention. La relative signal aporta un prior estructural, pero la calidad musical final también depende de la tokenización, el training corpus, el sampling y el método de evaluación.
+\end{knowledgebox}
+
+\lecturefigure{slide-30-music-transformer-demo.jpg}{Página de qualitative samples de Music Transformer y otros modelos}{Diapositiva V030 recuperada de la grabación oficial; 00:37:18}
+
+\begin{warningbox}{El demo es evidencia, pero de fuerza limitada}
+Los ejemplos de la página web ayudan al público a percibir la repetition, la coherence y el drift, pero son susceptibles al cherry-picking, al fragmento reproducido y a las preferencias subjetivas. Conviene combinarlos con la held-out likelihood, métricas estructurales, un blind listening study y ejemplos con varias seeds, en lugar de tomar una pieza musical agradable como una victoria general.
+\end{warningbox}
+
+\teachervoice{El ponente reproduce/muestra samples musicales para que el efecto de la relative position sea perceptible; no trata el demo como una metric completa. La clase conserva esta evidencia cualitativa, pero debe quedar claro que solo permite plantear la observación de que «la estructura de largo alcance es mejor», y no basta para determinar una causa única.}
+
+\subsection{Resumen de la sección}
+
+La self-attention por sí misma no conoce el orden. El absolute encoding permite al modelo ver el index; relative/bias/rotation hacen que la pairwise interaction perciba directamente la distancia, y Music Transformer ofrece una aplicación a estructuras largas. La position representation es un componente central de la attention interface, no una suma decorativa que se hace una sola vez antes de la entrada.
+\section{Long Context: Quadratic Complexity es solo el primer nivel del problema}
+
+A medida que crece la context length, la attention enfrenta a la vez el problema del cómputo y el de la activation memory: $QK^\top$ tiene $n^2$ scores, y los valores intermedios del softmax también deben leerse y escribirse. El curso divide los métodos de long-context en patrones fijos locales/dispersos, content-based sparse routing, linear/factored approximation y external memory/retrieval; la verdadera dificultad es si la estructura del algoritmo puede mapearse al hardware.
+
+\subsection{Dos tipos de cuello de botella: Compute y Attention-logit Memory}
+
+Los términos principales de la attention estándar son:
+\[
+\operatorname{FLOPs}_{\mathrm{score/value}}\approx 4n^2d_hH,
+\qquad \operatorname{Memory}_{\mathrm{logits}}=O(Hn^2).
+\]
+donde $n$ es la sequence length, $d_h$ es la head dimension y $H$ es el head count. Aunque el total de FLOPs todavía sea aceptable, materializar todos los logits puede agotar antes la HBM; lo esencial de FlashAttention es precisamente evitar escribir una y otra vez la score matrix completa de vuelta en la memoria de la GPU.
+
+\lecturefigure{slide-31-evolution-attention-challenges.jpg}{La evolución de la attention enfrenta dos problemas: quadratic compute y memory-bound}{Diapositiva V031 recuperada de la grabación oficial; 00:40:27}
+
+\begin{knowledgebox}{Lectura de la figura: los dos problemas no pueden resumirse con una misma cifra}
+El diagrama de arquitectura de la izquierda señala la attention, y el texto enumera quadratic complexity y memory bound. Primero hay que distinguir la cantidad de cómputo, la capacidad de activation, el memory bandwidth y la kernel utilization; un método con FLOPs lineales que genere gather/scatter irregulares puede seguir siendo más lento que un dense tiled kernel.
+\end{knowledgebox}
+
+\subsection{Local, Sparse, Routing y LSH Patterns}
+
+Una window fija limita a $w$ los vecinos candidatos de cada token, y la complejidad baja de $O(n^2d)$ a $O(nwd)$. Un local pattern de varias capas puede propagar la información paso a paso; los strided/global tokens establecen conexiones entre regiones; routing/LSH encuentra de forma aproximada, según el contenido, los tokens con alta similitud, e intenta conservar las aristas que de verdad tienen peso en la full attention.
+
+\lecturefigure{slide-32-long-context-patterns.jpg}{Attention pattern local, sparse, routing y LSH}{Diapositiva V032 recuperada de la grabación oficial; 00:44:48}
+
+\begin{knowledgebox}{Lectura de la figura: el grafo de conexiones determina el diámetro de propagación de la información}
+Primero observa los nonzero blocks de cada pattern y luego pregúntate cuántas capas necesitan dos tokens lejanos para comunicarse. La local window es regular y amigable con el kernel, pero las rutas de largo alcance se alargan; routing/LSH es más content-aware, pero introduce clustering, sorting y memory access irregular. Una misma proporción de dispersión no implica la misma velocidad.
+\end{knowledgebox}
+
+\teachervoice{El ponente recuerda la sparse attention para imágenes y música y plantea una observación importante: la mayoría de las capas pueden ser locales, y solo unas pocas capas posteriores asumen el verdadero long-distance modeling. La content-based sparsity tiene un fuerte atractivo teórico, pero el memory movement suele consumir los FLOP savings.}
+
+\subsection{Linear, Factored y External Memory}
+
+Otro grupo de métodos cambia la attention factorization o introduce memory. La linear attention usa kernel features para reasociar $\operatorname{softmax}(QK^\top)V$; la factored attention descompone la interaction bidimensional o de secuencias largas; Memorizing Transformer o retrieval colocan parte del historial en un store externo y lo leen según la query.
+
+\lecturefigure{slide-33-long-context-methods.jpg}{Rutas linear, factored y retrieval/memory}{Diapositiva V033 recuperada de la grabación oficial; 00:44:54}
+
+\begin{knowledgebox}{Términos clave: qué capa modifica cada método de long-context}
+\begin{tabularx}{\textwidth}{@{}L{0.22\textwidth}X X@{}}
+\toprule
+Ruta & Mecanismo central & Riesgo principal \\
+\midrule
+Local/fixed sparse & Un pequeño número de attention edges predefinidas & Puede omitir aristas lejanas relevantes por su contenido \\
+Routing/LSH sparse & Agrupamiento por contenido o búsqueda de vecinos cercanos & Acceso irregular a memoria, error de aproximación, implementación compleja \\
+Linear/factored & Reescribe o descompone el attention kernel & La expresividad y la numerical stability pueden cambiar \\
+External memory/retrieval & Almacena el historial fuera del modelo y lo lee cuando se necesita & index freshness, retrieval error y latency \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\begin{importantbox}{Long context no equivale a usar el long context de forma efectiva}
+Poder recibir $n$ tokens solo demuestra la capacidad de la interfaz; también hay que evaluar si la información lejana se recupera, si aumenta la interferencia, si la position se extrapola, si la respuesta depende de la evidencia correcta y si la latency/throughput es aceptable.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La long-context attention tiene dos cuellos de botella ortogonales: pairwise compute e intermediate memory. Las rutas local/sparse/routing/linear/memory cambian, respectivamente, el grafo de conexiones, la forma de aproximación o el lugar de almacenamiento; cualquier conclusión sobre complejidad debe seguir indagando en el kernel y en el hardware mapping.
+\section{Not All FLOPs Are Equal: el Systems Co-design de Attention}
+
+Los artículos sobre algoritmos suelen comparar la eficiencia en FLOPs, pero la aceleración real depende del HBM bandwidth, la on-chip SRAM, la kernel fusion, la parallel granularity y el KV cache. La \term{HBM (High Bandwidth Memory, memoria de video de alto ancho de banda)} es DRAM apilada fuera del chip de la GPU, de gran capacidad pero con alto costo de acceso; la \term{SRAM (Static Random-Access Memory)} está dentro del chip y tiene poca capacidad y baja latencia. Un kernel de alto rendimiento procura reutilizar los datos en la SRAM tanto como sea posible.
+
+\subsection{Memory Hierarchy y Arithmetic Intensity}
+
+La \term{arithmetic intensity (intensidad aritmética)} se define como cuántos FLOPs se realizan por cada byte transferido:
+\[
+I=\frac{\text{FLOPs}}{\text{bytes moved}}.
+\]
+Si $I$ es baja, el kernel suele estar limitado por el bandwidth; reducir los FLOPs a costa de más HBM round trips puede resultar más lento. La dense matrix multiplication es regular, admite tiling y tiene alta reutilización de datos, por lo que con frecuencia supera a algoritmos irregulares que en teoría requieren menos operaciones.
+
+\lecturefigure{slide-34-flops-memory-hierarchy.jpg}{FLOPs, ancho de banda y la memory hierarchy de la GPU}{Diapositiva V034 recuperada de la grabación oficial; 00:49:36}
+
+\begin{knowledgebox}{Lectura de la figura: primero ubicar en qué nivel de memory están los datos}
+La pirámide va de los registros y la SRAM a la HBM y la memoria principal; cuanto más cerca del compute, más rápida pero más pequeña. Primero hay que preguntar si Q/K/V, los logits y el output se escriben de vuelta en la HBM, y después si es posible aplicar tile/recompute; «calcular una vez menos» no necesariamente ahorra tiempo si exige varias transferencias lentas.
+\end{knowledgebox}
+
+\teachervoice{Vaswani repite que el practical bottleneck «always ends up being memory movement». No niega la algorithmic complexity, sino que advierte a los investigadores: solo cuando un esquema disperso, aproximado o de baja precisión puede formar kernels regulares y de alta reutilización, la FLOP reduction de un artículo puede convertirse en wall-clock gain.}
+
+\subsection{KV Cache, MQA y GQA}
+
+La autoregressive inference guarda en caché las keys/values anteriores para no recalcularlas en cada paso. El tamaño del \term{KV cache} es aproximadamente proporcional al número de layers, la context length, el número de KV heads y la head dimension. La multi-query attention (MQA) hace que todas las query heads compartan un solo conjunto de K/V; la grouped-query attention (GQA) comparte un conjunto de K/V entre varias query heads, como compromiso entre calidad y memory/bandwidth.
+
+\lecturefigure{slide-35-gqa-mqa-activation-memory.jpg}{La KV activation memory en MHA, GQA y MQA}{Diapositiva V035 recuperada de la grabación oficial; 00:51:06}
+
+\begin{knowledgebox}{Lectura de la figura: Queries y KV heads no tienen que corresponderse uno a uno}
+A la izquierda, MHA guarda K/V independientes para cada query head; al centro, se comparten por group; a la derecha, MQA conserva un solo conjunto. Primero hay que contar las K/V columns y luego estimar el volumen de lectura durante el decode; reducir las KV heads puede bajar de forma notable el memory bandwidth, pero compartir demasiado puede perder parte de la relation capacity.
+\end{knowledgebox}
+
+\subsection{Online Softmax y Fused Kernel}
+
+El softmax ordinario necesita primero encontrar el row max, luego calcular la suma de exponenciales y después normalizar, lo que implica leer los scores varias veces. El online algorithm mantiene, sobre bloques en flujo, un running max $m$ y una normalization $\ell$:
+\[
+m' = \max(m,\max_j s_j),\qquad
+\ell'=e^{m-m'}\ell+\sum_j e^{s_j-m'}.
+\]
+Aquí $s_j$ son los scores del nuevo block. Junto con la tiled attention, la normalization y la value accumulation pueden completarse en la SRAM sin materializar la matriz completa de $n^2$. Un \term{fused kernel (operador fusionado)} combina varias operaciones de la GPU en un solo kernel, lo que reduce las lecturas y escrituras en HBM y el launch overhead.
+
+\lecturefigure{slide-36-online-softmax-systems.jpg}{Online softmax y bandwidth-aware attention optimization}{Diapositiva V036 recuperada de la grabación oficial; 00:51:27}
+
+\begin{knowledgebox}{Lectura de la figura: la fórmula del algoritmo y el kernel schedule son dos niveles de diseño}
+La diapositiva presenta a la vez la online normalization, la memory hierarchy y la tiled attention. Primero hay que verificar la equivalencia numérica y luego ver cómo el block permanece en la SRAM; la ventaja de los métodos del tipo FlashAttention proviene del IO-aware schedule, no de cambiar la definición del modelo. El resultado también depende de la GPU architecture, la shape y la implementation quality.
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Pseudocódigo conceptual de la normalización en flujo del online softmax}]
+running_max = -inf
+running_sum = 0.0
+weighted_value = 0.0
+for score_block, value_block in blocks:
+    new_max = max(running_max, max(score_block))
+    old_scale = exp(running_max - new_max)
+    block_weight = exp(score_block - new_max)
+    running_sum = old_scale * running_sum + sum(block_weight)
+    weighted_value = old_scale * weighted_value + block_weight @ value_block
+    running_max = new_max
+output = weighted_value / running_sum
+\end{lstlisting}
+
+\begin{warningbox}{No usar el Parameter Count en lugar del Serving Cost}
+Modelos con el mismo número de parámetros pueden tener latency/throughput completamente distintos según las KV heads, la context length, el procesamiento por lotes, la precision, el parallelism y el kernel. Los FLOPs de entrenamiento, los prefill FLOPs, el decode bandwidth y el end-to-end request cost deben reportarse por separado.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La attention optimization se extiende de la equation al data movement. La memory hierarchy explica por qué una FLOP reduction puede no servir; MQA/GQA modifican el KV state, y el online softmax y la fusion modifican el schedule de ejecución. La Transformer architecture moderna y los systems ya son inseparables.
+\section{De la Architecture al Universal Substrate}
+
+La conferencia termina situando de nuevo al Transformer dentro de la consolidation thesis. Ya se extendió desde el translation backbone hacia vision, contrastive learning, modelos de lenguaje y tool-using systems, pero el curso también enumera de forma explícita lo que no cubrió: layer norm, modificaciones a la FFN, higher-order attention y faster decoding. Universal substrate describe una tendencia; no es una declaración de que «todos los problemas ya están unificados».
+
+\subsection{Extensiones a otros campos y omisiones deliberadas de esta clase}
+
+El Vision Transformer trata los patches de la imagen como tokens, y el contrastive model alinea representaciones entre modalidades; estos cambios demuestran que el block de token mixing + feature transformation es transferible. Al mismo tiempo, la pre/post layer norm, la gated FFN, la higher-order interaction y el speculative/non-autoregressive decoding influyen de manera notable en los sistemas modernos; esta clase solo sigue la línea principal de attention/position/system.
+
+\lecturefigure{slide-37-advancements-other-areas.jpg}{El Transformer se extiende a vision y contrastive learning}{Diapositiva V037 recuperada de la grabación oficial; 00:52:33}
+
+\begin{knowledgebox}{Lectura de la figura: lo que se transfiere es el block motif, no que las entradas sean iguales por naturaleza}
+Las imágenes requieren patch/tokenización y position bidimensional; el contrastive learning requiere un objective entre muestras. Primero observe el Transformer encoder compartido y después el input/output específico de cada modalidad (modality-specific); el éxito entre campos respalda la architecture reuse, pero no implica que deba eliminarse todo inductive bias.
+\end{knowledgebox}
+
+\lecturefigure{slide-38-not-covered-topics.jpg}{Direcciones de evolución del Transformer que esta clase no desarrolla, pero que son igual de importantes}{Diapositiva V038 recuperada de la grabación oficial; 00:54:15}
+
+\begin{warningbox}{Una conferencia de 80 minutos no sustituye un mapa completo del campo}
+La pre-vs-post norm afecta la estabilidad de las redes profundas, la FFN/gating afecta la capacity, la higher-order attention cambia la interaction y el speculative decoding mejora la inference. Interpretar «no cubierto» como «no importante» haría que los apuntes fueran más tajantes que la propia clase.
+\end{warningbox}
+
+\teachervoice{Que el ponente muestre por iniciativa propia la diapositiva Not Covered es una forma de evidence hygiene: reconoce que muchos avances importantes no entraron en el relato. Unos apuntes de calidad también deben conservar la delimitación del alcance, en lugar de meter a la fuerza en la clase todos los términos posteriores solo para parecer completos.}
+
+\subsection{El LLM como Prompt-programmable Substrate}
+
+Cuando un mismo pretrained model puede ejecutar una gran variedad de tareas mediante el prompt, empieza a parecerse a un substrate de cómputo general: el usuario ya no entrena un modelo independiente para cada tarea, sino que especifica el comportamiento mediante el context. Aquí la «programming» sigue siendo probabilistic conditioning, limitada por los datos de entrenamiento, el instruction following, la context window y la reliability.
+
+\lecturefigure{slide-39-llms-universal-substrate.jpg}{El LLM como prompt-programmable universal substrate}{Diapositiva V039 recuperada de la grabación oficial; 00:57:15}
+
+\begin{knowledgebox}{Lectura de la figura: el prompt es una interfaz, no una prueba de confiabilidad}
+El diagrama al estilo Pac-Man expresa que un solo modelo absorbe múltiples tareas. Primero pregunte si las tareas realmente comparten los model weights y después si la salida puede verificarse; la few-shot breadth muestra consolidation, pero no garantiza exact computation, fresh knowledge, long-horizon execution ni safety.
+\end{knowledgebox}
+
+\begin{importantbox}{La consolidation traslada los problemas hacia etapas posteriores}
+Cuando la interfaz del modelo se unifica, las diferencias no desaparecen: se trasladan a la data mixture, el prompt/tool schema, la evaluation, el serving, el feedback y la safety. Lo que se simplifica es la API superficial, no necesariamente la pila de ingeniería completa.
+\end{importantbox}
+
+\subsection{El Transformer moderno es un Data-center System}
+
+El entrenamiento y el serving de los modelos grandes abarcan miles de GPU e implican \term{collectives (comunicación colectiva)} como all-reduce, all-gather y reduce-scatter, además de la topología de red, la congestión, las estrategias de paralelismo y la tolerancia a fallas. Un layer en el diagrama del modelo, en tiempo de ejecución, se divide en parámetros, activations y un communication schedule repartidos entre varios devices.
+
+\lecturefigure{slide-40-modern-transformer-datacenter.jpg}{El Transformer moderno a gran escala debe entenderse como un data-center system}{Diapositiva V040 recuperada de la grabación oficial; 00:59:06}
+
+\begin{knowledgebox}{Lectura de la figura: al crecer el número de parámetros, la red también entra en el critical path del modelo}
+La fotografía del centro de datos no es decorativa. Primero pregunte cómo se hace la partición con tensor/data/pipeline parallel y después si los collectives se superponen con el compute (compute overlap); la quality del modelo puede ser la misma, pero la cluster topology y la congestion determinan si el entrenamiento es escalable. Un architecture researcher también necesita entender los systems boundaries.
+\end{knowledgebox}
+
+\teachervoice{El ponente dice que, si de verdad se investiga el modern large-scale Transformer, hay que estudiar all-reduce, InfiniBand, RoCE y congestion. El Transformer grande «now in some sense is a data center»; esto cierra el ciclo con la inversión del juicio sobre la machine capacity de Dartmouth planteado al inicio.}
+
+\subsection{Tools: qué capacidades deben estar dentro del modelo y cuáles deben recurrir a sistemas externos}
+
+El \term{tool use (uso de herramientas)} permite que el modelo invoque, mediante una interface estructurada, una calculadora, búsqueda, una base de datos, un code executor u otro service. No es un regreso al pipeline frágil, sino dejar fuera las capacidades de software verificables, exactas y ya existentes, mientras el modelo se encarga de elegir, combinar e interpretar.
+
+\lecturefigure{slide-41-llms-using-tools.jpg}{El LLM se conecta a búsqueda, cálculo y software externo mediante herramientas}{Diapositiva V041 recuperada de la grabación oficial; 00:59:24}
+
+\begin{knowledgebox}{Lectura de la figura: la Swiss-army knife sigue necesitando interfaces claras}
+Cada herramienta tiene su schema, sus permisos, su cost y sus failure modes. Primero observe cuándo decide el modelo invocarla y después cómo se verifica el resultado y cómo pasa al siguiente paso; la tool breadth puede ampliar la capability, pero un routing erróneo, la prompt injection y las actions irreversibles también amplían el riesgo.
+\end{knowledgebox}
+
+\teachervoice{En la sesión de Q\&A, Vaswani ofrece un juicio muy ingenieril: no conviene gastar «mil millones de FLOPs por posición» para calcular dos números; ciertas capacidades deben delegarse a herramientas externas, y el modelo debe encargarse del thinking que requiere juicio semántico y combinación. El límite de las herramientas es una capability allocation, no una señal de que el modelo sea poco puro.}
+
+\subsection{It Is Time to Build: la retroalimentación del producto también es una señal de aprendizaje}
+
+El ponente sostiene que la interacción con usuarios reales puede exponer carencias de capacidad y formar un ciclo de data/feedback/model improvement. El producto no genera buenos datos de forma automática: la retroalimentación tiene selection bias, problemas de privacy, reward hacking y KPI de corto plazo; pero sin workflows reales, es difícil que los investigadores sepan en qué interfaces falla realmente el modelo.
+
+\lecturefigure{slide-42-time-to-build.jpg}{El uso real y la mejora del modelo pueden formar un ciclo cerrado de retroalimentación del producto}{Diapositiva V042 recuperada de la grabación oficial; 01:00:06}
+
+\begin{importantbox}{El valor de investigación de Build proviene de las Failures observables}
+Un ciclo cerrado de alto valor debe registrar la tarea, la trayectoria de herramientas, las correcciones del usuario, el resultado de la ejecución y la clasificación de fallas, y distinguir entre «al usuario le gusta» y «la tarea es correcta». Solo al convertir la retroalimentación en artifacts de entrenamiento/evaluation auditables, el uso del producto mejorará el modelo, en lugar de solo amplificar los sesgos existentes.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La consolidation del Transformer ya atraviesa modalidades y tareas, pero todavía queda mucho trabajo de architecture sin cubrir. Una vez que el LLM se convierte en un substrate general, los problemas de sistemas se desplazan hacia el data center, las tools, el feedback y la verification; el modelo unificado no hizo desaparecer la ingeniería, sino que reorganizó sus límites.
+\section{Research Directions y Q\&A: lo que todavía no se sabe}
+
+La clase no cerró con «scale solves everything», sino con una lista: uncertainty, inference-time learning, adaptive thinking, planning y quantization. La sesión de Q\&A añadió además condiciones limitantes como non-autoregressive ordering, language world knowledge, generalization, multi-agent coordination, modularity y gradient descent. Estos spoken nodes son la parte de esta clase donde más se concentra la teacher voice.
+
+\subsection{Cinco Research Directions públicas}
+
+Primero, el modelo debería saber lo que no sabe; segundo, si el modelo puede aprender un skill nuevo en inference time, sin actualizar sus parámetros cada vez; tercero, si puede asignar adaptive compute según la dificultad del problema; cuarto, si el reasoning/planning puede resolverse con un modelo pequeño, un external planner o una mejor representation; quinto, si una precision más baja puede seguir reduciendo el memory traffic y aumentando el matrix throughput.
+
+\lecturefigure{slide-43-research-directions.jpg}{Incertidumbre, inference-time learning, adaptive thinking, planning y quantization}{Diapositiva V043 recuperada de la grabación oficial; 01:00:51}
+
+\begin{knowledgebox}{Lectura de la figura: las cinco direcciones abarcan model, algorithm y system}
+Knowing what you do not know pertenece a calibration/evaluation; learning skills at inference time pertenece a memory/adaptation; adaptive thinking y planning pertenecen a compute allocation; quantization pertenece al numerical/system co-design. No pueden validarse con un solo indicador de «modelo más grande».
+\end{knowledgebox}
+
+\teachervoice{El ponente observa que un diffusion model puede mejorar su calidad con más compute de muestreo, mientras que los modelos de lenguaje carecían entonces de un adaptive-compute knob igual de claro. Plantea la pregunta: ¿se puede hacer que un modelo pequeño piense más en los problemas difíciles y se conecte a un external planner, para acercarse al reasoning de un modelo grande, en lugar de pagar el costo máximo por cada token?}
+
+\subsection{Non-autoregressive Decoding: lo que realmente falta es un Order Oracle}
+
+La sesión de Q\&A explicó con más detalle la parallel generation. Si el latent/context ya generado basta para que el siguiente grupo de tokens sea condicionalmente independiente, ese grupo puede producirse en paralelo; la dificultad está en aprender ese grouping/order. Una factorization por grupos es:
+\[
+p(y\mid x)=\prod_{g=1}^{G}\prod_{i\in S_g}p\!\left(y_i\mid x,y_{S_{<g}}\right),
+\]
+donde $S_g$ es el $g$-ésimo token group que puede generarse en paralelo y $S_{<g}$ son los groups generados antes. Si un oracle proporciona los groups correctos, el problema se simplifica mucho; en la práctica, el modelo además tiene que descubrir la conditional independence y manejar distribuciones de salida multimodales.
+
+\teachervoice{El ponente dice que, si alguien proporcionara un oracle ordering del tipo «primero genera estas tres palabras y luego esas dos», la non-autoregressive generation tendría más posibilidades. Intentaron modelar las dependencias con una vector-quantized latent sequence; funcionó en translation, pero requería distillation para reducir la entropy de los datos y, al final, su practical impact fue menor que el de speculative decoding.}
+
+\subsection{Language-only World Model: insuficiente, pero más útil de lo que se intuye}
+
+La clase no aceptó que «el texto permite aprender todo el mundo físico», pero tampoco negó su usefulness. Los modelos de lenguaje grandes absorben del texto una gran cantidad de conocimiento sobre objetos, procedimientos y relaciones sociales, y pueden servir como prior de alto nivel para un robotics planner; la percepción, el control y la retroalimentación del entorno siguen a cargo de otros sistemas. Lo esencial es distinguir knowledge coverage de action grounding.
+
+\begin{warningbox}{Poder planificar no equivale a poder controlar en lazo cerrado}
+Que un modelo de lenguaje enuncie pasos razonables solo demuestra que puede organizar sus priors textuales; el robot además necesita reconocer los objetos presentes, estimar el estado, cumplir con la dinámica, ejecutar de forma segura y recuperarse de los fallos. El world knowledge es planner input, no physical verification.
+\end{warningbox}
+
+\teachervoice{La postura de Vaswani es pragmática: quizá language alone sea incompleto, pero los robots ya pueden usar los modelos grandes como planner, lo que muestra que el texto contiene más información sobre el mundo de lo que muchos esperaban. Ni siquiera hemos aprovechado por completo la usefulness de los modelos actuales, así que una insuficiencia de fondo no basta para negar su valor de ingeniería actual.}
+
+\subsection{Generalization: las capacidades nuevas pueden surgir de una Recombination a gran escala}
+
+Si los datos de entrenamiento tienen una cobertura muy amplia, el límite OOD tradicional se vuelve difícil de definir. Puede que el modelo nunca haya visto un ejemplo exacto de «describir esta Stanford lecture con la métrica de Chaucer», pero sí ha visto clases, a Chaucer, métrica y reescrituras, y puede combinarlos en una salida nueva. Esto es compositional generalization útil, aunque sus piezas de información atómicas provengan de la distribución de entrenamiento.
+
+\begin{knowledgebox}{No hay que reducir la Recombination a «solo memoria»}
+Una evaluación debe distinguir entre exact memorization, template interpolation, systematic composition y algorithmic extrapolation. La recombination a gran escala puede generar valor real, pero no garantiza una extrapolación arbitraria en longitud, números, reglas o espacio de estados; cada benchmark mide una generalization distinta.
+\end{knowledgebox}
+
+\subsection{Multi-agent Systems: Decomposition, Coordination, Verification}
+
+Que varios agents superen a un solo modelo grande no depende del número de roles. El ponente plantea tres preguntas básicas: cómo descomponer el objetivo según el skill de cada agent, cómo coordinar el proceso con estado compartido y dependencias, y cómo verificar el resultado. Sin verification, más agents solo producen más texto y una failure propagation más compleja.
+
+\begin{importantbox}{Los tres requisitos mínimos de validación de un sistema Multi-agent}
+\textbf{Goal decomposition}: dividir la tarea en subgoals verificables; \textbf{coordination}: manejar el orden, los recursos, los conflictos y la memory compartida; \textbf{verification}: comprobar los resultados con pruebas, estado del entorno o evidencia externa. Si falta cualquiera de los tres, el llamado swarm no es más que muestreo en paralelo.
+\end{importantbox}
+
+\teachervoice{El ponente dice medio en broma que «los mejores agents son las neurons», porque se actualizan de forma coordinada a través del gradient. Para los sistemas multi-agent explícitos no ofrece una arquitectura universal, sino que reconoce abiertamente que decomposition, coordination y verification siguen en una etapa temprana.}
+
+\subsection{Modularity, MoE y la «Architecture al servicio del Gradient Descent»}
+
+Los module diseñados por personas suelen fracasar por las dificultades de routing, credit assignment y optimización conjunta. Mixture of Experts (MoE) ofrece learned routing, de modo que cierta specialization surge dentro del end-to-end gradient descent; pero la expert identity no equivale a un módulo cognitivo completo, y la responsabilidad puede seguir distribuida entre la attention, el residual stream y varios experts.
+
+\teachervoice{Vaswani dice que a veces siente que «solo estamos construyendo architecture para servir al gradient descent». La frase no desprecia la arquitectura; señala que la entrenabilidad es una restricción estricta: por elegante que sea una división en módulos, si el credit no puede propagarse y el routing no puede aprenderse, difícilmente sustituirá a una red más homogénea pero optimizable.}
+
+\subsection{Resumen de la sección}
+
+Las research directions abarcan calibration, adaptation, compute allocation, planning y numerical efficiency. La sesión de Q\&A muestra además que la parallel generation requiere una estructura de order/independence, que el language world knowledge es útil pero no equivale a grounding, que los sistemas multi-agent requieren verification y que la modularity debe subordinarse a la entrenabilidad.
+\section{Síntesis y ampliación: Love the Transformer, pero sin dejar de cuestionar}
+
+El título de esta clase no expresa una admiración incondicional por el Transformer, sino la aceptación de un hecho de investigación: combina content-based routing, parallel representation learning, residual computation y scalable matrix operations en un substrate muy potente, y llevó al NLP de pipelines especializados a sistemas compartidos. Lo que de verdad merece «love» no es un block fijo, sino el método de la consolidation, la learned interface y el algorithm--system co-design.
+
+\subsection{Nueve conclusiones de ingeniería transferibles}
+
+Las siguientes conclusiones sirven para evaluar un nuevo sequence model, una agent architecture o un sistema long-context. Vinculan la historia, los mecanismos y la evidencia de sistemas, y evitan que los equipos comparen solo el número de parámetros o un único benchmark.
+
+\begin{enumerate}
+  \item \textbf{Primero, preguntar qué interfaces absorbió el sistema.} El valor de la consolidation proviene de reducir las hand-written boundaries, no de que cambie el nombre del modelo.
+  \item \textbf{Distinguir expressivity de trainability.} Un LSTM puede expresar algoritmos complejos y, aun así, no ser adecuado para el scale debido a su sequential critical path.
+  \item \textbf{Ver la attention como content routing.} Q/K determinan las conexiones, V determina el contenido, y la FFN y la residual determinan las transformaciones posteriores.
+  \item \textbf{Registrar los objetivos originales que fracasaron.} La parallel reading tuvo éxito; la parallel writing sigue limitada por mode/order.
+  \item \textbf{La position es una pairwise interface.} La extrapolación de longitud depende del encoding, la frequency, el training range y el attention behavior.
+  \item \textbf{La complejidad debe desglosarse hasta el data movement.} FLOPs, activation, bandwidth, kernel regularity y latency deben reportarse por separado.
+  \item \textbf{Repartir de manera razonable las capacidades dentro y fuera del modelo.} Las operaciones exact, fresh y verificables corresponden a las herramientas; la composición semántica y la selección de estrategias corresponden al modelo.
+  \item \textbf{Un sistema multi-agent necesita decomposition, coordination y verification.} Los prompts de rol no sustituyen un protocolo de sistema.
+  \item \textbf{Proteger las conclusiones con declaraciones de alcance.} Un attention map, una demo musical o un benchmark solo respaldan afirmaciones limitadas.
+\end{enumerate}
+
+\begin{importantbox}{Esta clase resumida en una frase}
+El valor duradero del Transformer no radica en que «la attention sea siempre la respuesta definitiva», sino en que mostró cómo combinar \textbf{la formulación general de problemas, el direccionamiento por contenido, el cómputo matricial en paralelo, una estructura residual entrenable y una implementación adecuada al hardware} en un substrate escalable; las arquitecturas de la siguiente generación todavía deben responder a estas restricciones.
+\end{importantbox}
+
+\subsection{Una tabla de auditoría de sistemas}
+
+\begin{longtable}{@{}L{0.18\textwidth}L{0.35\textwidth}L{0.35\textwidth}@{}}
+\toprule
+Dimensión & Preguntas que conviene hacer & Interpretaciones erróneas comunes \\
+\midrule
+Representation & ¿Cómo se representan token, position y state? & Una tokenización unificada equivale a una semántica unificada \\
+Routing & ¿La información se intercambia por contenido, por posición o mediante una topology fija? & El attention weight es una explicación completa \\
+Dependency & ¿Qué pasos deben ser sequential? & Si el entrenamiento es paralelizable, la inference también lo es \\
+Complexity & ¿Cuánto suman FLOPs, activation y bandwidth? & Un Big-O menor siempre es más rápido \\
+Memory & ¿Dónde residen el KV, la retrieval externa y el estado de largo plazo? & Si cabe en el context, se puede usar eficazmente \\
+Interface & ¿La salida la genera el modelo o proviene de llamar a una herramienta? & Más herramientas implican capacidades más confiables \\
+Learning & ¿Qué actualizan, respectivamente, el gradiente, la in-context memory y la retroalimentación? & Todo «aprendizaje» equivale a entrenar parámetros \\
+Evidence & ¿Qué demuestran, respectivamente, los resultados, la demo y la interpretabilidad? & La evidencia local se extrapola como capacidad general \\
+\bottomrule
+\end{longtable}
+
+\subsection{Lecturas adicionales}
+
+\begingroup
+\footnotesize
+\begin{itemize}[itemsep=0pt,topsep=0.15em,parsep=0pt]
+  \item Vaswani et al., \href{https://arxiv.org/abs/1706.03762}{\emph{Attention Is All You Need}}
+  \item Bahdanau, Cho, and Bengio, \href{https://arxiv.org/abs/1409.0473}{\emph{Neural Machine Translation by Jointly Learning to Align and Translate}}
+  \item Gehring et al., \href{https://arxiv.org/abs/1705.03122}{\emph{Convolutional Sequence to Sequence Learning}}
+  \item Shaw, Uszkoreit, and Vaswani, \href{https://arxiv.org/abs/1803.02155}{\emph{Self-Attention with Relative Position Representations}}
+  \item Huang et al., \href{https://arxiv.org/abs/1809.04281}{\emph{Music Transformer}}
+  \item Roy et al., \href{https://arxiv.org/abs/2003.05997}{\emph{Efficient Content-Based Sparse Attention with Routing Transformers}}
+  \item Ainslie et al., \href{https://arxiv.org/abs/2305.13245}{\emph{GQA: Training Generalized Multi-Query Transformer Models}}
+  \item Dao et al., \href{https://arxiv.org/abs/2205.14135}{\emph{FlashAttention}}
+  \item Schick et al., \href{https://arxiv.org/abs/2302.04761}{\emph{Toolformer}}
+\end{itemize}
+
+Al leer, se recomienda seguir usando la tabla de auditoría de sistemas y distinguir en todo momento tres niveles: el mechanism/result que demuestra el artículo, el historical/engineering judgment que se ofrece en clase y la extension que el lector actual podría hacer. En cuanto una conclusión cruce la source boundary, debe indicarse explícitamente que se trata de una inferencia y no de palabras textuales de la clase.
+\endgroup
+
+\end{document}

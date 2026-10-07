@@ -1,0 +1,699 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+
+\renewcommand{\notetitle}{Lecture 15: Robotics Foundation Model, RT-1 y planificación corporizada}
+\renewcommand{\noteauthors}{Elaborado a partir de la conferencia de Ted Xiao, los subtítulos oficiales hechos por personas, las diapositivas recuperadas y los artículos originales}
+\renewcommand{\notedate}{CS25 V2 · Versión reescrita source-first de 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{Clase: 2023-02-07; publicación: 2023-05-23}
+\renewcommand{\videoduration}{1:16:07}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=ct4tdyyNDY4}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.94\textwidth,height=0.54\textheight,keepaspectratio]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\let\standardtableofcontents\tableofcontents
+\renewcommand{\tableofcontents}{%
+  \begingroup
+  \small
+  \setlength{\parskip}{0pt}
+  \standardtableofcontents
+  \endgroup
+}
+
+\begin{document}
+\makecscover
+
+\section{Auditoría de fuentes y pregunta central del curso}
+
+Esta clase no anuncia que «la robótica ya tuvo su momento GPT», sino que propone una receta de investigación de 2023: ¿es posible combinar los principios de diseño del scaling en aprendizaje automático, los Internet-scale language / vision models en constante avance y los datos robóticos fuera de línea a gran escala, de modo que las capacidades de los robots reales dejen de crecer lentamente a fuerza de ingeniería manual, una por una? A continuación, Ted Xiao usa RT-1, SayCan, Inner Monologue y DIAL para mostrar cómo esta receta entra, respectivamente, en skill learning, planning, feedback y data augmentation.
+
+\subsection{Cómo se reconstruyó esta clase}
+
+El sitio oficial del curso ofrece la grabación y tres artículos de lectura obligatoria, pero no publica un slide deck independiente. Por ello, esta clase toma como base la grabación oficial de Stanford Online en 1080p: se muestreó la región de screen-share cada dos segundos, de 2,284 cuadros se seleccionaron 315 candidatos estables de alta exhaustividad y, tras eliminar duplicados manualmente, quedaron 45 estados didácticos independientes; por último, se volvieron a extraer cuadros de ancho completo del video original de 1920x1080 según las marcas de tiempo verificadas, para evitar que se recortara el lado derecho de las diapositivas. La motivación expresada oralmente y las preguntas y respuestas provienen de los subtítulos humanos oficiales `en-US`; los subtítulos locales anteriores eran 4,183 subtítulos automáticos con desplazamiento repetido, y se sustituyeron por 1,840 captions humanos no vacíos.
+
+\begin{longtable}{L{0.21\textwidth}L{0.31\textwidth}L{0.38\textwidth}}
+\toprule
+Capa de evidencia & Material local & Función en la nota \\
+\midrule
+Grabación oficial & Video de 1:16:07 y 45 teaching states recuperados & Determina el orden de la clase, los diagramas de arquitectura, las tablas de resultados, las demostraciones y el mapa del sistema \\
+Subtítulos humanos oficiales & `lecture15.en.srt` y timed transcript & Recupera la speaker motivation, las decisiones de ingeniería, las limitaciones señaladas en las preguntas y la incertidumbre \\
+Artículos obligatorios del curso & RT-1, SayCan, Inner Monologue & Verifica fórmulas, definiciones experimentales, alcance de los resultados e interfaces entre módulos \\
+Artículos primarios complementarios & BC-Z y DIAL & Explican los antecedentes históricos, los datos fuera de línea y el VLM relabeling \\
+Archivos de auditoría & manifest, coverage, teacher-voice ledger & Demuestran que cada elemento visual y oral tiene un destino didáctico \\
+\bottomrule
+\end{longtable}
+
+\begin{warningbox}{Límite histórico}
+La clase se impartió el 7 de febrero de 2023. RT-2, Open X-Embodiment, PaLM-E, Gemini Robotics y los resultados posteriores de vision-language-action scaling no pueden proyectarse hacia atrás como evidencia de la clase. Al final se incluye por separado una interpretación de los VLA modernos, pero se mantiene separada de lo que Ted Xiao sostenía en ese momento.
+\end{warningbox}
+
+\subsection{Primero, distinguir términos cercanos}
+
+El ponente usa oralmente foundation model, Internet-scale model y LLM de manera intercambiable y poco estricta, pero al escribir la nota es necesario distinguir el objeto de entrenamiento, la fuente de datos y la función dentro del sistema. El siguiente glosario establece primero las coordenadas de lectura; las fórmulas y los casos vienen más adelante.
+
+\begin{longtable}{L{0.22\textwidth}L{0.30\textwidth}L{0.38\textwidth}}
+\toprule
+Término & Problema que resuelve & Mecanismo central y relación con el curso \\
+\midrule
+Foundation model & Si un solo modelo puede reutilizarse en una gran cantidad de tareas posteriores & Depende del entrenamiento a escala, una interfaz general y representaciones transferibles; esta clase lo plantea como objetivo y no como un hecho consumado \\
+Imitation learning & Cómo aprender una policy a partir de demostraciones cuando no hay una reward explícita & Aprendizaje supervisado $p(a\mid o,l)$; el punto de partida estable de RT-1 \\
+Offline robot learning & Cómo desacoplar la recolección del entrenamiento & Primero se recolecta un conjunto de datos fijo y luego se entrenan varios métodos sobre él repetidamente; reduce el ensayo y error en línea con robots reales \\
+Tokenización & Cómo hacer que imágenes, lenguaje y acciones entren en un modelo de secuencias unificado & Comprime entradas continuas o de alta dimensión en tokens discretos o compactos; la interfaz de interoperabilidad de RT-1 \\
+Affordance & Si una habilidad es ejecutable en el estado actual & SayCan usa un value / success score para acotar el conocimiento previo lingüístico del LLM \\
+Closed-loop planning & Cómo actualizar el plan cuando falla la ejecución & Inner Monologue retroalimenta al planner con scene, clarification y success feedback \\
+Vision-language model & Cómo reescribir robot data con Internet-scale visual semantics & DIAL usa un VLM para generar etiquetas de lenguaje más ricas, en lugar de controlar directamente al robot \\
+\bottomrule
+\end{longtable}
+
+\subsection{Cuatro preguntas que atraviesan toda la clase}
+
+Al leer los sistemas siguientes conviene preguntarse continuamente: si a los datos robóticos les falta cantidad o diversidad; si el valor del Transformer proviene del número de parámetros o de una token interface unificada; cómo se acotan las acciones propuestas por el LLM según su ejecutabilidad física; y cómo la retroalimentación y las etiquetas de lenguaje modifican la siguiente ronda de la policy. Solo al ubicar las cuatro preguntas en una misma cadena del sistema se ve con claridad que los cuatro trabajos no son demos inconexas.
+
+\begin{importantbox}{La tesis sistémica de esta clase}
+La dificultad de un foundation model para robótica no consiste solo en entrenar una red más grande, sino en dotar de interfaces combinables a los datos de habilidades, el control en tiempo real, la planificación en lenguaje, la retroalimentación del entorno y las etiquetas semánticas. En esta recipe de 2023, el lenguaje funciona más bien como «universal glue»: conecta los módulos, pero no puede sustituir el grounding físico de cada uno.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Esta clase se reconstruyó con la grabación oficial, los subtítulos humanos y cinco artículos primarios, y distingue estrictamente entre una «recipe de investigación» y un «foundation model ya demostrado». A continuación se explica primero por qué la robótica aspira a la emergence y la homogenization, y después por qué el mundo físico se ha convertido en la última ficha de dominó difícil de derribar.
+\section{Por qué la robótica también quiere un Foundation Model}
+
+Los campos del lenguaje y la visión ya mostraron la capacidad de reutilización que aporta el entrenamiento a escala; en robótica, en cambio, todavía es común recolectar datos, entrenar y ajustar parámetros por separado para cada tarea. El título inicial y el montage del laboratorio hacen visible esa brecha: los robots logran muchas demostraciones vistosas, pero el crecimiento de sus capacidades sigue pareciendo un conjunto de proyectos aislados entre sí, y no una curva unificada que pueda extenderse de forma sostenida.
+
+\subsection{De un conjunto de Demos robóticas a un problema de Scaling}
+
+La slide de título nombra la dirección como «Towards a Robotics Foundation Model», y en ella `Towards` importa más que `Foundation Model`. El segundo montage muestra la experiencia de varios brazos robóticos en distintas cocinas, objetos y tareas, lo que indica que el control en el mundo real ya cuenta con muchas capacidades locales; el verdadero problema es si un sistema escalable puede absorber en conjunto toda esa experiencia.
+
+\lecturefigure{slide-01-title.jpg}{Towards a Robotics Foundation Model: una agenda de investigación de la clase, no una declaración de algo terminado}{Diapositiva V001 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+\lecturefigure{slide-02-robot-experience-montage.jpg}{La diversidad de la experiencia de robots reales: distintas cocinas, objetos, acciones y embodiment}{Diapositiva V002 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+\teachervoice{Desde el inicio, Ted Xiao describió esta clase como su «intento de entender» las direcciones futuras. Su objetivo es preguntar si las capacidades de los robots pueden pasar de un progreso lineal, por proyectos, a un crecimiento compuesto más rápido, y no afirmar que hoy ya exista una emergence verificable de robots de propósito general.}
+
+\subsection{Ruta de la clase: Ingredient, System, Feedback, Data}
+
+La Agenda primero presenta tres tipos de ingredient y luego pasa, en orden, por RT-1, SayCan, Inner Monologue y DIAL. Este orden corresponde a un robot completo: RT-1 aprende habilidades de bajo nivel, SayCan combina habilidades, Inner Monologue replanifica a partir de la retroalimentación y DIAL amplía la cobertura lingüística de los datos fuera de línea; al final, todas las capas se vuelven a ensamblar en un mapa del sistema.
+
+\lecturefigure{slide-03-agenda-foundation.jpg}{Ruta del curso: de los foundation-model ingredients a cuatro casos de sistemas robóticos}{Diapositiva V003 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+\subsection{El atractivo de la Emergence y la Homogenization}
+
+Los dos puntos más atractivos de un foundation model para la robótica son las \term{emergent capabilities} y la \term{homogenization}. Las primeras se refieren a capacidades complejas que aparecen al aumentar la escala y que no se observan en modelos pequeños; la segunda, a que una misma representación e interfaz de entrenamiento pueda servir a tareas posteriores compuestas. En la slide 4, el lado izquierdo toma prestadas las emergence plots de los modelos de lenguaje, y el derecho usa «habitación—edificio—mundo» para ilustrar la enorme amplitud del espacio de estados de un robot.
+
+\lecturefigure{slide-04-why-foundation-model.jpg}{Por qué se quiere un robotics foundation model: emergence y downstream homogenization}{Diapositiva V004 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+\begin{knowledgebox}{Lectura de la figura: esta no es una scaling curve de robótica}
+La curva inferior izquierda proviene de tareas de modelos de lenguaje y sirve para ilustrar que una capacidad puede aparecer después de cierta scale; las elipses de la derecha son solo un diagrama conceptual de la cobertura de entornos robóticos. Juntas plantean una hipótesis: quizá la robótica también necesite superar cierta escala de datos, tareas y modelo para que surja una generalización composicional más fuerte. La clase no presentó un punto crítico propio de la robótica, por lo que esta figura no debe tomarse como una law verificada.
+\end{knowledgebox}
+
+\teachervoice{Un estudiante preguntó en ese momento si «ya existe un foundation model para robótica». La respuesta del ponente fue que todavía no está claro, y agregó que quizá el campo de la robótica primero necesite ver su propia emergent-capability curve antes de tener fundamento para llamar foundation model a un sistema.}
+
+\subsection{Por qué la robótica es el último Domino}
+
+El lenguaje, las imágenes, el código y la música pueden obtener enormes corpus estáticos de Internet, mientras que los datos robóticos exigen que dispositivos reales interactúen con el mundo. Cada trayectoria implica tiempo de hardware, costo de operadores, riesgos de seguridad, disposición de objetos y cambios de estado de larga duración. Por ello, la slide del Domino no dice que la robotics no haya avanzado, sino que le falta un mecanismo de producción de datos tan barato y replicable como los token a web-scale.
+
+\lecturefigure{slide-05-why-not-foundation-model.jpg}{Why not: la interacción física convierte a la robotics en la foundation-model domino más difícil de derribar}{Diapositiva V005 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+\begin{warningbox}{«Más datos» no es una recomendación ejecutable}
+El valor de un episode robótico depende de lo que aporta de nuevo: una tarea nueva, un objeto nuevo, un fondo nuevo, un embodiment nuevo, un lenguaje nuevo o la repetición de la misma acción. Si solo se agregan trayectorias repetidas en escenarios fáciles, el costo sube sin que necesariamente se amplíe la cobertura de comportamientos; más adelante, las curvas de RT-1 confirmarán directamente la importancia de la task diversity.
+\end{warningbox}
+
+\subsection{Descomponer la visión en tres tipos de Ingredient}
+
+En lugar de entrenar directamente un modelo robótico gigantesco, el ponente primero descompone el problema en tres tipos de ingredient operables: la architecture / tokenization tomada del ML scaling; los language y common-sense priors de los Internet-scale models externos; y el paso del aprendizaje robótico desde el costoso ensayo y error en línea hacia grandes offline datasets reutilizables.
+
+\lecturefigure{slide-06-ingredients-overview.jpg}{Los tres tipos de ingredientes de la receta de un robotics foundation model}{Diapositiva V006 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+\begin{importantbox}{Los tres tipos de Ingredient no se sustituyen entre sí}
+Una arquitectura de alta capacidad resuelve los problemas de representación e interoperabilidad; los foundation models externos aportan un prior semántico, y los offline robot data aportan acciones reales y dinámica de contacto. Tener solo lenguaje sin capacidad de ejecución, solo trayectorias robóticas sin cobertura semántica o solo un modelo grande sin presupuesto de tiempo real deja al sistema detenido en una sola capa.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La robótica aspira a un foundation model porque la emergence y la homogenization pueden convertir habilidades locales en capacidades reutilizables; sin embargo, el alto costo y la heterogeneidad de los datos físicos impiden copiar tal cual el entrenamiento con datos de Internet. Por eso, la clase descompone la visión en tres ingredientes: arquitectura, prior externo y datos fuera de línea.
+\section{Del Online Robot Learning a la Offline Recipe}
+
+Esta sección desarrolla uno por uno los tres ingredientes y usa seis años de investigación en robótica de Google Brain para explicar por qué el equipo terminó eligiendo multi-task imitation. El cambio decisivo no fue abandonar el aprendizaje en línea, sino convertir primero los datos en una infraestructura independiente, de modo que varios algoritmos puedan consumir una y otra vez el mismo conjunto de experiencia real.
+
+\subsection{Ingredient 1: Scaling-Friendly Architecture}
+
+El primer ingrediente proviene del scaling en lenguaje y visión: network de alta capacidad, self-attention, más compute/data, tokenización e interoperabilidad entre módulos. El valor del Transformer no reside solo en la fórmula de attention, sino en que ofrece una interfaz de secuencia unificada que permite que el historial de imágenes, las instrucciones en lenguaje y las acciones entren en un mismo autoregressive model.
+
+\lecturefigure{slide-07-ingredient-ml-scaling.jpg}{Ingredient 1: tomar de ML scaling la architecture, el compute, los data y la tokenización}{Diapositiva V007 recuperada del video oficial; Stanford CS25 Lecture 15}
+
+\begin{knowledgebox}{Qué significa la tokenización en robótica}
+En NLP, un token suele ser una subpalabra discreta; en RT-1, la imagen se convierte primero en tokens visuales compactos y las magnitudes de control continuas se cuantizan en action tokens. Una token interface unificada permite reutilizar el Transformer, pero el error de cuantización, la longitud de la secuencia y el costo de decodificación en tiempo real se vuelven nuevas restricciones de ingeniería.
+\end{knowledgebox}
+
+\subsection{Ingredient 2: aprovechar Internet-Scale Models}
+
+El segundo ingrediente no exige que el equipo de robótica entrene desde cero la semántica de lenguaje o de visión. Los modelos externos siguen mejorando en su propio dominio y pueden aportar common sense, comprensión del lenguaje, categorías visuales y representaciones componibles. Para la robótica, estos modelos funcionan mejor como planner, captioner, labeler o representation provider, y no como fuente directa de motor commands cuando carecen de grounding.
+
+\lecturefigure{slide-08-ingredient-internet-models.jpg}{Ingredient 2: aprovechar los Internet-scale generative models, que mejoran continuamente}{Diapositiva V008 recuperada del video oficial; Stanford CS25 Lecture 15}
+
+\teachervoice{El ponente llama a esto «Bitter Lesson 2.0»: no basta con elegir algoritmos que mejoren con más compute; también hay que diseñar la interfaz del robot de modo que una foundation model futura y más potente pueda conectarse directamente. Los modelos de lenguaje actuales no son el punto final, y el sistema debe beneficiarse de los avances de los modelos de mañana.}
+
+\subsection{Ingredient 3: la Robotics pasa de Online a Offline}
+
+El tercer ingrediente es el régimen de datos. En robótica, el RL en línea exige aprender mientras se ejecuta, y los fallos pueden dañar el equipo o desperdiciar tiempo de operación; el offline learning, en cambio, fija primero el conjunto de datos y luego entrena y compara varios modelos con las mismas trajectories. La slide 9 contrapone corpus fuera de línea como The Pile y LAION con el aprendizaje online / on-policy tradicional de la robótica, para subrayar la diferencia en la forma de consumir los datos.
+
+\lecturefigure{slide-09-ingredient-offline-data.jpg}{Ingredient 3: las foundation models consumen corpus fuera de línea gigantescos, mientras que la robótica ha dependido durante mucho tiempo de la recolección en línea}{Diapositiva V009 recuperada del video oficial; Stanford CS25 Lecture 15}
+
+Sean los datos de demostración fuera de línea $\mathcal{D}=\{(o_t,l,a_t)\}$, donde $o_t$ es la observación, $l$ es la tarea expresada en lenguaje y $a_t$ es la acción del experto. El objetivo más directo de behavioral cloning es
+\begin{equation}
+\theta^*=\arg\min_{\theta}
+-\mathbb{E}_{(o_t,l,a_t)\sim\mathcal{D}}
+\log p_{\theta}(a_t\mid o_{\le t},l).
+\end{equation}
+Esto convierte el aprendizaje de control en aprendizaje supervisado, que es estable y fácil de escalar; pero en cuanto la policy se desvía de la trayectoria del experto, encuentra estados que la distribución de entrenamiento no cubre, y esa es la limitación fundamental de la offline imitation.
+
+\subsection{Seis años de historia: de End-to-End a Multi-Task}
+
+La slide histórica conecta el goal conditioning, QT-Opt, sim2real y el RL a gran escala con robots reales de 2016--2020 con los sistemas multitarea de 2020--2022, como BC-Z, IL+RL y MT-Opt. No es una revisión exhaustiva, sino la evolución de las preguntas internas del equipo: primero, «¿puede un robot de extremo a extremo aprender una tarea?»; después, «¿cómo escalar a muchas tareas en escenarios más complejos?».
+
+\lecturefigure{slide-10-google-robotics-history.jpg}{Historia de la robotics en Google Brain: del aprendizaje de extremo a extremo de una sola tarea a los datos y las políticas multitarea}{Diapositiva V010 recuperada del video oficial; Stanford CS25 Lecture 15}
+
+\lecturefigure{slide-11-online-to-offline-shift.jpg}{El giro de seis años: de los online methods a la offline multi-task imitation}{Diapositiva V011 recuperada del video oficial; Stanford CS25 Lecture 15}
+
+\teachervoice{Cuando un estudiante preguntó si una «24/7 robot farm» sería suficiente, el ponente subrayó que las horas de robot no son la única escala. Si todo lo que se recolecta durante el día es el mismo tipo de acción y de escenario, la cantidad de datos crece sin ampliar la task diversity; lo verdaderamente escaso es cubrir nuevos failure modes y variaciones combinatorias.}
+
+\begin{knowledgebox}{El lugar de BC-Z en el curso}
+BC-Z usa lenguaje o videos de personas como task conditioning, entrena una multi-task imitation policy en alrededor de cien manipulation tasks y evalúa zero-shot task combinations. Demostró que el templated language basta como interfaz de tareas y también expuso la sensibilidad de la ResNet policy a la distribución de entrenamiento y a escenarios nuevos, con lo que proporcionó a RT-1 su punto de partida en datos y en arquitectura.
+\end{knowledgebox}
+
+\subsection{Convertir los Ingredients en una Recipe}
+
+La receta final alinea las tres columnas de ingredientes con las lessons: architecture / tokenización de alta capacidad; external models reemplazables que mejoran continuamente; y datos robóticos fuera de línea abundantes y diversos. La frase inferior los condensa en «large diverse offline datasets + high-capacity architectures + language as universal glue».
+
+\lecturefigure{slide-12-foundation-recipe.jpg}{Turning Ingredients into a Recipe: la combinación de arquitectura, modelos externos y datos fuera de línea}{Diapositiva V012 recuperada del video oficial; Stanford CS25 Lecture 15}
+
+\begin{importantbox}{Desacoplar Data Generation y Data Consumption}
+Los sistemas en línea suelen adaptar el proceso de recolección a un algoritmo concreto, y cuando el algoritmo cambia hay que volver a operar los robots; la offline recipe convierte las trayectorias en un activo de largo plazo, de modo que RT-1, el RL futuro o distintas architectures puedan consumir los mismos datos. El desacoplamiento no elimina la distribution shift, pero reduce de forma notable el costo de iteración y mejora la reproducibilidad.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+El núcleo de la recipe de la clase no es que «el Transformer lo resuelve todo», sino la interfaz unificada y el régimen de datos: la tokenización permite que varias modalidades entren en un mismo modelo, las foundation models externas aportan un prior reemplazable y los offline datasets desacoplan la recolección del entrenamiento. A continuación, RT-1 llevará estos principios a un presupuesto estricto de control en tiempo real.
+\section{RT-1: el aprendizaje por imitación multitarea formulado como un Transformer en tiempo real}
+
+El diseño de RT-1 no parte de una tabla de clasificación de modelos, sino que se deduce hacia atrás a partir de un conjunto de restricciones reales: hay 130,000 demostraciones existentes que deben aprovecharse, la recolección de datos nuevos es costosa, los vision backbone de uso general son demasiado lentos, la task está condicionada por lenguaje y, además, el robot debe ejercer control en lazo cerrado con una frecuencia estable. La arquitectura solo tiene sentido si satisface a la vez el rendimiento de procesamiento, la temporización, la precisión de las acciones y la generalización.
+
+\subsection{De la Agenda al Skill Learning}
+
+La Agenda coloca a RT-1 como el primer caso de sistema, porque todos los planner de alto nivel terminan por invocar skills ejecutables. Si la policy de bajo nivel solo puede realizar tres acciones, incluso el LLM más capaz únicamente podrá reordenar esas tres acciones; por ello, el curso primero amplía la skill library y después analiza cómo el lenguaje las combina.
+
+\lecturefigure{slide-13-agenda-rt1.jpg}{Agenda: RT-1 como la capa de skill learning de la receta de foundation model para robótica}{Diapositiva V013 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+\subsection{First Principles: las restricciones anteceden a la Architecture}
+
+La slide 14 reúne tres tipos de restricciones de entrada. El modelo debe ser robust / generalize; los off-the-shelf vision models no satisfacen la inferencia en tiempo real del mundo físico; los datos incluyen language conditioning, por lo que se requiere multi-modality. La lesson de la derecha traduce estas restricciones en attention y tokenización, en lugar de elegir primero un Transformer grande y luego buscarle una aplicación.
+
+\lecturefigure{slide-14-rt1-first-principles.jpg}{First principles de RT-1: la robustez, la visión en tiempo real y el condicionamiento por lenguaje determinan en conjunto la arquitectura}{Diapositiva V014 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+\begin{warningbox}{El control en tiempo real no se mide con la latency promedio}
+El control de robots atiende la tail latency y la estabilidad del ritmo de ejecución. Un retraso largo ocasional puede hacer que la pinza no alcance el objeto o que el controlador use una imagen desactualizada; por eso, el compact backbone, TokenLearner y el diseño del decoder del artículo no solo ahorran FLOPs, sino que protegen la temporización del lazo cerrado.
+\end{warningbox}
+
+\subsection{RT-1 Architecture: tokens de imagen, lenguaje y acción}
+
+RT-1 recibe como entrada un historial de seis cuadros de imagen y una instrucción en lenguaje natural. Las imágenes se comprimen mediante un EfficientNet FiLM-conditioned y TokenLearner, y luego ingresan, junto con el condicionamiento por lenguaje, a un Transformer decoder-only, que produce tokens de acción discretizados. El modelo predice las dimensiones de control de forma autorregresiva, de modo que el control multimodal puede expresarse como una likelihood unificada sobre una secuencia.
+
+\lecturefigure{slide-15-rt1-architecture.jpg}{Arquitectura de RT-1: FiLM EfficientNet, TokenLearner, Transformer y action tokens}{Diapositiva V015 recuperada de la grabación oficial; Brohan et al., 2022}
+
+Si la secuencia de entrada se escribe como $x=(x_1,\ldots,x_n)$, que contiene visual, language y action tokens, el objetivo autorregresivo es
+\begin{equation}
+p_{\theta}(x)=\prod_{j=1}^{n}p_{\theta}(x_j\mid x_{<j}).
+\end{equation}
+Durante el entrenamiento, la pérdida principal de control se calcula solo sobre los action token; la visión y el lenguaje aportan el condicionamiento. Esta unificación no implica que las tres modalidades contengan la misma cantidad de información; TokenLearner existe precisamente para comprimir la secuencia de patches de alta dimensión de la imagen hasta un tamaño procesable en tiempo real.
+
+\subsection{Action Discretization y el presupuesto de 3 Hz}
+
+Cada dimensión de acción continua se asigna a 256 bins. Si una dimensión de acción cumple $a\in[a_{\min},a_{\max}]$, se puede usar
+\begin{equation}
+b(a)=\operatorname{round}\left(
+255\frac{a-a_{\min}}{a_{\max}-a_{\min}}
+\right)
+\end{equation}
+para obtener el token discreto; después de la inferencia, este se vuelve a convertir en control continuo. La cuantización transforma la regresión multidimensional en una categorical prediction, lo que facilita la decodificación con el Transformer, pero también introduce precisión finita y dependencias entre los tokens de las distintas dimensiones.
+
+\lecturefigure{slide-16-rt1-design-takeaways.jpg}{Design takeaway de RT-1: inferencia de 100 ms, historial de seis cuadros, 81→8 patch, 256 bins, 35M parámetros}{Diapositiva V016 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+\begin{knowledgebox}{Lectura de la figura: tres escalas de tiempo distintas}
+El ciclo de control opera a unos 3 Hz, es decir, alrededor de 333 ms por paso; el presupuesto para la pasada hacia adelante del modelo es de unos 100 ms, lo que deja margen para la percepción, la comunicación y la ejecución; el historial de seis cuadros solo abarca una ventana de tiempo muy corta y sirve para estimar la tendencia del movimiento, no como memoria de largo plazo de la tarea. Los 35M parámetros son un compromiso para el despliegue en tiempo real y no pueden compararse directamente con la cantidad de parámetros de los grandes VLM fuera de línea posteriores.
+\end{knowledgebox}
+
+\teachervoice{El ponente vuelve una y otra vez a la context length: si se enviaran al Transformer todas las image patches de cada cuadro, la secuencia crecería de forma desmedida de inmediato. TokenLearner conserva solo unos cuantos tokens visuales pertinentes para la tarea en curso; es una condición necesaria para «poder funcionar en el robot», no una técnica de compresión opcional.}
+
+\begin{lstlisting}[caption={RT-1-style tokenized imitation loop},label={lst:rt1-loop}]
+for observation_history, instruction, expert_action in dataset:
+    image_features = film_efficientnet(observation_history, instruction)
+    visual_tokens = token_learner(image_features, output_tokens=8)
+    language_tokens = sentence_encoder(instruction)
+    action_tokens = discretize(expert_action, bins=256)
+
+    context = concat(language_tokens, visual_tokens)
+    loss = autoregressive_action_loss(transformer, context, action_tokens)
+    update(loss)
+
+def act(observation_history, instruction):
+    context = encode(observation_history, instruction)
+    predicted_tokens = transformer.decode(context)
+    return undiscretize(predicted_tokens)
+\end{lstlisting}
+
+\subsection{Resumen de la sección}
+
+RT-1 formula la imitation multitarea como control autorregresivo tokenizado, pero su aportación central es también el resource accounting: el historial de seis cuadros, la compresión con TokenLearner, los 35M parámetros y la cuantización de acciones satisfacen en conjunto el lazo cerrado en tiempo real. La siguiente sección examina si estas decisiones de diseño realmente se traducen en generalización entre tareas y entre escenarios.
+\section{Evidencia de Scaling y Generalization de RT-1}
+
+La success rate promedio en las tareas de entrenamiento no indica si el robot puede entrar a una cocina nueva, ignorar un distractor o combinar instrucciones no vistas. Por eso, RT-1 se evalúa a lo largo de cuatro ejes: seen tasks, unseen tasks, distractors y backgrounds, y además se prueba su desempeño cuando varios factores de variación aparecen al mismo tiempo.
+
+\subsection{Visual y Semantic Diversity}
+
+La sección anterior solo demostró que RT-1 puede ejecutar control multitarea bajo restricciones de tiempo real; aún no respondía si estas capacidades dependen de la cocina de entrenamiento, de objetos fijos y de instrucciones con plantilla. Esta sección primero descompone la generalization en cuatro cambios de distribución distinguibles; al leer la figura, conviene comparar por separado las condiciones seen, unseen, distractor y background, en lugar de fijarse solo en la barra más alta o en el promedio global. Estos resultados respaldan la ventaja frente a los baseline, pero no demuestran que el modelo haya adquirido comprensión semántica de mundo abierto.
+
+Del lado izquierdo de la slide 17, cuatro grupos de barras comparan RT-1, GATO, BC-Z y BC-Z XL; del lado derecho se muestran variaciones de fondo, de objetos y de distractores. RT-1 es en conjunto más fuerte en las cuatro condiciones, pero las condiciones unseen / background siguen claramente por debajo de las seen tasks, lo que indica que ser el «mejor baseline» no equivale a haber resuelto la generalización en mundo abierto.
+
+\lecturefigure{slide-17-rt1-visual-semantic-diversity.jpg}{Tasa de éxito de RT-1 ante variaciones seen, unseen, distractor y background}{Diapositiva V017 recuperada de la grabación oficial; Brohan et al., 2022}
+
+\begin{knowledgebox}{Lectura de la figura: cada barra mide un modo de falla distinto}
+Las seen tasks evalúan principalmente el ajuste a la distribución de entrenamiento; las unseen tasks evalúan la composición de lenguaje y conducta; los distractors evalúan si objetos irrelevantes desvían la atención; los backgrounds evalúan los cambios en la distribución visual. Los cuatro rubros no pueden reducirse a un solo promedio, porque cada architecture component contribuye de manera distinta a cada eje.
+\end{knowledgebox}
+
+\subsection{La variación de múltiples factores es más difícil que la de uno solo}
+
+La figura anterior aísla los factores de variación uno por uno, lo que facilita ubicar en qué tipo de shift se degrada el modelo; sin embargo, en un despliegue real rara vez cambia una sola variable a la vez. Por ello, esta sección pasa al compound shift: la pregunta es si la ventaja ante un solo factor se mantiene cuando cambian simultáneamente el fondo, la disposición, la posición de los objetos, el punto de vista y el lenguaje. Al leer la figura, primero compara el descenso progresivo de level 1 a level 3 y después observa las diferencias concretas en la unseen kitchen; esta demostración indica que la variación conjunta es más difícil, pero unos cuantos casos exitosos no deben tomarse como evidencia de que el modelo se transfiere a cualquier entorno nuevo.
+
+La slide 18 coloca lado a lado los resultados en barras y el video de la unseen kitchen: el robot no solo cambia de fondo, sino que puede enfrentar al mismo tiempo nuevas posiciones de objetos, otra superficie de mesa, variaciones de lenguaje y diferencias de punto de vista. En las stacked bars, los level 1/2/3 indican cada vez más factores que cambian simultáneamente; aunque RT-1 va a la cabeza, su tasa de éxito en la dificultad más alta sigue siendo limitada.
+
+\lecturefigure{slide-18-rt1-variation-unseen-kitchen.jpg}{Generalization multifactorial: cambio simultáneo de fondo, disposición y tarea en una unseen kitchen}{Diapositiva V018 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+El segundo demo usa variantes en lenguaje natural; por ejemplo, ya no repite la plantilla de entrenamiento, sino que pide al robot que actúe mediante descripciones más libres. Esto muestra el valor del language conditioning, pero también deja ver que la semántica de la tarea sigue dependiendo de la skill coverage existente: el modelo puede entender otra forma de decir lo mismo, pero no puede crear con el lenguaje capacidades físicas que los datos de entrenamiento nunca incluyeron.
+
+\lecturefigure{slide-19-rt1-language-variation-demo.jpg}{Demostración de variación de lenguaje: ejecución de tareas con distinta redacción bajo variación visual multifactorial}{Diapositiva V019 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+\teachervoice{El ponente presenta estos videos como complemento de las gráficas cuantitativas, no como una «selección de los mejores casos». Insiste en que la generalization multifactorial es mucho más difícil que las pruebas de una sola variable; que un robot funcione algunas veces en una cocina nueva no significa que ya haya aprendido cualquier entorno doméstico.}
+
+\subsection{Mezcla de datos entre Distribution}
+
+RT-1 también incorpora datos de simulation / sim-to-real, de bin-picking y de distintas embodiment. En la figura, a la izquierda están las fuentes de datos y a la derecha las barras reportan la mejora relativa que aportan a las targeted evaluations. La conclusión es que un modelo de alta capacidad puede extraer información compartida de datos heterogéneos, no que todos los datos produzcan transferencia positiva incondicional.
+
+\lecturefigure{slide-20-rt1-diverse-data-distributions.jpg}{Entrenamiento con múltiples data distributions: everyday robots, simulation y bin picking}{Diapositiva V020 recuperada de la grabación oficial; Brohan et al., 2022}
+
+\begin{warningbox}{La Data interoperability tiene límites}
+Cada robot tiene cámaras, espacios de acción y dinámicas distintos. Sin un embodiment identifier, action normalization o una semántica compartida, concatenar los datos sin más genera conflictos. El resultado de RT-1 es que «parte de los datos heterogéneos puede ayudar a distribuciones específicas», no que «cualquier robot dataset puede fusionarse directamente».
+\end{warningbox}
+
+\subsection{La Task Diversity importa más que el Raw Size}
+
+En la data scaling slide, el eje horizontal es la proporción de datos conservada y el eje vertical es la success rate; los puntos azules son las seen tasks y los negros, la generalization. La flecha verde indica reducir la cantidad total de datos; la flecha morada indica reducir la task diversity conservando una mayor cantidad de episodes. Esta última provoca una caída más pronunciada, lo que muestra que repetir la misma tarea no sustituye cubrir más tareas.
+
+\lecturefigure{slide-21-rt1-data-scaling.jpg}{Scaling with data: reducir la task diversity perjudica más la generalización que reducir la misma cantidad de episodes}{Diapositiva V021 recuperada de la grabación oficial; Brohan et al., 2022}
+
+\begin{importantbox}{Las cuatro «escalas» de los datos robóticos}
+\begin{enumerate}
+  \item \textbf{Episode count}: número total de trayectorias;
+  \item \textbf{Task diversity}: combinaciones de habilidades y objetivos distintos;
+  \item \textbf{Environment diversity}: fondo, disposición, objetos y lighting;
+  \item \textbf{Embodiment diversity}: distintos robots y action space.
+\end{enumerate}
+«Más datos» solo tiene sentido en ingeniería si se especifica de qué escala se trata.
+\end{importantbox}
+
+\subsection{Ablation: no es un efecto exclusivo del Transformer}
+
+La gráfica de ablation toma el RT-1 completo como punto cero; hacia abajo se representa la pérdida de tasa de éxito. GATO, BC-Z, BC-Z XL, quitar el modelo grande, quitar el preentrenamiento, cambiar a action continua/autorregresiva, quitar el history o el Transformer producen caídas distintas en los cuatro ejes de evaluación. El resultado indica que la architecture, el preentrenamiento, el history y la action representation intervienen en el desempeño, y que este no depende solo del número de parámetros.
+
+\lecturefigure{slide-22-rt1-design-ablations.jpg}{RT-1 design ablations: impacto relativo de cada componente en los cuatro tipos de generalization}{Diapositiva V022 recuperada de la grabación oficial; Brohan et al., 2022}
+
+\begin{knowledgebox}{Lectura de la figura: no busques solo la barra más larga}
+Cada color corresponde a un evaluation axis distinto; un componente puede ayudar sobre todo en las unseen tasks y tener poco efecto en las seen tasks. La pérdida de `w/o transformer` o `w/o pretraining` no puede interpretarse por sí sola como una causal law, porque la estructura sustituta, la estabilidad del entrenamiento y la capacidad pueden cambiar al mismo tiempo. El valor de la Ablation está en ubicar los ejes frágiles, no en asignar un orden absoluto a los componentes.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La evidencia de RT-1 muestra que una Transformer-style token interface puede mejorar, dentro de un presupuesto de tiempo real, el control multitarea y varios ejes de generalización, aunque la capacidad sigue disminuyendo con la complejidad del escenario. La conclusión más sólida sobre los datos es que la task diversity pesa más que la simple episode repetition; la conclusión más sólida sobre el sistema es que varios componentes actúan en conjunto, y el éxito no puede atribuirse a la sola frase «usó un Transformer».
+\section{SayCan: el LLM planifica y la affordance decide si se puede hacer}
+
+RT-1 amplió la skill library, pero no resolvió cómo una instrucción como «limpia la mesa» se descompone en varias habilidades sucesivas. SayCan usa el modelo de lenguaje como high-level planner y, al mismo tiempo, emplea el value / affordance model del robot para restringir si cada paso es ejecutable en el estado actual; así conecta el Internet-scale common sense con el grounded control.
+
+\subsection{De Skill Learning a Planning}
+
+El tercer punto de la Agenda pasa a SayCan. A continuación, la timeline de la clase vincula las multi-task robot policies de 2021--2022 con el LLM-powered planning de 2022--2023: las acciones de bajo nivel siguen proviniendo de robot data, mientras que la composición de alto nivel empieza a apoyarse en modelos de lenguaje.
+
+\lecturefigure{slide-23-agenda-saycan.jpg}{Agenda: SayCan entra en la capa de language-conditioned planning}{Diapositiva V023 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+\lecturefigure{slide-24-robotics-foundation-timeline.jpg}{Timeline de la investigación en robótica: de escalar operaciones reales a acelerar los sistemas robóticos con LLM}{Diapositiva V024 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+\subsection{Dos problemas: Fixed Commands y No Grounding}
+
+Primero, el robot solo puede invocar un conjunto limitado de habilidades, por ejemplo `find apple`, `pick apple`, `go table`; el LLM tiene que aprender a «hablar el lenguaje del robot». Segundo, el LLM no tiene cámara ni dinámica: no sabe si la manzana existe ni si la pinza puede sujetarla; el sistema debe añadir physical affordance grounding al conocimiento previo del lenguaje.
+
+\lecturefigure{slide-25-language-models-robotics-challenges.jpg}{Language models for robotics: skill vocabulary fijo y falta de real-world grounding}{Diapositiva V025 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+\begin{warningbox}{El planner no puede crear Skills que no existen}
+El LLM puede descomponer un objetivo de manera impecable, pero si la low-level library no incluye «abrir el cajón» o «limpiar un líquido», el planner solo puede producir texto no ejecutable. El límite superior del sistema lo determina la cobertura de las grounded skills; este es también el SayCan bottleneck que el ponente señaló explícitamente en la sesión de preguntas y respuestas.
+\end{warningbox}
+
+\subsection{SayCan Score: el producto de Useful y Possible}
+
+Para una habilidad candidata $k$, un objetivo de alto nivel $g$ y el estado actual $s$, SayCan puede escribirse como
+\begin{equation}
+\operatorname{Score}(k\mid g,s)
+\propto p_{\mathrm{LM}}(k\mid g,h)
+\cdot p_{\mathrm{aff}}(\mathrm{success}\mid s,k),
+\end{equation}
+donde $h$ son los pasos ya ejecutados. El primer término pregunta «¿este paso sirve para cumplir el objetivo expresado en lenguaje?», y el segundo, «¿el robot puede hacerlo ahora?». En log space ambos términos se suman, lo que evita que una acción plausible en lenguaje pero físicamente imposible quede en primer lugar.
+
+\lecturefigure{slide-26-saycan-architecture.jpg}{SayCan: la usefulness del LLM y la robotic affordance eligen conjuntamente la siguiente habilidad}{Diapositiva V026 recuperada de la grabación oficial; Ahn et al., 2022}
+
+\begin{knowledgebox}{Lectura de la figura: ordenamiento de candidatos, no control generado libremente}
+La tabla central enumera habilidades como `find apple` y `pick apple`. La puntuación del LLM favorece los pasos coherentes con el objetivo, la puntuación de affordance filtra los que no son ejecutables en ese momento, y el sistema elige el de mayor combined score; tras ejecutarlo, vuelve a ordenar. El controller de bajo nivel no lo acciona directamente ningún token del LLM.
+\end{knowledgebox}
+
+\subsection{Experimentos: Planning y Execution se puntúan por separado}
+
+El diagrama de arquitectura muestra cómo SayCan combina usefulness y affordance, pero aún hace falta distinguir dos afirmaciones diferentes: «el plan es razonable en lenguaje» y «el robot completa finalmente la tarea». Esta sección usa métricas independientes para examinar la contribución del ordenamiento de alto nivel y la de la ejecución de bajo nivel; al leer los resultados, conviene comparar primero la diferencia entre planning y execution, y después revisar la ablation que retira el grounding. Los experimentos demuestran que la puntuación de ejecutabilidad en el entorno es indispensable, pero la tasa de éxito global por sí sola no permite determinar si los fallos restantes provienen de la percepción, del control o de la skill coverage.
+
+En la clase se reportan 101 long-horizon instructions, con una tasa de éxito de planificación de aproximadamente 84\% y una tasa de éxito de ejecución de aproximadamente 74\%, y se requiere encadenar más de diez navigation / manipulation skills. Al retirar el grounding, el desempeño cae casi a la mitad, lo que indica que la plausibility lingüística no sustituye la ejecutabilidad en el entorno.
+
+\lecturefigure{slide-27-saycan-experiment-results.jpg}{SayCan experiment overview: 84\% de planning, 74\% de execution y grounding ablation}{Diapositiva V027 recuperada de la grabación oficial; Ahn et al., 2022}
+
+\begin{warningbox}{Planning Success no equivale a Task Success}
+Una secuencia de pasos puede ser semánticamente correcta y aun así no ejecutarse por fallos de percepción, de sujeción o de navegación. Reportar planning y execution por separado permite localizar el cuello de botella; si solo se reporta la tasa final de la tarea, no se puede saber si el fallo proviene del LLM, del affordance model o de la low-level skill.
+\end{warningbox}
+
+\subsection{PaLM-SayCan: cómo se transmite el progreso de un modelo externo}
+
+En la slide 28, el eje horizontal es el language model size y el eje vertical, la planning performance. PaLM-SayCan mejora conforme aumenta la escala del modelo, lo que indica que, con los datos del robot sin cambios, el progreso de un LLM externo puede transmitirse al sistema a través de la interfaz del planner. El punto azul de FLAN-SayCan recuerda también que el instruction tuning y la familia del modelo se mezclan en la comparación de scale.
+
+\lecturefigure{slide-28-palm-saycan-scaling.jpg}{PaLM-SayCan: un LLM más capaz mejora el desempeño de la planificación de alto nivel}{Diapositiva V028 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+Un mejor prompt y el chain-of-thought permiten además atender solicitudes como «busca una fruta que no sea manzana» o peticiones de limpieza de varios pasos. Los ejemplos de la derecha convierten la explicación en lenguaje natural en una secuencia de habilidades invocables, lo que muestra la decomposition semántica del LLM; sin embargo, cada secuencia todavía debe pasar por la affordance score antes de llegar al robot.
+
+\lecturefigure{slide-29-palm-saycan-prompting.jpg}{PaLM-SayCan prompting: CoT e indicaciones más elaboradas generan secuencias de habilidades de varios pasos}{Diapositiva V029 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+\teachervoice{Lo que el ponente más valora de SayCan es su «leverage»: sin volver a recolectar trayectorias del robot, basta con sustituir el LLM o el prompt por uno mejor para que la capacidad de planificación aumente. Pero también subraya que este leverage solo actúa sobre la skill selection y no puede suplir acciones que el low-level controller simplemente no sabe realizar.}
+
+\subsection{Resumen de la sección}
+
+SayCan conecta el conocimiento previo del lenguaje con la ejecución física mediante el producto de la LM usefulness y la affordance probability. Demuestra que el progreso de un LLM externo puede transmitirse a la planning del robot y, a la vez, deja muy claro el límite superior del sistema: la grounded skill library, el affordance model y la ejecución de bajo nivel siguen siendo cuellos de botella que no se pueden omitir.
+\section{Inner Monologue: de Open Loop a Feedback-Conditioned Replanning}
+
+SayCan vuelve a elegir una habilidad en cada paso, pero puede no saber si el paso anterior tuvo éxito. Si el robot no logró tomar la lata de refresco de cola y aun así continúa con «llevársela al usuario», el plan de alto nivel es coherente en el lenguaje, pero ya no es válido en el mundo. Inner Monologue añade al planner scene description, clarification y success detector, de modo que el razonamiento en lenguaje cierre realmente el lazo.
+
+\subsection{Agenda y Open-Loop Failure}
+
+La agenda pasa a Inner Monologue. La siguiente slide ilustra el problema con una trayectoria fallida: el usuario pide una bebida y el planner elige el refresco de cola; tras fallar la toma del objeto, el sistema sigue la secuencia original, se desplaza y declara la tarea terminada. Sin observation feedback, el CoT es solo un open-loop script.
+
+\lecturefigure{slide-30-agenda-inner-monologue.jpg}{Agenda: de SayCan a Inner Monologue con retroalimentación del entorno}{Diapositiva V030 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+\lecturefigure{slide-31-saycan-open-loop-failure.jpg}{Open-loop failure: después de fallar la toma del refresco de cola, el planner sigue ejecutando el plan anterior}{Diapositiva V031 recuperada de la grabación oficial; Huang et al., 2022}
+
+\begin{importantbox}{El planning corporeizado debe mantener un estado actualizable}
+Un plan en lenguaje lleva implícita una belief: qué hay sobre la mesa, qué tiene el robot en la mano, cuáles son las preferencias del usuario y si el subobjetivo actual ya se cumplió. Cualquier action puede modificar esa belief. Si el sistema no lee las nuevas observaciones, por razonables que sean los tokens siguientes, solo serán un razonamiento sobre un estado del mundo caducado.
+\end{importantbox}
+
+\subsection{Passive Scene Description}
+
+La trayectoria fallida de la subsección anterior muestra que un open-loop planner, aunque genere pasos razonables, sigue avanzando sobre un plan caducado después de una sola toma fallida. La corrección más directa no es modificar de inmediato el planner, sino hacer que el estado del entorno regrese de forma continua al contexto en lenguaje. Esta sección examina cómo la passive feedback comprime en texto los resultados de detección y el avance de la tarea; al leer la figura hay que atender tanto a qué estados aporta como a qué hechos físicos se descartan porque la detector ontology es insuficiente.
+
+La retroalimentación pasiva la escribe de forma continua un detector o un VLM, por ejemplo: «veo una lata de refresco de cola y una botella de refresco de lima», «el bloque amarillo ya está en el tazón amarillo». Estas descripciones comprimen imágenes de alta dimensión en un estado textual que el planner puede consumir, de modo que el LLM sabe después de cada paso si el mundo cambió como se esperaba.
+
+\lecturefigure{slide-32-inner-monologue-passive-feedback.jpg}{Passive feedback: object detection, task-progress description y visual QA}{Diapositiva V032 recuperada de la grabación oficial; Huang et al., 2022}
+
+\begin{knowledgebox}{El cuello de botella de información de la passive feedback}
+El scene caption conserva solo los conceptos que el detector sabe expresar. Si el sistema no tiene etiquetas como «vaso volcado», «derrame de líquido» o «pinza vacía», el planner no ve esos hechos. Convertir a texto reduce la complejidad de la interfaz, pero también convierte la perception ontology en un límite superior.
+\end{knowledgebox}
+
+\subsection{Active Scene Description y Clarification}
+
+La retroalimentación activa se solicita solo cuando el planner tiene incertidumbre, por ejemplo para preguntar por las preferencias del usuario, aclarar una instrucción o consultar la ubicación de un objeto. La slide 33 presenta juntas la active scene description y la visual QA in context: el robot puede preguntar «¿qué bebida quieres?» y actualizar el plan según la respuesta, en lugar de adivinar en condiciones de incertidumbre.
+
+\lecturefigure{slide-33-inner-monologue-active-feedback.jpg}{Active feedback: preguntar al usuario, al entorno o al módulo de preguntas y respuestas visuales solo cuando hace falta}{Diapositiva V033 recuperada de la grabación oficial; Huang et al., 2022}
+
+Si la belief textual se denota $b_t$, la observación de la ejecución $o_{t+1}$, la success signal $z_{t+1}$ y la retroalimentación del usuario $u_{t+1}$, la actualización en lazo cerrado puede abstraerse como
+\begin{equation}
+b_{t+1}=U(b_t,o_{t+1},z_{t+1},u_{t+1}),
+\qquad
+k_{t+1}=\arg\max_k \operatorname{Score}(k\mid g,b_{t+1}).
+\end{equation}
+A diferencia de un open-loop plan, cada elección se basa en la belief actualizada.
+
+\subsection{Success Detector y tabla de resultados}
+
+La mitad superior de la slide de resultados compara combinaciones como CLIPort, oracle, LLM, object feedback e Inner Monologue; la mitad inferior muestra diálogos concretos y el task-progress detector. Al leer la tabla conviene distinguir primero entre seen / unseen tasks y después comparar las diferencias entre añadir solo object feedback, solo success feedback y ambas combinadas.
+
+\lecturefigure{slide-34-inner-monologue-results.jpg}{Inner Monologue results: object feedback, success detector y replanning en lazo cerrado}{Diapositiva V034 recuperada de la grabación oficial; Huang et al., 2022}
+
+\begin{warningbox}{La feedback no es verdadera por sí misma}
+El success detector puede dar falsos positivos, la scene description puede omitir objetos y la respuesta del usuario también puede ser ambigua. El closed loop solo da a los errores la oportunidad de corregirse; si el modelo de retroalimentación tiene un sesgo sistemático, el planner seguirá siendo coherente consigo mismo sobre una belief errónea.
+\end{warningbox}
+
+\subsection{Los límites de Importing Common Sense}
+
+La última slide contrasta la afirmación de 2018 de que «el cuello de botella de los robots es el high-level semantic planning» con el «no» de los LLM en 2022. La lesson de la parte inferior es más precisa: si el language es la universal API del sistema, los foundation models pueden aportar common sense. Esto reduce el costo de la planificación semántica de alto nivel, pero no elimina los perception, skill y control bottlenecks.
+
+\lecturefigure{slide-35-foundation-common-sense-lesson.jpg}{Aprovechar los foundation models para aportar common sense, sin que sustituyan al sistema físico}{Diapositiva V035 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+\teachervoice{El ponente no presenta al LLM como el «cerebro» del robot. Su argumento es que la language interface permite que el common sense de un modelo externo entre en un sistema existente; si el detector, la affordance o el controller no ofrecen la interfaz correcta, por potente que sea el LLM, no tendrá un estado del mundo sobre el cual operar.}
+
+\begin{lstlisting}[caption={Closed-loop planner de SayCan + Inner Monologue},label={lst:closed-loop-planner}]
+belief = describe_scene(initial_observation)
+history = []
+
+while not task_complete(belief):
+    candidates = language_model.propose_skills(goal, belief, history)
+    scored = []
+    for skill in candidates:
+        useful = language_model.score(skill, goal, history)
+        possible = affordance_model.score(skill, belief)
+        scored.append((useful * possible, skill))
+
+    skill = max(scored)[1]
+    outcome = execute(skill)
+    feedback = collect_scene_success_and_user_feedback(outcome)
+    belief = update_belief(belief, feedback)
+    history.append((skill, feedback))
+\end{lstlisting}
+
+\subsection{Resumen de la sección}
+
+Inner Monologue convierte el planning en lenguaje de una open-loop sequence en un observation-conditioned loop. La passive scene, la active clarification y la success detection aportan distintos canales de retroalimentación; la capacidad del sistema sigue limitada por la perception ontology y la detector reliability, pero al menos puede volver a planificar cuando el mundo se aparta del plan.
+\section{DIAL: ampliar la cobertura lingüística de un Offline Dataset con VLM}
+
+RT-1 demostró que la imitación fuera de línea a gran escala es viable, pero dejó al descubierto un problema de economía de datos: 130,000 episodes, 13 robots, 17 meses y unas 700 tasks, además de la necesidad de reescribir en lenguaje natural los teleoperator command estructurados. DIAL no vuelve a recolectar acciones, sino que usa un VLM para generar instruction labels más ricas para las trayectorias existentes.
+
+\subsection{Agenda y Teleoperation Cost}
+
+Los resultados de scaling de RT-1 llevan con facilidad a concentrar la atención en la architecture y a pasar por alto el costo de recolección y de anotación lingüística que hay detrás de cada robot trajectory. El punto de partida de DIAL es precisamente volver a calcular el costo de esta cadena de suministro de datos: qué pasos deben realizar el robot y el operador, y qué trabajo semántico puede delegarse a un modelo de visión y lenguaje preentrenado. Esta sección explica primero los dos niveles de costo humano del pipeline original; estas cifras explican el cuello de botella de la escalabilidad, pero de ellas no se puede concluir directamente que las etiquetas automáticas tengan la misma precisión que las etiquetas humanas.
+
+La Agenda entra en DIAL. La slide 37 divide la cadena de datos original en dos etapas: el operador recolecta acciones con comandos estructurados y después un crowd worker reescribe los comandos en lenguaje natural. Los dos niveles de costo humano hacen que cada semantic concept adicional resulte muy caro y que la gran mayoría de las trayectorias solo tenga etiquetas basadas en plantillas.
+
+\lecturefigure{slide-36-agenda-dial.jpg}{Agenda: DIAL entra en la capa de data augmentation}{Diapositiva V036 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+\lecturefigure{slide-37-rt1-teleoperation-cost.jpg}{Economía de datos de RT-1: 130k episodes, 13 robots, 17 months, 700 tasks y anotación lingüística humana}{Diapositiva V037 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+\teachervoice{El ponente plantea la motivación de DIAL de forma muy pragmática: el «secret ingredient» de RT-1 no es alguna fancy layer, sino una ingeniería de datos costosa y prolongada. Si solo se habla del modelo y no de quién hace la teleoperación ni de quién reetiqueta, no es posible explicar el costo real del scaling en robótica.}
+
+\subsection{Pipeline de cuatro etapas}
+
+DIAL primero hace fine-tune de un VLM con un conjunto pequeño de crowd-sourced instructions; después lo usa para generar lenguaje para un offline dataset de gran escala; a continuación mezcla las trayectorias originales, las etiquetas humanas y las etiquetas del VLM para entrenar una language-conditioned policy; por último, evalúa un RT-1-style controller con lenguaje natural que no apareció durante el entrenamiento.
+
+\lecturefigure{slide-38-dial-pipeline.jpg}{Las cuatro etapas de DIAL: poco lenguaje humano, VLM relabeling, entrenamiento mixto y unseen instruction evaluation}{Diapositiva V038 recuperada de la grabación oficial; Xiao et al., 2022}
+
+Sea $\mathcal{D}_A$ el conjunto pequeño de etiquetas humanas en lenguaje natural, $\mathcal{D}_B$ el conjunto grande de trayectorias estructuradas originales y $\hat{\mathcal{D}}_B$ las trayectorias reetiquetadas por el VLM; entonces el objetivo de la policy puede escribirse como
+\begin{equation}
+\mathcal{L}_{\mathrm{DIAL}}(\theta)
+=-\mathbb{E}_{(o,l,a)\sim
+\mathcal{D}_A\cup\mathcal{D}_B\cup\hat{\mathcal{D}}_B}
+\log p_{\theta}(a\mid o,l).
+\end{equation}
+Lo importante no es la complejidad de la fórmula, sino que se amplía el soporte de $l$: un mismo comportamiento puede recibir relaciones espaciales, atributos, expresiones sinónimas y descripciones más naturales.
+
+\subsection{El Language Space pasa de Cluster a cobertura}
+
+Los embedding clusters de la izquierda provienen de los comandos estructurados; los colores y los límites de los clústeres son muy nítidos, porque cada plantilla equivale aproximadamente a un one-hot task ID. Las DIAL predictions de la derecha son más continuas, y las distintas expresiones se entremezclan en el espacio semántico. Los ejemplos del centro muestran cómo trayectorias como `open top drawer` o `move bottle near chip bag` se reescriben con un lenguaje más descriptivo.
+
+\lecturefigure{slide-39-dial-language-clusters.jpg}{Comparación en el embedding-space entre Structured commands y DIAL predicted language}{Diapositiva V039 recuperada de la grabación oficial; Xiao et al., 2022}
+
+\begin{knowledgebox}{Para qué sirve un Language Space denso}
+Las etiquetas de plantilla solo le indican a la policy el «número de tarea», y difícilmente permiten compartir conceptos como `left`, `lonely object`, colores o formas. Un lenguaje más rico permite que distintas tareas reutilicen representaciones en el nivel del significado de las palabras, y que en la prueba se especifique la misma acción con una paraphrase no vista en el entrenamiento. El costo es que el VLM produce ruido e incluso descripciones erróneas.
+\end{knowledgebox}
+
+\subsection{Novel Instructions: ver el total y también las categorías}
+
+La slide de resultados compara a la izquierda distintas dataset mixtures y muestra a la derecha instrucciones no vistas como `raise the leftmost can`, `move the lonely object to the others` y `move the right apple to the left`. El DIAL completo alcanza 60\% en el overall; las categories spatial y rephrased son las más sólidas, mientras que la semantic category sigue siendo claramente más difícil.
+
+\lecturefigure{slide-40-dial-novel-instruction-results.jpg}{DIAL novel-instruction evaluation: combinaciones de datos, resultados por categoría y ejemplos cualitativos}{Diapositiva V040 recuperada de la grabación oficial; Xiao et al., 2022}
+
+\begin{warningbox}{60\% no equivale a control con lenguaje abierto}
+La prueba incluye poco más de sesenta novel instructions construidas a mano, que cubren variaciones espaciales, reformulaciones y algunos cambios semánticos, pero no lenguaje natural arbitrario. El ponente también afirma explícitamente que la ablation sistemática de la compositional generalization está incompleta y que el mecanismo interno de muchos casos exitosos no está claro.
+\end{warningbox}
+
+\subsection{Takeaway: con suficiente Diversity, se tolera poco Label Noise}
+
+Los DIAL takeaways son tres: usar el VLM como data augmentation; inyectar Internet-scale priors en los offline data; y, cuando el dataset es lo bastante grande y los comportamientos son diversos, un poco de ruido en las etiquetas puede seguir siendo aceptable. Este último punto no significa que la label quality sea irrelevante, sino que las trayectorias redundantes y la diversidad semántica pueden amortiguar parte de los errores.
+
+\lecturefigure{slide-41-dial-takeaways.jpg}{DIAL takeaways: VLM augmentation, Internet priors, offline diversity y label noise limitado}{Diapositiva V041 recuperada de la grabación oficial; Stanford CS25 Lecture 15}
+
+\teachervoice{Ted Xiao es muy cauteloso con «label noise okay»: un ruido demasiado alto sigue dañando el entrenamiento, y el propio comportamiento del robot debe ser lo bastante diverso. Ni el mejor captioner puede crear de la nada una habilidad no recolectada a partir de trayectorias de acción completamente idénticas.}
+
+\subsection{Resumen de la sección}
+
+DIAL coloca el foundation model en la capa de datos y no en la capa de control: el VLM reescribe la interfaz semántica de las trayectorias existentes, de modo que los mismos datos de acción admiten más lenguaje. Reduce el costo de la anotación humana y mejora el desempeño con novel instruction, pero no puede sustituir la cobertura de comportamientos, y la evidencia sobre la generalización composicional sigue siendo limitada.
+\section{Mapa del sistema, límites señalados en la Q\&A y agenda de investigación}
+
+Una vez concluidos los cuatro casos, la clase los vuelve a ubicar dentro de un solo sistema robótico y, en la sesión de preguntas, expone sus límites por iniciativa propia: la skill library sigue siendo pequeña, la imitation es solo un punto de partida, el compositional scaling no tiene un umbral y un contexto visual de seis cuadros ya está cerca de la capacidad del modelo.
+
+\subsection{What's Next: primero, regresar al nivel del sistema}
+
+El último punto de la Agenda no presenta otro artículo, sino que combina los local successes. Cualquier afirmación sobre un «foundation model para robots» debe responder quién se encarga de skill learning, planning, low-level control, data augmentation y object representation, cómo se transmiten los datos entre las interfaces y cómo se retroalimentan las fallas.
+
+\lecturefigure{slide-42-agenda-whats-next.jpg}{Agenda: de los cuatro trabajos de regreso al sistema robótico completo}{Diapositiva V042 recuperada del video oficial; Stanford CS25 Lecture 15}
+
+\subsection{Component Map: dónde se ubica cada Foundation Model}
+
+La tabla del sistema coloca RT-1 en skill learning; SayCan / Inner Monologue, en planning; Code as Policies, en low-level control; DIAL, en data augmentation, y NLMap, en object-centric representations. La recipe de la parte superior subraya que todos estos métodos dependen de large diverse offline data, de una high-capacity architecture y de language glue.
+
+\lecturefigure{slide-43-system-component-map.jpg}{Component map del sistema: RT-1, SayCan, Inner Monologue, Code as Policies, DIAL y NLMap}{Diapositiva V043 recuperada del video oficial; Stanford CS25 Lecture 15}
+
+\begin{importantbox}{Language es una API, no una inteligencia monolítica}
+El lenguaje permite que skills, planes, scene descriptions y labels compartan una interfaz legible, por lo que es fácil conectar modelos externos; sin embargo, cada módulo sigue necesitando sus propios data, evaluation y failure handling. Fusionar todos los módulos en un solo decoder puede simplificar la interfaz, pero no elimina por sí solo los problemas de grounding ni de control en tiempo real.
+\end{importantbox}
+
+\subsection{2016--2023: cómo cambió la pregunta}
+
+La timeline escribe bajo el eje horizontal las preguntas de tres etapas: en 2016--2021, cómo aprende un robot real de extremo a extremo; en 2021--2022, cómo escalar a muchas tasks; en 2022--2023, cómo aprovechar los foundation models para acelerar la robotics. SayCan, Inner Monologue, DIAL, Code as Policies y NLMap, enumerados a la derecha, son componentes de un sistema, no un end-to-end model unificado.
+
+\lecturefigure{slide-44-robotics-progress-timeline.jpg}{Avances en la investigación robótica: de end-to-end y multi-task scaling al foundation-model leverage}{Diapositiva V044 recuperada del video oficial; Stanford CS25 Lecture 15}
+
+\subsection{Closing y proyectos públicos}
+
+La línea de tiempo ya devolvió RT-1, SayCan, Inner Monologue y DIAL a los problemas que cada uno resuelve; el cierre, a su vez, vuelve a anclar estos sistemas en artículos, código y demostraciones que pueden revisarse. Esta sección no añade otro método, sino que revisa qué puntos de entrada verificables deja la clase completa. Al leer la última diapositiva conviene hacer corresponder cada proyecto público con los módulos de data, planning, feedback y grounding vistos antes, y a la vez evitar tomar una demo cuidadosamente seleccionada como prueba completa de operación autónoma a largo plazo.
+
+La Thank-you slide conserva los puntos de entrada de cuatro proyectos y un ejemplo de un robot que limpia un refresco de cola. Recuerda al lector que la evidencia de esta clase proviene de artículos, código y demos consultables, no de una visión abstracta. En la demostración, la instrucción larga se sigue descomponiendo en una secuencia finita de habilidades, lo que muestra el límite entre language planning y la skill library.
+
+\lecturefigure{slide-45-thank-you.jpg}{Cierre: proyectos SayCan, Inner Monologue, RT-1 y DIAL, y demostración de la tarea de limpieza}{Diapositiva V045 recuperada del video oficial; Stanford CS25 Lecture 15}
+
+\subsection{Q\&A uno: la Generalization no tiene un umbral único}
+
+Un estudiante pregunta qué escala requiere la generalización composicional. El ponente responde que depende de la task definition, de la dataset scale y del concepto; hoy no hay una cifra que prediga la emergence a través de colores, objetos y habilidades. Su conjetura personal es que tal vez falten uno o dos órdenes de magnitud de datos, pero aclara de forma explícita que se trata de un juicio subjetivo.
+
+\begin{warningbox}{No conviertas «uno o dos órdenes de magnitud» en una Scaling Law}
+Esta frase proviene de una rough intuition expresada durante las preguntas, sin experimentos controlados, sin definición del eje horizontal y sin intervalos de confianza. Sirve para expresar que «la escala actual sigue siendo pequeña», pero no para predecir que con cierto número de parámetros o cierto episode count surgirán necesariamente capacidades robóticas generales.
+\end{warningbox}
+
+\subsection{Q\&A dos: el cuello de botella de SayCan son las Grounded Skills}
+
+Las affordance/value functions de SayCan solo pueden asignar puntuaciones a una skill library finita. Si el robot tiene únicamente tres habilidades, el planner solo puede producir combinaciones de esas tres; agrandar el modelo de lenguaje no agrega nuevas primitive de acción. Por ello, la instruction coverage de alto nivel depende del número, la precisión y la cobertura de estados de las habilidades de bajo nivel.
+
+\teachervoice{El ponente lo llama el «100\% bottleneck» de SayCan: cuántos platillos hay en el buffet del planner determina cuántos objetivos puede combinar. Esta comparación es más precisa que decir «el LLM se encarga del planning», porque devuelve el límite de capacidad a los datos del robot y al controller.}
+
+\subsection{Q\&A tres: la Imitation es una Existence Proof, no el final}
+
+En su momento, RT-1 usaba sobre todo imitation loss. Como investigador de RL, el ponente quisiera incorporar offline improvement o RL, pero se eligió la multi-task imitation porque es estable, escalable y ya demostró que funciona con datos reales a gran escala. Desde el punto de vista de ingeniería, establecer primero una base policy confiable y después estudiar una optimization más compleja es más verificable que intentar resolver todos los problemas al mismo tiempo.
+
+\begin{knowledgebox}{Por qué no usar Online RL directamente}
+En robots reales, la reward es escasa, las fallas son costosas y la paralelización de datos está limitada por el hardware. La offline imitation renuncia a la exploración activa a cambio de un entrenamiento estable y de un dataset reutilizable. Si en el futuro se incorpora RL, todavía habrá que resolver el distribution shift, las restricciones de seguridad y la extrapolación de value fuera de línea.
+\end{knowledgebox}
+
+\subsection{Q\&A cuatro: seis cuadros ya están cerca del Context Limit}
+
+Las tareas largas requieren memoria del orden de minutos, pero los tokens de imágenes de alta dimensión agotan pronto el context. Los seis cuadros de RT-1 solo cubren el movimiento de corto plazo y no pueden almacenar una trayectoria completa ni una few-shot demonstration. El ponente propone el retrieval transformer u otros memory mechanisms como posibles direcciones, y afirma de forma explícita que hoy no es realista meter trayectorias completas en el context.
+
+\teachervoice{La última limitación es muy concreta: no se trata de que «el modelo aún no sea lo bastante inteligente», sino de que seis imágenes ya se acercan al context budget. Las tareas corporizadas de larga duración requieren compresión, recuperación, resúmenes de estado o memory externa; ampliar sin más el prompt eleva a la vez la latency y el riesgo para el control en tiempo real.}
+
+\subsection{Resumen de la sección}
+
+El mapa del sistema muestra que los cuatro trabajos cubren, respectivamente, las interfaces de skill, plan, feedback y data; las preguntas, en cambio, señalan que no se combinan por sí solos en un robot de propósito general. Los verdaderos cuellos de botella pendientes son la grounded skill coverage, los algoritmos de aprendizaje, una generalization predecible y la memory de largo plazo.
+\section{Ampliación hacia los VLA modernos: de la recipe de 2023 a los modelos unificados}
+
+Esta sección es una interpretación de ingeniería escrita en 2026 y no forma parte de lo que se expuso en la clase de 2023. No usa sistemas posteriores para demostrar retrospectivamente que esta clase tenía razón; analiza qué restricciones de la recipe de Ted Xiao siguen vigentes en un vision-language-action model unificado.
+
+\subsection{Un modelo unificado sigue necesitando una validación modular}
+
+Aunque la visión, el lenguaje y la acción se integren en un solo modelo, el entrenamiento y el despliegue deben seguir auditando por separado perception, planning, skill execution, feedback y data coverage. Una loss de extremo a extremo permite compartir representaciones, pero hace más difícil localizar el origen de los errores; por eso, la evaluation a nivel de sistema debe conservar la verificación de ejecutabilidad al estilo de SayCan, el ciclo cerrado al estilo de Inner Monologue y la auditoría semántica de datos al estilo de DIAL.
+
+\begin{importantbox}{Parámetros unificados no implican responsabilidades unificadas}
+Un checkpoint puede cumplir varias funciones a la vez, pero el contrato de ingeniería todavía debe responder: qué clase de token puede controlar acciones reales, quién verifica que una acción sea segura, quién mantiene el estado a largo plazo, quién decide que la tarea terminó y qué entradas son solo datos y no instrucciones. Compartir parámetros no sustituye los límites de permisos ni los de validación.
+\end{importantbox}
+
+\subsection{La Data Mixture requiere una Resource Accounting explícita}
+
+La mezcla moderna de datos de varios robots debe registrar la proporción de cada embodiment, tarea, entorno y etiqueta de lenguaje. Si una tarea sencilla y frecuente ocupa la mayor parte de los tokens, la disminución de la loss de entrenamiento puede ocultar el deterioro de habilidades escasas pero críticas; si los distintos action spaces no se normalizan, el modelo aprenderá a asociar un mismo token con controles contradictorios. Los resultados de task-diversity de RT-1 siguen recordándonos que el token count no equivale a cobertura.
+
+\subsection{Memory y Latency son restricciones conjuntas}
+
+Un context más largo permite conservar más historial visual, pero aumenta el costo de la pasada hacia adelante y la latencia de control. Los sistemas corporeizados suelen necesitar organizar en capas el estado reciente de alta frecuencia, los resúmenes de la tarea a largo plazo y una episodic memory recuperable, en lugar de mantener todos los cuadros de forma permanente en la attention window. Al evaluar, deben reportarse a la vez success, latency, control frequency, memory size y recovery behavior.
+
+\begin{warningbox}{Límites de la interpretación actualizada}
+Los sistemas de la clase operaban en una cocina cerrada, con acciones limitadas y detectors especializados; un VLA de mundo abierto enfrenta más sensores, la seguridad de las personas y errores irrecuperables. Lo que se transfiere es «la disciplina de interfaces y evidencia», no una extrapolación directa de las tasas de éxito de la clase a despliegues domésticos o industriales.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Un VLA unificado puede absorber varios módulos de la recipe de 2023, pero sigue requiriendo una validación independiente de la ejecutabilidad, la retroalimentación, la cobertura de datos y el presupuesto de tiempo real. Cuanto más sólida sea la representación unificada del Foundation model, con más transparencia debe reportar el sistema qué sigue dependiendo de data, controllers o safety layers especializados.
+\section{Síntesis y ampliación}
+
+\subsection{Una tabla que recoge toda la Recipe}
+
+La siguiente tabla reúne los cuatro sistemas principales según su entrada, su salida y sus modos de falla. Es más útil que memorizarlos por año de publicación, porque cualquier robot foundation model posterior debe cubrir estas funciones, aunque su implementación pueda integrarse en un mismo modelo.
+
+\begin{longtable}{@{}L{0.16\textwidth}L{0.22\textwidth}L{0.23\textwidth}L{0.27\textwidth}@{}}
+\toprule
+Sistema & Entrada principal & Salida principal & Modo de falla principal \\
+\midrule
+RT-1 & Seis cuadros visuales, tarea en lenguaje, demostraciones fuera de línea & Acciones discretizadas en tiempo real & Escenas nuevas, variación de varios factores a la vez, context de largo plazo y dataset coverage \\
+SayCan & Objetivo de alto nivel, skill list, affordance scores & Siguiente grounded skill & Skill library demasiado pequeña, affordance imprecisa, fallas de ejecución \\
+Inner Monologue & Scene, success, retroalimentación del usuario, planes previos & Belief actualizada y plan del siguiente paso & Errores del detector / caption, ontology de retroalimentación incompleta \\
+DIAL & Poco lenguaje humano, muchas offline trajectories, VLM & Language labels y policy ampliadas & Label noise, cobertura insuficiente de comportamientos, evidencia limitada de generalización composicional \\
+\bottomrule
+\end{longtable}
+
+\subsection{Conclusiones finales}
+
+Primero, el recurso central del scaling en robótica no es un único episode count, sino la cobertura diversa de tareas, entornos, lenguaje y embodiment. Segundo, uno de los valores reales del Transformer es la token interface y un sequence model de alta capacidad, pero el presupuesto de tiempo real obliga a comprimir la visión, usar un historial corto y desplegar modelos pequeños. Tercero, la mejor forma de conectar un LLM a un robot es mediante un planner restringido por grounding, no tratando directamente las probabilidades del lenguaje como acciones. Cuarto, el feedback y el VLM relabeling pueden inyectar en el sistema el prior de foundation models externos, pero no pueden crear de la nada habilidades físicas que no se hayan recolectado.
+
+\begin{importantbox}{La frase que más vale llevarse}
+La robotics foundation-model recipe de 2023 no es «conectar el robot a un LLM», sino: entrenar con datos fuera de línea grandes y diversos un skill model ejecutable en tiempo real, usar el lenguaje para conectar la planeación con la retroalimentación, usar la affordance para mantener el grounding y dejar que foundation models externos mejoren de forma continua la interfaz semántica.
+\end{importantbox}
+
+\subsection{Lecturas adicionales}
+
+Todos los materiales siguientes se publicaron antes de la fecha de la clase y forman directamente la cadena de evidencia de esta sesión. El orden de lectura sugerido es: la capa de skill/data de RT-1, el planner de SayCan, el feedback de Inner Monologue y, por último, DIAL para volver a la interfaz de datos.
+
+\begin{itemize}
+  \item \href{https://arxiv.org/abs/2212.06817}{Brohan et al., RT-1: Robotics Transformer for Real-World Control at Scale}: imitación multitarea, arquitectura, data scaling y ablation.
+  \item \href{https://arxiv.org/abs/2204.01691}{Ahn et al., Do As I Can, Not As I Say}: LLM usefulness y affordance grounding.
+  \item \href{https://arxiv.org/abs/2207.05608}{Huang et al., Inner Monologue}: planeación en lazo cerrado con scene, success y active feedback.
+  \item \href{https://arxiv.org/abs/2202.02005}{Jang et al., BC-Z}: imitación multitarea condicionada por lenguaje y zero-shot task generalization.
+  \item \href{https://arxiv.org/abs/2211.11736}{Xiao et al., Robotic Skill Acquisition via Instruction Augmentation with Vision-Language Models}: DIAL y VLM relabeling.
+\end{itemize}
+
+\subsection{Autoevaluación posterior a la clase}
+
+\begin{importantbox}{Diez preguntas de autoevaluación}
+\begin{enumerate}
+  \item ¿Por qué esta sesión solo puede decir «towards a robotics foundation model» y no que ya se demostró la emergence?
+  \item ¿Cómo desacopla el offline robot learning la data generation de la consumption, y qué riesgo de distribution-shift introduce?
+  \item ¿Qué restricción de recursos resuelve cada uno de estos elementos de RT-1: TokenLearner, el historial de seis cuadros y los 256 bins?
+  \item ¿Por qué reducir la task diversity perjudica más la generalization que una episode reduction equivalente?
+  \item En SayCan, ¿qué es lo que el LM score y el affordance score no pueden sustituir, cada uno?
+  \item ¿Por qué deben reportarse por separado el planning success y el execution success?
+  \item ¿En qué se diferencian el passive, el active y el success feedback de Inner Monologue?
+  \item ¿Por qué DIAL puede ampliar la cobertura del lenguaje, pero no crear habilidades que no se recolectaron?
+  \item ¿De qué condiciones del dataset depende «poco label noise: okay», y de qué manera no debe malinterpretarse?
+  \item Si seis cuadros ya se acercan al context limit, ¿qué memory architecture necesitan las tareas que duran minutos?
+\end{enumerate}
+\end{importantbox}
+
+\end{document}

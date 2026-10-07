@@ -1,0 +1,684 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+\usepackage{multicol}
+
+\renewcommand{\notetitle}{Lecture 40: el Transformer en los modelos de difusión: de DiT a MMDiT y la generación eficiente}
+\renewcommand{\noteauthors}{Elaborado a partir de la clase oficial de Sayak Paul (Hugging Face) en Stanford CS25 V5, el deck oficial de 66 páginas y los subtítulos hechos a mano}
+\renewcommand{\notedate}{CS25 V5 · versión reescrita source-first de 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{Clase: 2025-05-27; publicación: 2025-06-24}
+\renewcommand{\videoduration}{1:14:32}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=vXtapCFctTI}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.97\textwidth,height=0.49\textheight,keepaspectratio]{slides-images/#1}
+  \caption{#2}
+  \figsource{Sayak Paul, official CS25 deck, page #3}
+\end{figure}
+}
+
+\let\standardtableofcontents\tableofcontents
+\renewcommand{\tableofcontents}{%
+  \small
+  \setlength{\parskip}{0pt}
+  \standardtableofcontents
+  \normalsize
+  \setlength{\parskip}{0.25em}
+}
+
+\begin{document}
+\makecscover
+
+\section{La generación por difusión no es un diagrama de una sola red}
+
+Esta clase no trata de «si un Transformer puede generar imágenes», sino de por qué el denoiser (eliminador de ruido) de los sistemas de difusión migró de un U-Net gigantesco a un Transformer escalable, y de cómo, tras esa migración, se rediseñan la inyección de condiciones, el costo de la atención, la parametrización multimodal y el control estructural. El ponente delimita primero el alcance: no expondrá de forma completa toda la matemática de diffusion o flow matching, sino que centrará la atención en la parametrización del backbone entrenable.
+
+\subsection{De los resultados de generación al proceso iterativo}
+
+Los resultados de la generación de imágenes a partir de texto son llamativos, pero el juicio sobre la arquitectura no puede partir directamente de las imágenes de ejemplo. A continuación se establece primero el proceso de generación mínimo: se parte de ruido y, a lo largo de varios pasos de tiempo, se obtiene gradualmente una muestra de datos; el texto es solo una condición que, en cada paso, modifica la dirección de la eliminación de ruido. Esta sección responde a dos preguntas: en cada paso, quién actualiza exactamente el estado y en qué punto la condición modifica la trayectoria. Solo leyendo los ejemplos, las fórmulas y los diagramas de componentes que siguen con estas dos preguntas en mente es posible reducir el efecto visual a un sistema analizable.
+
+\lecturefigure{slide-04.jpg}{Los modelos de difusión de texto a imagen ya pueden generar escenas complejas, realistas y composicionales}{04}
+
+En la figura, distintos modelos abiertos o cerrados pueden atender prompts composicionales como «un cactus con cara sonriente», «un panda científico loco» o «un astronauta que sale de un huevo en la Luna». Al leer la figura conviene distinguir tres cosas: photorealism, prompt adherence y diversity. Un solo ejemplo exitoso únicamente demuestra que el modelo puede generar cierto resultado; no indica la cobertura, la reproducibilidad ni la fiabilidad ante combinaciones de cola larga.
+
+\lecturefigure{slide-05.jpg}{Intuición de la difusión: el ruido aleatorio se convierte gradualmente en una imagen real mediante refinement en múltiples pasos}{05}
+
+A diferencia de una GAN, que genera la muestra en una sola propagación hacia adelante, el muestreo por difusión es iterativo y secuencial. Si la adición de ruido hacia adelante se escribe como
+\[
+x_t=\sqrt{\bar\alpha_t}\,x_0+\sqrt{1-\bar\alpha_t}\,\epsilon,
+\qquad \epsilon\sim\mathcal N(0,I),
+\]
+$x_0$ es la muestra limpia, $x_t$ es el estado con ruido en el paso de tiempo $t$ y $\bar\alpha_t$ está determinado por el programa de ruido. Al generar, se recorre el camino inverso desde el ruido hasta la distribución de los datos.
+
+\lecturefigure{slide-06.jpg}{La condición de texto restringe la trayectoria de generación en cada paso de eliminación de ruido}{06}
+
+El ejemplo del monstruo peludo blanco muestra que el texto no interviene como una clasificación al final, sino que influye de manera continua en los estados intermedios. La generación condicionada puede abstraerse como $\epsilon_\theta(x_t,t,c)$ o como un velocity predictor $v_\theta(x_t,t,c)$, donde $c$ es texto, una clase, una imagen u otro control. Cuanto más compleja es la condición, más se vuelve la forma de inyectarla el núcleo del diseño del backbone.
+
+\teachervoice{00:02:48--00:06:25: el docente condensa la difusión en la intuición más importante: es iterative refinement, no one-shot generation. La función de la condición de texto es modificar la trayectoria de forma continua, no añadir una etiqueta a la imagen final.}
+
+\begin{importantbox}{Dos problemas separables en los modelos de difusión}
+El primero es el de \textbf{la trayectoria y el objetivo}: cómo agregar ruido, cómo definir velocity/noise/score y qué scheduler elegir. El segundo es el de \textbf{la parametrización de la red}: si se usa un U-Net, un DiT u otra estructura para predecir el objetivo. Esta clase responde principalmente al segundo tipo de problema.
+\end{importantbox}
+
+\subsection{Qué contiene un sistema de difusión de nivel producto}
+
+Es frecuente llamar erróneamente «Diffusion model» a una sola red. Un pipeline real de text-to-image incluye al menos un text encoder, una latent representation, un denoiser, un scheduler y un VAE decoder; algunos sistemas también usan varios codificadores de texto y guidance.
+
+\lecturefigure{slide-07.jpg}{Primer bloque del sistema de difusión: el codificador de texto convierte el prompt en una representación de la condición}{07}
+
+El texto entra primero en uno o varios encoders. Sistemas como Stable Diffusion 3 combinan varios codificadores de texto, porque cada uno tiene sesgos distintos en vocabulario, comprensión de textos largos y espacio semántico. La calidad de la representación de la condición determina si el modelo puede entender el prompt, pero también aumenta la memoria de GPU, la latencia y la complejidad de la interfaz de entrenamiento.
+
+\lecturefigure{slide-08.jpg}{Segundo bloque: la generación ocurre en el espacio noisy latent y no en el espacio de píxeles original}{08}
+
+La latent diffusion usa primero un VAE para comprimir la imagen en un latent de baja resolución y después aplica la difusión sobre ese latent. Si la imagen mide $H\times W$ y la tasa de submuestreo es $f$, el espacio latent mide aproximadamente $H/f\times W/f$, lo que reduce de forma considerable el número de tokens; el costo es que el VAE puede perder texto, texturas o detalles de alta frecuencia.
+
+\lecturefigure{slide-09.jpg}{Tercer bloque: el denoiser U-Net o Transformer predice la dirección de actualización en cada paso}{09}
+
+El denoiser recibe los noisy latents, el paso de tiempo y la condición de texto, y produce noise, velocity u otra parametrización. Todas las discusiones de arquitectura que siguen en estas notas giran en torno a este módulo azul. Sustituir el backbone no sustituye automáticamente el scheduler, el VAE ni el codificador de texto; por ello, las mejoras de extremo a extremo deben medirse por componente.
+
+\lecturefigure{slide-10.jpg}{Sistema completo: texto, latent, denoiser, scheduler y VAE forman un ciclo iterativo cerrado}{10}
+
+El scheduler usa la salida de la red para calcular el siguiente latent; tras repetir el ciclo varias veces, el VAE lo decodifica en una imagen. La latencia de inferencia es aproximadamente «costo del denoiser por paso × número de pasos de muestreo», de modo que una arquitectura más rápida por paso, pero que requiere más pasos, no necesariamente es más rápida de extremo a extremo. En la sesión de Q\&A, el ponente también reconoció el valor de las GAN para la one-shot generation de latencia ultrabaja.
+
+\begin{knowledgebox}{Primera aparición: scheduler y denoiser}
+El scheduler es el proceso numérico que determina el nivel de ruido y la regla de actualización inversa; el denoiser es la red que se aprende. Ambos determinan conjuntamente el muestreo, pero pueden sustituirse de forma relativamente independiente. Al comparar la velocidad de los modelos, deben reportarse a la vez el número de pasos de muestreo y el costo por paso.
+\end{knowledgebox}
+
+\subsection{Diffusion, flow matching y el enfoque de esta clase}
+
+Para ver con claridad el backbone, todavía hace falta saber de dónde proviene la señal de entrenamiento. Diffusion suele predecir el ruido agregado, mientras que flow matching define una trayectoria de probabilidad entre el ruido y los datos y predice el campo de velocidades; ambos pueden usar Transformers similares.
+
+\lecturefigure{slide-11.jpg}{Entrenamiento de difusión: se construye $x_t$ a partir de una imagen limpia y ruido, y se pide a la red que recupere el objetivo}{11}
+
+La noise-prediction objective más común es
+\[
+\mathcal L_{\epsilon}
+=\mathbb E_{x_0,\epsilon,t}
+\left[\|\epsilon-\epsilon_\theta(x_t,t,c)\|_2^2\right].
+\]
+Aquí $t$ determina la relación señal-ruido y $c$ es la condición. Distintos esquemas de timestep weighting cambian el intervalo de ruido al que atiende el modelo; por ello, la receta de entrenamiento y la arquitectura no pueden discutirse por completo por separado.
+
+\lecturefigure{slide-12.jpg}{Flow matching: aprender el campo de velocidades del ruido a los datos a lo largo de una trayectoria definida}{12}
+
+Si se adopta la trayectoria lineal $x_t=(1-t)x_0+t x_1$, la velocidad objetivo es $u_t=x_1-x_0$, y puede entrenarse
+\[
+\mathcal L_{\mathrm{FM}}
+=\mathbb E\left[\|v_\theta(x_t,t,c)-u_t\|_2^2\right].
+\]
+La trayectoria y la parametrización reales pueden ser más complejas, pero lo esencial es que la red predice la dirección local del flujo. La mayor parte de las discusiones estructurales sobre DiT, MMDiT y SANA no depende de si se predice noise o velocity.
+
+\lecturefigure{slide-13.jpg}{Esta clase deja explícitamente de lado la scheduler math y se centra en la network parameterization}{13}
+
+Lo que la figura amplía es $	heta$: cómo procesa la red el noisy input, cómo inyecta $t$ y el texto, y cómo escala a alta resolución. Esta delimitación del alcance es importante. Si un sistema obtiene mejores resultados, la mejora puede provenir de los datos, el VAE, la objective, la guidance o el post-training, y no puede atribuirse por completo al backbone.
+
+\lecturefigure{slide-14.jpg}{Grados de libertad en el diseño del backbone de difusión: espacio de entrada, estructura de la red, condición y objetivo de salida}{14}
+
+Pixel-space o latent-space determina el tamaño espacial; U-Net o Transformer determina el token mixing; las class, text o image conditions determinan la interfaz de control; epsilon, velocity o data prediction determina la semántica de la salida. Al leer esta tabla, cada fila debe verse como un eje experimental que puede someterse a ablate de forma independiente, no como un paquete fijo.
+
+\begin{warningbox}{No confundir la clasificación de backbones con la clasificación de sistemas de generación completos}
+Un mismo denoiser puede producir diferencias enormes con distintos VAE, datos, schedulers, números de pasos de muestreo y guidance. Si un artículo solo reporta el FID final o la preferencia humana, conviene seguir indagando sobre las variables controladas, el cómputo de entrenamiento y la configuración de inferencia.
+\end{warningbox}
+
+\begin{lstlisting}[language=Python,caption={Flujo de muestreo simplificado de un sistema de difusión text-to-image}]
+text_tokens = text_encoder(prompt)
+latent = sample_gaussian(shape)
+for timestep in scheduler.timesteps:
+    prediction = denoiser(latent, timestep, text_tokens)
+    latent = scheduler.step(prediction, timestep, latent)
+image = vae.decode(latent)
+\end{lstlisting}
+
+\subsection{Resumen de la sección}
+
+La generación por difusión es un sistema de múltiples componentes que opera de forma iterativa. Diffusion y flow matching definen la trayectoria y la supervisión; el denoiser backbone define cómo se procesan el estado y la condición. En adelante solo se sustituye el módulo de red azul, pero se seguirán revisando la velocidad de extremo a extremo, la receta de entrenamiento y los límites de la evidencia.
+\section{De la U-Net gigante a la DiT escalable}
+
+El auge del Transformer no se debió a que la U-Net no pudiera generar buenas imágenes, sino a que, cuando la U-Net evolucionó hacia una gran cantidad de estructuras personalizadas de convolución, residuales, atención, submuestreo y sobremuestreo y skip, se volvió difícil que heredara directamente el escalamiento y las optimizaciones de sistema de los Transformer de uso general. El valor de DiT reside, en primer lugar, en la unificación de la estructura y la reutilización del ecosistema.
+
+\subsection{Por qué la U-Net se volvió cada vez más «gigante»}
+
+Los primeros DDPM y la latent diffusion usaban principalmente U-Net. Su sesgo inductivo multiescala es adecuado para imágenes, pero la U-Net moderna de text-to-image ya no es una simple red convolucional simétrica, sino una mezcla de muchos componentes especializados. Esta sección sigue la pregunta de «por qué un prior de imagen maduro se convierte en una carga de ingeniería»: primero se examinan las capacidades que aporta la ruta multiescala y después se rastrea cómo los block especializados, las interfaces de condicionamiento y la configuración por resolución acumulan complejidad capa por capa.
+
+\lecturefigure{slide-15.jpg}{En la época de DDPM/LDM dominaba la U-Net, que después incorporó gradualmente Transformer blocks}{15}
+
+La U-Net obtiene un campo receptivo amplio mediante el submuestreo, recupera la resolución mediante el sobremuestreo y conserva los detalles con las skip connection. El condicionamiento de texto suele inyectarse en las capas intermedias mediante cross-attention. Su desempeño es maduro, pero hace que cada etapa de resolución tenga distintos canales, número de block y configuración de atención.
+
+\lecturefigure{slide-16.jpg}{Componentes de la U-Net gigante: stem convolucional, downblocks, midblock, upblocks y cabeza de salida}{16}
+
+La convolución de entrada proyecta el noisy latent a los hidden channels; los downblocks reducen gradualmente el tamaño espacial; el midblock procesa la representación más comprimida; los upblocks combinan las skip features para recuperar los detalles. Cada block puede incluir además ResNet, normalization, self/cross-attention y operadores de muestreo.
+
+\lecturefigure{slide-17.jpg}{Los problemas de ingeniería de la «Giant U-Net»: una configuración enorme y difícil de mantener unificada}{17}
+
+El objetivo didáctico de la captura de la configuración no es burlarse de la cantidad de parámetros, sino mostrar la architecture surface area: los arreglos de canales, los tipos de block, las attention head, la cross-attention dimension, el número de capas y el método de muestreo deben coordinarse entre sí. Es fácil que un experimento modifique varias variables a la vez, y la reproducción y la optimización también se vuelven más difíciles.
+
+\lecturefigure{slide-18.jpg}{El interior de un downblock se compone de diversos módulos personalizados de ResNet, Transformer y muestreo}{18}
+
+Los block personalizados pueden aprovechar el prior de imagen, pero también impiden reutilizar directamente optimizaciones estándar como fused kernel, FlashAttention, QK-Norm o GQA. Un fused kernel combina varias operaciones de GPU en un solo kernel para reducir las lecturas y escrituras en HBM (High Bandwidth Memory, memoria de video de alto ancho de banda) y el kernel launch overhead; cuanto más irregular es la estructura, más difícil es la fusión.
+
+\lecturefigure{slide-19.jpg}{La U-Net completa, desplegada, muestra un flujo de datos multiescala complejo y skip connections}{19}
+
+Esta vista panorámica debe leerse siguiendo la resolución: a la izquierda el submuestreo, al centro el bottleneck y a la derecha el sobremuestreo; las flechas horizontales son las skip. La complejidad no proviene solo de la cantidad de parámetros, sino también de la activation memory, de la planificación de tensor de distintos tamaños y de la distribución de las capas de condicionamiento. La optimización del sistema requiere especializarse block por block.
+
+\begin{warningbox}{Complejo no equivale a erróneo, y unificado no equivale a más potente}
+El inductive bias multiescala de la U-Net puede seguir siendo valioso con datos limitados o con objetivos de latencia específicos. La estructura de DiT es más ordenada, pero si el número de token es enorme, el costo de la atención supera rápidamente al de la convolución. La elección de arquitectura debe vincularse a la resolución, los datos y el hardware.
+\end{warningbox}
+
+\subsection{UViT es una transición; DiT es una reescritura de la estructura}
+
+UViT intenta conservar la jerarquía y las skip largas de la U-Net, al mismo tiempo que sustituye los bloques convolucionales por Transformer. La DiT original va más lejos: aplica patchify al noisy latent y lo envía a un ViT encoder casi estándar, sin mantener ya el tronco multiescala completo en forma de U.
+
+\lecturefigure{slide-20.jpg}{UViT: sustituye los bloques convolucionales por Transformer/MLP y conserva las skip largas entre capas}{20}
+
+UViT muestra que un Transformer puede desempeñar el papel de denoiser, pero su estructura aún conserva rastros de la U-Net. Las skip largas conectan las etapas del codificador y del decodificador, y la longitud de secuencia y la hidden dimension también pueden variar entre capas. Es una «U-Net transformerizada», no «la generación escrita como un modelo estándar de token».
+
+\lecturefigure{slide-21.jpg}{Razones para migrar a DiT: escalamiento, reutilización del ecosistema, sencillez de implementación y calidad de generación}{21}
+
+DiT puede incorporar directamente avances de los Transformer como el MLP en paralelo, QK-Norm, Grouped Query Attention (GQA) y RoPE. GQA hace que varias query heads compartan menos key/value heads para reducir el cómputo y el almacenamiento de KV; QK-Norm, por su parte, normaliza query/key y mejora la estabilidad del entrenamiento de modelos grandes. Lo esencial de la migración es acceder a un ecosistema de backbone de uso general en evolución continua.
+
+\teachervoice{00:14:44--00:21:54, el docente explica «por qué cambiar a DiT» como una unificación de las interfaces de ingeniería e investigación: la U-Net gigante se compone de muchos custom blocks, mientras que DiT puede heredar directamente los avances de la comunidad de Transformer en escalamiento, normalización, atención y kernel.}
+
+\begin{knowledgebox}{Primera aparición: Inductive bias}
+El inductive bias (sesgo inductivo) son los supuestos que la arquitectura codifica de antemano. La U-Net enfatiza la convolución local y la multiescala; DiT depende más de que los datos enseñen las relaciones entre token. Cuando aumentan los datos y la capacidad de cómputo, un sesgo manual más débil puede escalar con mayor facilidad, aunque no todas las escalas se benefician.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El problema de la U-Net no es que no funcione, sino que las implementaciones modernas están muy personalizadas y es difícil escalarlas de forma unificada. UViT conserva la estructura jerárquica, mientras que la DiT original reescribe el denoising como un token computation cercano a ViT. El siguiente capítulo explicará, punto por punto, qué condicionamientos y mecanismos de inicialización requiere este «cambio aparentemente pequeño».
+\section{Original DiT: de ViT a un eliminador de ruido condicional}
+
+La fuerza de la DiT original viene de la contención: patch embedding, position embedding, self-attention y MLP se toman casi sin cambios de ViT, y lo nuevo se concentra en el timestep/class conditioning y en la decodificación de la salida. Para entenderla no conviene memorizar el diagrama; hay que deducirla a partir de la tensor shape y la residual equation.
+
+\subsection{Patchify y los dos tipos de condición}
+
+La sección anterior solo indicó la dirección de «sustituir la U-Net por un Transformer»; esta sección concreta esa idea como transformaciones de tensores: cómo un latent bidimensional se convierte en tokens y cómo el timestep y la class label entran en la misma secuencia de encoder blocks. Al leer las figuras conviene seguir a la vez el número de tokens, la dimensión del embedding y la ruta del condicionamiento, porque las tres determinan juntas la calidad, el costo de cómputo y si el modelo puede reutilizar los componentes estándar de ViT.
+
+Sea el latent $x_t\in\mathbb R^{B\times C\times H\times W}$ y el patch size $P$; entonces el número de tokens es
+\[
+N=\frac{H}{P}\frac{W}{P},
+\]
+y cada token se proyecta linealmente a la dimensión $D$. Cuanto mayor es $P$, menor es el cómputo, pero más difícil resulta recuperar los detalles locales.
+
+\begin{knowledgebox}{El patch size ajusta a la vez la calidad de generación y el costo del sistema}
+Duplicar $P$ reduce a la mitad el número de tokens tanto en altura como en anchura, de modo que el total de tokens baja a cerca de una cuarta parte y el término dominante de la attention cuadrática puede bajar a cerca de un dieciseisavo; el costo es que cada token debe resumir una región espacial más grande. Por eso el patch size no es un simple parámetro de preprocesamiento, sino una decisión de arquitectura que vincula la fidelidad del detalle, la longitud de la secuencia y el presupuesto de cómputo.
+\end{knowledgebox}
+
+\lecturefigure{slide-22.jpg}{Forward pass clásico de ViT: patchify, codificación posicional, encoder blocks y head}{22}
+
+Esta diapositiva de código es la baseline: los patches de la imagen se aplanan y se proyectan, se les añaden la codificación posicional y el class token, y luego pasan por blocks de estructura idéntica. DiT elimina el objetivo de clasificación, pero conserva la tokenización y la red troncal del encoder. Al leer el código, primero hay que seguir las shapes, no los nombres de las funciones.
+
+\lecturefigure{slide-23.jpg}{De ViT a la DiT class-conditional: la red troncal casi no cambia; solo se sustituyen el condicionamiento y la salida}{23}
+
+DiT sigue aplicando embedding a los latent patches; añade un embedder de $t$ y un embedder de $y$; la head final no produce una clase, sino que decodifica cada token como la predicción de los patch pixels/latents. Así, la tarea de generación puede formularse como una «token sequence regression condicional».
+
+\lecturefigure{slide-24.jpg}{Estructura general del block de la DiT original y de la head de salida}{24}
+
+Cada block contiene self-attention, MLP y adaptive LayerNorm; la condición $c$ influye a la vez en los parámetros de normalización y en la residual gate. La capa de salida además debe aplicar el patchify inverso para volver a un tensor espacial. En la figura no hay cross-attention, porque tanto la class label como el timestep pueden comprimirse en un solo vector de condición.
+
+\lecturefigure{slide-25.jpg}{Timestep embedding: llevar el tiempo de ruido escalar a una representación continua de alta dimensión}{25}
+
+El sinusoidal embedding habitual es
+\[
+e_{2k}(t)=\sin(t/\omega_k),\qquad
+e_{2k+1}(t)=\cos(t/\omega_k),
+\]
+y después pasa por un MLP para obtener la condición. Cada paso de tiempo corresponde a una relación señal-ruido distinta, y la red debe saber si en ese momento tiene que recuperar la estructura general o los detalles; $t$ no es un índice ordinario, sino la variable de estado de la tarea de eliminación de ruido.
+
+\lecturefigure{slide-26.jpg}{Class embedding: la clase discreta se convierte en vector de condición mediante una embedding table}{26}
+
+La clase $y$ se mapea a $D$ dimensiones mediante `nn.Embedding`. Para la classifier-free guidance, durante el entrenamiento se descarta la clase con cierta probabilidad, de modo que se aprende la unconditional branch. En inferencia pueden combinarse la predicción condicional y la incondicional para mejorar la prompt/class adherence, aunque una guidance demasiado fuerte sacrifica diversidad.
+
+\lecturefigure{slide-27.jpg}{Fusión de condiciones: los embeddings de class y timestep se suman para obtener $c=y+t$}{27}
+
+La suma requiere que ambas condiciones ya estén proyectadas a la misma dimensión y supone que un solo vector basta para controlar toda la capa. Aquí no hay un problema de alineación a nivel de token, por lo que la suma simple es eficiente. Más adelante, el condicionamiento por texto es más rico, y PixArt y MMDiT modificarán esta ruta.
+
+\begin{importantbox}{Lista mínima de modificaciones de DiT}
+Respecto a ViT se necesitan cuatro interfaces nuevas: la patchification del noisy latent, el timestep embedding, el embedding de la condición de la tarea y una head que decodifique los tokens de vuelta a una predicción espacial. La red troncal Self-attention/MLP no se vuelve misteriosa por tratarse de «difusión».
+\end{importantbox}
+
+\subsection{AdaLN-Zero: cómo entra la condición en cada block}
+
+La Original DiT no usa cross-attention; en su lugar, la condition genera la scale, el shift y las residual gates de LayerNorm. Así, el costo del condicionamiento no depende del número de tokens, lo que resulta especialmente adecuado para el control de baja dimensión por class/timestep. La pregunta central de esta sección es la siguiente: la condición debe influir en cada block sin romper la estabilidad al inicio de una red profunda; AdaLN-Zero responde a la vez «cómo inyectarla» y «cómo arrancar de forma segura» mediante parámetros de modulación y una residual gate inicializada en cero.
+
+\lecturefigure{slide-28.jpg}{Cada block obtiene por regresión, a partir del vector de condición, los parámetros de modulación de AdaLN}{28}
+
+La Adaptive LayerNorm puede escribirse como
+\[
+\operatorname{AdaLN}(h;c)=
+(1+s(c))\odot\frac{h-\mu(h)}{\sqrt{\sigma^2(h)+\epsilon}}+b(c),
+\]
+donde $s(c)$ y $b(c)$ son, respectivamente, la scale y el shift generados por la condición. Sumar $1$ hace que, con inicialización en cero, se reduzca a una normalización ordinaria.
+
+\lecturefigure{slide-29.jpg}{Block AdaLN-Zero: la condición modula a la vez la attention, el MLP y la residual gate}{29}
+
+Una capa puede resumirse como
+\[
+h'=h+g_{\mathrm{msa}}(c)\odot
+\operatorname{MSA}(\operatorname{AdaLN}_1(h;c)),
+\]
+\[
+h''=h'+g_{\mathrm{mlp}}(c)\odot
+\operatorname{MLP}(\operatorname{AdaLN}_2(h';c)).
+\]
+Seis grupos de parámetros controlan la scale, el shift y la gate de las dos subcapas. Por ello la condición puede influir de manera continua en el cómputo a lo largo de la profundidad, en lugar de concatenarse una sola vez en la entrada.
+
+\lecturefigure{slide-30.jpg}{Capa de salida: decodificar los tokens $(B,N,D)$ en patches y aplicar unpatchify para volver al espacio}{30}
+
+Si los canales de salida son $C_o$, cada token debe predecir $P^2C_o$ valores. La capa lineal produce $(B,N,P^2C_o)$, que después se reorganiza con reshape como $(B,C_o,H,W)$. La salida puede contener noise/velocity y también puede predecir al mismo tiempo la variance, según la parametrización de entrenamiento.
+
+\lecturefigure{slide-31.jpg}{Estrategia de inicialización: AdaLN y la final layer se inicializan en cero para que el punto de partida de la red sea cercano a la identity}{31}
+
+Si en una red residual profunda cada capa reescribe la señal de forma considerable desde el inicio, la optimización puede volverse inestable. Inicializar en cero las gates y la final projection hace que cada block sea al principio aproximadamente $h\mapsto h$, y el modelo aprende gradualmente a apartarse de la identity. Es un detalle de implementación importante para el éxito del entrenamiento de DiT, no un cosmetic trick.
+
+\lecturefigure{slide-32.jpg}{El valor de AdaLN-Zero y la línea posterior de parámetros compartidos}{32}
+
+AdaLN-Zero es más barato que la cross-attention, porque la red de condicionamiento no crece de forma cuadrática con el número de tokens; posteriormente, PixArt además comparte los parámetros de AdaLN entre distintos blocks, lo que reduce todavía más los parámetros y el cómputo. El costo es que la compresión en una condición de baja dimensión puede no ser adecuada para la alineación fina con textos largos.
+
+\teachervoice{00:24:53--00:32:56, el docente enfatiza que la Original DiT no usó la cross-attention que se ocurriría de forma natural, sino LayerNorm y gates dirigidas por la condición; la zero init hace que cada block parta de la identity y es un mecanismo de estabilización muy práctico.}
+
+\begin{lstlisting}[language=Python,caption={Cómputo central del block DiT con AdaLN-Zero}]
+def dit_block(tokens, condition):
+    shift1, scale1, gate1, shift2, scale2, gate2 = modulator(condition)
+    attn_input = layer_norm(tokens) * (1 + scale1) + shift1
+    tokens = tokens + gate1 * self_attention(attn_input)
+    mlp_input = layer_norm(tokens) * (1 + scale2) + shift2
+    return tokens + gate2 * mlp(mlp_input)
+\end{lstlisting}
+
+\subsection{Scaling: ¿más compute se traduce de forma estable en mejor calidad?}
+
+El resultado importante del artículo de DiT no es una muestra vistosa, sino que, al aumentar el tamaño del modelo y el compute de entrenamiento, métricas como FID mejoran de forma relativamente suave. El block uniforme hace que este experimento de escalamiento sea más controlable que con una U-Net muy personalizada. Por eso esta sección no trata la diapositiva de resultados como una tabla de posiciones, sino como evidencia de escalamiento: primero se confirman los ejes horizontal y vertical y las variables de control, y después se distingue entre «la tendencia observada en un intervalo» y «una ley que puede extrapolarse sin límite».
+
+\lecturefigure{slide-33.jpg}{Resultados de DiT: la calidad de generación mejora de forma sostenida al aumentar el tamaño del modelo y el cómputo}{33}
+
+El gráfico de burbujas suele codificar a la vez el tamaño del modelo, los GFLOPs y el FID. Primero hay que confirmar la dirección de los ejes y luego comparar las series bajo la misma configuración de entrenamiento. La tendencia respalda la escalabilidad, pero no permite concluir un escalamiento ilimitado; la calidad de los datos, el VAE bottleneck y el algoritmo de muestreo terminarán siendo limitaciones.
+
+\lecturefigure{slide-34.jpg}{La eficiencia compute-quality de DiT y sus limitaciones class-conditional}{34}
+
+La Original DiT demuestra eficiencia en ImageNet class-conditional, pero no resuelve directamente el text-to-image de vocabulario abierto. El vector de clase es corto y adecuado para AdaLN; un prompt en lenguaje natural es una secuencia larga que requiere token-level interaction. El siguiente paso, PixArt, no consiste en sustituir simplemente el class id por un vector de oración, sino en introducir un text encoder y cross-attention.
+
+\begin{warningbox}{Que FID mejore no significa que mejoren todas las dimensiones}
+FID es sensible a la feature distribution, pero no mide por completo el texto, el conteo, las relaciones de composición, las preferencias humanas ni la seguridad. Al leer un scaling plot también deben revisarse el número de pasos de inferencia, la guidance, los datos de entrenamiento y la resolución.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La Original DiT trata los latent patches como tokens, usa el timestep/class embedding para generar los parámetros de AdaLN-Zero y decodifica los tokens de salida de vuelta al espacio. Su estructura es cercana a ViT, y las innovaciones principales se concentran en la modulación por condición y en la identity initialization. La evidencia de scaling demuestra que la estructura es escalable, pero todavía no resuelve el condicionamiento por lenguaje natural.
+\section{PixArt-$\alpha$: lograr que DiT entienda el lenguaje natural}
+
+Text-to-image sustituye la condición breve de clase por tokens de texto largos. La arquitectura debe resolver a la vez el modelado interno de los patch de la imagen y la alineación texto--imagen. La propuesta de PixArt-$\alpha$ conserva la self-attention de DiT, lee el texto mediante cross-attention y sigue modulando AdaLN con el timestep.
+
+\subsection{Qué módulos nuevos requiere la condición de texto}
+
+Codificar el prompt en un solo vector pierde las relaciones entre palabras; por eso los modelos predominantes conservan la token sequence del texto. Al leer las dos diapositivas siguientes, conviene seguir por separado dónde se codifica el texto, dónde interactúa con la imagen y cómo entra el paso de tiempo en cada capa. Esta sección pasa de la condición de clase de baja dimensión del Original DiT a la condición en lenguaje natural; el problema no es solo «conectar un encoder más», sino cómo conservar la estructura a nivel de palabra, controlar la dirección de la interfaz y calcular el costo del pipeline completo.
+
+\lecturefigure{slide-35.jpg}{De class-conditional DiT a text-to-image: codificación del texto, cross-attention y modulación temporal}{35}
+
+Tres preguntas forman la lista de decisiones de diseño: qué text encoder usar; si texto e imagen interactúan mediante cross-attention, concatenación o joint attention; y si el timestep sigue usando AdaLN. Pueden elegirse de forma independiente; por lo tanto, «text DiT» no es una arquitectura única.
+
+\lecturefigure{slide-36.jpg}{Bloque de PixArt-$\alpha$: self-attention, cross-attention, MLP y condición de timestep}{36}
+
+Los noisy image tokens pasan primero por self-attention y después por cross-attention, con los image tokens como query y los text tokens como key/value. La condición del paso de tiempo modula el image stream mediante AdaLN. Así, el texto conserva su estructura de secuencia y el número de tokens de imagen puede diferir del número de tokens de texto.
+
+\lecturefigure{slide-37.jpg}{El codificador de texto Flan-T5-XXL admite prompts largos y aporta una comprensión semántica rica}{37}
+
+Un text encoder grande mejora la capacidad semántica, pero también aumenta la memoria de GPU y la latencia. Si el encoder está congelado, el entrenamiento generativo no actualiza la representación del lenguaje; si se entrena de forma conjunta, el costo es mayor y puede deteriorarse la capacidad lingüística. Al comparar tamaños de modelo, es necesario indicar si se incluyen los parámetros del text encoder.
+
+\begin{knowledgebox}{La dirección de la cross-attention}
+Que los tokens de imagen actúen como query y los tokens de texto como key/value significa que cada posición espacial lee activamente el significado de las palabras pertinentes. La longitud de salida sigue siendo igual al número de tokens de imagen; esta capa no actualiza directamente el texto. MMDiT, en cambio, hace que ambas modalidades evolucionen juntas.
+\end{knowledgebox}
+
+\subsection{AdaLN compartido y resultados de un modelo compacto}
+
+PixArt conserva la timestep modulation, pero no necesita mantener parámetros independientes para cada block. Un modulador compartido reduce el cómputo y los parámetros, y deja las diferencias entre capas a la representación propia de cada block. Esta sección indaga de dónde proviene esa compacidad: lo que se comparte es el mapeo de la condición y no todos los pesos del Transformer; por eso hay que revisar por separado el número de parámetros, el cómputo de entrenamiento y la calidad final, sin suponer que «compartir» equivale automáticamente a mayor rapidez de extremo a extremo.
+
+\lecturefigure{slide-38.jpg}{AdaLN de PixArt: el timestep genera los parámetros de modulación de cada block}{38}
+
+La diapositiva de código muestra que el time embedding, tras pasar por un MLP, produce scale/shift. Igual que en el Original DiT, AdaLN se encarga de la condición temporal; el texto pasa por cross-attention. Separar ambos tipos de condición evita comprimir un texto largo en un único vector de modulación.
+
+\lecturefigure{slide-39.jpg}{Parámetros de AdaLN compartidos con sesgos ligeros para cada block}{39}
+
+Si todos los block comparten el mismo modulador, los parámetros adicionales por capa pueden bajar de $O(LD^2)$ a algo más cercano a $O(D^2+LD)$, donde $L$ es el número de capas. El ahorro por compartir restringe la capacidad expresiva, pero los experimentos muestran que el costo puede reducirse de forma considerable con una pérdida de calidad pequeña.
+
+\lecturefigure{slide-40.jpg}{PixArt-$\alpha$: resultados de texto a imagen competitivos con un número compacto de parámetros}{40}
+
+La tabla y la gráfica de barras deben leerse considerando a la vez los parámetros, el costo de entrenamiento y las métricas. Un modelo más pequeño no implica un entrenamiento más sencillo: la calidad de las caption de los datos, el curriculum de resolución, el VAE, el optimizer y el dropout pueden contribuir al resultado. El ponente deja explícitamente la training recipe para otro tema.
+
+\teachervoice{00:32:56--00:40:45, el docente divide el aporte de PixArt en dos partes: usar un codificador de texto grande y cross-attention para procesar el lenguaje natural; y seguir usando el AdaLN de timestep, compartiendo parámetros para ahorrar cómputo. Que la arquitectura sea sencilla no significa que el entrenamiento sea «fácil».}
+
+\begin{warningbox}{El criterio para contar parámetros debe ser uniforme}
+Al reportar los parámetros del denoiser, es posible que no se incluyan el text encoder congelado ni el VAE; sin embargo, el despliegue de extremo a extremo debe cargarlos. Al comparar «modelos más pequeños», conviene listar a la vez el denoiser, los condition encoders, la memoria de GPU máxima, los FLOPs de entrenamiento y la latencia de muestreo.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+PixArt-$\alpha$ extiende DiT al lenguaje natural mediante un encoder de texto y cross-attention, al tiempo que conserva el AdaLN de timestep y comparte los parámetros de modulación. Muestra el potencial de un backbone compacto y también recuerda que es necesario separar la arquitectura, la training recipe y el costo del pipeline completo.
+\section{El costo cuadrático de la alta resolución y SANA}
+
+Una vez unificada la estructura DiT, el principal problema del sistema vuelve a ser el número de tokens. Una imagen 4K, incluso en el espacio latent, todavía puede producir cientos de miles de posiciones, y el tiempo y la memoria $N^2$ de la self-attention vanilla resultan inasumibles. SANA intenta linealizar la image self-attention y, al mismo tiempo, conservar la cross-attention con el texto.
+
+\subsection{Por qué el latent space sigue explotando}
+
+El submuestreo solo aplaza el problema. Si una imagen de 4096 pasa por un VAE de factor 8 y produce un latent de $512\times512$, y luego se tokeniza con $P=1$, entonces $N=262{,}144$; la attention matrix tiene unos $6.9\times10^{10}$ elementos, lo cual es inaceptable ya en una sola capa. Esta sección parte de ese orden de magnitud para comparar la optimización de E/S de FlashAttention con la reescritura de complejidad de la linear attention; lo central es determinar qué costo elimina cada una y qué términos cuadráticos o riesgos de calidad conserva.
+
+\lecturefigure{slide-41.jpg}{En resoluciones ultraaltas, los latent tokens siguen haciendo que la attention cuadrática se descontrole}{41}
+
+El costo principal de la vanilla attention es
+\[
+T_{\mathrm{attn}}=O(N^2d),\qquad
+M_{\mathrm{attn}}=O(N^2),
+\]
+donde $N$ es el número de tokens y $d$ es la head dimension. FlashAttention evita almacenar explícitamente la matriz completa y mejora la E/S, pero no cambia el volumen de cómputo cuadrático.
+
+\lecturefigure{slide-42.jpg}{Estructura general de SANA: self-attention lineal, cross-attention y FFN eficiente}{42}
+
+SANA no linealiza toda la attention. Entre tokens de imagen usa linear attention, mientras que la condición textual se sigue inyectando mediante cross-attention; además, emplea Mix-FFN, compresión y un diseño ligero para compensar la capacidad expresiva. Al leer la figura, conviene analizar por separado las dos rutas: image-image e image-text.
+
+\lecturefigure{slide-43.jpg}{Detalle de SANA: reordenar la secuencia de multiplicaciones y reutilizar $K^\top V$ para evitar la matriz $N\times N$}{43}
+
+Para un kernel descomponible $\phi$, la attention lineal se escribe
+\[
+\operatorname{LA}(Q,K,V)
+=\phi(Q)\left(\phi(K)^\top V\right).
+\]
+Primero se calcula $\phi(K)^\top V$, con una complejidad aproximada de $O(Nd^2)$, sin construir el attention map de $N^2$. El costo es que la normalización exacta de la softmax attention y ciertas pairwise interactions quedan aproximadas.
+
+\begin{warningbox}{La linear attention no elimina gratuitamente el costo cuadrático}
+La reducción de complejidad depende de un mapeo de características descomponible, de una head dimension fija y de una implementación específica; cuando $d$ es grande, la secuencia es corta o el kernel no está bien optimizado, la forma lineal teórica no necesariamente es más rápida. Más importante aún, la aproximación modifica las interacciones entre tokens que se pueden expresar, por lo que deben reportarse a la vez la latency real, la memoria de GPU máxima y la degradación de calidad, en lugar de comparar únicamente la notación O grande.
+\end{warningbox}
+
+\lecturefigure{slide-44.jpg}{El compromiso calidad--velocidad de SANA: aceleración notable en la generación de alta resolución}{44}
+
+La gráfica de desempeño debe leerse a lo largo de la Pareto frontier: con igual calidad, cuál es más rápido; con igual latencia, cuál es mejor. El hardware, el lote, la resolución y el número de pasos de muestreo pueden alterar la clasificación. El valor de la attention lineal no está en ser superior a todas las escalas, sino en evitar el cuello de botella cuadrático en secuencias visuales extremadamente largas.
+
+\begin{importantbox}{Las conclusiones de eficiencia deben ligarse a la workload}
+Reportar FLOPs no basta para predecir la velocidad. También hay que medir la implementación del kernel, el ancho de banda de HBM, el batch size, la longitud de secuencia, el compilador y el hardware. En secuencias cortas, vanilla/FlashAttention puede ser más rápida; la ventaja de los métodos lineales solo aparece en secuencias largas.
+\end{importantbox}
+
+\teachervoice{00:40:45--00:49:49, el docente explica que SANA no consiste en «eliminar la attention»: solo linealiza la image self-attention, conserva la text cross-attention y usa componentes como Mix-FFN para compensar la calidad.}
+
+\subsection{Resumen de la sección}
+
+La alta resolución vuelve a convertir el número de latent tokens en el cuello de botella dominante. SANA, al cambiar el orden de las multiplicaciones, reduce la image self-attention de cuadrática a casi lineal y conserva la interacción con el texto. Sus resultados deben entenderse como un Pareto de quality--speed y no como una victoria o derrota en una sola métrica.
+\section{MMDiT: que el texto y la imagen evolucionen juntos en espacios distintos}
+
+En PixArt, los token de imagen se actualizan mediante cross-attention, y los token de texto suelen permanecer congelados. El MMDiT de Stable Diffusion 3 parte de que las dos modalidades están en espacios de representación distintos, por lo que requieren normalization y projections independientes, aunque pueden intercambiar información en la joint attention.
+
+\subsection{Por qué no tratar las modalidades directamente como el mismo tipo de token}
+
+El texto y la noisy image difieren en su estadística, en la longitud de su secuencia y en su semántica. Compartir por completo los parámetros podría obligar a una modalidad a heredar los sesgos de la otra; separarlos por completo impide la interacción. MMDiT opta por «proyecciones independientes, atención conjunta». Lo que esta sección busca distinguir es que compartir e interactuar no son lo mismo: las dos modalidades pueden conservar cada una su propia normalization/QKV y, aun así, intercambiar información en el mismo attention map; las cuatro diapositivas siguientes desarrollan paso a paso precisamente esa frontera.
+
+\lecturefigure{slide-45.jpg}{Motivación de MMDiT: los espacios de embedding del texto y de la imagen son distintos, y la cross-attention unidireccional introduce un sesgo}{45}
+
+La atención cruzada unidireccional solo actualiza el flujo de imagen; la representación del texto no cambia según el estado visual actual. MMDiT busca que ambos lados evolucionen juntos, conservando al mismo tiempo cada uno su propia parametrización. Esta motivación es razonable, pero no constituye una demostración teórica de que «separar siempre es mejor».
+
+\lecturefigure{slide-46.jpg}{MMDiT usa AdaLN y QKV projections independientes para cada modalidad}{46}
+
+El texto y la imagen se calculan por separado:
+\[
+(Q_x,K_x,V_x)=f_x(X,c),\qquad
+(Q_t,K_t,V_t)=f_t(T,c),
+\]
+donde $f_x,f_t$ incluyen cada una su propia normalization y su propia proyección. Duplicar los parámetros aumenta la capacidad expresiva, pero también la memoria, los FLOPs y la complejidad de implementación.
+
+\lecturefigure{slide-47.jpg}{Block completo de MMDiT: dos rutas de modulación, dos rutas de proyección y atención conjunta sobre los token}{47}
+
+Tras concatenar $Q=[Q_t;Q_x]$, $K=[K_t;K_x]$ y $V=[V_t;V_x]$, se calcula la joint attention:
+\[
+O=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt d}\right)V.
+\]
+Después, la salida se divide por modalidad. Así coexisten las interacciones text-text, image-image y la cross-modal interaction, en lugar de apilar por separado una capa de cross-attention.
+
+\lecturefigure{slide-48.jpg}{Ventajas de MMDiT: cada modalidad conserva parámetros exclusivos y, a la vez, interactúa globalmente mediante la concatenación}{48}
+
+Las separate paths permiten que cada modalidad aprenda su propio scale, shift y projections; la concatenation, en cambio, permite que la atención seleccione la información de manera unificada. El riesgo es el desequilibrio en la proporción de token: una gran cantidad de image tokens puede opacar un texto corto, lo cual exige un diseño de normalization, mask o loss.
+
+\begin{knowledgebox}{Diferencia entre joint attention y cross-attention}
+La cross-attention suele actualizar solo el query stream; la joint attention coloca los token de ambas modalidades en el mismo mapa de atención, de modo que ambos lados pueden actualizarse. La primera ahorra más cómputo y tiene una interfaz clara; la segunda ofrece una interacción más simétrica, pero con un costo mayor.
+\end{knowledgebox}
+
+\subsection{Resultados, escalamiento y componentes complementarios que suelen pasarse por alto}
+
+Para saber si MMDiT vale la pena hay que fijarse en la ablation, no en el diagrama de la arquitectura. La clase presenta curvas de loss/quality y resultados de escalamiento, y advierte que SD3 también depende de mejores componentes de sampling/training; no se puede atribuir toda la mejora al multimodal block. Por eso, esta sección examina por separado tres tipos de evidencia: la ablación controlada responde por el mecanismo local, las curvas de scaling responden por la escalabilidad, y los ejemplos del sistema completo solo dan cuenta del desempeño final de la recipe combinada.
+
+\lecturefigure{slide-49.jpg}{Ablation de MMDiT: efecto de la parametrización exclusiva por modalidad en las curvas de entrenamiento y de calidad}{49}
+
+Las curvas «sugieren con fuerza», pero no demuestran, que MMDiT sea eficaz. Conviene verificar si el baseline está igualado en número de parámetros, FLOPs y duración del entrenamiento; si MMDiT es más grande, parte de la ganancia podría provenir de la capacity. Lo ideal es comparar dos grupos de experimentos: compute-matched y parameter-matched.
+
+\lecturefigure{slide-50.jpg}{Scaling de MMDiT: los modelos grandes siguen beneficiándose, pero necesitan QK-Norm para estabilizar el entrenamiento}{50}
+
+Al aumentar el hidden size y el número de capas, los attention logits pueden explotar. QK-Norm normaliza query/key y controla la escala del producto punto. Es un componente de estabilidad del entrenamiento: no aumenta directamente la capacidad de representación, pero puede determinar si un modelo grande converge o no.
+
+\lecturefigure{slide-51.jpg}{El desempeño completo de SD3 también depende de los componentes complementarios de entrenamiento/muestreo que representa el «hippo»}{51}
+
+Esta diapositiva humorística usa un hipopótamo para recordar que, además del artículo sobre la arquitectura, hay componentes complementarios como Rectified Flow, los datos, los caption, el VAE y la guidance. Al leer cualquier narrativa del tipo «tal block produjo SD3», hay que buscar activamente los omitted components y evitar atribuir el resultado a una sola causa.
+
+\teachervoice{00:49:49--00:57:31 y 01:03:04--01:04:45: el docente describe la justificación de MMDiT como la diferencia entre los espacios de las modalidades y su evolución conjunta, pero en la sesión de preguntas reconoce que se trata de una hand-wavy intuition, no de una optimality proof.}
+
+\begin{warningbox}{Explicar la arquitectura no es una descomposición causal}
+Una curva de entrenamiento está influida a la vez por el número de parámetros, el optimizer, los datos, el loss weighting y la estabilidad numérica. Sin experimentos igualados, no puede afirmarse que «las separate QKV por sí solas causan toda la mejora».
+\end{warningbox}
+
+\subsection{Las diversas soluciones de compromiso de MMDiT}
+
+El MMDiT completo mantiene dos juegos de projections en cada capa, lo cual es muy costoso. Los modelos reales pueden usar el multimodal block solo en algunas capas y el DiT ordinario en las demás; también pueden actualizar las modalidades de forma alternada, o bien unirlas hasta la etapa final. Esta sección pasa de la etiqueta binaria «usa o no MMDiT» al block schedule: hay que comparar en qué capas ocurre la unión, cuánto dura, cuánto se conserva de los parámetros de las dos rutas, y cómo estas decisiones modifican la Pareto frontier entre calidad y costo.
+
+\lecturefigure{slide-52.jpg}{Variantes de MMDiT: combinación de multimodal blocks con DiT blocks ordinarios}{52}
+
+Si solo hay $k$ capas MMDiT y las $L-k$ restantes son capas ordinarias, puede ajustarse el equilibrio entre la capacidad de interacción y los FLOPs. Modelos como Flux adoptan un diseño mixto. La pregunta central es si rinde más la fusión temprana, intermedia o tardía, y qué capas necesitan realmente parámetros de doble ruta.
+
+\lecturefigure{slide-53.jpg}{Otra variante: primero se actualiza cada modalidad por separado y después las representaciones pasan a una etapa conjunta}{53}
+
+En la figura, las modality A/B se procesan primero de forma independiente y luego se intercambian o se concatenan. Un diseño por etapas puede reducir la longitud en token de la joint attention, pero puede retrasar la alineación entre modalidades. Equivale a una elección continua entre early/mid/late fusion.
+
+\lecturefigure{slide-54.jpg}{Modelos como Lumina-Image 2.0 muestran distintas combinaciones de multimodal blocks}{54}
+
+La variedad de variantes muestra que MMDiT no es una receta fija, sino un espacio de diseño de «parámetros exclusivos por modalidad + cuándo unirlas». Al comparar artículos, conviene escribir el block schedule en una tabla, en lugar de solo marcar si se usa o no MMDiT.
+
+\begin{lstlisting}[language=Python,caption={MMDiT block: QKV independientes, attention conjunta y división posterior por modalidad}]
+def mmdit_block(text_tokens, image_tokens, condition):
+    q_t, k_t, v_t = text_projection(text_tokens, condition)
+    q_x, k_x, v_x = image_projection(image_tokens, condition)
+    q = concat(q_t, q_x); k = concat(k_t, k_x); v = concat(v_t, v_x)
+    output = attention(q, k, v)
+    text_out, image_out = split_by_modality(output)
+    return text_tokens + text_out, image_tokens + image_out
+\end{lstlisting}
+
+\subsection{Resumen de la sección}
+
+MMDiT hace que el texto y la imagen usen AdaLN/QKV independientes y, al mismo tiempo, evolucionen juntos en la joint attention. Esto puede atenuar el conflicto entre espacios de representación, pero también aumenta notablemente el costo. Los sistemas reales recurren a blocks mixtos, a la fusión por etapas y a QK-Norm para equilibrar calidad, estabilidad y FLOPs.
+\section{DiT-Air: ¿hasta dónde puede llegar el uso compartido de parámetros?}
+
+Después de que MMDiT se volvió más complejo, DiT-Air plantea la pregunta inversa: ¿qué parámetros necesitan realmente ser independientes en cada capa y en cada modalidad? Compartir estos módulos de modulación, de proyección o de propagación hacia adelante puede reducir el costo, pero compartir demasiado debilita las capacidades propias de cada modalidad. Esta pregunta se acerca más a una optimización de Pareto de ingeniería que a la de «si conviene usar MMDiT».
+
+\subsection{Del problema de diseño a la arquitectura compartida}
+
+El uso compartido de parámetros tiene tres dimensiones: entre capas, entre modalidades y entre submódulos. Cada dimensión afecta de manera distinta a la capacidad y al costo de ejecución. Las cuatro diapositivas siguientes presentan la cadena completa, del problema a la estructura y a la ablation. Al leer esta sección conviene separar siempre tres criterios de medida: si se reducen los pesos, si se reducen los FLOPs de cada pasada hacia adelante y si se reduce la latency en hardware real; solo cuando se contabilizan los tres a la vez la arquitectura compartida tiene sentido de ingeniería.
+
+\lecturefigure{slide-55.jpg}{Simplificación del problema: cuánto se puede compartir de AdaLN, QKVO, MLP y la forma de attention}{55}
+
+PixArt ya demostró que compartir AdaLN funciona; el siguiente paso es compartir las Q/K/V/O projections o el MLP, e incluso sustituir las pilas self+cross por una joint attention unificada. Cada elemento compartido reduce parámetros, pero no necesariamente reduce los FLOPs de activation o de attention.
+
+\lecturefigure{slide-56.jpg}{Arquitectura de DiT-Air: comparación de distintas posiciones de uso compartido de parámetros con un block unificado}{56}
+
+La figura coloca lado a lado el baseline, AdaLN sharing, QKVO sharing y MLP sharing. Una representación unificada facilita hacer una controlled ablation. Al diseñar hay que distinguir entre «menos parámetros», «menos FLOPs» y «más rápido en tiempo de reloj»: compartir pesos puede reducir el almacenamiento sin reducir el número de multiplicaciones de matrices por token.
+
+\lecturefigure{slide-57.jpg}{Experimentos de uso compartido en DiT-Air: las distintas combinaciones forman una curva calidad--eficiencia}{57}
+
+La curva muestra que compartir de forma parcial puede mejorar la eficiencia con una pérdida de calidad pequeña. Al leer la figura, primero se localiza la Pareto frontier y después se revisan las barras de error y el criterio con que se mide el cómputo. Si el uso compartido degrada la prompt fidelity o el texto de grano fino, el FID promedio no necesariamente revela el problema.
+
+\lecturefigure{slide-58.jpg}{Tabla de ablation: beneficios y pérdida de calidad al compartir QKVO/MLP}{58}
+
+La tabla convierte las decisiones por componente en evidencia. La conclusión no es «cuanto más se comparte, mejor», sino que AdaLN sharing suele ser relativamente seguro, mientras que QKVO/MLP sharing depende más del objetivo y del presupuesto. Para un despliegue de baja latencia puede aceptarse una pequeña pérdida de calidad; en investigación, cuando se busca el límite superior, puede convenir conservar parámetros propios.
+
+\teachervoice{01:05:00--01:08:43, el docente usa DiT-Air para responder «¿realmente se necesita MMDiT?»: no necesariamente. AdaLN, QKVO y MLP pueden compartirse, pero el beneficio en eficiencia debe evaluarse junto con la pérdida de calidad.}
+
+\begin{importantbox}{No confundir los tres tipos de costo}
+El parameter count afecta al almacenamiento de los pesos; los FLOPs aproximan la cantidad de cómputo; la latency depende además del kernel, del grado de paralelismo y del ancho de banda de memoria. Compartir parámetros puede reducir de forma notable el archivo del modelo sin reducir en la misma proporción el tiempo de inferencia.
+\end{importantbox}
+
+\begin{lstlisting}[language=Python,caption={Comparar las opciones de uso compartido con indicadores de Pareto, no solo ordenarlas por una única puntuación de calidad}]
+for design in candidate_architectures:
+    quality = evaluate_prompt_fidelity_and_preference(design)
+    memory = peak_device_memory(design)
+    latency = benchmark_end_to_end_sampling(design)
+    flops = estimate_denoiser_flops(design)
+    report_pareto_point(design, quality, memory, latency, flops)
+\end{lstlisting}
+
+\subsection{Resumen de la sección}
+
+DiT-Air convierte la simplificación de la arquitectura en experimentos medibles de uso compartido. AdaLN, QKVO y MLP sharing afectan respectivamente a los parámetros, al cómputo y a la capacidad; MMDiT no es la respuesta por defecto. Las decisiones de ingeniería deben basarse en la Pareto frontier de extremo a extremo y evaluarse en conjunto con el apego al texto, la preferencia humana y la latencia.
+\section{Control estructural, video y la próxima generación de arquitecturas generativas}
+
+La generación de imágenes no se limita al condicionamiento por texto. Las señales estructurales como Pose, edge y scribble tienen correspondencia espacial, mientras que en subject-driven generation y en editing puede no haber una alineación directa; el video añade además la dimensión temporal. Las últimas diapositivas amplían DiT de un backbone para imágenes individuales a una plataforma más general de conditional generation.
+
+\subsection{El control estructural no es un problema único}
+
+Si la señal de control corresponde a las posiciones de los píxeles de salida, puede usarse un auxiliary encoder que produzca features multiescala y las inyecte en el base model; si la condición es la identidad del sujeto o una instrucción de edición, la relación de posiciones no es fija y se requieren token interaction, adapter o mecanismos basados en recuperación. Esta sección establece una clasificación a partir de «si la condición tiene correspondence espacial», porque eso determina si la condición puede inyectarse posición por posición y también si la evaluación debe centrarse en el seguimiento del contorno, la preservación de la identidad o la semántica de la edición.
+
+\lecturefigure{slide-59.jpg}{Ejemplos de control estructural: edge, depth y pose tienen correspondencia espacial con la imagen objetivo}{59}
+
+Estas señales pueden verse como observaciones adicionales alineadas con el noisy latent. El modelo debe conservar el contenido del sujeto y, al mismo tiempo, seguir con rigor el contorno o la postura. La evaluación no puede limitarse a la estética; también deben calcularse control accuracy y content preservation.
+
+\lecturefigure{slide-60.jpg}{ControlNet/PixArt-$\delta$: una red auxiliar codifica la condición visual y la inyecta en el base DiT}{60}
+
+La auxiliary network copia o adapta parte del backbone e inyecta las features estructurales mediante un zero-initialized residual. Así puede congelarse el base model grande y reducirse el costo del ajuste fino. Para las subject/edit conditions sin correspondencia espacial, sumar directamente posición por posición no es razonable.
+
+\teachervoice{01:08:47--01:10:40, el docente distingue en particular entre el control estructural y subject-driven/editing: el primero siempre tiene correspondence espacial y el segundo no necesariamente, por lo que la forma de inyección de ControlNet no puede generalizarse de manera mecánica.}
+
+\begin{warningbox}{Conflicto entre la intensidad del control y la libertad de generación}
+Una condición estructural demasiado fuerte fija la textura y la composición; una demasiado débil no logra que se siga el control. Deben reportarse las curvas fidelity--diversity con distintos valores de control scale, y revisarse el ruido en la condición y las posturas fuera del dominio.
+\end{warningbox}
+
+\subsection{Video: de tokens bidimensionales a interacción espaciotemporal tridimensional}
+
+El video no solo tiene más cuadros: exige mantener la coherencia de identidad, movimiento y física a lo largo del tiempo. Aplicar joint attention a $T$ cuadros con $N$ tokens cada uno tiene un costo de $O((TN)^2)$; factorized attention es más económica, pero puede perder el acoplamiento espaciotemporal de largo alcance. Esta sección extiende la token accounting del DiT para imágenes individuales al eje temporal y compara qué problema resuelve cada una de estas opciones: full 3D interaction, la descomposición espacio--tiempo y la codificación posicional.
+
+\lecturefigure{slide-61.jpg}{DiT para video: RoPE, 3D attention, factorized attention y retos de eficiencia}{61}
+
+RoPE (Rotary Position Embedding) codifica la posición relativa rotando query/key, y puede extenderse a los ejes temporal y espaciales. Full 3D attention suele dar mejor calidad, pero con un costo altísimo; la atención descompuesta en espacio y tiempo es más controlable. Las métricas de video también deben cubrir la temporal consistency, no solo la nitidez de cada cuadro.
+
+\teachervoice{00:59:10--01:01:38 y 01:10:40--01:11:44, en la sesión de preguntas se enfatiza que la dificultad del video no es «generar unas cuantas imágenes más, una por cuadro», sino el costo de la atención tridimensional y la coherencia temporal; el docente recomienda seguir líneas orientadas a la eficiencia como LTX-Video.}
+
+\begin{knowledgebox}{Primera aparición: RoPE}
+RoPE codifica la posición como una rotación de query/key, de modo que el producto punto incorpora de forma natural la información de posición relativa. En video pueden asignarse frecuencias de rotación al tiempo, la altura y el ancho, pero la extrapolación de longitud y la proporción entre los tres ejes todavía requieren diseño.
+\end{knowledgebox}
+
+\subsection{In-context generation y direcciones abiertas}
+
+La próxima generación de modelos generativos busca leer ejemplos en contexto, como los modelos de lenguaje: dada una imagen de referencia, un par antes/después de una edición o una secuencia multimodal, el modelo infiere directamente la tarea. Los principales obstáculos de las arquitecturas actuales son secuencias demasiado largas, tipos de condición heterogéneos y la dificultad de construir datos de entrenamiento. Esta sección pasa de la conditional generation con interfaz fija a tareas guiadas por ejemplos; al leer las diapositivas siguientes hay que distinguir entre las demostraciones de un «formato de entrada unificado» y la evidencia de una «verdadera generalización entre tareas».
+
+\lecturefigure{slide-62.jpg}{El problema de la próxima generación: cómo lograr in-context learning en modelos de difusión}{62}
+
+In-context generation requiere colocar los ejemplos y el objetivo en un mismo contexto en el que puedan interactuar, sin ajuste fino para cada tarea. Si todas las imágenes se despliegan como tokens, el cómputo crece de forma explosiva; si se comprimen en exceso, ya no es posible copiar detalles o relaciones. La arquitectura debe combinar atención eficiente, representaciones jerárquicas y tokens de tarea.
+
+\lecturefigure{slide-63.jpg}{Playground v3, FuseDiT, OmniGen y otros exploran la generación en contexto unificada}{63}
+
+Estos modelos intentan organizar text, reference images y target latents en una secuencia unificada o en una interacción por etapas. Muestran una dirección, no una solución ya alcanzada al in-context learning general. Al compararlos, deben revisarse las tareas que admiten, la longitud de contexto, los datos de entrenamiento y si necesitan un adapter específico.
+
+\lecturefigure{slide-64.jpg}{Diffusers ofrece implementaciones de varias arquitecturas, lo que facilita la reproducción y el hacking}{64}
+
+La diapositiva de implementación destaca un punto de entrada a la investigación: una biblioteca unificada permite comparar módulos como DiT, PixArt, SANA y MMDiT, y reduce las diferencias ocultas de implementación. Sin embargo, «el código se ejecuta» no equivale a que el experimento sea reproducible; también se necesitan los pesos del modelo, el procesamiento de datos, la configuración de entrenamiento, las semillas aleatorias y los scripts de evaluación.
+
+\lecturefigure{slide-65.jpg}{Conclusiones y direcciones no cubiertas: MoE, entrenamiento, post-training, alignment y evaluación}{65}
+
+La última diapositiva enumera de forma explícita los vacíos: la mezcla de expertos (MoE) ya llegó a la generación de imágenes; el entrenamiento en sí es otro sistema completo; el posentrenamiento, la alineación de preferencias y la evaluación siguen siendo problemas independientes y difíciles. Este límite evita que confundamos el diseño del backbone con una inteligencia generativa completa.
+
+\teachervoice{01:11:44--01:14:23, el docente considera la in-context generation un problema de la próxima generación de arquitecturas y reconoce explícitamente que no cubrió MoE, entrenamiento, post-training, preference alignment ni evaluation.}
+
+\begin{importantbox}{La meta de la investigación en arquitecturas no es un sample más bonito}
+Un sistema generativo completo también debe responder: ¿los datos tienen autorización y están deduplicados? ¿El entrenamiento es estable? ¿Cómo se alinea el modelo con las preferencias? ¿Las métricas automáticas son confiables? ¿El video tiene coherencia temporal? ¿El despliegue cumple con el presupuesto de latencia y de memoria de GPU? El backbone es solo una de esas capas.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+El control estructural depende de si la condición está alineada espacialmente; el video introduce tokens tridimensionales y la coherencia temporal; la in-context generation exige que el modelo procese de manera unificada los ejemplos y el objetivo. Diffusers reduce la barrera de implementación, pero el entrenamiento, el post-training, MoE y la evaluación siguen siendo problemas de sistema abiertos.
+\section{Límites de la evidencia y términos clave}
+
+Esta clase abarca arquitectura, sistemas y resultados de producto, por lo que es fácil caer en dos malentendidos: primero, sustituir una evaluación integral por una sola muestra; segundo, sustituir la latencia real por los FLOPs. Las preguntas de la sesión de Q\&A sobre GAN, métricas automáticas, costo del video, AdaLN y MMDiT aportan los límites de ingeniería necesarios.
+
+\subsection{Cuatro correcciones que deja la sesión de Q\&A}
+
+Primero, las GAN no han desaparecido por completo: siguen siendo valiosas cuando la generación one-shot y la latencia ultrabaja importan más que la máxima calidad. Segundo, las métricas automáticas de imagen y video son débiles; deben combinarse con la preferencia humana y con métricas de la tarea. Tercero, un video no es un conjunto de cuadros independientes. Cuarto, la intuición detrás de MMDiT no es una demostración de optimalidad teórica.
+
+\teachervoice{00:57:31--01:01:38, la sesión de preguntas en línea trata los modelos autoregressive, las GAN, las métricas automáticas y los retos del video. El docente no responde que «la difusión gana en todos los casos», sino que distingue los escenarios según latency, quality y temporal consistency.}
+
+\teachervoice{01:01:45--01:03:00, el docente vuelve a explicar AdaLN: LayerNorm se encarga de estabilizar las características y la parte adaptive usa la condición externa para modificar scale/shift, de modo que el mismo block ejecuta cálculos distintos según el timestep o la condición.}
+
+\begin{warningbox}{Qualitative cherry-picking}
+Un modelo generativo permite elegir, entre una gran cantidad de muestras, unas pocas imágenes óptimas. Un reporte confiable debe fijar el prompt set, publicar las seeds, mostrar las muestras fallidas y medir al mismo tiempo prompt fidelity, diversity, human preference, latency y memory.
+\end{warningbox}
+
+\subsection{Concentrado de términos clave}
+
+A continuación se reorganizan los términos de alta densidad del curso según «el problema que resuelven», para no confundir el nombre de un modelo con un mecanismo.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{p{0.18\textwidth} X X}
+\toprule
+\textbf{Término} & \textbf{Problema que resuelve} & \textbf{Mecanismo central y relación con el curso} \\
+\midrule
+Scheduler & Cómo pasar de un estado de ruido al siguiente & Define el timestep, el programa de ruido y la actualización numérica; no equivale al denoiser. \\
+Denoiser & Qué dirección debe predecir en cada paso & U-Net o DiT; produce una parametrización de noise, velocity o data. \\
+Latent diffusion & Cómo reducir el costo del espacio de píxeles & Primero comprime con un VAE y luego itera sobre un latent de baja resolución. \\
+U-Net & Cómo aprovechar el sesgo multiescala de las imágenes & Los down/up blocks y las skip connections conservan la información local y global. \\
+DiT & Cómo eliminar ruido con un Transformer estándar & Aplica patchify al latent y modula los encoder blocks con timestep/condition. \\
+AdaLN-Zero & Cómo inyectar la condición a bajo costo y estabilizar redes profundas & La condición genera scale/shift/gates; la inicialización en cero hace que el block sea inicialmente casi la identity. \\
+Cross-attention & Cómo leen el texto los token de imagen & La imagen funciona como query y el texto como key/value; normalmente solo se actualiza el flujo de imagen. \\
+Linear attention & Cómo evitar el $N^2$ de la image self-attention & Reordena la secuencia de multiplicaciones de la attention kernelizada, a costa de parte de la interacción exacta. \\
+MMDiT & Cómo conservan las dos modalidades su espacio propio y evolucionan juntas & AdaLN/QKV separados; tras concatenar, se aplica joint attention. \\
+QK-Norm & Cómo estabilizar los attention logits en modelos grandes & Normaliza query/key para controlar la escala del producto punto. \\
+GQA & Cómo reducir el costo de key/value & Varias query heads comparten menos K/V heads. \\
+RoPE & Cómo codificar la posición relativa espacial y temporal & Rota query/key; puede extenderse a los tres ejes del video. \\
+Structural control & Cómo seguir edge/pose/depth & Codifica condiciones alineadas espacialmente y las inyecta en el base model. \\
+Parameter sharing & Cómo reducir los pesos y parte del cálculo & Comparte AdaLN, QKVO y MLP entre capas o entre modalidades, con un compromiso entre calidad y eficiencia. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Resumen de la sección}
+
+Las arquitecturas generativas no pueden compararse sin tomar en cuenta el objetivo y la workload. GAN, U-Net, DiT, linear attention y MMDiT tienen cada una su rango de aplicación; las métricas automáticas, el número de parámetros y los FLOPs son solo indicadores parciales. Una conclusión confiable requiere control de variables, mediciones de extremo a extremo y muestras fallidas.
+\section{Síntesis y ampliación}
+
+\subsection{Una línea principal desde U-Net hasta la próxima generación de sistemas generativos}
+
+Esta clase puede condensarse en siete reescrituras estructurales: separar el diffusion pipeline del denoiser; unificar la enorme U-Net en un token backbone; inyectar timestep/class con AdaLN-Zero; procesar el texto con cross-attention; afrontar la alta resolución con linear attention; hacer que las modalidades evolucionen juntas con MMDiT; y, por último, mediante el uso compartido de parámetros, las redes de control y las representaciones jerárquicas, devolver el costo a un rango que permita el despliegue.
+
+\begin{importantbox}{Conclusión central}
+La verdadera aportación de DiT no es que «el Transformer también puede dibujar», sino haber incorporado el backbone generativo al espacio de diseño escalable del Transformer. Desde entonces, cada modelo nuevo responde al mismo conjunto de preguntas: cómo se forman los tokens, cómo entran las condiciones, si las modalidades comparten parámetros, cómo escala la atención y si la ganancia en calidad justifica el costo del sistema.
+\end{importantbox}
+
+\subsection{Lista de verificación de ingeniería}
+
+\begin{enumerate}
+  \item \textbf{Pipeline: }¿se reportan a la vez el text encoder, el VAE, el scheduler y el denoiser?
+  \item \textbf{Conditioning: }las condiciones de baja dimensión usan AdaLN; ¿las condiciones de secuencia larga requieren cross/joint attention?
+  \item \textbf{Resolution: }¿cuántos tokens hay y en qué momento $N^2$ se convierte en el cuello de botella?
+  \item \textbf{Sharing: }¿lo que reduce el uso compartido de parámetros son los pesos, los FLOPs o la latency real?
+  \item \textbf{Evaluation: }¿hay prompts fijos, muestras fallidas, preferencias humanas y métricas de apego al control?
+  \item \textbf{Video: }¿se mide la temporal consistency, en lugar de revisar solo cuadros individuales?
+  \item \textbf{Reproducibility: }¿están completos los datos, la configuración, los pesos, la seed y los scripts de evaluación?
+\end{enumerate}
+
+\subsection{Preguntas abiertas}
+
+Primero, ¿puede la high-resolution linear attention conservar las relaciones de grano fino de la softmax attention? Segundo, ¿la proporción óptima entre parámetros exclusivos de cada modalidad y parámetros compartidos varía con la profundidad de la capa? Tercero, ¿cómo asignar dinámicamente el token budget en video y en contextos multi-image? Cuarto, ¿qué formato de datos y qué task curriculum requiere la in-context generation? Quinto, ¿cómo se coordinan MoE, post-training y preference optimization con el diffusion backbone?
+
+Estas preguntas indican que el progreso futuro no vendrá solo de denoisers más grandes. Es más probable que los avances surjan del diseño conjunto del backbone, los datos, la condition interface, los kernels del sistema, el muestreo y el alignment. Al evaluar un DiT nuevo, la pregunta más valiosa no es «qué nombre usa», sino «bajo qué restricciones modificó qué Pareto frontier».
+
+\subsection{Lecturas adicionales}
+
+\begin{itemize}[itemsep=0.2em,topsep=0.2em]
+  \item Slides oficiales: \url{http://bit.ly/dit-cs25}
+  \item Grabación oficial: \url{https://www.youtube.com/watch?v=vXtapCFctTI}
+  \item Rutas representativas: DiT, PixArt-$\alpha$, SANA, Stable Diffusion 3/MMDiT, DiT-Air, ControlNet, LTX-Video, FuseDiT y OmniGen.
+  \item Al leer artículos, busca primero ablaciones compute-matched, latency de extremo a extremo, evaluación con prompts fijos, muestras fallidas y el costo del pipeline completo.
+\end{itemize}
+
+\end{document}

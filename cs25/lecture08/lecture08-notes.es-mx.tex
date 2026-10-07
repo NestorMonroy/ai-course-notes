@@ -1,0 +1,780 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+
+\renewcommand{\notetitle}{Lecture 08: Transformer Circuits e Induction Heads: de la transición de fase en el comportamiento a un mecanismo verificable de in-context learning}
+\renewcommand{\noteauthors}{Elaborado a partir de la conferencia de Chris Olah, los subtítulos manuales oficiales y los materiales originales de Transformer Circuits / Induction Heads}
+\renewcommand{\notedate}{CS25 V1 · versión reescrita source-first de 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{2022-07-17}
+\renewcommand{\videoduration}{59:34}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=pC4zRb_5noQ}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.96\textwidth]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\begin{document}
+\makecscover
+
+\section{Auditoría de fuentes y límites del problema: qué es la Mechanistic Interpretability}
+
+Esta clase plantea una pregunta más difícil que «si el modelo responde correctamente»: dado un conjunto de parámetros ya entrenados, ¿es posible descompilar el cómputo interno del modelo en un algoritmo que una persona pueda examinar? Chris Olah llama a este trabajo \term{mechanistic interpretability} (interpretabilidad mecanicista). No se conforma con mostrar las activation correlacionadas ni con generar razones en lenguaje natural, sino que busca explicar cómo cierto conjunto de weights, features y attention heads forma un proceso de cómputo reproducible.
+
+Esta reescritura toma como referencia audiovisual el video oficial \texttt{pC4zRb\_5noQ}. El calendario del curso Stanford CS25 V1 sitúa la clase el 2021-11-15; durante la sesión, Olah menciona varias veces que los resultados sobre induction-head aún no se han publicado. El artículo correspondiente se hizo público el 2022-03-08, y Stanford Online no subió la grabación sino hasta el 2022-07-17. Por ello, estas notas separan con claridad la tentative hypothesis expuesta en clase, la evidencia complementaria del artículo posterior y la interpretación de ingeniería propia de esta clase; no se debe usar el conocimiento posterior para presentar cada afirmación como una conclusión definitiva.
+
+El video no cuenta con un PDF independiente de las slides. Recuperamos 64 páginas didácticas de la grabación oficial en 1080p: conservamos los pasos independientes de las derivaciones de fórmulas y el progressive state final, y omitimos curvas repetidas, transiciones en blanco, los créditos finales y las pantallas intermedias de la live demo de Lexoscope de baja resolución entre los minutos 50 y 55; la explicación oral de cross-lingual/soft-induction durante la demo se incorpora completa al texto.
+
+\lecturefigure{slide-01-interpretability-definition.jpg}{Mechanistic interpretability: mapear los neural-network parameters de vuelta a algorithms comprensibles para las personas.}{Video oficial de Stanford Online 00:00:30--00:03:27.}
+
+El vision circuit de la izquierda de la figura ofrece el ejemplo mínimo: la wheel feature responde a ruedas en la parte inferior de la imagen y no a ruedas en la parte superior; la window feature tiene la preferencia espacial opuesta; ambas, en conjunto, sustentan la car feature. Lo importante no es «descubrir una neuron que se llama car», sino ver que entre las features hay relaciones de dirección, signo y posición que pueden interpretarse como un algoritmo compuesto.
+
+\teachervoice{La analogía de Olah es la siguiente: los weights son como un compiled computer program, y las features/neurons, como variables o registers. La tarea de la interpretación mecanicista es la reverse engineering, no escribir para la salida una historia a posteriori que suene razonable.}
+
+\begin{knowledgebox}{La interpretabilidad no es un problema único}
+\begin{tabularx}{\textwidth}{L{0.24\textwidth}X X}
+\toprule
+Nivel & Pregunta típica & ¿Es foco de esta clase? \\
+\midrule
+Behavioral evaluation & ¿Con qué entradas acierta o falla el modelo? & Sirve para descubrir la ICL phase change, pero no es el punto final. \\
+Feature attribution & ¿Qué token/activation se relacionan con la salida? & Aporta pistas, pero por sí sola no demuestra un circuit. \\
+Mechanistic analysis & ¿Cómo implementan los parámetros un algoritmo ejecutable? & Núcleo de esta clase: QK/OV, path composition, induction. \\
+Causal validation & ¿Cambia el comportamiento objetivo al retirar un componente? & La small-model ablation es la evidencia clave. \\
+System/social explanation & ¿Cómo producen conjuntamente un resultado los datos, el despliegue, las personas y las instituciones? & Queda fuera del alcance de los circuitos de esta clase; los circuits no lo responden automáticamente. \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{Por qué hacer esta ingeniería inversa}
+
+Olah presenta dos tipos de motivación. La motivación científica: las personas no escribirían a mano un programa explícito capaz de realizar ImageNet classification o el GPT-3 behavior, pero el gradient descent sí encuentra alguna solución en los parámetros; comprender esa solución podría revelar algoritmos nuevos. La motivación de seguridad: si el sistema se usa en escenarios de alto impacto, queremos identificar los «unknown unknowns» latentes en los parámetros antes de que un failure mode se active en la práctica.
+
+\lecturefigure{slide-02-why-mechanistic-interpretability.jpg}{Por qué estudiar la interpretación mecanicista: descubrir los algoritmos que escribe el gradient descent e identificar con anticipación modos de falla desconocidos.}{Video oficial de Stanford Online 00:03:28--00:04:23.}
+
+\begin{warningbox}{Poder explicar un circuit no equivale a explicar el modelo completo}
+Un circuito local puede validarse en un modelo específico, una prompt family específica y una metric específica; no abarca automáticamente las MLP, los datos de entrenamiento, otras heads, el comportamiento fuera de distribución ni las consecuencias sociales del despliegue. El valor de la mechanistic interpretability proviene de avances locales verificables, no de proclamar de antemano que «el modelo ya es transparente».
+\end{warningbox}
+
+\subsection{La solidez de la evidencia en el momento de la clase}
+
+Lo particular de esta clase es que el ponente muestra por iniciativa propia el estado inconcluso de la investigación. Antes se había dedicado principalmente a las vision ConvNets, y trasladar los mismos métodos a los language models todavía era un trabajo nuevo; por eso debemos conservar matices como «esto es una hypothesis», «en el large model por ahora solo hay correlation» y «puede haber otro mechanism».
+
+\lecturefigure{slide-03-language-models-new-territory.jpg}{Advertencia del ponente sobre el estado del trabajo: la interpretación mecanicista de los modelos de lenguaje sigue siendo muy reciente y aún está lejos de una publicación madura y una explicación completa.}{Video oficial de Stanford Online 00:04:24--00:05:39.}
+
+\teachervoice{Olah invita al público a plantear las preguntas más básicas y a señalar lo que no esté claro o sea erróneo. Este tono de la clase es muy importante: la induction-head story que sigue es una línea de investigación respaldada por varios tipos de evidencia, no una explicación final y cerrada de todo el in-context learning de los Transformer.}
+
+\subsection{Resumen de la sección}
+
+La mechanistic interpretability considera al modelo como un programa compilado por el gradient descent e intenta recuperar los algoritmos que contiene. Sirve tanto al descubrimiento científico como, potencialmente, a la auditoría de seguridad, pero es indispensable distinguir entre el circuit local, el modelo completo y el sistema desplegado, y registrar con rigor la solidez de la evidencia de cada conclusión.
+\section{Rompecabezas conductual: cómo cuantificar el In-Context Learning}
+
+Antes de estudiar los circuitos internos, primero hay que definir el fenómeno externo que se quiere explicar. \term{In-context learning} (ICL) se refiere a que, con los parámetros fijos, el modelo mejora sus predicciones posteriores únicamente a partir de los examples, pattern o instructions presentes en el context actual. Parece como si el modelo ejecutara otra vez un aprendizaje temporal dentro del prompt; por eso es una de las capacidades más llamativas de los modelos de lenguaje grandes.
+
+\lecturefigure{slide-04-in-context-learning-motivation.jpg}{In-context learning: un modelo de lenguaje con parámetros fijos adquiere temporalmente nuevas capacidades a partir del prompt/context.}{Video oficial de Stanford Online 00:05:40--00:06:51.}
+
+\teachervoice{El expositor llama al ICL una de las propiedades más striking de los modelos de lenguaje grandes, pero aquí el «learning» no es una gradient update. Los parámetros del modelo permanecen sin cambios; el cambio ocurre en las residual activations y en la attention computation.}
+
+\subsection{Dos learning axis}
+
+Una learning curve ordinaria toma el avance del entrenamiento como eje horizontal y observa cómo mejora el modelo a medida que aumentan los gradient steps; la ICL curve, en cambio, fija un training snapshot, toma el context token index como eje horizontal y observa si, dentro del mismo forward, los tokens más tardíos se predicen mejor. Al reunir ambas se obtiene una función bidimensional
+\[
+\mathcal{L}(s,i)
+=\mathbb{E}_{x}\left[-\log p_{\theta_s}(x_i\mid x_{<i})\right],
+\]
+donde:
+\begin{itemize}
+  \item $s$: training snapshot o tokens de entrenamiento acumulados;
+  \item $i$: token index dentro de la sequence actual;
+  \item $\theta_s$: parámetros del snapshot $s$;
+  \item $\mathcal{L}(s,i)$: next-token loss promedio de ese snapshot en la $i$-ésima context position.
+\end{itemize}
+
+\lecturefigure{slide-05-learning-vs-in-context-curves.jpg}{Learning curve e in-context learning curve: eje del tiempo de entrenamiento y eje de la posición en el context.}{Video oficial de Stanford Online 00:06:52--00:10:33.}
+
+\begin{importantbox}{Los dos tipos de «aprendizaje» no deben confundirse}
+El training learning modifica $\theta_s$; el in-context learning mantiene fijo $\theta_s$ y solo cambia el prefix de entrada y las activations internas. El primero responde «qué pasa si el modelo se entrena más tiempo»; el segundo responde «qué pasa si el mismo modelo ve más context».
+\end{importantbox}
+
+\subsection{Mapa bidimensional de loss e ICL score}
+
+Al apilar la per-token loss de cada snapshot, con la context position en el eje vertical y el snapshot en el eje horizontal, se obtiene un mapa bidimensional. Un corte horizontal es la training curve de una token position; un corte vertical es la ICL curve de un snapshot. El expositor usa un summary statistic sencillo:
+\[
+S_{\mathrm{ICL}}(s)
+=\mathcal{L}(s,500)-\mathcal{L}(s,50).
+\]
+
+\begin{itemize}
+  \item Si $S_{\mathrm{ICL}}<0$, el token 500 es más fácil de predecir que el token 50;
+  \item cuanto más negativo es el valor, más fuerte es la late-context advantage;
+  \item este indicador solo condensa la context-position improvement y no equivale a la few-shot task accuracy;
+  \item los tokens 50 y 500 son una operational choice de la configuración del artículo, no la única definición legítima de ICL.
+\end{itemize}
+
+\lecturefigure{slide-06-token-snapshot-loss-map.jpg}{Gráfica de diagnóstico unificada: loss por token index × training snapshot, y $\mathrm{Loss@500}-\mathrm{Loss@50}$.}{Video oficial de Stanford Online 00:10:34--00:12:45.}
+
+\begin{knowledgebox}{Lectura de la figura: primero los ejes, luego la curva de diferencias a la derecha}
+El mapa de calor de la izquierda muestra la loss de cada training snapshot en distintos token index; Loss@50 y Loss@500, al centro, son dos cortes horizontales; la curva de diferencias de la derecha elimina la mejora global del entrenamiento y resalta «si la segunda mitad del context se vuelve útil de repente».
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Cálculo del ICL score y del phase-change diagnostic a partir de la per-token loss.}]
+def in_context_learning_score(loss_by_snapshot_and_token):
+    loss_50 = loss_by_snapshot_and_token[:, 49]
+    loss_500 = loss_by_snapshot_and_token[:, 499]
+    score = loss_500 - loss_50  # more negative means stronger ICL
+    slope = derivative(score, with_respect_to="log_training_tokens")
+    return score, slope
+\end{lstlisting}
+
+\subsection{Qué tan grande es realmente 0.4 nats}
+
+Cuando la negative log-likelihood usa el natural logarithm, su unidad es el nat. Para convertirla a bits, se divide entre $\ln 2$:
+\[
+0.4\ \mathrm{nats}
+=\frac{0.4}{\ln 2}\ \mathrm{bits}
+\approx 0.577\ \mathrm{bits/token}.
+\]
+Dicho de otro modo, la uncertainty del modelo sobre los late-context tokens disminuye aproximadamente medio bit por token, lo que equivale aproximadamente a una binary choice menos cada dos tokens. Esto no significa «la exactitud mejora 40\%» ni puede compararse directamente entre conjuntos de datos, pero basta para mostrar que la información nueva dentro del context se aprovecha de forma estable.
+
+\lecturefigure{slide-07-meaning-of-point-four-nats.jpg}{Intuición del tamaño del efecto: $0.4$ nats equivalen a cerca de $0.5$ bits/token.}{Video oficial de Stanford Online 00:12:46--00:13:47.}
+
+\teachervoice{Olah convierte por iniciativa propia los nats en bits para evitar que se subestimen los decimales de la curva. En language modeling cada token acumula pérdida, y medio bit/token en secuencias largas produce una total log-likelihood difference muy grande.}
+
+\subsection{Resumen de la sección}
+
+La métrica conductual del ICL proviene de una loss surface bidimensional: un eje es el avance del entrenamiento y el otro es la context position. $\mathrm{Loss@500}-\mathrm{Loss@50}$ condensa la late-token advantage en una sola curva y proporciona una magnitud objetivo, susceptible de intervención, para la búsqueda posterior del circuit interno.
+\section{Phase Change: de la loss bump a la circuit hypothesis}
+
+El hallazgo principal del loss map bidimensional no es que el ICL se fortalezca poco a poco, sino que aparece de repente dentro de una ventana de entrenamiento muy estrecha. Para resaltar este cambio, los investigadores calculan diferencias o derivadas de la token-position curve y de la training trajectory. En el mapa de calor aparece una línea vertical nítida, y la loss curve ordinaria también muestra una pequeña bump.
+
+\lecturefigure{slide-08-per-step-learning-heatmaps.jpg}{Loss surface y vista de derivadas: dentro de una ventana de entrenamiento estrecha aparece un cambio estructural evidente.}{Video oficial de Stanford Online, 00:13:48--00:14:01.}
+
+Las magnitudes de diagnóstico pueden escribirse de forma abstracta como
+\[
+D_i(s,i)=\frac{\partial \mathcal{L}(s,i)}{\partial \log i},
+\qquad
+D_s(s)=\frac{\partial S_{\mathrm{ICL}}(s)}{\partial \log s}.
+\]
+
+\begin{itemize}
+  \item $D_i$ mide la loss reduction que produce aumentar la longitud relativa del context;
+  \item $D_s$ mide la velocidad con la que cambia el ICL score durante el entrenamiento;
+  \item un narrow spike indica que el comportamiento cambia rápidamente en pocos training steps;
+  \item la derivada amplifica el ruido, por lo que es indispensable contrastarla con la loss original, con varias seeds y con varios model sizes.
+\end{itemize}
+
+\lecturefigure{slide-09-phase-change-across-scales.jpg}{En distintas model scales se observan la loss bump y el ascenso rápido del ICL.}{Video oficial de Stanford Online, 00:14:02--00:15:11.}
+
+\begin{warningbox}{«Phase change» es una descripción empírica, no una transición de fase física demostrada}
+Que la curva cambie rápidamente en un número finito de snapshots no demuestra que la optimization trajectory sea matemáticamente discontinua. La conclusión más prudente es esta: existe un narrow training interval en el que el comportamiento del modelo y sus signatures internas se reorganizan rápidamente y al mismo tiempo, lo cual justifica plantear una hipótesis sobre el mecanismo y realizar intervenciones.
+\end{warningbox}
+
+\subsection{Del cambio de comportamiento al mecanismo interno}
+
+Si el ICL observable se fortalece de golpe en unos cuantos cientos de steps, una hipótesis natural es que dentro del modelo también se formó un nuevo circuit. Para verificarlo no basta con seguir observando la loss: hay que descomponer los parámetros en paths interpretables y comparar attention-only models de una y de dos capas, porque el primero no presenta esa phase change y el segundo sí.
+
+\lecturefigure{slide-10-sudden-mechanism-change-hypothesis.jpg}{Hipótesis de investigación: la transición de fase en el comportamiento de ICL corresponde a la formación repentina de un algoritmo o circuito interno.}{Video oficial de Stanford Online, 00:15:12--00:15:31.}
+
+\teachervoice{El ponente habla de una «natural hypothesis», no de una proof. La bump en el comportamiento es solo el punto de partida de la búsqueda; la explicación mecanicista solo se va sosteniendo cuando el circuit candidato aparece en el momento adecuado, su estructura puede implementar el algoritmo objetivo y la ablation elimina el comportamiento.}
+
+\subsection{Escalera de evidencia}
+
+Más adelante se usarán repetidamente cuatro tipos de evidencia. Para evitar confusiones, primero se ordenan por su fuerza:
+\begin{table}[H]
+\centering
+\small
+\caption{Tipos de evidencia en esta clase y las conclusiones que pueden sustentar.}
+\begin{tabularx}{\textwidth}{L{0.21\textwidth}L{0.28\textwidth}X}
+\toprule
+Evidencia & Ejemplo & Qué puede sustentar \\
+\midrule
+Representational plausibility & Las matrices QK/OV pueden implementar match y copy & Muestra que el circuit tiene la capacidad, pero no demuestra que realmente se use. \\
+Temporal co-occurrence & La induction signature y el ICL aparecen al mismo tiempo & Aporta evidencia correlacional; puede haber una causa común. \\
+Behavioral generality & Copy, translation, pattern matching & Muestra que el mecanismo no se limita a un único toy string. \\
+Causal intervention & Tras hacer ablate a la head, el ICL score retrocede & Sustenta directamente la contribución causal de ese componente a esa metric. \\
+Near-complete accounting & Pocos paths explican la mayor parte de la loss del toy model & Es casi completo dentro del modelo acotado, pero no se extrapola automáticamente a LLM de gran tamaño. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Resumen de la sección}
+
+La phase change convierte una idea vaga, «el modelo parece aprender del context», en un objetivo de investigación concreto: explicar el cambio del ICL score dentro de una ventana estrecha. La curva de comportamiento genera la hypothesis; una conclusión mecanicista sólida requiere además álgebra, viabilidad estructural, generalización entre ejemplos y causal ablation.
+\section{Transformer attention-only de una capa: primero se expresa el modelo como rutas aditivas}
+
+Para obtener un álgebra exacta, Olah retira temporalmente las MLP, la LayerNorm y los bias, y conserva solo una capa de multi-head attention, la residual connection, el token embedding y el unembedding. No es la arquitectura completa de un LLM moderno, sino un banco de pruebas: si ni siquiera este sistema puede descomponerse, será todavía más difícil explicar los modelos grandes.
+
+\lecturefigure{slide-11-one-layer-simplifications.jpg}{Supuestos del análisis: one layer, attention-only, sin LayerNorm y sin bias.}{Video oficial de Stanford Online 00:15:32--00:15:59.}
+
+\begin{warningbox}{Función y límites del toy model}
+El modelo simplificado permite escribir cada path como un producto de matrices y llevar una accounting casi completa. Puede revelar reusable concepts, pero no demuestra que las mismas fórmulas sigan dominando el comportamiento de la misma manera en modelos con MLP, RMSNorm, RoPE, GQA y cientos de capas.
+\end{warningbox}
+
+\subsection{Forma del residual stream}
+
+Sea la token one-hot matrix $T\in\mathbb{R}^{n\times |V|}$, el embedding $W_E\in\mathbb{R}^{|V|\times d}$ y el unembedding $W_U\in\mathbb{R}^{d\times |V|}$. El residual stream inicial es
+\[
+X_0=T W_E.
+\]
+El attention-only model de una capa se escribe como
+\[
+X_1=X_0+\sum_{h\in H}A^h(X_0)X_0W_{OV}^h,
+\qquad
+\mathrm{logits}=X_1W_U.
+\]
+
+\begin{itemize}
+  \item $A^h\in\mathbb{R}^{n\times n}$: el attention pattern de la head $h$;
+  \item $W_{OV}^h=W_V^hW_O^h\in\mathbb{R}^{d\times d}$: matriz compuesta de value/output;
+  \item la residual identity path conserva la representación original de la posición actual;
+  \item la salida de cada head se escribe de vuelta, por suma, en el shared residual stream.
+\end{itemize}
+
+\begin{knowledgebox}{Términos clave: niveles de objetos en el análisis de circuitos}
+\small
+\begin{tabularx}{\textwidth}{L{0.22\textwidth}L{0.28\textwidth}X}
+\toprule
+Término & Pregunta que responde & Función en esta clase \\
+\midrule
+Residual stream & ¿Dónde reside la representación actual que comparten todas las capas? & Funciona como un espacio de trabajo común; la representación de entrada, cada cabeza de atención y las capas posteriores leen o escriben, mediante sumas, el mismo conjunto de vectores de posición. \\
+Attention pattern $A$ & ¿De qué source position a qué destination position fluye la información? & Es un position-to-position routing; no indica directamente el contenido de la feature que se transporta. \\
+QK circuit & ¿Por qué la posición actual atiende a cierta posición anterior? & $W_{QK}=W_QW_K^{\top}$ define la query--key compatibility; es la regla parametrizada de ``where to read''. \\
+OV circuit & Una vez leída la información, ¿qué escribe la head? & $W_{OV}=W_VW_O$ convierte la source feature en una residual update y puede plegarse además hacia los output-token logits. \\
+Path composition & ¿Por qué componentes pasó un resultado? & Despliega la acción sucesiva del residual, de las heads de la primera capa y de las de la segunda, y distingue direct, single-head y composed paths. \\
+Virtual head & ¿La combinación de dos heads reales forma una función nueva? & Es un effective circuit que surge del producto de matrices entre capas, no un conjunto de parámetros nuevo dentro del modelo. \\
+Induction head & ¿Cómo implementa el modelo $[A][B]\ldots[A]\mapsto[B]$? & La capa anterior mueve previous-token information y la capa posterior copia la continuation después de un contexto histórico similar. \\
+Ablation & ¿El circuit candidato solo está correlacionado o contribuye causalmente al comportamiento? & Se retira o se reemplaza cierta head/path y se mide el cambio del ICL score; la conclusión solo abarca la intervención y la metric utilizadas. \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\lecturefigure{slide-12-attention-only-model-algebra.jpg}{Álgebra del embedding, las heads, el residual y el unembedding en el Transformer attention-only.}{Video oficial de Stanford Online 00:16:00--00:18:13.}
+
+\teachervoice{El ponente considera que la notación tradicional $Q,K,V,O$ tiende a ocultar la estructura de la head. Una descomposición más útil es esta: $A$ decide de dónde a dónde se mueve la información, y $W_{OV}$ decide qué contenido se mueve exactamente.}
+
+\subsection{La attention head como operador sobre dos ejes independientes}
+
+Si se separan el sequence-position mixing y el feature-channel mapping, la head puede verse como un tensor/Kronecker product:
+\[
+h(X)=A^h(X)XW_{OV}^h
+\quad\Longleftrightarrow\quad
+\mathcal{H}^h=A^h\otimes W_{OV}^h.
+\]
+
+\begin{itemize}
+  \item multiplicar por la izquierda por $A^h$: weighted sum entre positions;
+  \item multiplicar por la derecha por $W_{OV}^h$: lectura y escritura en el residual feature space;
+  \item los parámetros y la semántica de ambos factores pueden examinarse por separado;
+  \item pero $A^h$ depende de la entrada, por lo que la head completa sigue siendo no lineal.
+\end{itemize}
+
+\lecturefigure{slide-13-attention-head-tensor-product.jpg}{Una sola attention head: position mixing $A^h$ y content map $W_{OV}^h$.}{Video oficial de Stanford Online 00:18:14--00:18:31.}
+
+\lecturefigure{slide-14-attention-layer-sum.jpg}{Una capa de attention: identity residual path más todos los head operators.}{Video oficial de Stanford Online 00:18:32--00:19:25.}
+
+En esta figura, $I$ no es un adorno, sino la residual path. Permite que la representación original del token llegue directamente al unembedding, y también hace que, al desplegar varias capas, surja de forma natural la path combinatorics de «elegir una head de cierta capa o saltarla».
+
+\subsection{Fold de embedding y unembedding}
+
+Ya se descompuso una head en position routing y feature mapping, pero al lector le interesan en última instancia los output-token logits, no las residual coordinates abstractas. Por eso, esta sección pliega el embedding de la entrada y el unembedding de la salida dentro de cada ruta, y plantea directamente la pregunta: una vez leído cierto source token, ¿qué candidate next tokens sube o baja? Esta representación token-to-token también establece una interfaz uniforme para el examen posterior de los QK/OV circuits.
+
+Al combinar $W_E$, $W_U$ y cada head, se obtiene directamente un vocabulary-to-vocabulary map:
+\[
+\mathrm{logits}
+=T W_EW_U
++\sum_h A^h(T)
+T\underbrace{W_EW_{OV}^hW_U}_{M_{OV}^h}.
+\]
+
+\begin{itemize}
+  \item $W_EW_U$: direct path; almacena principalmente bigram-like statistics;
+  \item $M_{OV}^h\in\mathbb{R}^{|V|\times |V|}$: el efecto de esa head sobre los output-token logits después de ver cierto source token;
+  \item $A^h$ decide desde qué source position se lee;
+  \item por lo tanto, la unidad interpretable del one-layer model pasa a ser «attention pattern × token-to-token map».
+\end{itemize}
+
+\lecturefigure{slide-15-fold-embedding-unembedding.jpg}{Después de plegar el embedding/unembedding, el modelo se divide en la direct/bigram path y las head paths.}{Video oficial de Stanford Online 00:19:26--00:19:35.}
+
+\lecturefigure{slide-16-fixed-pattern-linearity.jpg}{Observación central: si se fijan los attention patterns, el one-layer attention-only model es lineal respecto a la entrada.}{Video oficial de Stanford Online 00:19:36--00:20:07.}
+
+\begin{importantbox}{Qué significa «lineal una vez fijado el pattern»}
+El modelo completo sigue dependiendo de la entrada de forma no lineal a través de la softmax attention; pero, para un prompt concreto o para una clase pequeña de patterns estables, podemos tratar $A^h$ temporalmente como constante y analizar la content path con álgebra lineal. El Mechanistic analysis suele aprovechar este condicionamiento local, en lugar de afirmar que el Transformer es globalmente lineal.
+\end{importantbox}
+
+\teachervoice{La metodología de Olah es esta: siempre que una parte pueda fijarse y convertirse en lineal, se obtiene una herramienta de explicación poderosa. Lo esencial es registrar con honestidad «qué se fijó», y no hacer pasar la conditional linearity por global linearity.}
+
+\subsection{Resumen de la sección}
+
+Un Transformer attention-only de una capa puede desplegarse en la residual direct path más un término aditivo por cada head. La perspectiva del tensor product separa «dónde se lee y escribe» de «qué se lee y escribe»; al plegar el embedding/unembedding, el efecto de cada head sobre los vocabulary logits puede examinarse directamente.
+\section{QK y OV Circuits: qué reglas aprende realmente un modelo de una capa}
+
+La sección anterior solo trató $A^h$ como una matriz dada; ahora hay que explicar cómo se produce el pattern. Con la row-vector convention, se define
+\[
+W_{QK}^h=W_Q^h(W_K^h)^{\top},
+\qquad
+A^h=\operatorname{softmax}\!\left(XW_{QK}^hX^{\top}+M_{\mathrm{causal}}\right).
+\]
+
+\begin{itemize}
+  \item $W_{QK}^h$: determina la compatibility entre destination/query y source/key;
+  \item $W_{OV}^h$: determina en qué se mapea el source residual al escribirse;
+  \item $M_{\mathrm{causal}}$: enmascara las positions futuras;
+  \item la función de una head debe describir a la vez el routing y el writing.
+\end{itemize}
+
+\lecturefigure{slide-17-attention-pattern-qk.jpg}{Cálculo del attention pattern: el QK circuit mapea token/residual pairs a routing scores.}{Video oficial de Stanford Online 00:20:08--00:20:39.}
+
+\subsection{Proyectar QK/OV al vocabulary space}
+
+Si se ignora la contextual residual contribution, pueden definirse token-space matrices efectivas:
+\[
+M_{QK}^h=W_EW_{QK}^hW_E^{\top},
+\qquad
+M_{OV}^h=W_EW_{OV}^hW_U.
+\]
+
+\begin{itemize}
+  \item $M_{QK}^h[a,b]$: preferencia relativa del destination token $a$ por el source token $b$;
+  \item $M_{OV}^h[b,c]$: logit effect sobre el output token $c$ después de leer el source token $b$;
+  \item ambas matrices son vocabulary-sized y, por lo general, enormes;
+  \item el positional embedding y el prior-layer residual hacen que el score real vaya más allá de un token lookup puro.
+\end{itemize}
+
+\lecturefigure{slide-18-vocabulary-square-matrices.jpg}{Una vez plegadas, QK y OV son vocabulary-sized square matrices.}{Video oficial de Stanford Online 00:20:40--00:24:29.}
+
+\lecturefigure{slide-19-qk-ov-circuits.jpg}{Las dos mitades de una head: QK conecta source/destination; OV conecta attended token/output token.}{Video oficial de Stanford Online 00:24:30--00:24:45.}
+
+\begin{knowledgebox}{Lectura de la figura: no reducir a dos los cuatro roles de token}
+El source token es el contenido de la posición que se lee; el destination token es la posición que se está actualizando; el out token es el token de predicción que se promueve o se suprime después de que la head escribe; el next token final lo determinan, además, otros paths de manera conjunta. QK conecta principalmente los dos primeros; OV conecta principalmente source y out.
+\end{knowledgebox}
+
+\teachervoice{La intuición del ponente es que OV recibe de forma más directa la output loss supervision: decide en qué logits escribir; QK se entrena de manera indirecta a través de «a dónde debe ir a buscar información». Esta distinción ayuda a leer la dense matrix, pero no significa que QK sea completamente unsupervised.}
+
+\subsection{Skip Trigram: la regla básica de una head de una capa}
+
+Una one-layer attention head solo puede elegir posiciones a partir de la destination representation actual y de las source representations candidatas, y luego usa el source token para determinar el output. Por ello forma de manera natural una skip-trigram rule:
+\[
+(\text{source token},\ \text{destination token})
+\longrightarrow \text{out token}.
+\]
+Por ejemplo, si la destination ve «looks», QK puede favorecer un «perfect» anterior, y OV después promueve «perfect» o alguna completion relacionada.
+
+\lecturefigure{slide-20-skip-trigram-examples.jpg}{La combinación de QK/OV forma example skip trigrams.}{Video oficial de Stanford Online 00:24:46--00:25:05.}
+
+\lecturefigure{slide-21-qk-source-destination.jpg}{El QK circuit vincula explícitamente el source token con el destination token.}{Video oficial de Stanford Online 00:25:06--00:27:47.}
+
+\begin{importantbox}{Por qué se llama skip trigram}
+Un trigram ordinario depende de dos tokens pasados consecutivos; aquí, source y destination pueden estar muy separados, y lo que hay entre ellos se «salta» («skip»). La regla sigue usando solo dos token identities para determinar el tercer output, por lo que su capacidad expresiva es limitada.
+\end{importantbox}
+
+\subsection{Una capacidad expresiva limitada produce bugs que desde fuera parecen muy extraños}
+
+El modelo quiere aprovechar el context de larga distancia, pero solo dispone de la interfaz del par source/destination token. Puede aprender reglas que estadísticamente suelen ser útiles, pero que carecen de condiciones más ricas; por ejemplo, tras ver un rare technical token, promover a ciegas un token repetido en varias posiciones posibles. Cuando el mismo pair debería producir completions distintas en contextos distintos, la one-layer head no puede distinguirlos.
+
+\lecturefigure{slide-22-correct-skip-trigrams.jpg}{Los skip trigrams «correctos» que aprende el modelo y las reglas restringidas.}{Video oficial de Stanford Online 00:27:48--00:32:33.}
+
+\lecturefigure{slide-23-qk-ov-composition-patterns.jpg}{La pattern family que puede expresar un modelo de una capa: source/destination matching y output mapping.}{Video oficial de Stanford Online 00:32:34--00:32:57.}
+
+\lecturefigure{slide-24-positional-circuits.jpg}{Algunas heads codifican principalmente positional relations, y no token pairs puramente semánticos.}{Video oficial de Stanford Online 00:32:58--00:33:31.}
+
+\begin{knowledgebox}{Lectura de la figura: Primarily Positional no equivale a «sin significado»}
+Las local/previous-token/offset heads pueden trasladar, para heads posteriores, etiquetas de posición, el estado de una frase o información de adyacencia. Vistas por separado, su marginal effect sobre los logits puede ser pequeño, pero en la composition de varias capas pueden convertirse en un upstream component clave.
+\end{knowledgebox}
+
+\subsection{Los límites del comportamiento de un one-layer model}
+
+Los attention-only models de una capa sí adquieren un poco de ICL: la magnitud que se dio en clase es de aproximadamente $0.1$ nats, frente a unos $0.4$ nats de los modelos de dos capas; además, no experimentan la sharp phase change descrita antes. Esta diferencia sugiere que las skip-trigram rules de una sola head no bastan para lograr una pattern completion más potente; se necesita composition de varias capas.
+
+\lecturefigure{slide-25-one-layer-summary.jpg}{One-layer summary: QK/OV son interpretables, los skip trigrams son útiles pero limitados y, una vez fijado el pattern, el comportamiento es lineal.}{Video oficial de Stanford Online 00:33:32--00:33:57.}
+
+\teachervoice{Olah dice que los Transformers «desperately want» usar long context, porque la información lejana reduce mucho la entropy; el modelo de una capa está limitado por su arquitectura y solo puede perseguir ese objetivo con reglas burdas que fácilmente producen bugs.}
+
+\subsection{Resumen de la sección}
+
+El QK circuit determina el source/destination routing, y el OV circuit determina cómo el attended token escribe en los output logits. Por ello, un modelo de una capa puede leerse como skip-trigram rules y positional rules; estas rules pueden aprovechar un context largo, pero carecen de la capacidad de construir dinámicamente un richer match a partir del texto anterior.
+\section{Eigenvalue Lens: comprimir una enorme vocabulary matrix en una copying signature}
+
+La sección anterior ya plegó cada head en token-to-token matrices, pero eso solo volvió el problema definible, todavía no legible: el lado de $M_{OV}$ y de $M_{QK}$ es igual al vocabulary size, por lo que enumerar entrada por entrada es costoso y además difícilmente permite un juicio global. Esta sección introduce el eigenvalue lens; la pregunta central es si con unas pocas spectral signatures se puede determinar si un head se parece más a copying, a anti-copying o a un different-token mapping. Al leer las figuras hay que recordar siempre que esta compresión pierde los tokens concretos, la basis y el contexto no lineal.
+
+Si una matriz mapea un espacio vectorial de vuelta sobre sí mismo, pueden usarse eigenvectors/eigenvalues para resumir si en ciertas directions amplifica, invierte o rota.
+
+\lecturefigure{slide-26-eigenvector-introduction.jpg}{Cuando la entrada y la salida pertenecen al mismo espacio, los eigenvectors pueden comprimir el comportamiento de la matriz.}{Video oficial de Stanford Online 00:33:58--00:34:21.}
+
+\[
+Mv=\lambda v.
+\]
+
+\begin{itemize}
+  \item $v$: el mode cuya dirección no cambia tras aplicar la matriz;
+  \item $\lambda$: el cambio de escala/fase de ese mode;
+  \item $\lambda$ real positive: refuerzo en la misma dirección;
+  \item $\lambda$ real negative: supresión en sentido inverso; $\lambda$ complex: rotación y escalamiento en un subespacio bidimensional.
+\end{itemize}
+
+\lecturefigure{slide-27-complex-eigenvalues.jpg}{Los token-to-token maps no simétricos pueden tener complex eigenvalues.}{Video oficial de Stanford Online 00:34:22--00:35:09.}
+
+\subsection{OV spectrum y copying}
+
+Para un OV map en token-space, los eigenmodes positivos indican que, al ver cierto grupo de token directions, se elevan los logits de output directions del mismo tipo, lo cual puede interpretarse como una copying tendency; los modes negativos son anti-copying; los modes complex/imaginary tienden más a mapear un tipo de token direction a otro distinto.
+
+\lecturefigure{slide-28-ov-eigenvalue-meaning.jpg}{Explicación didáctica de la figura de OV eigenvalues: anti-copying, different-token mapping y copying.}{Video oficial de Stanford Online 00:35:10--00:35:55.}
+
+\begin{warningbox}{El spectrum es un summary, no un diccionario semántico completo}
+El embedding/unembedding del vocabulary no es necesariamente ortogonal, y la matriz también puede ser non-normal; los eigenvectors no necesariamente corresponden a un solo token nombrable. Reducir un eigenvalue positivo a copying es un diagnóstico práctico para small attention-only circuits, no un teorema semántico universal para cualquier matriz.
+\end{warningbox}
+
+\subsection{Distribución de copying en heads de una y dos capas}
+
+Olah muestra que, en el modelo de una capa, el OV spectrum de diez (de doce) heads cae principalmente en la dirección real positiva, lo que indica que el modelo usa ampliamente la estrategia simple de «al ver un token, elevar el mismo token o uno relacionado». El modelo de dos capas también tiene muchos copying heads, pero el routing de varias capas permite que se activen con un pattern más preciso.
+
+\lecturefigure{slide-29-layer-one-copying-heads.jpg}{Modelo de una capa: 10/12 attention heads tienen una copying signature fuerte.}{Video oficial de Stanford Online 00:35:56--00:36:05.}
+
+\lecturefigure{slide-30-layer-two-copying-heads.jpg}{Modelo de dos capas: la segunda capa sigue teniendo varios copying heads fuertes.}{Video oficial de Stanford Online 00:36:06--00:36:41.}
+
+\lecturefigure{slide-31-head-eigenvalue-histogram.jpg}{Compresión de la OV spectral signature en un histogram de heads de todo el modelo.}{Video oficial de Stanford Online 00:36:42--00:37:21.}
+
+\teachervoice{El ponente enfatiza que esta es una bottom-up methodology: primero se deriva un summary legible a partir de la estructura de la matriz y después se afirma que «la mayoría de estos heads hacen copy», en lugar de suponer de antemano que todos los heads siguen cierto pattern y luego escoger ejemplos que lo respalden.}
+
+\subsection{QK spectrum y límites de validez del método}
+
+El positive mode de QK tiende a emparejar la misma token direction; el negative mode tiende a evitar el mismo token; el complex mode tiende a una relación entre tokens distintos. Esto tiene más sentido en modelos de varias capas, porque los previous heads pueden escribir en el residual actual información como «cuál fue el token anterior», y luego el QK de la capa siguiente realiza un same-feature matching.
+
+\lecturefigure{slide-32-qk-eigenvalues-multilayer.jpg}{Los QK eigenvalues son más útiles en chains de varias capas: las capas anteriores mueven la información y las posteriores la emparejan.}{Video oficial de Stanford Online 00:37:22--00:37:37.}
+
+\lecturefigure{slide-33-eigenanalysis-breaks-at-scale.jpg}{La naive eigenvalue analysis deja de funcionar al crecer el modelo y al agregar MLP.}{Video oficial de Stanford Online 00:37:38--00:38:35.}
+
+\begin{warningbox}{El MLP invalida la idea de que «una matriz lo explica todo»}
+Un attention-only model puede linealizarse localmente con un fixed pattern; el MLP introduce activation-dependent nonlinear feature transforms, y LayerNorm también acopla las coordenadas. En modelos grandes todavía se pueden analizar el Jacobian local, las features y los paths, pero no puede copiarse tal cual la small-model eigenvalue story.
+\end{warningbox}
+
+\teachervoice{Olah dice explícitamente que el naive spectral method «completely breaks down» al agregar MLP. Una nota de calidad debe conservar esta frase y no presentar las eigenvalue plots como una caja de herramientas general de interpretabilidad para LLM.}
+
+\subsection{Resumen de la sección}
+
+El eigenvalue lens comprime un enorme token-to-token circuit en tendencias como copying/anti-copying, y revela que el modelo de una capa depende fuertemente de un copying extendido. Depende de que el mapeo sea sobre el mismo espacio y de una estructura aproximadamente lineal; frente al MLP y a modelos grandes, solo sirve como un indicio limitado.
+\section{Composición en dos capas: de Additive Heads a Virtual Heads}
+
+El modelo de una capa carece de phase change, mientras que el de dos capas la presenta. La diferencia no está solo en que haya «el doble de heads», sino en que el attention pattern de la segunda capa puede leer las features que escribió la primera, y en que las value paths de ambas capas se combinan en un nuevo effective operator. A continuación se usa path expansion para desarrollar explícitamente esta composición.
+
+\lecturefigure{slide-34-one-layer-formula-recall.jpg}{Repaso de la direct path y las single-head paths del modelo de una capa.}{Video oficial de Stanford Online 00:38:36--00:39:05.}
+
+\subsection{Definición de las matrices OV y QK reutilizables}
+
+Para reducir la notación, el artículo y la clase agrupan las matrices que siempre aparecen juntas:
+\[
+W_{OV}^{\ell,h}=W_V^{\ell,h}W_O^{\ell,h},
+\qquad
+W_{QK}^{\ell,h}=W_Q^{\ell,h}(W_K^{\ell,h})^{\top}.
+\]
+Aquí $\ell$ es el índice de capa y $h$ es el índice de head. La primera describe la escritura de contenido (content write); la segunda, la métrica de compatibilidad (compatibility metric).
+
+\lecturefigure{slide-35-define-wov-wqk.jpg}{Definición de $W_{OV}$ y $W_{QK}$, que expone los dos tipos centrales de circuit de la atención.}{Video oficial de Stanford Online 00:39:06--00:39:33.}
+
+\subsection{Producto de operadores en el modelo de dos capas}
+
+Una vez definidas $W_{QK}$ y $W_{OV}$ para una capa, la pregunta siguiente no es simplemente volver a escribir la segunda capa, sino explicar cómo la segunda capa usa la información que la primera ya escribió en el residual stream. En esta sección se tratan las dos capas como el producto de dos residual-plus-head operators; así se conservan los heads independientes de cada capa y, al mismo tiempo, se hacen visibles las effective paths que solo existen cuando se combinan capas. Este desarrollo es el puente esencial entre «el modelo tiene dos capas» y «el modelo adquiere una nueva capacidad algorítmica».
+
+Si se ignoran LayerNorm/MLP/bias, el operator de cada capa es
+\[
+\mathcal{L}_{\ell}
+=I+\sum_{h\in H_{\ell}}A^{\ell,h}\otimes W_{OV}^{\ell,h}.
+\]
+La residual transform de dos capas es
+\[
+X_2=\mathcal{L}_2\mathcal{L}_1X_0.
+\]
+
+\lecturefigure{slide-36-two-layer-formula.jpg}{Transformer attention-only de dos capas: producto de dos residual-plus-head operators.}{Video oficial de Stanford Online 00:39:34--00:39:59.}
+
+El Kronecker product cumple la mixed-product identity:
+\[
+(A_2\otimes W_2)(A_1\otimes W_1)
+=(A_2A_1)\otimes(W_2W_1).
+\]
+
+\begin{itemize}
+  \item $A_2A_1$: composición en dos pasos del position routing;
+  \item $W_2W_1$: composición en dos pasos de la content transformation;
+  \item elegir la identidad produce paths que omiten alguna capa;
+  \item la matriz de atención depende en realidad del residual, por lo que el desarrollo simbólico no elimina la no linealidad del routing.
+\end{itemize}
+
+\lecturefigure{slide-37-mixed-product-identity.jpg}{La mixed-product identity separa la composición de posiciones de la composición de contenido.}{Video oficial de Stanford Online 00:40:00--00:40:33.}
+
+\subsection{Los tres tipos de paths tras el desarrollo}
+
+El producto de operadores por sí solo todavía no indica qué rutas de cómputo aparecen realmente. En esta sección se desarrolla $\mathcal{L}_2\mathcal{L}_1$ y se clasifican los términos según omitan alguna capa, pasen por un solo head o atraviesen heads de ambas capas de manera consecutiva. Al leer la expresión siguiente, cada término debe verse como un flujo de información que puede examinarse e intervenirse por separado, en lugar de volver a comprimir todos los summands en una matriz de caja negra; el induction circuit es justamente una instancia concreta del último tipo, la composed path.
+
+El desarrollo da:
+\[
+I
++\sum_{h\in H_1}A^{1,h}\otimes W_{OV}^{1,h}
++\sum_{k\in H_2}A^{2,k}\otimes W_{OV}^{2,k}
++\sum_{k,h}(A^{2,k}A^{1,h})\otimes
+(W_{OV}^{2,k}W_{OV}^{1,h}).
+\]
+
+\begin{itemize}
+  \item direct path: ambas capas pasan por el residual;
+  \item single-head paths: pasan solo por un head de una de las capas;
+  \item virtual/composed paths: la salida de un head de la primera capa es leída por un head de la segunda;
+  \item un virtual head no agrega parámetros: es el effective circuit de la composición de heads ya existentes.
+\end{itemize}
+
+\lecturefigure{slide-38-expanded-two-layer-terms.jpg}{Desarrollo de dos capas: términos direct, de individual head y de composición virtual-head.}{Video oficial de Stanford Online 00:40:34--00:41:39.}
+
+\lecturefigure{slide-39-principled-head-analysis.jpg}{La path expansion ofrece un marco de análisis de attention heads basado en principios.}{Video oficial de Stanford Online 00:41:40--00:42:43.}
+
+\begin{importantbox}{Un circuit no equivale a «un solo head»}
+Un algoritmo puede abarcar varios heads y varias capas: un head anterior escribe una feature, un head posterior la lee mediante QK y luego la escribe en los logits mediante OV. Nombrar los mecanismos solo a partir del attention map de un head aislado hace fácil pasar por alto la composición; el path es una unidad más cercana a la ejecución de un programa.
+\end{importantbox}
+
+\subsection{Ordenar paths con marginal loss accounting}
+
+En el toy model se puede aplicar ablation a un término de path, o retirarlo, y medir su efecto marginal sobre la loss. La clase presenta los órdenes de magnitud de la direct path, de los heads individuales de la primera y la segunda capa, y de las virtual paths; muchos términos virtuales son pequeños por sí solos, pero no por ello deben descartarse de forma permanente, porque pueden volverse decisivos en modelos más profundos o con ciertos inputs.
+
+\lecturefigure{slide-40-path-loss-contributions.jpg}{Marginal contribution de los distintos path types a la loss.}{Video oficial de Stanford Online 00:42:44--00:42:49.}
+
+\lecturefigure{slide-41-virtual-heads-later.jpg}{En el modelo actual, los términos virtual-head son pequeños, pero pueden ser importantes en modelos más profundos.}{Video oficial de Stanford Online 00:42:50--00:43:05.}
+
+\lecturefigure{slide-42-understand-model-with-twelve-heads.jpg}{Accounting casi completo del toy model: el comportamiento principal se entiende con unos doce heads.}{Video oficial de Stanford Online 00:43:06--00:43:09.}
+
+\lecturefigure{slide-43-head-terms-by-layer.jpg}{Términos de attention heads y reducción de la loss, organizados por layer/type.}{Video oficial de Stanford Online 00:43:10--00:43:21.}
+
+\begin{knowledgebox}{Lectura de la figura: el marginal effect no es el único indicador de importancia}
+La head ablation puede quedar compensada por paths redundantes; un head anterior cuyo OV direct logit effect es muy pequeño puede, aun así, alterar con fuerza el QK routing posterior. Conviene examinar a la vez el direct logit effect, la path composition, la dependencia del attention pattern y la ablation específica de cada comportamiento.
+\end{knowledgebox}
+
+\subsection{El pattern de la segunda capa depende de lo que escribe la primera}
+
+Aunque la OV path pueda formalizarse como una suma, las $Q$ y $K$ de la segunda capa provienen del residual stream, que contiene los outputs de la primera capa. Por lo tanto, el attention pattern de la segunda capa contiene cross terms: los heads previos cambian «hacia dónde mirar», y no solo «qué escribir después de mirar».
+
+\lecturefigure{slide-44-patterns-read-previous-heads.jpg}{Los attention patterns de la segunda capa usan información de la primera, aunque la OV path simple ignore por el momento la composición.}{Video oficial de Stanford Online 00:43:22--00:43:39.}
+
+\lecturefigure{slide-45-layer-two-qk-context.jpg}{Desarrollo explícito del QK de la segunda capa: tanto queries como keys pueden incluir contribuciones de los heads de la primera capa.}{Video oficial de Stanford Online 00:43:40--00:43:49.}
+
+\lecturefigure{slide-46-positive-eigenvalues-copy.jpg}{Signature OV de copia: los positive eigenvalues hacen más probable que se emita el attended token.}{Video oficial de Stanford Online 00:43:50--00:43:59.}
+
+\lecturefigure{slide-47-second-layer-copying-circuits.jpg}{Varios heads de la segunda capa tienen copying OV circuit, lo que sienta las bases del conditional copy.}{Video oficial de Stanford Online 00:44:00--00:44:11.}
+
+\lecturefigure{slide-48-inspect-patterns-empirically.jpg}{Cuando el QK circuit se vuelve complejo, se infieren mecanismos candidatos a partir de los empirical attention patterns.}{Video oficial de Stanford Online 00:44:12--00:46:07.}
+
+\teachervoice{Olah usa el álgebra, pero también reconoce que un QK circuit complejo se entiende más fácilmente si se empieza por los attention patterns reales. La interpretabilidad mecanicista no admite una sola herramienta: hace que las fórmulas, la visualización, la ablation y los ejemplos se restrinjan entre sí.}
+
+\subsection{Resumen de la sección}
+
+El modelo de dos capas, mediante la multiplicación de operators, produce direct paths, single-head paths y composed virtual paths. Más importante aún, lo que escribe la primera capa modifica el routing de la segunda, de modo que el modelo puede primero desplazar un estado como «el token anterior» y luego, en la capa siguiente, emparejarlo y copiarlo; así obtiene un conditional algorithm del que carece el modelo de una capa.
+\section{Induction Heads: el circuito que implementa el In-Context Nearest Neighbor}
+
+Volvamos ahora al phase-change mystery. Una induction head procesa el patrón
+\[
+[A][B]\ \cdots\ [A]\quad\longrightarrow\quad[B].
+\]
+Cuando el token actual es $A$, busca una $A$ que haya aparecido antes, lee la $B$ que sigue a esa $A$ anterior y eleva la next-token probability de $B$.
+
+\subsection{Induction pattern}
+
+El mecanismo suele requerir una composition en dos pasos. La previous-token head escribe en la posición $j$ la token identity de la posición $j-1$; en la capa siguiente, la induction head hace un QK match entre la $A$ de la posición actual y la previous-token feature que lleva cada posición candidata, y mediante un copying OV emite el token actual $B$ de la posición candidata.
+
+\lecturefigure{slide-49-induction-pattern.jpg}{Induction pattern: se busca un prefix idéntico anterior y se copia el token que lo sigue.}{Video oficial de Stanford Online 00:46:08--00:47:01.}
+
+\begin{lstlisting}[caption={Pseudocódigo conceptual del induction-head algorithm.}]
+def induction_prediction(tokens, current_index):
+    current_token = tokens[current_index]
+    candidates = []
+    for source in range(1, current_index):
+        if tokens[source - 1] == current_token:
+            candidates.append(tokens[source])
+    return learned_weighted_copy(candidates)
+\end{lstlisting}
+
+\begin{importantbox}{In-context nearest neighbor}
+La induction head trata el context como una base de datos temporal: la query es el pattern actual, las keys son los patterns históricos y el value es el token que apareció después de cada pattern histórico. Se parece a k-NN, pero la similitud, la representation, las rutas de composición y la output transformation las aprende la red.
+\end{importantbox}
+
+\teachervoice{La definición condensada de Olah es: buscar la previous copy, mirar una posición hacia adelante y predecir que lo que ocurrió la vez anterior volverá a ocurrir. Las heads reales pueden emparejar frases, token classes o vecinos semánticos, no solo una $A$ literalmente idéntica.}
+
+\subsection{Por qué es el workhorse del meta-learning}
+
+Una copying head simple solo eleva a ciegas los tokens repetidos en muchas posiciones posibles; el induction circuit, en cambio, primero identifica «qué situación pasada se parece a la actual» y después copia la continuation de esa situación. Este conditional retrieval se parece más a un context algorithm generalizable, por lo que sirve para texto repetido, imitación de formato, aprendizaje local de funciones y correspondencias de traducción.
+
+\lecturefigure{slide-50-induction-workhorse.jpg}{Induction heads: el workhorse del meta-learning, que combina pattern matching y copying.}{Video oficial de Stanford Online 00:47:02--00:47:05.}
+
+\lecturefigure{slide-51-multiple-induction-heads.jpg}{En el modelo existen varias induction heads, que cubren distintos patterns y logit effects.}{Video oficial de Stanford Online 00:47:06--00:47:29.}
+
+\subsection{Del attention pattern a la matrix signature}
+
+En una induction head clásica, el OV debe tener una copying tendency y el QK debe preferir el same-token/same-pattern match sobre la shifted feature de la primera capa. Por ello pueden usarse QK/OV traces o eigenvalue summaries para ubicar las heads en un diagrama bidimensional: las heads de la esquina superior derecha, que combinan strong QK matching y OV copying, son induction candidates.
+
+\lecturefigure{slide-52-head-taxonomy.jpg}{Clasificación espectral y por patrones de induction heads, otras heads e induction-ish heads.}{Video oficial de Stanford Online 00:47:30--00:47:47.}
+
+\lecturefigure{slide-53-qk-ov-trace-scatter.jpg}{QK/OV trace scatter: dos circuit signatures para localizar induction candidates.}{Video oficial de Stanford Online 00:47:48--00:48:15.}
+
+\begin{warningbox}{La signature no es la definición}
+Que una head caiga en cierta región del scatter solo indica que sus matrices tienen propiedades de candidata. Para establecer un verdadero induction mechanism se necesitan además el attention pattern, la path composition, ejemplos y ablation; los modelos modernos pueden lograr un comportamiento similar mediante otras bases, distributed features o la cooperación de varias heads.
+\end{warningbox}
+
+\lecturefigure{slide-54-induction-meta-learning-summary.jpg}{Principal aportación de las induction heads al meta-learning e idea para detectarlas automáticamente.}{Video oficial de Stanford Online 00:48:16--00:48:21.}
+
+\lecturefigure{slide-55-other-local-heads.jpg}{Otras heads suelen ser más local y realizan token lookup o position tracking.}{Video oficial de Stanford Online 00:48:22--00:48:33.}
+
+\lecturefigure{slide-56-lookup-similar-context.jpg}{El núcleo de la induction head: consultar qué ocurrió después en una situación histórica similar.}{Video oficial de Stanford Online 00:48:34--00:48:41.}
+
+\subsection{De vuelta a la phase-change hypothesis}
+
+La viabilidad estructural ya está establecida: una composition de dos capas puede implementar un conditional lookup, y las induction candidates pueden identificarse a partir del QK/OV y del attention pattern. Con ello, la hipótesis de investigación se vuelve concreta: la ICL phase change es el momento en que el modelo descubre durante el entrenamiento los induction-head circuits.
+
+\lecturefigure{slide-57-phase-change-hypothesis.jpg}{Hipótesis central: la formación de induction heads impulsa la ICL phase change.}{Video oficial de Stanford Online 00:48:42--00:49:53.}
+
+\teachervoice{El ponente vuelve a usar la palabra hypothesis y enseguida dice «let's check it». Esto refleja el ritmo correcto de la explicación mecanicista: primero se plantea, a partir de la estructura, una hipótesis falsable y después se buscan intervenciones y evidencia en distintos modelos.}
+
+\subsection{Resumen de la sección}
+
+El induction circuit combina la previous-token information con una copying head de la capa siguiente para formar el algoritmo $[A][B]\ldots[A]\to[B]$. Es un context nearest-neighbor mechanism aprendible, más preciso que el copying incondicional, y ofrece una explicación candidata estructuralmente creíble de la phase change.
+\section{Niveles de evidencia: Small-Model Causality y Large-Model Correlation}
+
+Una vez que se tiene un circuit candidato, la pregunta más importante es si de verdad impulsa la measured behavior. Los small attention-only models son lo bastante simples como para hacer ablate head por head y volver a calcular el ICL score; en los large models es más difícil hacer un accounting completo, y en clase se muestra principalmente la coincidencia entre formation timing y behavior timing.
+
+\subsection{Small models: ablation directa}
+
+Se aplica a un head una pattern-preserving ablation o se retira su contribution, y se compara
+\[
+\Delta S_h
+=S_{\mathrm{ICL}}^{(-h)}-S_{\mathrm{ICL}}^{(\mathrm{base})}.
+\]
+Si al retirar un induction head el score se vuelve menos negativo, eso indica que la late-token advantage se debilitó. En la figura, el color de cada head indica la induction strength y las curvas muestran el efecto de la ablation de cada head sobre el meta-learning/ICL score.
+
+\lecturefigure{slide-58-small-model-ablation.jpg}{Small attention-only models: la ablation muestra que los induction heads impulsan la measured ICL.}{Video oficial de Stanford Online 00:49:54--00:50:29.}
+
+\begin{knowledgebox}{Lectura de la figura: las formation dynamics no son monótonas}
+Durante el entrenamiento, muchos heads se desplazan en algún momento hacia la induction signature, pero después solo unos pocos se imponen; además, hay un head de tipo induction cuya ablation tiene el efecto contrario. Esto recuerda que la head label no es una entidad estática: la función cambia con la competencia, la redundancia y la specialization a lo largo del entrenamiento.
+\end{knowledgebox}
+
+\teachervoice{La afirmación más fuerte de Olah es sobre los small models: casi toda la measured ICL puede explicarse con estos induction heads. Pero también señala un head con contribución inversa, lo que muestra que «parecerse a induction» y «mejorar la chosen metric» no son del todo equivalentes.}
+
+\subsection{Large models: aparecen al mismo tiempo, pero sigue siendo correlation}
+
+En los large models, las induction signatures se forman en la misma ventana de entrenamiento en la que el ICL score cambia con rapidez. Esta co-occurrence es coherente con el small-model mechanism y aparece también en distintas model scales, por lo que resulta muy sugerente; sin embargo, no existe un large-model ablation accounting igual de completo, y es posible que otros circuits se formen al mismo tiempo.
+
+\lecturefigure{slide-59-large-model-timing.jpg}{Large models: la induction-head formation ocurre en sincronía con el ICL increase.}{Video oficial de Stanford Online 00:50:30--00:50:47.}
+
+\begin{warningbox}{Las conclusiones sobre large models deben conservar el calificativo «correlational»}
+La temporal alignment descarta muchos mecanismos lentos, pero no puede descartar una causa común ni otros cambios estructurales simultáneos. En clase, Olah usa explícitamente «only correlational evidence»; las notas no deben elevarlo a «ya se demostró que toda la large-model ICL es causada por induction heads».
+\end{warningbox}
+
+\teachervoice{El ponente considera que esta correlation es muy suggestive, sobre todo porque la induction tiene una functional plausibility clara; pero de inmediato agrega que también podrían descubrirse otros mechanisms en esa misma ventana estrecha.}
+
+\subsection{Generality: de la literal copy a la translation}
+
+Si la induction solo pudiera copiar fragmentos de caracteres idénticos, difícilmente explicaría una ICL más rica. El artículo y la live demo muestran repeated chunks, cross-lingual alignment y analogías: por ejemplo, una posición de la segunda oración, en inglés, puede leer el token que sigue al significado correspondiente en la primera oración, en francés. En ese caso, query/key emparejan relaciones similares en el learned feature space, no una one-hot token equality.
+
+\lecturefigure{slide-60-repeated-chunk-translation.jpg}{Los induction heads pueden copiar chunks y muestran un comportamiento de translation/soft matching.}{Video oficial de Stanford Online 00:50:48--00:55:29.}
+
+\begin{importantbox}{Soft induction}
+Un soft induction head aprende un feature match de «situaciones similares»: el token idéntico es un caso particular, y un translation pair, palabras de la misma clase, un slot de formato o la entrada de una función también pueden convertirse en neighbors. Esto amplía el alcance explicativo de la induction, pero también dificulta su verificación, porque la similitud puede estar distribuida entre varios features y heads.
+\end{importantbox}
+
+\teachervoice{En la live demo, la correspondencia French/English se lee paso a paso mediante attention. Olah llama a esto soft induction: no se copia la word tal cual, sino una relationship o function más abstracta.}
+
+\subsection{Resumen de la sección}
+
+La small-model ablation aporta evidencia causal sobre la ICL metric; el large-model timing solo aporta evidencia correlacional. La translation y el soft matching muestran que la induction va más allá de la literal copy, pero también implican que el mecanismo es más distribuido y más difícil de demostrar por completo con un único attention map.
+\section{Límites de la extrapolación: otros mecanismos, LSTM y Scaling Laws}
+
+La Induction-head story resulta muy atractiva porque conecta la conducta, la estructura matemática y la intervention; cuanto más pulcra es una historia, más hace falta buscar activamente lo que no logra explicar. Al final, el ponente admite de manera explícita otros mechanisms y deja como preguntas abiertas buena parte del cómputo de los modelos grandes.
+
+\subsection{In-context nearest neighbor no abarca todo el meta-learning}
+
+Olah resume la induction como in-context nearest neighbor y, al mismo tiempo, señala que las soft heads pueden aprender functions. Esta descripción sirve para explicar cómo se empareja y se continúa un pattern a partir de examples, pero no cubre necesariamente la gradient-descent-like inner optimization, el Bayesian updating, el multi-step reasoning ni el uso de herramientas.
+
+\lecturefigure{slide-61-in-context-nearest-neighbor.jpg}{La induction como in-context nearest neighbor; las soft heads pueden aprender relaciones funcionales.}{Video oficial de Stanford Online, 00:55:30--00:55:33.}
+
+\lecturefigure{slide-62-alternative-contributors.jpg}{Otros mechanisms pueden contribuir al mismo tiempo al large-model ICL.}{Video oficial de Stanford Online, 00:55:34--00:55:59.}
+
+\begin{warningbox}{Una mechanistic story elegante puede seguir siendo incompleta}
+Las induction heads pueden explicar cierto tipo de lookup/copy behavior y, en los small models, explicar el chosen ICL score; los modelos grandes pueden usar a la vez MLP memory, distributed feature binding, other heads, implicit optimization o paths más largos. La conclusión más adecuada es «un mecanismo importante», no «el único mecanismo».
+\end{warningbox}
+
+\teachervoice{La present theory que se presenta al cierre de la clase abarca, en esencia, dos tipos de algoritmos: uno es el copying amplio del tipo «si ya apareció cierta palabra, puede volver a aparecer más adelante en una posición adecuada»; el otro es el induction-head nearest neighbor. El ponente deja espacio para «possibly other things».}
+
+\subsection{Por qué el Transformer es más adecuado que la bounded-state LSTM para el lookup en contextos largos}
+
+La attention puede acceder directamente a cualquier position pasada, y el costo de la recuperación depende sobre todo de la context length y de la attention implementation; la LSTM tradicional debe comprimir toda la historia en un recurrent state de dimensión fija, por lo que el lookup exacto a larga distancia tiende a degradarse. Esta diferencia hace que la induction-style retrieval sea más natural en el Transformer, pero no significa que la LSTM sea matemáticamente incapaz de expresar algún tipo de meta-learning, ni que la attention aprenda automáticamente el lookup correcto.
+
+\lecturefigure{slide-63-transformer-vs-lstm.jpg}{ICL en contextos largos: la ruta de recuperación directa de la attention frente al cuello de botella del estado fijo de la LSTM.}{Video oficial de Stanford Online, 00:56:00--00:56:21.}
+
+\begin{knowledgebox}{No hay que presentar la comparación de arquitecturas como una imposibilidad absoluta}
+Con precisión finita, hidden state finito y las condiciones reales de entrenamiento, la retrieval fiel a larga distancia es difícil para la LSTM; en teoría, un estado más grande, una memory externa o un entrenamiento especial podrían cambiar la conclusión. El «impossible» de la clase debe entenderse en un contexto de ingeniería: ese tipo de mechanism no surge de forma natural y es difícil de escalar de manera estable.
+\end{knowledgebox}
+
+\subsection{¿Explican las induction heads las meta-learning scaling laws?}
+
+Si el ICL se aproxima a un context nearest neighbor, la capability podría variar en función conjunta de la pattern diversity de los training data, la representation quality y la context retrieval, y no solo del parameter count. El ponente plantea que esto podría ayudar a entender las curvas de las scaling laws, pero no ofrece una teoría completa ni una validación.
+
+\lecturefigure{slide-64-meta-learning-scaling-laws.jpg}{Pregunta abierta: ¿puede el induction-head mechanism explicar las meta-learning scaling laws?}{Video oficial de Stanford Online, 00:56:22--00:56:47.}
+
+\teachervoice{La explicación de Olah sobre las scaling laws es claramente más tentative: se trata solo de una línea posible. Las notas no deben convertir una diapositiva de preguntas en una law establecida, y mucho menos sustituir con la induction story el análisis empírico de la data distribution, la optimization y el architecture scaling.}
+
+\subsection{Lo que todavía no se entiende}
+
+En la sesión de preguntas y respuestas, Olah enumera las MLP layers, la arithmetic, la multi-speaker/dialogue representation y una gran cantidad de mecanismos internos de los modelos grandes. La near-complete account de los attention-only toy models es una demostración del método, no el punto final de la investigación; la nonlinear feature superposition, la normalization y los distributed circuits de los modelos grandes siguen siendo difíciles.
+
+\teachervoice{«Hay tanto que todavía no entendemos que es difícil decir cuál es el siguiente paso» es el cierre más honesto de esta clase. La madurez de la interpretabilidad mecanicista debe medirse por circuits reproducibles, resultados de intervención y casos de falla, no por la cantidad de términos.}
+
+\subsection{Resumen de la sección}
+
+Las induction heads son un ICL mechanism importante, con estructura y respaldo de intervention, pero los modelos grandes pueden usar otros algorithms. El Transformer ofrece una interfaz natural para la retrieval en contextos largos, la conexión con las scaling laws sigue siendo una hipótesis abierta, y las MLP y los distributed circuits son la dificultad central de la siguiente etapa.
+
+\section{Síntesis y ampliación}
+
+\subsection{La cadena completa de Behavior a Mechanism}
+
+Lo más reutilizable de esta clase no es un attention heatmap en particular, sino un procedimiento de investigación: primero se define una métrica de comportamiento y después se busca un abrupt change; se elige un toy model resoluble para construir el álgebra; a partir de la path structure se propone un algorithm candidato; por último, se gradúa la evidencia con ablation, timing, cross-example generality y contraejemplos. La credibilidad de la Mechanistic interpretability proviene de esta cadena, no de una figura que «parece estar atendiendo al token correcto».
+
+\begin{importantbox}{Quince conclusiones centrales}
+\begin{enumerate}
+  \item La Mechanistic interpretability intenta descompilar los parameters en algorithms.
+  \item ICL fija los parámetros; la adaptación temporal ocurre solo en el context y las activations.
+  \item La loss surface bidimensional muestra a la vez el training snapshot y la token position.
+  \item Cuanto más negativo es $\mathrm{Loss@500}-\mathrm{Loss@50}$, mayor es la late-context advantage.
+  \item $0.4$ nats equivalen aproximadamente a $0.58$ bits/token, no a 40\% de accuracy.
+  \item La loss bump y el derivative spike dan lugar a la phase-change hypothesis, pero no la demuestran.
+  \item Los attention-only toy models eliminan MLP/LayerNorm/bias a cambio de un álgebra exacta.
+  \item Una head puede dividirse en dos circuits: QK routing y OV writing.
+  \item Una vez fijado el attention pattern, el attention-only path es localmente lineal respecto a la entrada.
+  \item Los one-layer models implementan principalmente reglas skip-trigram/positional; su ICL es débil y no presentan phase change.
+  \item El eigenvalue lens puede resumir small token-to-token maps, pero deja de funcionar con MLP y en modelos grandes.
+  \item La two-layer expansion produce composed/virtual heads y permite que el routing lea features de capas anteriores.
+  \item El induction circuit implementa un context nearest neighbor de la forma $[A][B]\ldots[A]\to[B]$.
+  \item La small-model ablation es evidencia causal; el formation timing en large models es principalmente evidencia correlacional.
+  \item Induction es un mecanismo importante, pero no necesariamente el único; la soft induction y los distributed circuits aún requieren una verificación más sólida.
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Un Circuit Audit Protocol reutilizable}
+
+Ante una nueva afirmación de interpretabilidad, conviene revisar en orden: si el behavior objetivo está cuantificado; si el component candidato tiene la capacidad estructural necesaria; si el camino se compone a través de layers; si el attention pattern y el OV logit effect son consistentes; si la ablation conserva la distribution y los demás patterns; si el resultado se sostiene entre prompts/seeds/models; y si la conclusión distingue entre toy model, small model y production-scale model.
+
+\begin{knowledgebox}{Lista de verificación práctica}
+\begin{enumerate}
+  \item Definir la behavior metric y la sign convention;
+  \item trazar el diagnóstico bidimensional training × context, en lugar de mirar solo el checkpoint final;
+  \item desarrollar los residual paths y distinguir entre routing y writing;
+  \item usar activation/attention para formular la hypothesis y ablation para la verificación causal;
+  \item registrar compensation, redundancy y negative-result heads;
+  \item en la large-model extrapolation, indicar si se trata de correlation, plausibility o intervention;
+  \item buscar activamente alternative mechanisms y failure cases.
+\end{enumerate}
+\end{knowledgebox}
+
+\subsection{Lecturas adicionales}
+
+Se recomienda leer primero la one-/two-layer decomposition de \emph{A Mathematical Framework for Transformer Circuits} y después la evidence taxonomy y el appendix de \emph{In-context Learning and Induction Heads}. A continuación, contrastarlos con las Kaplan scaling laws y el few-shot behavior de GPT-3 para reflexionar sobre la relación entre la behavioral curve, las training dynamics y la circuit formation. Al leer trabajos actuales de interpretación de modelos grandes, conviene observar sobre todo cómo abordan las MLP nonlinearities, la feature superposition, la normalization, la distributed computation y la causal validation, en lugar de comparar únicamente qué tan atractivas son las head visualizations.
+
+\teachervoice{La present theory con la que cierra esta clase consiste en dos algorithms principales: copying generalizado e induction-head in-context nearest neighbors, reconociendo al mismo tiempo que puede haber otros mecanismos. Conservar esta incertidumbre es precisamente la síntesis más fiel a la clase y a la investigación original.}
+
+\end{document}

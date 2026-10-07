@@ -1,0 +1,695 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+\usepackage{multicol}
+
+\renewcommand{\notetitle}{Lecture 37: Razonamiento en modelos de lenguaje de gran tamaño: decodificación, entrenamiento, agregación y recuperación}
+\renewcommand{\noteauthors}{Elaborado a partir de la conferencia oficial de Denny Zhou (Google DeepMind), las 49 páginas de diapositivas y los subtítulos hechos a mano}
+\renewcommand{\notedate}{CS25 V5 · versión reescrita source-first de 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{Clase: 2025-04-29; publicación: 2025-05-21}
+\renewcommand{\videoduration}{1:06:07}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=ebnX5Ur1hBk}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.97\textwidth,height=0.49\textheight,keepaspectratio]{slides-images/#1}
+  \caption{#2}
+  \figsource{Denny Zhou, Stanford CS25 V5 official deck, slide #3}
+\end{figure}
+}
+
+\let\standardtableofcontents\tableofcontents
+\renewcommand{\tableofcontents}{%
+  \small
+  \setlength{\parskip}{0pt}
+  \standardtableofcontents
+  \normalsize
+  \setlength{\parskip}{0.25em}
+}
+
+\begin{document}
+\makecscover
+
+\section{Primero, definir el problema: qué significa aquí «razonamiento»}
+
+El debate sobre si «los modelos de lenguaje grandes realmente razonan» suele mezclar filosofía, ciencia cognitiva, lógica formal y capacidades de producto. Al inicio, Denny Zhou acota el problema de forma deliberada: esta clase estudia solo un objeto operable y medible, la \textbf{secuencia de token intermedios} que el modelo genera entre la entrada y la respuesta final. Esta definición no exige que la trayectoria se parezca al cerebro humano ni garantiza que explique con fidelidad el cómputo interno del modelo; solo pregunta si agregar pasos de generación intermedios visibles amplía el cómputo que el modelo puede realizar, modifica la señal de entrenamiento y mejora la selección de la respuesta final.
+
+\lecturefigure{slide-01.jpg}{Título del curso: LLM Reasoning}{1}
+
+\teachervoice{00:00:52--00:02:30, el docente afirma explícitamente que no participa en el debate sin definición sobre si «los LLM realmente razonan o no». Esta clase fija reasoning como los intermediate tokens entre input y output; toda la teoría, la decodificación y los métodos de entrenamiento posteriores se desarrollan en torno a esta definición operativa.}
+
+\subsection{Los token intermedios son una interfaz de cómputo, no una prueba de personalidad}
+
+Sea la entrada $x$, la secuencia de razonamiento intermedio $r=(r_1,\ldots,r_T)$ y la respuesta final $a=(a_1,\ldots,a_M)$. Un modelo autorregresivo asigna una probabilidad a toda la respuesta:
+\[
+p_\theta(r,a\mid x)
+=\prod_{t=1}^{T}p_\theta(r_t\mid x,r_{<t})
+ \prod_{j=1}^{M}p_\theta(a_j\mid x,r,a_{<j}).
+\]
+Aquí $\theta$ son los parámetros del modelo, $T$ es el número de token intermedios, $M$ es el número de token de la respuesta, y $r_{<t}$ y $a_{<j}$ denotan los prefijos ya generados. El cambio esencial no es que «el modelo de pronto tenga un monólogo interior», sino que la generación de la respuesta, que originalmente ocurría en una sola pasada hacia adelante, se despliega en $T+M$ pasos de cómputo condicional; cada token nuevo puede leer los resultados anteriores y escribir un estado temporal de vuelta en el contexto.
+
+\lecturefigure{slide-02.jpg}{Definición operativa de esta clase: los pasos intermedios entre la entrada y la salida}{2}
+
+\begin{importantbox}{Definición operativa}
+En esta clase, LLM reasoning se refiere a los token intermedios que el modelo genera antes de la respuesta final. Es una \textbf{trayectoria de cómputo observable}: puede usarse para continuar el cómputo, entrenar, filtrar y agregar; pero «legible» no equivale a «fiel», y «parecido a lo humano» no equivale a «mismo mecanismo».
+\end{importantbox}
+
+\begin{warningbox}{La sustitución conceptual más frecuente}
+Al ver pasos en lenguaje natural, es fácil sustituir «la trayectoria ayuda a obtener la respuesta correcta» por «la trayectoria revela por completo el proceso causal interno del modelo». Esta clase respalda lo primero, pero de ello no se sigue automáticamente lo segundo. Para evaluar una trayectoria hay que distinguir, como mínimo, la corrección de la respuesta final, la validez de los pasos, la posibilidad de verificarlos y la fidelidad de la explicación.
+\end{warningbox}
+
+\subsection{La última letra: por qué diseñar tareas que no se resuelvan por atajos}
+
+La concatenación de las últimas letras de «artificial intelligence» es «le». La respuesta directa tiene solo dos caracteres y no muestra cómo la obtuvo el modelo; la versión paso a paso primero extrae la última letra de artificial, $l$, luego la última letra de intelligence, $e$, y al final las concatena. El valor didáctico de esta pequeña tarea no está en su dificultad, sino en que descompone un proceso secuencial en estados temporales explícitos, lo que permite a los investigadores distinguir entre «haber memorizado un patrón frecuente» y «haber ejecutado la transformación paso a paso».
+
+\lecturefigure{slide-03.jpg}{Concatenación de últimas letras: comparación entre la respuesta directa y los pasos intermedios}{3}
+
+\teachervoice{00:03:18--00:05:10, el docente explica que al principio probaron con la «concatenación de primeras letras», pero la gran cantidad de siglas en la web permitía que incluso los modelos antiguos respondieran correctamente sin dificultad, por lo que cambiaron a las últimas letras. Lección práctica: en una tarea sintética hay que revisar los atajos presentes en el corpus de entrenamiento; de lo contrario, el benchmark podría estar midiendo memoria de coocurrencias y no el algoritmo objetivo.}
+
+El trabajo de rationale generation de 2017 utilizó pasos intermedios en lenguaje natural para problemas algebraicos de enunciado; investigaciones neurosimbólicas anteriores solían expresar el proceso intermedio mediante programas, fórmulas lógicas o estados de búsqueda. El giro histórico no consiste en que «por primera vez hubiera estados intermedios», sino en colocar esos estados en la misma secuencia de lenguaje que la entrada y la salida, de modo que puedan generarse y aprenderse directamente con modelos de secuencias.
+
+\lecturefigure{slide-04.jpg}{Rationale generation: el lenguaje natural como soporte del cómputo intermedio}{4}
+
+\begin{knowledgebox}{Términos clave: rationale, scratchpad y Chain-of-Thought}
+\textbf{rationale} pone el acento en la explicación o el fundamento de la solución; \textbf{scratchpad}, en usar un espacio intermedio escribible para realizar el cómputo; \textbf{Chain-of-Thought (CoT)} suele referirse a pasos consecutivos expresados en lenguaje. En la práctica, los tres pueden usar secuencias de token similares, pero sus objetivos de investigación difieren: la explicación, el espacio de trabajo para el cómputo y la capacidad de razonamiento no deben confundirse solo por su nombre.
+\end{knowledgebox}
+
+\subsection{Por qué los token intermedios aumentan la computabilidad}
+
+Las diapositivas oficiales plantean una línea teórica: si un problema puede resolverse con un Boolean circuit de tamaño $T$, entonces un Transformer de tamaño fijo puede simular ese cómputo paso a paso generando $O(T)$ token intermedios; si se obliga al modelo a producir directamente la respuesta final, podría requerirse una red muy profunda, o incluso podría ser imposible expresarlo con la profundidad dada. Intuitivamente, la profundidad de la red aporta «capas secuenciales dentro de los parámetros» y la longitud de generación aporta «pasos secuenciales durante la inferencia».
+
+\lecturefigure{slide-05.jpg}{Los token intermedios trasladan el cómputo secuencial de la profundidad de la red a la longitud de generación}{5}
+
+El presupuesto total de cómputo puede escribirse de forma aproximada como
+\[
+C_{\text{total}}\approx C_{\text{prefill}}+T\,C_{\text{decode-step}}.
+\]
+Aquí $C_{\text{prefill}}$ es el costo de procesar la entrada, $C_{\text{decode-step}}$ es el costo marginal de generar un token nuevo y $T$ es la longitud de los pasos intermedios. Una trayectoria más larga aporta más cómputo secuencial, pero también aumenta la latencia, el uso de KV cache y la acumulación de errores; por eso, «permitir más token» no es una mejora gratuita, sino que convierte un problema de capacidad en un problema de presupuesto y de selección.
+
+\begin{importantbox}{Conclusión central desde la perspectiva del cómputo}
+El valor de los token intermedios consiste, ante todo, en \textbf{aumentar la profundidad de cómputo secuencial disponible durante la inferencia}. Esto explica por qué un modelo con los mismos parámetros puede resolver, cuando se le permite desplegar pasos, problemas en los que falla al responder directamente; también explica por qué test-time compute debe precisar «qué se está ampliando exactamente: la longitud, el número de muestras, la amplitud de búsqueda o las llamadas a herramientas».
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Esta sección fija reasoning como token intermedios y explica su función mediante la descomposición probabilística, las tareas sintéticas y la profundidad de cómputo. La definición evita deliberadamente las analogías con la mente humana: lo que realmente queda por resolver es cómo encontrar buenas trayectorias, cómo entrenar su distribución, cómo agregar varias trayectorias y cómo demostrar que la respuesta final es confiable.
+\section{¿Los modelos preentrenados ya saben razonar?: de la greedy decoding a la CoT decoding}
+
+Si las trayectorias intermedias son útiles, el siguiente paso no es hacer fine-tuning de inmediato, sino revisar primero si esas trayectorias ya existen en la distribución preentrenada. La clase plantea una hipótesis contraintuitiva: tal vez el modelo no sea «del todo incapaz», sino que la greedy decoding eligió demasiado pronto una rama corta, de alta probabilidad local, pero errónea. Así, el objeto de estudio pasa de la capacidad de los parámetros a la estrategia de decodificación.
+
+\subsection{«No sabe» puede significar solo que el primer candidato es incorrecto}
+
+Las diapositivas presentan primero una creencia común en ese momento: un LLM preentrenado necesita ingeniería de prompts o fine-tuning para producir razonamiento. La página siguiente la refuta directamente y subraya que «all we need is decoding». Al leer estas dos páginas hay que conservar los matices: esto no significa que cualquier modelo preentrenado pueda resolver cualquier tarea, sino que \textbf{no basta con que falle la salida voraz top-1 para afirmar que en su distribución no existe una trayectoria correcta}.
+
+\lecturefigure{slide-06.jpg}{Creencia común: sin prompting ni fine-tuning, un modelo preentrenado no puede razonar}{6}
+
+\lecturefigure{slide-07.jpg}{Contrapropuesta de la clase: la distribución preentrenada puede contener ya trayectorias de razonamiento}{7}
+
+\teachervoice{00:06:20--00:08:30, el docente desplaza el énfasis de «volver a entrenar el modelo» a «revisar primero la distribución de generación». Las diapositivas advierten: latent capability y top-1 behavior no son el mismo concepto; una salida fallida puede deberse a la búsqueda y al ordenamiento, o a que en la distribución no existe en absoluto una solución correcta, y ambos casos deben distinguirse mediante el análisis de candidatos.}
+
+\subsection{El problema de las manzanas: generación de candidatos, ordenamiento erróneo y confianza en la respuesta}
+
+Las tres páginas siguientes descomponen un fallo en dos etapas: «si el candidato existe» y «si el ordenamiento es correcto». En el problema de las manzanas, la salida greedy es 5, pero en el conjunto de candidatos ya aparece la trayectoria correcta «el papá tiene 5, en total $3+5=8$». La página 8 demuestra primero que revisar más candidatos permite encontrar la solución correcta; la página 9 descarta después un atajo tentador, elegir la respuesta según la longitud de la respuesta generada, porque un texto largo también puede equivocarse con seguridad; la página 10 propone finalmente ordenar según \textbf{la confianza del modelo en la parte de la respuesta final}. Al leer las figuras hay que seguir cómo un mismo grupo de candidatos se reordena en las tres páginas con distintas reglas de selección, en lugar de tomar las tres páginas como capturas repetidas.
+
+\lecturefigure{slide-08.jpg}{Cuando greedy falla, el conjunto de candidatos aún puede contener un razonamiento correcto}{8}
+
+\lecturefigure{slide-09.jpg}{La longitud no es un indicador confiable de la calidad del razonamiento}{9}
+
+\lecturefigure{slide-10.jpg}{Seleccionar candidatos según la confianza en la respuesta final, no según la longitud de la trayectoria}{10}
+
+Para un candidato $y^{(k)}=(r^{(k)},a^{(k)})$, puede definirse la log-probabilidad promedio del intervalo de la respuesta:
+\[
+s_k=\frac{1}{|a^{(k)}|}\sum_{j=1}^{|a^{(k)}|}
+\log p_\theta\!\left(a^{(k)}_j\mid x,r^{(k)},a^{(k)}_{<j}\right),
+\qquad k^*=\arg\max_k s_k.
+\]
+Aquí $s_k$ es la confianza normalizada de la respuesta del candidato $k$, $|a^{(k)}|$ es el número de tokens de la respuesta y $k^*$ es la selección final. Considerar solo el último token es adecuado para respuestas tipo etiqueta; para números de varios tokens, programas o texto libre deben usarse límites explícitos de la respuesta y normalización por longitud; de lo contrario, las respuestas cortas obtienen una ventaja injusta.
+
+\begin{warningbox}{La confianza no es prueba de corrección}
+Las probabilidades del modelo provienen de su propia distribución y pueden tener un exceso de confianza sistemático; la extracción de la respuesta también puede cortar mal las unidades, los signos o el cuerpo de un programa. La confianza sirve como señal para ordenar candidatos, pero no debe cargar por sí sola con la detección de hallucination, los umbrales de puesta en producción ni las garantías de seguridad.
+\end{warningbox}
+
+\subsection{El algoritmo de dos pasos de la Chain-of-Thought Decoding}
+
+La estructura de la CoT decoding es sencilla: primero, ir más allá de greedy y explorar varios candidatos generados; después, elegir según la confianza en la respuesta final. Es distinta del CoT prompting: la primera modifica \textbf{la decodificación y el ordenamiento}; el segundo modifica \textbf{el prompt de entrada}. Un mismo modelo puede aplicar CoT decoding sin ejemplos, o seguir usando greedy con un CoT prompt; los dos ejes deben mantenerse separados.
+
+\lecturefigure{slide-11.jpg}{Chain-of-Thought Decoding: ampliar los candidatos y luego ordenarlos según la confianza en la respuesta}{11}
+
+\begin{lstlisting}[language=Python,caption={Pseudocódigo mínimo para reordenar candidatos CoT según la confianza en la respuesta}]
+def cot_decode(model, prompt, samples, answer_parser):
+    candidates = model.sample(prompt, n=samples)
+    ranked = []
+    for response in candidates:
+        answer_span = answer_parser(response.text)
+        if answer_span is None:
+            continue
+        score = mean(response.logprobs[answer_span])
+        ranked.append((score, response.text))
+    if not ranked:
+        raise ValueError("no parseable answer")
+    return max(ranked)[1]
+\end{lstlisting}
+
+\begin{knowledgebox}{Lista de verificación de ingeniería: qué requiere ordenar candidatos}
+Deben registrarse la temperatura de muestreo y el top-$p$, el número de candidatos, la versión del analizador de respuestas, la log-prob del intervalo de la respuesta, la proporción de candidatos repetidos y la tasa de análisis inválidos. De lo contrario, la «mejora por decodificación» podría deberse solo a gastar más tokens, a un cambio de formato o a una filtración accidental de los límites de la respuesta, y el experimento no podría reproducirse.
+\end{knowledgebox}
+
+\teachervoice{00:10:24--00:12:10, el docente enfatiza que la puntuación considera la probabilidad condicional de la final answer, y no se obtiene multiplicando las probabilidades de toda la trayectoria larga para compararlas directamente. Nota de clase: cuanto más larga es la trayectoria, menor es por naturaleza su probabilidad conjunta; si no se delimitan la respuesta ni se normaliza, el sesgo de longitud se confunde con calidad.}
+
+\subsection{Resumen de la sección}
+
+Esta sección descompone la afirmación «los modelos preentrenados no saben razonar» en dos proposiciones verificables: si la trayectoria correcta existe en la distribución de candidatos y si el decodificador puede colocarla en el primer lugar. La CoT decoding resuelve el segundo problema, pero depende del análisis de la respuesta y de la calibración de las probabilidades; si en la distribución falta por completo la trayectoria correcta, es necesario recurrir al prompting o al entrenamiento.
+\section{De Prompting a SFT: cómo hacer que las buenas trayectorias queden naturalmente al frente}
+
+CoT decoding admite que la trayectoria correcta puede estar oculta en lo profundo de la distribución y luego la encuentra con candidatos adicionales. Un objetivo más directo es cambiar la distribución misma: lograr que las respuestas con pasos, capaces de conducir a la respuesta correcta, tengan mayor probabilidad desde la primera generación. Tanto Prompting como supervised finetuning (SFT) reordenan la distribución, pero el primero modifica temporalmente la distribución condicional mediante el contexto, mientras que el segundo forma una preferencia duradera mediante la actualización de parámetros.
+
+\lecturefigure{slide-12.jpg}{La siguiente pregunta: ¿puede una thoughtful response convertirse naturalmente en top-1?}{12}
+
+\subsection{Qué cambian Few-shot CoT y el zero-shot trigger}
+
+Few-shot CoT coloca en el prompt problemas similares con sus soluciones paso a paso, y el modelo imita a partir de ellos el formato de salida y la estrategia de resolución; «Let's think step by step», en cambio, usa una frase disparadora genérica para inducir un proceso intermedio más largo. Ninguno de los dos modifica los parámetros; su ventaja es que se despliegan rápido y pueden ajustarse a cada tarea, y sus desventajas son el espacio que ocupan en el contexto, la sensibilidad a la elección de ejemplos y que el desempeño suele verse afectado por la redacción y el orden.
+
+\lecturefigure{slide-13.jpg}{Few-shot Chain-of-Thought y zero-shot «Let's think step by step»}{13}
+
+\lecturefigure{slide-14.jpg}{Ventajas y limitaciones de Prompting: simple y eficaz, pero depende de los ejemplos}{14}
+
+\lecturefigure{slide-15.jpg}{Crítica en clase: pedir que primero se vean ejemplos o repetir «piensa paso a paso» es una interfaz poco natural}{15}
+
+Al leer estas tres páginas conviene distinguir entre la \textbf{información de la tarea} y las \textbf{señales de control del razonamiento}. Los ejemplos le indican al modelo el formato de salida, pero también pueden filtrar vocabulario del dominio, la dificultad y la distribución de respuestas; la frase disparadora genérica reduce la ingeniería por tarea, aunque por lo general rinde menos que un few-shot de alta calidad. Si solo se informa que «el prompt A es mejor que el prompt B», sin reportar los ejemplos, el orden, el presupuesto de tokens y la configuración de decodificación, no es posible determinar si la mejora proviene de una transferencia real de estrategia o de condiciones de contexto más favorables.
+
+\teachervoice{00:12:40--00:16:20, el docente dice que few-shot CoT es muy eficaz, pero que si quien pregunta ya cuenta con problemas similares y sus soluciones completas, ¿para qué preguntarle al modelo?; y añadir cada vez «piensa paso a paso» tampoco parece una capacidad natural. El docente enfatiza: un prompt exitoso es una interfaz útil, pero eso no significa que el problema de entrenamiento esté resuelto.}
+
+\begin{knowledgebox}{Términos clave: Prompting, In-Context Learning y Finetuning}
+\textbf{Prompting} consiste en agregar instrucciones, ejemplos o estructura a la entrada; \textbf{in-context learning} es la adaptación del modelo a una tarea a partir del contexto sin actualizar parámetros; \textbf{finetuning}, en cambio, actualiza los parámetros mediante gradientes. El estado de los dos primeros suele desaparecer al terminar la solicitud, mientras que el último cambia la distribución base del modelo en solicitudes futuras.
+\end{knowledgebox}
+
+\subsection{SFT: convertir trayectorias humanas en un objetivo de máxima verosimilitud}
+
+SFT recopila problemas $x$ y soluciones humanas paso a paso $y^*=(r^*,a^*)$, y luego maximiza la verosimilitud de la secuencia de referencia. Para el conjunto de datos $\mathcal D$, la pérdida es
+\[
+\mathcal L_{\text{SFT}}(\theta)
+=-\mathbb E_{(x,y^*)\sim\mathcal D}
+\left[\sum_{t=1}^{|y^*|}\log p_\theta(y_t^*\mid x,y_{<t}^*)\right].
+\]
+Aquí $\theta$ son los parámetros por actualizar y $|y^*|$ es la longitud de la respuesta de referencia. Con teacher forcing, durante el entrenamiento siempre se le da al modelo el prefijo correcto $y_{<t}^*$; en el despliegue, el modelo debe consumir el prefijo que él mismo generó, de modo que una desviación en un solo paso puede llevar los estados posteriores fuera de la distribución de entrenamiento.
+
+\lecturefigure{slide-16.jpg}{Supervised Finetuning: recopilar pasos humanos y maximizar su verosimilitud}{16}
+
+\lecturefigure{slide-17.jpg}{La brecha entre entrenamiento y prueba en SFT: de tareas anotadas a problemas nuevos}{17}
+
+La figura 17 entrena con problemas de última letra y de manzanas, y luego prueba con «¿cuántas r tiene strawberry?». Aunque todas las tareas puedan escribirse como pasos en lenguaje natural, la coincidencia del formato superficial no garantiza la transferencia del algoritmo. El modelo puede aprender a «repetir las formas de las palabras y las estructuras de las oraciones de los ejemplos de entrenamiento» sin aprender a contar carácter por carácter en una cadena arbitraria; por eso se necesitan particiones out-of-distribution según la longitud de la combinación, la forma de las palabras, el dominio y la dificultad, en lugar de dividir al azar muestras parecidas.
+
+\begin{warningbox}{El supuesto oculto de teacher forcing}
+SFT supone que la trayectoria de referencia es correcta y, además, es un camino que el modelo genera con facilidad; también supone que la next-token imitation local produce un comportamiento globalmente correcto. Si el estilo de los pasos de referencia difiere demasiado de la distribución del modelo, este puede seguir sin entrar de manera estable en esa trayectoria aunque la pérdida de entrenamiento disminuya.
+\end{warningbox}
+
+\subsection{Por qué «recolectar más datos y ampliar la escala» no necesariamente resuelve la generalización}
+
+La ventaja de SFT es su generalidad: una vez construido un formato unificado de entrada y respuesta, el mismo flujo de entrenamiento puede abarcar tareas de matemáticas, código y explicación. Su desventaja es que la generalización a combinaciones nuevas y a dificultades nuevas es inestable, y ampliar las trayectorias humanas del mismo tipo suele producir rendimientos decrecientes. El «Don't scale blindly» de la diapositiva no se opone a scale; exige confirmar primero que el objetivo de aprendizaje y el proceso de generación de datos estén alineados con el objetivo de despliegue.
+
+\lecturefigure{slide-18.jpg}{SFT: general pero con generalización limitada; ampliar a ciegas el mismo paradigma no necesariamente funciona}{18}
+
+\teachervoice{00:16:20--00:19:55, el docente recuerda que en 2021 su equipo descubrió que SFT generalizaba mal en razonamiento, y da una de las advertencias prácticas más fuertes de esta clase: si el paradigm en sí está equivocado, seguir ampliando datos del mismo tipo y la escala del entrenamiento no lo corregirá por sí solo.}
+
+Tres tipos de prueba permiten distinguir entre «no aprendió lo suficiente» y «el objetivo está desalineado»:
+\begin{enumerate}
+  \item \textbf{Ampliación dentro de la misma distribución}: si agregar muestras parecidas a las de entrenamiento sigue produciendo mejoras estables;
+  \item \textbf{Extrapolación combinatoria}: si el modelo colapsa cuando aumentan la longitud, el rango numérico o la combinación de operaciones;
+  \item \textbf{Sustitución de trayectorias}: si soluciones distintas pero igualmente correctas se penalizan por error.
+\end{enumerate}
+Si el modelo solo mejora en el primer tipo, se comporta más bien como un interpolador; si en el tercer tipo trata trayectorias alternativas válidas como errores, el propio objetivo de máxima verosimilitud está comprimiendo el espacio de soluciones.
+
+\subsection{Resumen de la sección}
+
+Prompting induce trayectorias de forma temporal mediante el contexto, y SFT reordena la distribución de forma permanente mediante referencias humanas. Ambos pueden hacer que el reasoning aparezca con más frecuencia, pero los dos dependen de que una persona especifique «cómo debe verse». Cuando el problema de despliegue admite varios caminos válidos, su dificultad rebasa la distribución anotada o la trayectoria correcta es difícil de escribir a mano, el siguiente paso debe ser optimizar directamente la calidad del resultado, en lugar de seguir imitando un único camino.
+\section{RL Finetuning: de imitar trayectorias humanas a optimizar la calidad de la generación}
+
+La clase ubica la falla principal de SFT en «from humans»: las soluciones humanas son costosas, tienen cobertura limitada y no necesariamente se encuentran en la región que el modelo genera con facilidad. La alternativa es que el modelo proponga sus propios candidatos, filtrarlos con un resultado final verificable y devolverle las trayectorias exitosas. Este ciclo une rejection sampling, self-training y, de forma más general, reinforcement learning finetuning.
+
+\subsection{Primer paso: cambiar la fuente de datos por la distribución del propio modelo}
+
+La slide 19 conserva primero el proceso de dos pasos de SFT y luego tacha «human-annotated»; las slides 20--21 muestran dos mejoras sucesivas: primero se maximizan las trayectorias correctas generadas por el modelo y después se reduce, al mismo tiempo, la probabilidad de las trayectorias incorrectas. Lo central no es que «los datos sintéticos siempre superan a los datos humanos», sino que los ejemplos de entrenamiento provienen de la política actual $\pi_\theta$ y, por lo tanto, se acercan más a los estados que el modelo realmente alcanza.
+
+\lecturefigure{slide-19.jpg}{Corregir la falla de generalización de SFT: cuestionar primero las trayectorias humanas como fuente de datos}{19}
+
+\lecturefigure{slide-20.jpg}{Ciclo de ejemplos positivos de RL finetuning: el modelo genera, se verifica y se vuelve a entrenar}{20}
+
+\lecturefigure{slide-21.jpg}{Distinguir además entre trayectorias correctas e incorrectas para reforzar la preferencia relativa}{21}
+
+Supongamos que el modelo genera $K$ trayectorias $y^{(k)}$ para el problema $x$ y que el verifier devuelve $v(x,y^{(k)})\in\{0,1\}$. La actualización más simple por rejection sampling conserva solo los ejemplos con $v=1$:
+\[
+\mathcal D_{\text{RS}}=\{(x,y^{(k)}):v(x,y^{(k)})=1\},
+\qquad
+\mathcal L_{\text{RS}}=-\mathbb E_{(x,y)\sim\mathcal D_{\text{RS}}}\log p_\theta(y\mid x).
+\]
+Aquí $K$ determina la amplitud de la exploración y $v$ determina qué trayectorias entran al conjunto de entrenamiento. Tras varias rondas, la distribución del modelo se desplaza hacia las regiones donde antes generó trayectorias exitosas; pero si el verifier se equivoca, las trayectorias incorrectas también se amplifican una y otra vez.
+
+\begin{lstlisting}[language=Python,caption={Generación de datos por rejection sampling con análisis de la respuesta y verifier}]
+def build_round(policy, problems, verifier, parse_answer, n=16):
+    accepted, rejected = [], []
+    for problem in problems:
+        for sample in policy.sample(problem, n=n):
+            answer = parse_answer(sample.text)
+            if answer is None:
+                rejected.append((problem, sample.text, "parse_error"))
+            elif verifier(problem, answer):
+                accepted.append((problem, sample.text))
+            else:
+                rejected.append((problem, sample.text, "wrong_answer"))
+    return accepted, rejected
+\end{lstlisting}
+
+\teachervoice{00:20:00--00:24:50, el docente recuerda que también le sorprendió la primera vez que oyó que «las respuestas generadas por una máquina pueden ser más adecuadas para entrenar que los datos humanos». Experiencia práctica: la ventaja no proviene de que «la máquina sea más inteligente», sino de que los ejemplos están alineados con la distribución del modelo actual y de que es posible volver a muestrear después de cada mejora, lo que forma un ciclo iterativo cerrado.}
+
+\subsection{Optimizar directamente lo que realmente queremos}
+
+Las slides 22--24 condensan algoritmos complejos en una sola frase: primero se define la generation quality y luego se aplica gradient ascent. Para una política $\pi_\theta(y\mid x)$ y una recompensa $R(x,y)$, el objetivo puede escribirse como
+\[
+J(\theta)=\mathbb E_{x\sim\mathcal X,\,y\sim\pi_\theta(\cdot\mid x)}[R(x,y)],
+\qquad
+\nabla_\theta J
+=\mathbb E[R(x,y)\nabla_\theta\log\pi_\theta(y\mid x)].
+\]
+Aquí $R$ puede ser la corrección de una respuesta matemática, la tasa de pruebas de código aprobadas, la calidad de una traducción o una puntuación de preferencia aprendida. La fórmula subraya que la recompensa determina la dirección de la optimización; policy gradient, las actualizaciones group-relative o el SFT con filtrado son solo métodos distintos para estimar e implementar esa dirección.
+
+\lecturefigure{slide-22.jpg}{Por qué usar trayectorias generadas por el modelo: optimizar directamente la conducta objetivo}{22}
+
+\lecturefigure{slide-23.jpg}{Primero se define la generation quality; el resto del trabajo consiste en calcular el gradiente}{23}
+
+\lecturefigure{slide-24.jpg}{Abstracción de RL finetuning: ascenso por gradiente sobre la calidad esperada}{24}
+
+\begin{importantbox}{La función objetivo va antes que el nombre del algoritmo}
+Decir «usamos RL» no indica, por sí mismo, qué optimiza el sistema. Primero hay que especificar la reward, el análisis de la respuesta, la distribución de muestreo, el costo por longitud, el tratamiento de las salidas inválidas y las restricciones de KL o de estabilidad; solo después se discute PPO, GRPO, REINFORCE o rejection sampling. Cuanto mejor se optimiza un objetivo equivocado, más peligroso se vuelve el sistema.
+\end{importantbox}
+
+En el ejemplo de calidad, el material de la clase menciona una métrica de traducción automática, que normalmente debe escribirse BLEU. Las métricas son solo aproximaciones: el exact match en matemáticas puede ignorar expresiones equivalentes, las pruebas unitarias de código pueden pasar por alto casos límite ocultos y BLEU puede favorecer la coincidencia superficial de n-gramas. La brecha entre el objetivo real y la reward calculable es la puerta de entrada al reward hacking.
+
+\subsection{El verifier es el cuello de botella actual de la escalabilidad automática}
+
+La slide 25 cita «Verification, the key to AI» y ofrece un juicio explícito: un verifier confiable suele importar más que el algoritmo de RL específico. Sea $z\in\{0,1\}$ la corrección real y $v$ la salida del verifier. Si la false-positive rate
+\[
+\alpha=P(v=1\mid z=0)
+\]
+no es suficientemente baja, cuanto mayor sea la escala de generación, más fácil será que el modelo encuentre trayectorias incorrectas que «engañan al verificador»; si la false-negative rate
+\[
+\beta=P(v=0\mid z=1)
+\]
+es demasiado alta, se descartan soluciones correctas y diversas, y la distribución de entrenamiento se vuelve cada vez más estrecha. Aquí $\alpha$ controla la contaminación por errores y $\beta$ controla la cobertura de lo correcto; ambas deben reportarse por dificultad de la tarea y por slice de riesgo.
+
+\lecturefigure{slide-25.jpg}{Un verifier confiable es la infraestructura central de RL reasoning}{25}
+
+\begin{warningbox}{«La respuesta final es correcta» no garantiza que la trayectoria lo sea}
+Un verifier de resultados puede aceptar trayectorias que acertaron por casualidad, que cometieron errores de unidades que luego se compensaron, que usaron información filtrada o que dependen de un estado de herramientas no reproducible. El entrenamiento de alto riesgo debe combinar un outcome verifier, process checks, detección de contaminación, un sandbox de ejecución y muestreo revisado por personas, en lugar de fijarse solo en la cadena final.
+\end{warningbox}
+
+\teachervoice{00:27:30--00:30:20, el docente enfatiza que, en las tareas que hoy pueden verificarse automáticamente, lo decisivo es el verifier, no la discusión sobre cuál actualización de RL es más elegante. Nota de clase: el límite superior de la escalabilidad lo determina «si es posible juzgar lo bueno y lo malo de forma barata y estable».}
+
+\subsection{Qué escala realmente el entrenamiento de razonamiento}
+
+La slide 26 vuelve a la teoría inicial: el razonamiento permite escalar la output length, mientras que la capacidad de responder directamente suele depender de la model depth. Al entrenar un reasoning model, la «scale» tiene al menos cuatro dimensiones: número de parámetros, número de problemas de entrenamiento, número de muestras por problema y longitud máxima de la trayectoria. Reportar solo los FLOPs totales oculta cómo se distribuyen estos presupuestos y tampoco permite explicar si la ganancia proviene de un modelo más fuerte, de más exploración o de un cómputo más largo.
+
+\lecturefigure{slide-26.jpg}{Scaling reasoning: distinguir entre longitud de salida y profundidad del modelo}{26}
+
+Si se muestrean $K$ trayectorias por problema con longitud promedio $T$, el costo de generación del entrenamiento es aproximadamente proporcional a $KT$; si la tasa de ejemplos aceptables es $q$, el costo esperado de obtener una trayectoria positiva es de alrededor de $KT/(Kq)=T/q$, pero aumentar $K$ eleva la probabilidad $1-(1-q)^K$ de «encontrar al menos una trayectoria correcta». Esto explica por qué las tareas con recompensa escasa consumen rápidamente el presupuesto de inferencia y muestra también que el verifier y la dificultad del currículo deben diseñarse en conjunto.
+
+\begin{knowledgebox}{Términos clave: SFT, Rejection Sampling, RL Finetuning}
+\textbf{SFT} imita secuencias de referencia dadas; \textbf{rejection sampling} muestrea del modelo actual y conserva solo las trayectorias que pasan la verificación; \textbf{RL finetuning}, de forma más general, optimiza directamente la recompensa esperada y puede aprovechar a la vez ejemplos positivos y negativos. Los tres pueden formar un pipeline continuo y no deben dividirse en bandos mutuamente excluyentes solo por el nombre de los artículos.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El giro central de RL finetuning es pasar de «reproducir una trayectoria escrita por una persona» a «aumentar, dentro de la distribución de candidatos del propio modelo, la probabilidad de las trayectorias exitosas según una calidad verificable». Esto proporciona una fuente cíclica de datos para escalar el razonamiento, pero también coloca en el centro del sistema los sesgos del verifier, el análisis de la respuesta, las fallas de la recompensa y el costo del muestreo.
+\section{Por qué las trayectorias de razonamiento parecen humanas: emergencia, búsqueda y la frontera de lo verificable}
+
+Con tokens intermedios y outcome-guided training, el modelo puede producir procesos de resolución largos y estructurados. En clase se le llamó la «beauty» del LLM reasoning: sin programar explícitamente un buscador exhaustivo, la token-to-token generation también puede mostrar descomposición, estimación, retroceso y verificación local. Este fenómeno merece estudiarse, pero la interpretación errónea más peligrosa es tomar la superficie lingüística como si fuera identidad cognitiva.
+
+\subsection{La estructura que emerge de la generación de tokens}
+
+La slide 27 contrasta los LLM modernos con la exhaustive search de la inteligencia artificial clásica. Una interpretación más precisa es esta: el modelo comprime una gran cantidad de patrones en sus parámetros y, al generar, avanza a lo largo de una trayectoria o de unas pocas; no necesariamente enumera de forma explícita el árbol de estados completo. La ventaja es que la ruta de razonamiento es compacta y puede combinarse con el lenguaje natural y con interfaces de herramientas; el costo es una cobertura incompleta, y las ramas erróneas no necesariamente se detectan de forma sistemática.
+
+\lecturefigure{slide-27.jpg}{El atractivo del LLM reasoning: un proceso estructurado puede surgir de la generación de tokens}{27}
+
+\teachervoice{00:31:20--00:32:10, el docente usa como contraste la valoración de Kasparov sobre Deep Blue y enfatiza que las trayectorias que vemos ahora ya no son solo programas de búsqueda escritos a mano. Esta nota advierte: se trata de una descripción de la forma del comportamiento; no basta para demostrar que el modelo no realiza una búsqueda implícita, ni demuestra que la trayectoria sea fiel.}
+
+\begin{importantbox}{Cómo debe entenderse aquí la «emergencia»}
+La emergencia no es una etiqueta mágica; significa que el objetivo de entrenamiento no codificó paso por paso el guion «primero estimar la escala, luego buscar una descomposición y al final verificar», y aun así el modelo, con la escala, los datos y el entrenamiento posterior, presenta esa estructura reutilizable. La investigación debe seguir preguntando qué datos y recompensas la inducen, en qué distribuciones falla y si un verifier puede revisarla.
+\end{importantbox}
+
+\subsection{El problema aritmético de 2025: qué aporta una trayectoria larga}
+
+El problema pide usar cada número del 1 al 10 una sola vez, solo con sumas y multiplicaciones, para obtener 2025. Una construcción concisa es
+\[
+(10\times4+5)\times(9\times3+8+7+2+1)=45\times45=2025.
+\]
+El primer grupo forma 45 y el segundo también forma 45. La slide 28 contrasta la solución concisa de estilo humano con la trayectoria larga del thinking mode de Gemini 2.0 en diciembre de 2024: el modelo primero nota que 2025 es $45^2$, luego transforma el objetivo en construir dos 45 y, tras una exploración muy larga de candidatos, da la respuesta.
+
+\lecturefigure{slide-28.jpg}{El problema aritmético de 2025: una trayectoria de razonamiento larga que va de la estimación de magnitud a la construcción de dos 45}{28}
+
+Al leer la figura, primero se observa la \textbf{reformulación del problema} en la trayectoria de la derecha: un objetivo grande sugiere multiplicación y la estructura de cuadrado sugiere dos factores; después se revisa si el proceso de búsqueda mantiene la restricción «cada número se usa una sola vez»; solo al final se mira la respuesta. El valor de un CoT largo no está en el número de palabras, sino en hacer explícitas las restricciones, las heurísticas y los objetivos intermedios, de modo que un verifier pueda revisarlos paso a paso y que los tokens posteriores lean la estructura de $45$ ya descubierta.
+
+\begin{warningbox}{Tres tipos de alucinación en las trayectorias largas}
+Primero, adivinar la respuesta y después fabricar un proceso plausible; segundo, violar restricciones a mitad del camino mientras la expresión final resulta correcta por casualidad; tercero, exploración repetitiva, circular o inútil que consume una gran cantidad de tokens. La evaluación debe revisar a la vez la expresión final, el conjunto de números usados, las restricciones de operación y el costo de la trayectoria.
+\end{warningbox}
+
+\subsection{Aprender el proceso de descubrimiento, no solo cargar los resultados descubiertos}
+
+La cita de Rich Sutton enfatiza que se busca que el agent aprenda el discovery process, no que solo contenga las respuestas que los humanos ya descubrieron. Para un reasoning model, esto significa que los datos de entrenamiento no pueden consistir solo en versiones finales de alta calidad; también deben ofrecer una distribución de problemas que pueda explorarse, retroalimentación confiable y oportunidades para recuperarse de los fallos. De lo contrario, el modelo se parece más a un enorme recuperador de soluciones y, ante combinaciones nuevas, sigue careciendo de un mecanismo de descubrimiento.
+
+\lecturefigure{slide-29.jpg}{La perspectiva de la Bitter Lesson: el objetivo es aprender el proceso de descubrimiento}{29}
+
+\teachervoice{00:32:10--00:39:00, el docente usa la trayectoria aritmética larga para mostrar que el modelo forma heurísticas parecidas a las humanas, pero recuerda repetidamente que un LLM es un probabilistic model. Nota de clase: los pasos legibles son un activo de ingeniería que sirve para la verificación y el entrenamiento; «parecer humano» es solo una descripción y no debe tomarse como evidencia de corrección.}
+
+Aquí la búsqueda no desaparece, sino que se divide en tres niveles: la compresión de patrones en los parámetros, la exploración local en la secuencia de tokens y, de forma opcional, la symbolic search/tool use externa. En la Q\&A, el docente aclaró además que el modelo puede escribir Python o invocar un buscador; eso corresponde al uso de herramientas. Al estudiar la «reasoning ability básica» puede examinarse por separado la generación sin búsqueda externa, pero los sistemas de producto normalmente deben combinar ambas cosas, en lugar de plantear search y learning como una oposición ideológica.
+
+\subsection{Los límites de capacidad del RL reasoning: no todas las tareas tienen un verifier automático}
+
+La slide 30 presenta las ventajas y desventajas centrales del RL finetuning: generaliza bien en tareas cuyas respuestas pueden verificarse automáticamente, pero muchas tareas abiertas carecen de una función de evaluación única, barata y confiable. El exact match en matemáticas, las pruebas de código y el resultado de una partida de ajedrez pertenecen a zonas relativamente favorables; las recomendaciones de política pública, la investigación de textos largos, el diseño de productos y el juicio social suelen implicar múltiples objetivos, retroalimentación diferida y conflictos de valores.
+
+\lecturefigure{slide-30.jpg}{Los límites del RL finetuning: tareas verificables automáticamente frente a tareas abiertas}{30}
+
+Las tareas pueden clasificarse en cuatro tipos según las condiciones del verifier:
+\begin{center}
+\begin{tabularx}{0.96\textwidth}{p{0.19\textwidth}X X}
+\toprule
+Tipo & Retroalimentación típica & Riesgo principal \\
+\midrule
+Respuesta única & exact match, tolerancia numérica & errores de análisis sintáctico, filtración de la respuesta \\
+Resultado ejecutable & pruebas unitarias, recompensa del simulador & pruebas incompletas, reward hacking \\
+Preferencia por pares & elección de un judge humano o de un modelo & sesgo del judge, preferencia de estilo \\
+Objetivo abierto a largo plazo & resultados de negocio, impacto social & atribución diferida, conflicto entre objetivos, costos irreversibles \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\begin{knowledgebox}{Verifier frontier}
+La siguiente etapa del entrenamiento de razonamiento no consiste en trasladar mecánicamente las recetas de RL existentes a todos los dominios, sino en construir retroalimentación de proceso más confiable, entornos ejecutables, pruebas contrafactuales y criterios de aceptación con múltiples métricas. Sin esta infraestructura, la «recompensa» en tareas abiertas puede fácilmente medir solo el formato, la complacencia o indicadores sustitutos de corto plazo.
+\end{knowledgebox}
+
+\subsection{Por qué el siguiente paso es la agregación y la recuperación}
+
+Aunque una sola reasoning path ya sea muy capaz, la generación sigue siendo un proceso aleatorio: una misma pregunta puede producir distintos pasos intermedios y respuestas. La slide 31 anticipa dos direcciones complementarias: la aggregation usa varios candidatos para estimar la probabilidad de la respuesta, y la retrieval complementa con conocimiento pertinente procedente del exterior o del contexto. La slide 32 recuerda de nuevo que un LLM es un next-token probability model, no un ser humano; el flujo natural de «generar primero la trayectoria y luego dar la respuesta» puede seguir desalineado respecto del objetivo probabilístico.
+
+\lecturefigure{slide-31.jpg}{Dos vías para mejorar aún más: Aggregation y Retrieval}{31}
+
+\lecturefigure{slide-32.jpg}{Incluso con reasoning, la next-token decoding puede no coincidir con el objetivo de la respuesta final}{32}
+
+\teachervoice{00:39:00--00:40:17, el docente pasa de las limitaciones del verifier en RL a las mejoras en inference-time: cuando una sola trayectoria es inestable, no hay que suponer que basta con una generación; conviene aprovechar la estructura estadística de varias muestras o recuperar primero el conocimiento pertinente y después resolver el problema.}
+
+\subsection{Resumen de la sección}
+
+Una reasoning trace larga puede contener objetivos intermedios, restricciones y verificación local, pero su corrección no puede demostrarse por el hecho de que «parezca humana». El RL tiene ventaja en tareas verificables automáticamente; el cuello de botella para extenderlo es el verifier de los objetivos abiertos. Lo que sigue es resolver la discrepancia entre una sola trayectoria aleatoria y la probabilidad de la respuesta final.
+\section{De la probabilidad de la trayectoria a la probabilidad de la respuesta: Self-Consistency y agregación de texto libre}
+
+Lo que el modelo de lenguaje optimiza de forma nativa es la next-token probability de cada paso. Sin embargo, lo que realmente le importa al usuario suele ser la probabilidad de la respuesta final $a$, y una misma respuesta puede derivarse de muchos reasoning path $r$ distintos. Si solo se elige la respuesta completa con la mayor probabilidad conjunta, se confunde la «trayectoria más probable» con la «respuesta más probable». El punto de partida teórico de Self-consistency es aplicar marginalization sobre las trayectorias latentes.
+
+\subsection{La trayectoria más probable no es la respuesta más probable}
+
+En esta sección se traduce primero a expresiones de probabilidad la intuición gráfica de las slides 33--34. Al leer la figura hay que distinguir la probabilidad conjunta de una respuesta completa de la probabilidad total que resulta cuando varias trayectorias convergen en la misma respuesta; la primera corresponde a «qué trayectoria es la más común», y solo la segunda corresponde a «qué respuesta concentra la mayor masa de probabilidad».
+
+Para una entrada $x$, la probabilidad de la respuesta debe ser
+\[
+p_\theta(a\mid x)=\sum_{r}p_\theta(r,a\mid x)
+=\sum_r p_\theta(r\mid x)p_\theta(a\mid x,r).
+\]
+donde $r$ es el reasoning path latente. Greedy o beam search se acercan más a buscar
+\[
+(r^*,a^*)=\arg\max_{r,a}p_\theta(r,a\mid x),
+\]
+mientras que lo que quiere el usuario es
+\[
+a^*=\arg\max_a\sum_r p_\theta(r,a\mid x).
+\]
+Si la respuesta A tiene diez trayectorias de probabilidad media y la respuesta B solo una trayectoria de probabilidad máxima, la decodificación de una sola trayectoria puede elegir B, aunque la masa de probabilidad total esté concentrada en A.
+
+\lecturefigure{slide-33.jpg}{Desajuste en la decodificación: la trayectoria con máxima probabilidad conjunta no coincide con la respuesta de máxima probabilidad marginal}{33}
+
+\lecturefigure{slide-34.jpg}{Idea de corrección: aplicar marginalization sobre los reasoning path latentes}{34}
+
+\begin{importantbox}{El significado probabilístico de Self-consistency}
+No es una simple «votación por mayoría», sino una aproximación de la probabilidad marginal de la respuesta mediante muestras aleatorias. Cada reasoning path es una variable latente y, al final, solo se agrega por la respuesta normalizada; cuando trayectorias distintas llegan a la misma respuesta, sus masas de probabilidad deben sumarse.
+\end{importantbox}
+
+\teachervoice{00:40:17--00:43:00, el docente describe esto como un desajuste que «se entiende con la probabilidad condicional de preparatoria»: el modelo genera según la probabilidad de la secuencia completa, mientras que la tarea busca el resultado cuya respuesta final tenga la mayor probabilidad. Nota de clase: muchas mejoras en el razonamiento provienen de plantear correctamente el objetivo de optimización, no de introducir arquitecturas complejas.}
+
+\subsection{Self-Consistency: estimar la masa de la respuesta con Monte Carlo}
+
+Tras muestrear $K$ trayectorias $(r^{(k)},a^{(k)})$, el estimador para el escenario exact-answer es
+\[
+\widehat p_K(a\mid x)=\frac{1}{K}\sum_{k=1}^{K}\mathbf 1[a^{(k)}=a],
+\qquad
+\hat a=\arg\max_a\widehat p_K(a\mid x).
+\]
+donde $K$ es el número de muestras, $\mathbf 1[\cdot]$ es la función indicadora y $\widehat p_K$ es la frecuencia con que aparece la respuesta. Conforme aumenta $K$, la varianza de Monte Carlo disminuye, pero el costo crece linealmente; si las muestras están muy correlacionadas o comparten el mismo error, aumentar $K$ tampoco produce evidencia independiente.
+
+\lecturefigure{slide-35.jpg}{Self-Consistency: generar aleatoriamente varias respuestas y elegir la respuesta más común}{35}
+
+\lecturefigure{slide-36.jpg}{Problema de los huevos de pato: agregar la respuesta final, no buscar la trayectoria textual más común}{36}
+
+En el problema de los huevos de pato, de las tres respuestas, dos llegan a 18 y una a 26; la unidad correcta de agregación es la respuesta normalizada 18. Las dos trayectorias correctas tienen textos distintos, pero expresan el mismo cálculo. Si se vota por la cadena completa, no se fusionan; si se normaliza en exceso, se pueden fusionar erróneamente $18$, $18\%$ y $18$ dólares. Por eso, el parser de respuestas forma parte de self-consistency y no es un posprocesamiento ajeno.
+
+\begin{lstlisting}[language=Python,caption={Agregación de self-consistency exact-answer}]
+from collections import Counter
+
+def self_consistency(model, prompt, parse_answer, n=32):
+    counts = Counter()
+    traces = []
+    for sample in model.sample(prompt, n=n, temperature=0.8):
+        answer = parse_answer(sample.text)
+        if answer is not None:
+            counts[answer] += 1
+            traces.append((answer, sample.text))
+    if not counts:
+        raise ValueError("all samples failed answer parsing")
+    answer, votes = counts.most_common(1)[0]
+    return answer, votes / sum(counts.values()), traces
+\end{lstlisting}
+
+\subsection{Cómo leer los resultados de GSM8K y de modelos posteriores}
+
+La slide 37 resume los primeros resultados en GSM8K; lo importante visualmente no es memorizar cada decimal, sino observar que el mismo modelo mejora al agregar CoT y vuelve a dar un salto al añadir self-consistency. La slide 38 cita resultados de aggregation en reasoning model posteriores, lo que muestra que «formar consensus con múltiples muestras» no pierde eficacia porque un modelo individual se vuelva más capaz. Ambas slides abarcan distintos modelos, años y configuraciones, por lo que no deben tomarse directamente como un leaderboard unificado; lo que respaldan es una conclusión sobre el mecanismo: la agregación a nivel de respuesta sigue aprovechando la diversidad de los candidatos.
+
+\lecturefigure{slide-37.jpg}{GSM8K: mejoras por etapas aportadas por CoT y self-consistency}{37}
+
+\lecturefigure{slide-38.jpg}{En reasoning model posteriores, la aggregation sigue aportando beneficios}{38}
+
+\begin{warningbox}{Inference-time scaling debe especificar «qué se amplió»}
+El muestreo múltiple amplía la anchura, el CoT largo amplía la profundidad, tree search amplía la estructura y tool use amplía las capacidades externas. Su latencia, paralelismo, memoria y patrones de error son completamente distintos; escribir solo «se aumentó el test-time compute» no permite reproducir el experimento ni comparar costos.
+\end{warningbox}
+
+\teachervoice{00:44:10--00:47:20, el docente enfatiza que la mejora de self-consistency es grande, pero de inmediato acepta la pregunta de un estudiante sobre el costo: más muestras implican más token. Experiencia práctica: al reportar una mejora, deben indicarse al mismo tiempo el número de muestras, el total de token, la latencia de reloj y las condiciones de concurrencia.}
+
+\subsection{La consistencia puede servir como confianza, pero no se convierte automáticamente en garantía}
+
+La slide 39 muestra que, en esa configuración de GSM8K, cuanto mayor es la consistencia, mayor es en general la exactitud. Puede definirse la consistency
+\[
+c(x)=\max_a\widehat p_K(a\mid x).
+\]
+Un $c(x)$ cercano a 1 indica que la mayoría de las muestras convergen en la misma respuesta; pero solo mide el \textbf{consenso interno}. Si el modelo tiene un sesgo estable hacia el mismo error, $c(x)$ seguirá siendo alto. Antes del despliegue, conviene trazar un reliability diagram en el conjunto de validación y comparar los intervalos de confianza predicha con la tasa real de aciertos, en lugar de tomar la gráfica de correlación vista en clase como prueba de calibración.
+
+\lecturefigure{slide-39.jpg}{En la configuración de GSM8K, una mayor consistencia se correlaciona con una mayor exactitud}{39}
+
+\lecturefigure{slide-40.jpg}{Dos preguntas límite: si hay que muestrear las respuestas directas y si generar varias respuestas en una sola pasada es equivalente}{40}
+
+La primera pregunta distingue entre «no hay reasoning intermedio» y «la respuesta sigue teniendo varios token»: si la respuesta es una sola etiqueta discreta, pueden leerse directamente los logits para obtener la distribución completa, sin necesidad de aproximarla por muestreo; si la respuesta es una cadena larga, la probabilidad de la secuencia sigue requiriendo búsqueda o muestreo. La segunda pregunta distingue el \textbf{muestreo independiente} de «pedir que una misma respuesta enumere varias respuestas»: en este último caso, los candidatos comparten contexto y se influyen entre sí, por lo que ya no son muestras de Monte Carlo independientes de la misma distribución, aunque en la práctica también puedan formar un ensemble.
+
+\begin{knowledgebox}{Consistencia, calibración y corrección}
+La \textbf{Consistency} es el consenso entre muestras; la \textbf{calibration} significa que, de las muestras a las que se atribuye un 80\% de confianza, aproximadamente el 80\% son correctas; la \textbf{accuracy} es la tasa final de aciertos. Las tres están relacionadas, pero no son equivalentes. Los errores con alto consenso, los aciertos con bajo consenso y la deriva de la distribución rompen cualquier correspondencia simple.
+\end{knowledgebox}
+
+\subsection{Cómo agregar texto libre: Universal Self-Consistency}
+
+Las preguntas abiertas no tienen una respuesta estandarizada que pueda contarse directamente. Universal Self-Consistency (USC) sustituye la «votación por cadenas idénticas» por «pedir a un modelo judge que compare varios candidatos y elija la respuesta más consistente, la que mejor representa el contenido común». En el ejemplo del consumo de café de la slide 42, cada respuesta enumera un conjunto distinto de países, por lo que no es posible un exact match; el judge debe identificar los hechos que se superponen, los conflictos y la cobertura.
+
+\lecturefigure{slide-41.jpg}{Universal Self-Consistency: pedir a un LLM que elija la respuesta de texto libre más consistente}{41}
+
+\lecturefigure{slide-42.jpg}{Ejemplo de texto libre: elegir la respuesta representativa a partir de la superposición semántica}{42}
+
+\begin{lstlisting}[language=Python,caption={Implementación estructurada de Universal Self-Consistency para texto libre}]
+def universal_self_consistency(generator, judge, prompt, n=12):
+    candidates = generator.sample(prompt, n=n)
+    packet = {
+        "question": prompt,
+        "candidates": [c.text for c in candidates],
+        "criteria": ["factual overlap", "contradictions", "coverage"],
+    }
+    decision = judge.generate_json(packet)
+    return candidates[decision["selected_index"]], decision
+\end{lstlisting}
+
+USC introduce nuevos puntos de falla: el judge puede preferir textos más largos, más seguros de sí mismos o de estilo parecido al suyo; si los candidatos copian en conjunto el mismo error, el consenso semántico tampoco sirve. Una implementación más robusta debe guardar las justificaciones del judge, aleatorizar el orden de los candidatos, usar un verifier independiente para comprobar los hechos y realizar ablaciones sobre el sesgo de origen común entre el modelo judge y el generator.
+
+\teachervoice{00:47:20--00:51:29, el docente considera la consistency una confidence signal natural, pero en la sesión de Q\&A posterior también admite que self-consistency no es perfecta. Recordatorio de las notas: es un estimador y una herramienta de ingeniería, no un teorema de que «la mayoría siempre tiene la razón».}
+
+\subsection{Resumen de la sección}
+
+Self-consistency corrige el desajuste entre la trayectoria más probable y la respuesta más probable: muestrea varios reasoning path y agrega la masa de probabilidad a nivel de respuesta. Puede elevar de forma notable la exactitud y aportar una señal de consenso, pero sus beneficios dependen de la diversidad de las muestras, del análisis de las respuestas, del presupuesto de costo y de la calibración; la versión de texto libre depende, además, de la fiabilidad del judge.
+\section{Retrieval + Reasoning: primero encontrar la estructura relevante y después desarrollar el cálculo}
+
+Algunas fallas no se deben a que el modelo no sepa razonar, sino a que a la entrada le faltan hechos, fórmulas, precedentes o abstracciones de nivel superior. Retrieval y reasoning resuelven etapas distintas: el primero cambia la información que el modelo puede ver; el segundo ejecuta la descomposición y el cálculo sobre la información dada. En clase se rechaza la disputa de «elegir uno de los dos» y se propone directamente retrieval + reasoning, porque el objetivo del producto es la exactitud global y no defender un bando metodológico.
+
+\subsection{Por qué la recuperación y el razonamiento no se sustituyen entre sí}
+
+La pregunta de la slide 43 ocupa una sola línea, pero resume la división del sistema en capas: el recuperador decide qué evidencia entra en el contexto y el razonador decide cómo combinar esa evidencia para llegar a una conclusión. Si la recuperación acierta pero el razonamiento falla, aparecen citas correctas con conclusiones erróneas; si el razonamiento es correcto pero falta la recuperación, se calcula con rigor sobre premisas equivocadas. Ambos deben evaluarse por separado en recall, provenance, entailment y éxito final de la tarea.
+
+\lecturefigure{slide-43.jpg}{¿Retrieval or reasoning? La respuesta de la clase es Retrieval + Reasoning}{43}
+
+Supongamos que el recuperador devuelve, a partir del corpus $\mathcal C$, $z\sim q_\phi(z\mid x)$, y que el generador produce después $y\sim p_\theta(y\mid x,z)$. La probabilidad ideal de la respuesta es
+\[
+p(y\mid x)=\sum_{z\in\mathcal C}q_\phi(z\mid x)p_\theta(y\mid x,z).
+\]
+Aquí $\phi$ son los parámetros de recuperación, $\theta$ los parámetros de generación y $z$ la evidencia. Los sistemas reales solo toman los documentos top-$k$ para aproximar la suma; por eso $k$, el reordenador, la compresión del contexto y la conservación de las citas modifican el resultado. La recuperación no termina con meter el texto de una página web en el prompt: es un componente probabilístico con tasa de recuperación, ruido y vigencia temporal.
+
+\begin{knowledgebox}{Primer uso: Retrieval-Augmented Reasoning}
+Consiste en obtener primero información relevante de documentos externos, memoria, herramientas o bancos de casos, y después hacer que el modelo genere los pasos intermedios y la respuesta con base en esa evidencia. Es indispensable conservar la fuente y la marca de tiempo, y distinguir entre «el modelo lo recuerda», «se recuperó» y «se dedujo de la evidencia»; de lo contrario, no es posible localizar los errores.
+\end{knowledgebox}
+
+\subsection{Analogical Reasoning: recuperar problemas relacionados, no la misma respuesta}
+
+La slide 44 presenta un cuadrado rotado cuyos cuatro vértices son $(-2,2)$, $(2,-2)$, $(-2,-6)$ y $(-6,-2)$. Si se pregunta directamente por el área, el modelo puede fallar; tras la indicación «recall a related problem», primero evoca la fórmula de la distancia entre dos puntos. La distancia entre vértices adyacentes es
+\[
+s=\sqrt{(2-(-2))^2+(-2-2)^2}=\sqrt{32},
+\qquad A=s^2=32.
+\]
+Aquí $s$ es la longitud del lado del cuadrado y $A$ su área. Lo que se recupera no es el mismo problema, sino una subestructura transferible, «la distancia entre dos puntos»; esto muestra que retrieval puede devolver primitivas algorítmicas, plantillas de demostración o casos de falla similares, y no solo párrafos con hechos.
+
+\lecturefigure{slide-44.jpg}{Analogical reasoning: primero se evoca un problema de distancia relacionado y después se calcula el área del cuadrado rotado}{44}
+
+\teachervoice{00:51:29--00:55:00, el docente dice que en la industria le importa más el desempeño y que no quiere discutir si es retrieval o reasoning. Nota de clase: un related problem no equivale a un duplicate problem; una recuperación útil suele aportar principios transferibles, no filtrar directamente la respuesta.}
+
+\begin{warningbox}{Transferencia negativa en la recuperación por analogía}
+Los casos parecidos en la superficie pueden tener restricciones, unidades o mecanismos causales distintos. El sistema debe hacer que el modelo escriba explícitamente «qué estructuras son iguales y qué condiciones difieren», y verificar las premisas antes de aplicar la analogía; de lo contrario, la recuperación por similitud introducirá en el razonamiento la plantilla equivocada que más se parece.
+\end{warningbox}
+
+\subsection{Step-Back: primero abstraer, luego volver a los detalles}
+
+El step-back prompting de la slide 45 no consiste simplemente en «pensar más tiempo», sino en elevar el problema original a un concepto o principio más general: en un problema de física se busca primero la ley de conservación; en preguntas con restricciones temporales se ordena primero la trayectoria completa y luego se vuelve al intervalo concreto. Esta operación reescribe la query de recuperación, de la redacción superficial a una pregunta estructural, y con frecuencia permite encontrar conocimiento más estable.
+
+\lecturefigure{slide-45.jpg}{Step-Back Prompting: evocar principios mediante la abstracción y después resolver el problema original}{45}
+
+El flujo puede escribirse en tres pasos:
+\begin{enumerate}
+  \item Generar la pregunta abstracta $x' = g(x)$, por ejemplo «¿qué relación de conservación sigue este tipo de sistema?»;
+  \item Recuperar o generar el principio $z=\operatorname{retrieve}(x')$;
+  \item Resolver bajo las restricciones originales $y=\operatorname{reason}(x,z)$.
+\end{enumerate}
+El criterio de aceptación decisivo es si $z$ realmente se aplica a $x$. Si la abstracción es demasiado amplia, la recuperación devuelve obviedades; si es demasiado estrecha, degenera en una reformulación del problema original. Conviene registrar la query abstracta, los aciertos de evidencia y las citas finales, para que el análisis de fallas sepa si el problema estuvo en el query rewrite, en retrieval o en reasoning.
+
+\subsection{Deep Research es un ciclo de varias rondas de recuperación y razonamiento}
+
+La slide 46 usa el acceso al producto Deep Research para mostrar cómo la misma idea se extiende a tareas largas: el sistema no recupera una sola vez, sino que formula subpreguntas, busca, lee, actualiza hipótesis, sigue recuperando y, al final, organiza un informe con fuentes. En la pantalla de la clase aparecen a la vez el título Gemini Deep Research y los accesos de producto de búsqueda/Deep research; el énfasis didáctico está en la categoría de producto, y la UI no debe tomarse como garantía de funciones en 2026.
+
+\lecturefigure{slide-46.jpg}{Deep Research: organizar la recuperación, la descomposición y la síntesis como una tarea de varias rondas}{46}
+
+\begin{lstlisting}[language=Python,caption={Ciclo de retrieval-reasoning con provenance y condición de paro}]
+def deep_research(question, search, reasoner, budget):
+    state = {"open": [question], "evidence": [], "claims": []}
+    while state["open"] and budget.remaining():
+        subquestion = state["open"].pop(0)
+        documents = search(subquestion, top_k=8)
+        update = reasoner.synthesize(subquestion, documents)
+        state["evidence"].extend(update.citations)
+        state["claims"].extend(update.claims)
+        state["open"].extend(update.followups)
+        budget.charge(documents, update)
+    return reasoner.final_report(state, require_citations=True)
+\end{lstlisting}
+
+Este ciclo necesita una condición de paro y la eliminación de evidencia duplicada. Sin un límite de presupuesto, el sistema puede seguir planteando preguntas nuevas indefinidamente; sin provenance, el texto final no puede verificarse; sin alineación claim--evidence, las citas son solo decorativas. Para los hechos que cambian con el tiempo, también hay que guardar la fecha de obtención, porque el contenido de una misma URL puede cambiar.
+
+\teachervoice{00:55:00--00:56:31, el docente vincula analogical reasoning, step-back y deep research: primero encontrar el conocimiento relevante o una estructura de nivel superior, y después razonar. Las notas advierten que un deep research real también debe manejar la calidad de las fuentes, los conflictos, la vigencia y la terminación; no se vuelve confiable automáticamente por buscar unas cuantas veces más.}
+
+\subsection{Resumen de la sección}
+
+Retrieval aporta a reasoning hechos externos, casos y principios abstractos; reasoning convierte esa evidencia en respuestas. Analogical prompting, step-back y deep research pueden verse como un espectro continuo que va de una analogía única a una investigación de varias rondas. La calidad del sistema debe descomponerse en tasa de recuperación, confiabilidad de la evidencia, corrección del razonamiento y fidelidad de las citas.
+\section{Síntesis y ampliación: cuatro desigualdades y sus condiciones de aplicación}
+
+Al final, la conferencia condensa su línea principal en cuatro comparaciones concisas: reasoning es mejor que no reasoning, RL finetuning es mejor que SFT, agregar varias respuestas es mejor que una sola respuesta, y retrieval + reasoning es mejor que reasoning por sí solo. Deben leerse como \textbf{direcciones de diseño dentro de las tareas y los presupuestos que trató la conferencia}, no como teoremas matemáticos incondicionales. Cada «mejor» se obtiene a cambio de costo, infraestructura y nuevos modos de falla.
+
+\subsection{Cómo se traducen las cuatro conclusiones de la clase en la pila del sistema}
+
+La slide 47 es una página de resumen muy compacta; esta sección la despliega en una pila de sistema implementable. Al leer la figura, observe primero que los cuatro «signos de mayor que» modifican, respectivamente, la longitud del razonamiento, la distribución de los parámetros, la estadística del muestreo y la información externa; después revise qué costo y qué responsabilidad de verificación añade cada capa. Las cuatro intervenciones pueden combinarse en un mismo sistema; no se trata de elegir una de cuatro.
+
+\lecturefigure{slide-47.jpg}{Resumen de la clase: reasoning, RL finetuning, aggregation y retrieval}{47}
+
+\begin{center}
+\begin{tabularx}{0.97\textwidth}{p{0.18\textwidth}p{0.23\textwidth}X X}
+\toprule
+Capa de intervención & Qué cambia & Beneficio principal & Riesgo nuevo \\
+\midrule
+Reasoning tokens & Cómputo secuencial de una sola generación & Descomposición, estado temporal, pasos verificables & Latencia, redundancia, acumulación de errores \\
+RL finetuning & Distribución base de trayectorias y respuestas & Las rutas exitosas aparecen con más frecuencia & Sesgo del verifier, reward hacking \\
+Aggregation & Estimación de la respuesta tras varios muestreos & Reduce el azar de una sola ruta & Costo en tokens, errores correlacionados, análisis sintáctico \\
+Retrieval & Evidencia externa visible para el modelo & Conocimiento actualizado, casos, principios & Ruido, obsolescencia, riesgos de procedencia y de inyección \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\begin{importantbox}{Una sola expresión que resume todo el sistema}
+Un reasoning system práctico puede escribirse así: primero se recupera $z$, luego se muestrean de la política varias trayectorias $r^{(1:K)}$ y respuestas $a^{(1:K)}$, y se usan el verifier y la aggregation para elegir la salida final. La capacidad proviene de la combinación de componentes; la confiabilidad depende de que la interfaz más débil sea observable, verificable y reproducible.
+\end{importantbox}
+
+\subsection{El siguiente avance: más allá de la respuesta única verificable}
+
+La slide 48 dirige los problemas abiertos hacia dos frentes: resolver tareas que no tienen una respuesta única verificable, y construir aplicaciones reales en lugar de seguir saturando benchmarks. Lo primero exige pasar de la binary correctness a la evaluación multiobjetivo, la evidencia del proceso, la retroalimentación a largo plazo y la expresión de la incertidumbre; lo segundo exige registrar de extremo a extremo el valor para el usuario, la gravedad de las fallas, el costo, la latencia, los permisos y la capacidad de recuperación.
+
+\lecturefigure{slide-48.jpg}{La siguiente etapa: tareas sin respuesta única verificable y aplicaciones reales}{48}
+
+\teachervoice{00:56:31--00:57:30, el docente dice que los benchmarks se saturan muy rápido y que prefiere ver aplicaciones reales y tareas que vayan más allá de la respuesta única verificable. Nota de clase: esto no niega los benchmarks, sino que exige que funcionen como herramientas de diagnóstico y no como sustitutos del valor final del producto.}
+
+Las tareas abiertas pueden adoptar una aceptación en varias capas, en lugar de obligar a un solo reward a cargar con todo el valor:
+\begin{enumerate}
+  \item \textbf{Restricciones duras}: fuentes de los hechos, permisos, formato, seguridad y límites legales;
+  \item \textbf{Métricas de la tarea}: completitud, ejecutabilidad, objetivos del usuario y costo;
+  \item \textbf{Evidencia del proceso}: fuentes recuperadas, trace de herramientas, contraejemplos e incertidumbre;
+  \item \textbf{Resultados a largo plazo}: adopción real, tasa de corrección de errores, reversiones y externalidades negativas.
+\end{enumerate}
+
+\subsection{Q\&A: seis salvedades que no pueden quitarse de las conclusiones de la clase}
+
+Los nueve minutos de preguntas y respuestas posteriores a la conferencia añadieron las incertidumbres más importantes que faltaban en las slides. Primero, en la experiencia del ponente, el answer-token log-prob puede servir como señal de hallucination, pero no se presentó como un detector perfecto. Segundo, search puede usarse como herramienta que el modelo invoca; excluir el search externo al «estudiar reasoning» no significa que el producto no deba usar search. Tercero, todavía falta una explicación satisfactoria de cómo el entrenamiento remodela la distribución de la secuencia completa, y la intuición sobre el top-token no puede extenderse hasta convertirse en una teoría completa.
+
+\teachervoice{00:57:30--01:01:00, el docente responde sobre confidence y search: el log-prob es útil en la práctica, pero search es una herramienta integrable; a él le interesa lo que el modelo mismo puede aprender sin depender de una enumeración exhaustiva explícita. Advertencia de los apuntes: aislar variables en la investigación y buscar el mejor desempeño en un producto son dos objetivos distintos.}
+
+Cuarto, la frontera entre reasoning y answer requiere un parser; si la respuesta final es un programa, la extracción y la verificación se vuelven claramente más difíciles. Quinto, un candidato de baja confianza a veces puede ser correcto, y self-consistency también puede fallar. Sexto, ante la pregunta «AGI en dos a cinco años: ¿qué deberían aprender los niños?», el docente se negó a aceptar la premisa del calendario y subrayó que los métodos actuales aún tienen muchas limitaciones y que lo que realmente falta son killer applications; reconoció expresamente el valor de los asistentes de programación, pero no equiparó los productos de chat con una AGI ya llegada.
+
+\teachervoice{01:01:00--01:06:04, el docente admite que la distribution reshaping todavía no se entiende bien, que las respuestas en forma de programa requieren un análisis sintáctico cuidadoso y que self-consistency no es perfecta, y se mantiene escéptico ante los calendarios de AGI a corto plazo. El criterio práctico final es si el modelo da lugar a aplicaciones realmente útiles, no cuánta atención recibe la discusión.}
+
+\begin{warningbox}{Límites de la evidencia de la clase de 2025}
+En esta conferencia, Gemini 2.0 thinking, la aggregation de o1, la UI de Deep Research, las cifras de GSM8K y los juicios sobre productos deben entenderse en el momento de la clase, abril de 2025. Los apuntes conservan los mecanismos y las lecciones de ingeniería, sin reescribir las capturas de pantalla y las afirmaciones empíricas de entonces como especificaciones de productos actuales de 2026 ni como garantías generales.
+\end{warningbox}
+
+\subsection{Doce preguntas antes de iniciar un proyecto de reasoning}
+
+\small
+\begin{multicols}{2}
+\begin{enumerate}
+  \item ¿Qué estados intermedios designa concretamente «Reasoning» en esta tarea?
+  \item Si la respuesta directa falla, ¿falta capacidad o falla el ordenamiento del decoding?
+  \item ¿Puede analizarse de forma estable la frontera de la respuesta, y cómo se normalizan las respuestas equivalentes?
+  \item ¿Las trayectorias humanas cubren los estados que el modelo realmente visitará?
+  \item ¿Qué brecha de aproximación hay entre el reward y la calidad real?
+  \item ¿Qué tan grandes son los false positive y false negative del verifier?
+  \item ¿Qué se escala: la longitud de la trayectoria, el número de muestras, el árbol de búsqueda o las llamadas a herramientas?
+  \item ¿Las múltiples muestras son suficientemente independientes, o comparten el mismo sesgo sistemático?
+  \item ¿La consistency está calibrada sobre la distribución objetivo?
+  \item ¿Cómo se conservan la procedencia, la fecha y los conflictos de lo recuperado con retrieval?
+  \item ¿Cómo combinan las tareas abiertas restricciones duras, preferencias y retroalimentación a largo plazo?
+  \item Tras el despliegue, ¿cómo se reproduce la trace, se detectan regresiones y se detiene o revierte el sistema?
+\end{enumerate}
+\end{multicols}
+\normalsize
+
+\subsection{Lecturas adicionales}
+
+\scriptsize
+\begin{multicols}{2}
+\noindent\textbf{Cómputo secuencial: }Li et al., \emph{Chain of Thought Empowers Transformers to Solve Inherently Serial Problems}. \href{https://arxiv.org/abs/2402.12875}{2402.12875}.\par
+\noindent\textbf{Decodificación sin prompt: }Wang and Zhou, \emph{Chain-of-Thought Reasoning Without Prompting}. \href{https://arxiv.org/abs/2402.10200}{2402.10200}.\par
+\noindent\textbf{Agregación de respuestas: }Wang et al., \emph{Self-Consistency Improves Chain of Thought Reasoning in Language Models}. \href{https://arxiv.org/abs/2203.11171}{2203.11171}.\par
+\noindent\textbf{Agregación de texto libre: }Chen et al., \emph{Universal Self-Consistency for Large Language Model Generation}. \href{https://arxiv.org/abs/2311.17311}{2311.17311}.\par
+\end{multicols}
+\normalsize
+
+\end{document}

@@ -1,0 +1,995 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+\usepackage{multicol}
+
+\renewcommand{\notetitle}{Lecture 24: Beyond LLMs}
+\renewcommand{\noteauthors}{Elaborado a partir de la clase de Steven Feng, Div Garg y Karan Singh, de 64 teaching states de la clase y de los artículos oficiales}
+\renewcommand{\notedate}{CS25 V3 · versión reescrita source-first de 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{Clase: 2023-11-28; publicación: 2023-12-15}
+\renewcommand{\videoduration}{1:00:13}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=ylEk1TE1uBo}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.96\textwidth,height=0.54\textheight,keepaspectratio]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\begin{document}
+\makecscover
+
+\section{Introducción: los dos sentidos de Beyond LLMs}
+
+Esta instructors lecture reúne dos problemas que parecen dispersos. El primer nivel es el interior del modelo: por qué las capacidades cambian con la escala, el prompt y las representaciones intermedias, y cómo obtener un razonamiento más sólido con Chain-of-Thought, search, program execution y data efficiency. El segundo nivel es el exterior del modelo: cómo un modelo de lenguaje se convierte en el núcleo de cómputo de un agent system y completa tareas de largo plazo junto con memory, tools, environment feedback, permissions y other agents.
+
+\lecturefigure{slide-01-title.jpg}{Los cuatro temas de la instructors lecture de CS25 V3}{Video de la clase de Stanford 00:00:21}
+
+\begin{knowledgebox}{Lectura de la figura: los cuatro temas forman una cadena de ampliación de capacidades}
+Emergent abilities trata la escala y la medición; Intermediate-Guided Reasoning trata cómo organizar el proceso de razonamiento; BabyLM cuestiona si es indispensable depender de cantidades masivas de datos; Agents coloca al modelo dentro de un sistema capaz de observar, actuar, recordar y corregir errores. En conjunto responden a «cómo ir más allá de una sola generación hacia adelante», y no son cuatro reseñas inconexas de temas de moda.
+\end{knowledgebox}
+
+\begin{importantbox}{La perspectiva de sistema unificada de esta clase}
+La capacidad puede escribirse como la composición de tres niveles:
+\[
+\text{Observed capability}
+=\text{Model}
+\circ\text{Inference procedure}
+\circ\text{Environment loop}.
+\]
+Model determina el conocimiento parametrizado y las representaciones; inference procedure determina el prompt, la search o la program execution; environment loop determina las herramientas, la retroalimentación, la memoria y los permisos. El agent de la segunda mitad de la clase consiste precisamente en hacer explícito este tercer nivel.
+\end{importantbox}
+
+\subsection{Límites de la evidencia}
+
+La primera mitad es principalmente una lectura guiada de artículos; la segunda incluye una demostración del prototipo de MultiOn y propuestas de arquitectura. Las notas separan las conclusiones de los artículos, las explicaciones dadas en clase, las capability claims del prototipo y las inferencias de ingeniería; en particular, las demostraciones de 2023 de reservación de vuelos, prueba de manejo o universal action API no deben presentarse como especificaciones de un producto actual ni como prueba de confiabilidad general.
+
+\subsection{Resumen de la sección}
+
+Beyond LLMs no significa abandonar los modelos de lenguaje, sino modificar a la vez la escala del modelo, el proceso de razonamiento y los límites del sistema. A continuación se parte de la emergence, el concepto que más se presta a malentendidos, y después se avanza gradualmente hacia el razonamiento estructurado, la eficiencia de muestreo y la agent architecture.
+\section{Emergent Abilities: ¿salto de capacidad o artefacto de medición?}
+
+La clase empieza por recordar la definición clásica de 2022 sobre las capacidades emergentes de los modelos grandes: una capacidad está cerca del nivel aleatorio en los modelos pequeños, aparece con claridad solo a partir de cierta escala y no puede extrapolarse directamente de la tendencia de los modelos pequeños. El ponente añade de inmediato la controversia sobre la medición: las métricas discretas, el prompt y la definición de la tarea pueden cambiar la forma de la curva. Por ello, la pregunta correcta no es la disyuntiva «¿la emergencia es real o falsa?», sino qué conductas, con qué medición y por qué se manifiestan como un umbral.
+
+\subsection{Definición clásica y critical threshold}
+
+La primera diapositiva de título presenta la emergencia como un objeto de estudio en sí mismo; luego, la diapositiva de definición plantea tres condiciones: los modelos grandes la tienen y los pequeños no, no se puede extrapolar directamente a partir de los modelos pequeños y el desempeño es casi aleatorio antes del critical threshold y sube con rapidez después. Esta definición se centra en la observed behavior y no ofrece una explicación del mecanismo interno. Esta sección fija primero esa definición histórica; más adelante se ponen a prueba los límites de su evidencia con la controversia sobre el prompt y la metric.
+
+\lecturefigure{slide-02-emergent-title.jpg}{Emergent Abilities of Large Language Models}{Video de la clase de Stanford 00:00:33}
+
+\begin{knowledgebox}{Lectura de la figura: la diapositiva de título establece el objeto de estudio}
+Aquí, la ability puede ser modular arithmetic, word unscrambling, question answering o una prompting behavior. No se trata de que una sola neuron «aprenda una habilidad» de golpe, sino de un patrón de desempeño en la tarea que observa la evaluation pipeline; el modelo, el prompt, el scoring y la task distribution forman parte de la definición del fenómeno.
+\end{knowledgebox}
+
+\lecturefigure{slide-03-emergent-definition.jpg}{Definición de capacidad emergente que adopta la clase}{Video de la clase de Stanford 00:00:39}
+
+\begin{importantbox}{Intuición matemática de la definición por umbral}
+Sea $s$ la escala y $m(s)$ la puntuación en la tarea. La narrativa clásica de la emergencia sostiene que existe un $s_c$ tal que
+\[
+m(s)\approx m_{\text{random}}\quad(s<s_c),\qquad
+m(s)\gg m_{\text{random}}\quad(s\ge s_c).
+\]
+$s_c$ es la critical scale observada y $m_{\text{random}}$ es la línea base aleatoria. Esta expresión describe la forma de la curva; no demuestra que en el espacio de parámetros ocurra una verdadera transición de fase física.
+\end{importantbox}
+
+\teachervoice{El ponente usa la phase transition como analogía del umbral de escala, pero también dice que los investigadores todavía carecen de una explicación suficiente. Lo «impredecible» en la clase significa que una extrapolación ingenua a partir de las curvas medidas en modelos pequeños falla, no que ninguna capacidad pueda estudiarse ni predecirse.}
+
+\subsection{Cómo leer las curvas few-shot}
+
+La figura con varias tareas pone los training FLOPs en el eje horizontal y la performance de la tarea en el eje vertical; modelos como LaMDA, GPT-3, Gopher, Chinchilla y PaLM muestran umbrales distintos en modular arithmetic, IPA transliteration, word unscrambling y Persian QA. Al leer la figura no basta con ver que «el modelo más grande obtiene la puntuación más alta»: también hay que revisar si el tramo de los modelos pequeños es plano, si la tarea usa exact match y si las distintas familias de modelos siguen la misma tendencia.
+
+\lecturefigure{slide-04-few-shot-emergence.jpg}{Curvas de varias tareas few-shot en función de los training FLOPs}{Video de la clase de Stanford 00:01:18}
+
+\begin{knowledgebox}{Lectura de la figura: primero se confirman los ejes y después se juzga el salto}
+El eje horizontal es la escala logarítmica del cómputo de entrenamiento; el eje vertical varía según la tarea. Algunas gráficas suben con claridad alrededor de $10^{22}$--$10^{23}$ FLOPs, pero hay pocos puntos y las arquitecturas de los modelos difieren. Si la metric es de todo o nada, una mejora continua a nivel de token puede comprimirse en un crossing repentino; por eso, el umbral puede reflejar tanto un cambio real de capacidad como una scoring nonlinearity.
+\end{knowledgebox}
+
+\begin{warningbox}{No se debe deducir una transición de fase necesaria a partir de unos pocos puntos discretos}
+La escala del modelo, los datos, la arquitectura y la recipe de entrenamiento cambian al mismo tiempo; los puntos de la curva no provienen de un controlled experiment que modifique una sola variable independiente. Las gráficas de emergencia respaldan que «la extrapolación ingenua desde modelos pequeños no es confiable», pero no respaldan por sí mismas que «una representación interna aparece de repente en cierto punto».
+\end{warningbox}
+
+\subsection{La prompting strategy cambia la capacidad que se observa}
+
+El siguiente grupo de figuras muestra el augmented prompting, que incluye scratchpad, instruction following, suma de ocho dígitos y calibration. El ejemplo más representativo es GSM8K: con prompting ordinario la mejora con la escala es limitada, mientras que Chain-of-Thought aumenta el desempeño de forma notable en los modelos grandes. Aquí la capacidad proviene tanto de los parámetros como de exponer el proceso de cálculo en los token de salida.
+
+\lecturefigure{slide-05-augmented-prompting.jpg}{Cambios de escala y capacidad con augmented prompting}{Video de la clase de Stanford 00:01:54}
+
+\begin{knowledgebox}{Lectura de la figura: la capacidad del modelo no puede separarse del elicitation method}
+Un mismo checkpoint puede producir curvas completamente distintas con prompts diferentes. Si CoT hace que el modelo grande convierta un cálculo implícito de varios pasos en una secuencia explícita, la «emergencia» observada puede ser la combinación de una latent capability con un elicitation threshold. Por eso, un informe de evaluación debe declarar a la vez el model, los prompt examples, el decoding y la metric.
+\end{knowledgebox}
+
+\begin{importantbox}{El desempeño observado es una función compuesta}
+Escrita de forma más completa, la puntuación de la tarea es
+\[
+m=G(\theta, p, d, \mu),
+\]
+donde $\theta$ representa los parámetros y el entrenamiento del modelo, $p$ la estrategia de prompt/inferencia, $d$ el decoding y $\mu$ la metric. Si solo se grafica $m$ contra la escala de parámetros, la no linealidad de los otros tres términos se proyecta junto con ella en el «efecto de escala».
+\end{importantbox}
+
+\subsection{El catálogo de capacidades y la escala son solo un índice}
+
+La clase conserva la tabla grande del artículo, que enumera distintas emergent abilities con sus training FLOPs, número de parámetros, modelos y referencias. Su valor está en permitir a los investigadores encontrar patrones entre tareas, no en asignar a cada capacidad un «número mínimo de parámetros» fijo y permanente. Por ello, esta sección trata la tabla como un índice de experimentos y se concentra en revisar la tarea, la familia de modelos y la configuración de evaluación, en lugar de memorizar las cifras umbral.
+
+\lecturefigure{slide-06-emergent-abilities-table.jpg}{Capacidades emergentes y escalas de aparición recopiladas en el artículo}{Video de la clase de Stanford 00:02:33}
+
+\begin{knowledgebox}{Lectura de la figura: la scale de la tabla no es un umbral universal}
+Una misma tarea desplaza su umbral con distintos tokenizer, data mixture, instruction tuning y prompt; además, cada familia de modelos aprovecha sus parámetros de manera diferente. Primero se mira la task y la reference, y después los FLOPs/parameters. La columna de escala funciona más como índice histórico de experimentos que como una constante que pueda consultarse directamente al diseñar un modelo nuevo.
+\end{knowledgebox}
+
+\subsection{Por qué ocurre la emergencia sigue sin resolverse}
+
+La diapositiva de explicaciones dice de forma explícita que por ahora se sabe poco sobre las causas; las evaluation metrics utilizadas tampoco bastan para explicar el fenómeno, y se propone analizarlo con métricas continuas como la cross-entropy loss. Una metric continua puede revelar mejoras graduales que ya ocurren en los modelos pequeños, pero que todavía no cruzan el umbral de exact match. Esta sección pasa de «ver el salto» a «explicar el salto» y analiza por separado el measurement artifact y el mecanismo de la capacidad.
+
+\lecturefigure{slide-07-emergence-explanations.jpg}{Incertidumbre sobre las causas de la emergencia y la evaluation metric}{Video de la clase de Stanford 00:02:45}
+
+\begin{knowledgebox}{Lectura de la figura: la metric critique cambia la fuerza de la evidencia}
+Si exact match solo otorga 1 punto cuando la respuesta completa es correcta, el paso del modelo de «casi correcto» a «correcto» produce un salto; la cross-entropy, en cambio, muestra cómo la masa de probabilidad se desplaza poco a poco. Una curva continua puede debilitar la impresión visual de una «transición de fase repentina», pero no descarta que una conducta compleja solo sea utilizable a partir de cierta escala práctica.
+\end{knowledgebox}
+
+\begin{warningbox}{La Mirage critique tampoco significa que «la capacidad no cambió»}
+Que la métrica produzca una discontinuity no implica que la escala no tenga efecto; indica que «la capacidad aparece de repente» y «la puntuación cruza de repente una línea» deben distinguirse. En ingeniería sigue importando cuándo una capacidad alcanza un umbral utilizable; lo que no se puede es tomar ese umbral como la única evidencia del mecanismo.
+\end{warningbox}
+
+\teachervoice{El ponente no propone una única emergence theory, sino que sitúa la elección de la metric como una pregunta central de investigación. Este límite prudente importa más que memorizar umbrales: primero hay que preguntar cómo se mide el fenómeno y después qué ocurrió dentro del modelo.}
+
+\subsection{Líneas de investigación Beyond scaling}
+
+Aunque aumentar la escala pueda traer capacidades nuevas, la clase insiste en que no es la única variable. Nuevas arquitecturas, datos de mayor calidad, mejores training procedures, few-shot prompting más eficaz, la teoría y la interpretabilidad, y la computational linguistics pueden hacer que las capacidades aparezcan antes o sean más controlables.
+
+\lecturefigure{slide-08-beyond-scaling.jpg}{Líneas de investigación sobre capacidades además de seguir aumentando la escala}{Video de la clase de Stanford 00:03:06}
+
+\begin{knowledgebox}{Lectura de la figura: estas líneas actúan sobre capas distintas}
+La architecture y el training modifican cómo se aprenden los parámetros; la data quality modifica la señal de supervisión; el prompting modifica la inference interface; la interpretabilidad y la theory modifican la capacidad de explicar y predecir; la computational linguistics aporta priors estructurales. Si todas se reducen a «cómputo efectivo», se pierde la posibilidad de intervenir en cada una.
+\end{knowledgebox}
+
+\subsection{El crecimiento de las capacidades va acompañado del crecimiento de los riesgos}
+
+La Emergent risk slide reúne truthfulness, bias, toxicity, memorization y riesgos desconocidos. Un modelo más grande puede resolver mejor las tareas, pero también reproducir con más eficacia datos sensibles, adaptarse a prompts dañinos o amplificar sesgos en contextos ambiguos; capacidad y riesgo no comparten un mismo eje de seguridad monótono. Por ello, esta sección trata la evaluación de seguridad como una dimensión independiente, en lugar de inferir a partir de la puntuación promedio en las tareas que el riesgo ya disminuyó.
+
+\lecturefigure{slide-09-emergent-risks.jpg}{El aumento de escala puede amplificar a la vez las capacidades y los riesgos sociales}{Video de la clase de Stanford 00:04:00}
+
+\begin{knowledgebox}{Lectura de la figura: el riesgo no es un apéndice que se agrega después del entrenamiento}
+La truthfulness es un problema de hechos y de calibración; el bias involucra diferencias entre grupos; la toxicity, salidas dañinas; la memorization, privacidad y derechos de autor. Cada uno requiere su propio dataset, attack y metric. Una puntuación global de helpfulness no demuestra que todos estos riesgos disminuyan al mismo tiempo.
+\end{knowledgebox}
+
+\teachervoice{El ponente advierte que los modelos futuros podrían presentar riesgos que aún no se han descubierto. Mencionar el unknown risk no busca sembrar alarma, sino mostrar que tanto la capability discovery como la safety discovery requieren red teaming y measurement continuos.}
+
+\subsection{El general-purpose model cambia la estructura de la investigación y de las aplicaciones}
+
+La Sociological changes slide no trata solo de la difusión tecnológica. Los modelos de propósito general llevan a la comunidad de «entrenar un modelo por tarea» a una shared foundation que luego atiende varios dominios mediante in-context prompting o una adaptación ligera; el Transformer también se extendió de NLP a escenarios como text-to-image, biology y robotics.
+
+\lecturefigure{slide-10-sociological-changes.jpg}{Cambios en la comunidad y en las aplicaciones traídos por la emergencia y los modelos de propósito general}{Video de la clase de Stanford 00:04:45}
+
+\begin{knowledgebox}{Lectura de la figura: un paradigma técnico redistribuye las barreras de entrada}
+El shared model reduce el costo de desarrollar aplicaciones, pero concentra en unos pocos proveedores el poder de entrenamiento, las interfaces de evaluación y la infraestructura. Los investigadores pueden acceder más rápido a las capacidades, pero dependen más de data/updates que no pueden ver. Más adelante, BabyLM plantea justamente la pregunta inversa ante esta concentración de recursos.
+\end{knowledgebox}
+
+\subsection{Trabajo futuro y preguntas abiertas de la clase}
+
+La Future-work slide reúne escala, arquitectura, entrenamiento, datos, prompting, capacidades de modelos pequeños, theory y computational linguistics; la diapositiva de discusión pregunta además si la escala tiene un límite, qué papel desempeñan los datos y la metric en la emergence, y si los specialized systems podrían superar al monolith que «mete todo en los parámetros».
+
+\lecturefigure{slide-11-future-work.jpg}{Líneas de investigación futura sobre las emergent abilities}{Video de la clase de Stanford 00:06:00}
+
+\begin{knowledgebox}{Lectura de la figura: el future work no es un único scaling roadmap}
+La lista incluye a la vez capability, efficiency, interpretabilidad y linguistic structure. Lo que más vale conservar es la comparación entre varias rutas: una misma capacidad puede obtenerse con más parámetros, mejores datos, mejores prompts, herramientas externas o modelos especializados; el objetivo de investigación debe comparar costo y confiabilidad, no solo el peak score.
+\end{knowledgebox}
+
+\lecturefigure{slide-12-discussion-questions.jpg}{Preguntas abiertas sobre la emergence que el ponente deja a la clase}{Video de la clase de Stanford 00:06:57}
+
+\begin{knowledgebox}{Lectura de la figura: las preguntas mismas marcan el límite de la evidencia}
+Estas preguntas no tienen respuesta estándar: si seguirán apareciendo capacidades, si los rendimientos de la escala son decrecientes, si la metric y los data fabrican los umbrales, si los sistemas especializados son más confiables. Las notas no deben proyectar hacia atrás las opiniones de 2026 como conclusiones del ponente, sino usar estas preguntas como punto de conexión con las tres unidades siguientes: reasoning, BabyLM y agents.
+\end{knowledgebox}
+
+\teachervoice{El ponente invita a los estudiantes a interrumpir y discutir en cualquier momento, lo que muestra que esta parte no anuncia una ley de la emergence, sino que usa el artículo clásico para construir un espacio común de preguntas.}
+
+\subsection{Resumen de la sección}
+
+La definición clásica de emergencia describe puntuaciones de tarea con forma de umbral, pero la curva depende a la vez del modelo, el prompt, el decoding y la metric. La escala puede traer capacidades nuevas, pero también riesgos nuevos y concentración de recursos; mejores datos, arquitecturas, procedimientos de inferencia y sistemas especializados son rutas alternativas o complementarias.
+\section{Intermediate-Guided Reasoning: convertir el proceso de razonamiento en un objeto manipulable}
+
+La segunda unidad pasa de «cuándo aparece una capacidad» a «cómo se organiza un razonamiento». El ponente aclara que Intermediate-Guided Reasoning no es un término estándar, sino una forma de agrupar una familia de métodos: hacer que el modelo genere pasos en lenguaje natural, buscar entre varios thought states, descomponer el problema de forma recursiva o entregar la representación intermedia a un intérprete de programas. La diferencia esencial es si el estado intermedio puede verificarse, revertirse y ejecutarse.
+
+\subsection{Un umbrella term de la clase}
+
+La diapositiva de título marca la transición; la definición propiamente dicha viene de la explicación oral: estos métodos hacen explícita la intermediate information previa a la respuesta final, de modo que una tarea compleja pueda dividirse, revisarse o delegarse a un módulo externo. Esta sección explica primero el contexto de este umbrella term en la clase y después lo divide en cuatro tipos de representación: cadena de texto, árbol de búsqueda, programa y grafo de cómputo.
+
+\lecturefigure{slide-13-intermediate-reasoning.jpg}{Unidad de clase sobre Intermediate-Guided Reasoning}{Video de la clase de Stanford 00:07:42}
+
+\begin{knowledgebox}{Lectura de la figura: no convertir una expresión de clase en una taxonomy fija}
+Esta clase agrupa CoT, ToT, Socratic decomposition, PAL y PoT bajo un mismo paraguas para comparar su intermediate representation; la literatura académica no ha adoptado este nombre general de manera uniforme. Estas notas conservan esa organización didáctica y siguen usando el nombre original de cada artículo.
+\end{knowledgebox}
+
+\teachervoice{El ponente dice por iniciativa propia «I don't think this is actually a term». Es una teacher voice que debe conservarse: el término surge de la organización de la clase y no debe presentarse como el nombre reconocido de un campo.}
+
+\subsection{El mecanismo básico de Chain-of-Thought}
+
+CoT hace que el modelo genere una serie de reasoning steps en lenguaje natural antes de la respuesta final. En arithmetic, symbolic y commonsense tasks de varios pasos, permite dividir un mapeo difícil en varias generaciones condicionadas más cortas; pero generar más tokens también aumenta las oportunidades de propagar errores y de producir explicaciones que parecen razonables sin serlo.
+
+\lecturefigure{slide-14-cot-overview.jpg}{Chain-of-Thought descompone problemas de varios pasos mediante texto intermedio}{Video de la clase de Stanford 00:08:03}
+
+\begin{knowledgebox}{Lectura de la figura: CoT cambia el inference trace, no los pesos del modelo}
+Few-shot CoT suele mostrar en el prompt ejemplos con el formato «problema→pasos→respuesta», y luego el modelo imita ese formato. Puede activar patrones algorítmicos ya presentes en el entrenamiento, pero no garantiza que cada paso corresponda a un proceso causal interno real. La mejora de la capacidad y la fidelidad de la explicación son dos criterios de aceptación distintos.
+\end{knowledgebox}
+
+Dado un problema $x$, una trayectoria intermedia $z=(z_1,\ldots,z_K)$ y una respuesta $y$, la generación con CoT puede escribirse como
+\[
+p_\theta(y,z\mid x)=p_\theta(z\mid x)p_\theta(y\mid x,z).
+\]
+$z$ representa el reasoning trace visible, $K$ el número de pasos y $y$ la respuesta final. Aumentar $p(y,z\mid x)$ no equivale a que $z$ explique fielmente el cómputo interno del modelo; solo indica que esa trayectoria textual y la respuesta tienen, en conjunto, alta probabilidad.
+
+\subsection{Standard prompting frente a CoT prompting}
+
+La diapositiva de ejemplos usa el problema de las pelotas de tenis para comparar la salida directa con el cálculo paso a paso. El lector no solo debe observar si la respuesta es correcta, sino también verificar si los pasos mantienen las unidades, si omiten alguna cantidad y si la respuesta final se deduce realmente de los pasos anteriores. Esta sección parte de dos prompts para el mismo problema y muestra cómo la trayectoria visible cambia la capacidad de diagnóstico, sin constituir por sí misma una proof.
+
+\lecturefigure{slide-15-cot-examples.jpg}{Comparación entre Standard prompting y Chain-of-Thought prompting}{Video de la clase de Stanford 00:09:18}
+
+\begin{knowledgebox}{Lectura de la figura: los pasos ofrecen una superficie de depuración}
+Cuando una direct answer es incorrecta, es difícil saber en qué punto se desvió el modelo; CoT al menos expone fallas de arithmetic, symbol mapping, missing step o semantic misunderstanding. La visibilidad mejora el diagnosis, pero no mejora automáticamente la truthfulness, porque el modelo también puede obtener primero la respuesta y luego redactar la justificación.
+\end{knowledgebox}
+
+\subsection{El análisis de errores es más útil que la exactitud promedio}
+
+La diapositiva Improving CoT divide los errores en categorías como calculator error, symbol mapping, missing step e incoherent reasoning. El ponente subraya que, aunque los modelos grandes obtienen un performance gain notable, siguen existiendo non-negligible errors; por eso se necesitan herramientas, verifiers y un mejor entrenamiento.
+
+\lecturefigure{slide-16-cot-improvements.jpg}{Fuentes de error de Chain-of-Thought y direcciones de mejora}{Video de la clase de Stanford 00:09:42}
+
+\begin{knowledgebox}{Lectura de la figura: cada categoría de error corresponde a una capa de corrección distinta}
+El calculator error puede delegarse a un interpreter; el symbol mapping requiere una vinculación de variables más estable; el missing step puede abordarse con decomposition o search; el incoherent CoT requiere verifier, consistency o supervisión del proceso. Atribuir todos los errores a que «el modelo no es lo bastante grande» hace perder correcciones de bajo costo.
+\end{knowledgebox}
+
+\begin{warningbox}{Un reasoning trace no es una proof}
+Un CoT fluido puede contener pasos irrelevantes, saltos implícitos o racionalizaciones a posteriori. En tareas de alto riesgo hay que verificar executable constraints, citar evidencia o resultados del entorno, en lugar de sustituir la corrección por la longitud del texto en lenguaje natural.
+\end{warningbox}
+
+\subsection{Cómo hacer que los modelos pequeños también usen CoT}
+
+En clase se señala que el CoT temprano era más eficaz a partir de escalas del orden de diez mil millones de parámetros, y que los modelos pequeños suelen cometer errores de missing step y de semantic understanding. Las líneas de investigación incluyen hacer fine-tuning con traces generados por modelos grandes, distillation, reasoning formats más concisos y verifiers especializados.
+
+\lecturefigure{slide-17-cot-smaller-models.jpg}{Líneas de investigación de Chain-of-Thought orientadas a modelos pequeños}{Video de la clase de Stanford 00:10:18}
+
+\begin{knowledgebox}{Lectura de la figura: el problema de los modelos pequeños puede ser de capacidad de representación o de formato de supervisión}
+Si el trace es demasiado largo o contiene ruido, el modelo pequeño aprende primero la plantilla superficial; si la tarea requiere un latent state que el modelo no puede representar, la destilación por sí sola tampoco basta. Conviene evaluar por separado final answer, step validity, trace length y compute, y no tratar el «trace de un modelo grande» como el material de enseñanza óptimo por naturaleza.
+\end{knowledgebox}
+
+\subsection{De dominios específicos a un reasoning format más general}
+
+La diapositiva de Generalization cuestiona el formato fijo de CoT y su dependencia del dominio: destaca en problemas matemáticos de varios pasos, pero no todas las tareas se prestan a pasos lineales en lenguaje natural. Un método más general debe admitir distintas state representations, branching, external calls y stopping rules.
+
+\lecturefigure{slide-18-cot-generalization.jpg}{Rigidez de formato y generalización entre dominios en Chain-of-Thought}{Video de la clase de Stanford 00:11:03}
+
+\begin{knowledgebox}{Lectura de la figura: la representación del razonamiento debe corresponder a la estructura de la tarea}
+El texto lineal es adecuado para la descomposición secuencial; las tareas de planificación pueden requerir árboles o grafos; la aritmética exacta se presta a programas; las tareas de percepción pueden requerir un state visual. La Generalization no consiste en obligar a todas las tareas a producir el mismo tipo de explicación larga, sino en elegir una intermediate representation que pueda verificarse y ejecutarse.
+\end{knowledgebox}
+
+\subsection{Tree of Thoughts: de una sola trayectoria a la búsqueda en el espacio de estados}
+
+Tree of Thoughts hace que el modelo genere varios thoughts candidatos, evalúe el siguiente paso y, cuando es necesario, haga look ahead o backtrack. Convierte el razonamiento de un único autoregressive sample en un search procedure; con ello gana flexibility, a cambio de más inference calls y de evaluator dependence.
+
+\lecturefigure{slide-19-tree-of-thoughts.jpg}{Evaluación de ramas y retroceso en Tree of Thoughts}{Video de la clase de Stanford 00:12:03}
+
+\begin{knowledgebox}{Lectura de la figura: los nodos son estados intermedios y las aristas, acciones de razonamiento}
+Un mismo input produce varios candidate states; el evaluator los califica y se conservan algunas ramas; las ramas fallidas pueden revertirse. Lo más importante de la figura no es su aspecto de árbol, sino que los tres papeles de generation, evaluation y selection están separados, lo que permite controlar la búsqueda de forma explícita.
+\end{knowledgebox}
+
+Si en cada nivel se expanden $b$ candidatos y la profundidad es $d$, una búsqueda completa visita como máximo
+\[
+1+b+b^2+\cdots+b^d=\frac{b^{d+1}-1}{b-1}
+\]
+nodos. $b$ es el branching factor y $d$ la reasoning depth. ToT debe controlar el costo exponencial con beam, heuristic o pruning; los errores del evaluator también pueden podar de antemano ramas correctas.
+
+\subsection{Socratic Questioning: descomposición recursiva y recuperación de respuestas}
+
+Socratic Questioning usa un modelo grande para plantear subproblems, los resuelve de forma recursiva y luego combina los resultados hacia arriba. Al igual que ToT, admite backtracking, pero su enfoque didáctico se acerca más a divide-and-conquer: primero se confirma que cada subproblema tenga solución y después se integran las respuestas locales en la solución del problema original.
+
+\lecturefigure{slide-20-socratic-questioning.jpg}{Descomposición recursiva en subproblemas de Socratic Questioning}{Video de la clase de Stanford 00:12:33}
+
+\begin{knowledgebox}{Lectura de la figura: la decomposition quality determina el límite superior}
+Si los subproblemas son incompletos, se traslapan entre sí o pierden restricciones, no se obtiene la respuesta global aunque cada respuesta local sea correcta. El sistema debe verificar coverage, dependency y recomposition, en lugar de revisar solo si cada leaf parece razonable.
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Flujo de razonamiento estructurado con verificación y retroceso}]
+def solve(problem, depth):
+    if depth == 0 or is_atomic(problem):
+        return answer_and_verify(problem)
+    subproblems = propose_decomposition(problem)
+    partial = [solve(item, depth - 1) for item in subproblems]
+    candidate = compose(problem, partial)
+    if verify(candidate, problem):
+        return candidate
+    return revise_decomposition(problem, partial)
+\end{lstlisting}
+
+\subsection{PAL: el modelo de lenguaje planifica, el intérprete calcula}
+
+Program-Aided Language Models hace que el modelo genere un programa y delega la arithmetic exacta y la symbolic execution a un interpreter como Python. El LLM se encarga de convertir el lenguaje natural en una estructura ejecutable y la computadora de ejecutarla de forma determinista; esto es más confiable que pedir al modelo que simule toda la aritmética dentro del token space.
+
+\lecturefigure{slide-21-pal.jpg}{PAL usa un programa como representación intermedia e invoca un intérprete}{Video de la clase de Stanford 00:13:09}
+
+\begin{knowledgebox}{Lectura de la figura: división del trabajo entre razonamiento neuronal y ejecución simbólica}
+El prompt muestra el problema, el program y el answer; el modelo produce code y el interpreter lo ejecuta para obtener el resultado. La ventaja es que la arithmetic es verificable y el trace es ejecutable; el riesgo es que la code generation malinterprete la semántica, invoque API peligrosas o produzca efectos secundarios fuera del sandbox.
+\end{knowledgebox}
+
+\subsection{Program of Thoughts: un scratchpad programático más general}
+
+Program of Thoughts también hace que el modelo genere un program, pero pone énfasis en intercalar la computation con el language reasoning. En problemas matemáticos complejos, el programa conserva variables, bucles y relaciones entre funciones, lo que evita la deriva aritmética de las cadenas largas en lenguaje natural. Esta sección retoma la división del trabajo con el interpreter de PAL y se centra en cómo un scratchpad programático conserva el estado a largo plazo y la estructura composicional.
+
+\lecturefigure{slide-22-program-of-thoughts.jpg}{Flujo de generación y ejecución de programas en Program of Thoughts}{Video de la clase de Stanford 00:13:51}
+
+\begin{knowledgebox}{Lectura de la figura: que el programa sea correcto no significa que el problema se haya entendido correctamente}
+El Interpreter solo garantiza que el programa dado se ejecute conforme a su semántica; si el modelo traduce el problema a una fórmula equivocada, el programa producirá de forma consistente una respuesta incorrecta. Por eso el pipeline necesita, como mínimo, syntax check, unit test, constraint check y result sanity check.
+\end{knowledgebox}
+
+El program-guided reasoning puede escribirse como
+\[
+P\sim p_\theta(P\mid x),\qquad y=\mathcal{I}(P),
+\]
+donde $P$ es el programa generado por el modelo, $\mathcal{I}$ es un intérprete controlado y $y$ es el resultado de la ejecución. La confiabilidad depende de dos partes, el semantic parsing $p_\theta$ y el execution sandbox $\mathcal{I}$, y no solo de la final answer accuracy.
+
+\subsection{Faith and Fate: expresar la compositionality como un grafo de cómputo}
+
+Al final de la clase se presenta el trabajo sobre computation graph, con énfasis en que una representación intermedia estructurada puede dividir un problema complejo en nodos verificables. El graph de la figura no es necesariamente superior a todos los métodos textuales, pero ofrece dependency, reuse y local verification, y es adecuado para tareas composicionales.
+
+\lecturefigure{slide-23-faith-and-fate.jpg}{El compositional computation graph del trabajo Faith and Fate}{Video de la clase de Stanford 00:14:33}
+
+\begin{knowledgebox}{Lectura de la figura: la estructura de grafo hace explícitas las dependencias}
+Los nodos representan subcálculos intermedios y las aristas, dependencias; si la respuesta final es incorrecta, se puede recorrer el graph para localizar el nodo erróneo. En comparación con el CoT lineal, el graph facilita reutilizar subresultados compartidos y se presta mejor a la ejecución en paralelo; el costo es que la graph construction y la node semantics requieren, a su vez, aprendizaje o reglas.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Lo que comparten los Intermediate-guided methods es que hacen el estado intermedio visible, explorable o ejecutable. CoT aporta texto lineal, ToT/Socratic aportan search/decomposition, PAL/PoT aportan la ejecución de programas y el computation graph aporta una estructura de dependencias; la confiabilidad depende del verifier, del interpreter y de la retroalimentación, no de la longitud de la trayectoria.
+\section{BabyLM: cuestionar el culto a la escala mediante restricciones de datos}
+
+La tercera unidad devuelve la atención de inference al preentrenamiento. BabyLM Challenge no busca el modelo más grande, sino que se limita a un presupuesto de datos cercano a la exposición lingüística de un niño y compara qué architecture, objective y curriculum aprenden con mayor eficiencia. Es a la vez un sample-efficiency benchmark y una reflexión sobre la concentración de los recursos de investigación y sobre los mecanismos del aprendizaje del lenguaje en los seres humanos.
+
+\subsection{La restricción central del Challenge}
+
+La diapositiva de título marca el paso de los reasoning methods a la data efficiency. El contexto de la clase es que el costo de entrenar modelos grandes sigue en aumento y que a las personas y a los laboratorios universitarios les resulta difícil participar en el frontier pretraining; por eso, fijar un presupuesto de datos pequeño vuelve a abrir un espacio de investigación comparable.
+
+\lecturefigure{slide-24-babylm-challenge.jpg}{BabyLM Challenge estudia el aprendizaje eficiente del lenguaje con un presupuesto de datos pequeño}{Video de la clase de Stanford 00:15:15}
+
+\begin{knowledgebox}{Lectura de la figura: la restricción misma cambia la pregunta de investigación}
+Un scaling benchmark común pregunta «¿hasta dónde se llega con más data/params?»; BabyLM pregunta «¿cómo se aprovechan mejor los datos bajo un data cap?». Esto premia el inductive bias, el objective, la tokenización, el curriculum y la architecture, y no solo la obtención de más páginas web y más cómputo.
+\end{knowledgebox}
+
+\subsection{Qué es un developmentally plausible data budget}
+
+La clase describe BabyLM así: entrenar modelos de lenguaje más pequeños con una cantidad de datos lingüísticos cercana a la que un niño puede recibir durante su crecimiento. La slide contrasta los billones de palabras del nivel de Chinchilla con los varios millones de palabras al año que recibe un niño, y el objetivo es conservar las capacidades gramaticales, semánticas y de razonamiento con muchos menos datos. Esta sección explica primero esa restricción de orden de magnitud y después por qué solo es developmentally inspired y no un modelo completo del aprendizaje infantil.
+
+\lecturefigure{slide-25-what-is-babylm.jpg}{BabyLM contrasta el volumen de corpus de los modelos grandes con la exposición lingüística de un niño}{Video de la clase de Stanford 00:15:48}
+
+\begin{knowledgebox}{Lectura de la figura: la comparación de volumen de datos es una referencia de orden de magnitud}
+Las estimaciones de exposición léxica infantil dependen de la edad, de la familia y del método estadístico; además, un token de un LLM no equivale a una word que oye una persona. Esta comparación sirve para subrayar que la eficiencia de muestreo del preentrenamiento moderno es muy baja; no debe usarse para afirmar que un modelo de texto y un niño tienen la misma percepción, interacción u objetivos de aprendizaje.
+\end{knowledgebox}
+
+\begin{importantbox}{La eficiencia de muestreo debe reportarse junto con el presupuesto}
+Si el desempeño promedio del modelo en el conjunto de tareas es $S$ y el número de tokens de entrenamiento es $N$, puede usarse
+\[
+\eta=\frac{S-S_0}{\log(1+N)}
+\]
+como una perspectiva aproximada de efficiency, donde $S_0$ es la línea base aleatoria o de un modelo pequeño. $\eta$ no es una métrica oficial de BabyLM; solo indica que al comparar deben reportarse a la vez la performance y el data budget, en lugar de mirar únicamente la puntuación absoluta.
+\end{importantbox}
+
+\subsection{Por qué vale la pena hacer BabyLM}
+
+La slide Why BabyLM enumera la eficiencia, la apertura de nuevos casos de uso, la interpretabilidad, el alignment, el university access, la ciencia cognitiva y el aprendizaje humano del lenguaje. Convierte la investigación con modelos pequeños, de «sustituto para quien no puede costear modelos grandes», en una pregunta científica propia: qué datos y qué estructuras producen una generalization eficiente.
+
+\lecturefigure{slide-26-why-babylm.jpg}{Motivaciones de BabyLM: eficiencia, accesibilidad e interdisciplina}{Video de la clase de Stanford 00:17:00}
+
+\begin{knowledgebox}{Lectura de la figura: las siete razones se dividen en dos grupos, ingeniería y ciencia}
+Del lado de la ingeniería importan el costo de entrenamiento, el despliegue y los presupuestos universitarios; del lado científico, la interpretabilidad, el alignment, la cognitive science y la child language acquisition. Con modelos pequeños es más fácil hacer una controlled ablation, pero tener pocos parámetros no implica automáticamente que el modelo sea interpretable o seguro.
+\end{knowledgebox}
+
+\teachervoice{El ponente enfatiza que la investigación con modelos grandes depende cada vez más de instituciones que poseen cientos o miles de GPU y millones de dólares. Uno de los valores de BabyLM es que las universidades y las personas vuelvan a poder entrenar modelos completos y comparar hipótesis, en lugar de solo invocar API cerradas.}
+
+\subsection{Composición de los datos y límites de la analogía infantil}
+
+La slide final sobre datos muestra la developmentally plausible pretraining mixture, que incluye fuentes como CHILDES child-directed speech, OpenSubtitles, libros infantiles, BNC speech, Wikipedia y Simple Wikipedia. Las distintas fuentes aportan diálogo, relatos, gramática cotidiana y conocimiento enciclopédico, pero siguen siendo una colección de textos fuera de línea.
+
+\lecturefigure{slide-27-babylm-data.jpg}{La developmentally inspired pretraining data mixture de BabyLM}{Video de la clase de Stanford 00:19:09}
+
+\begin{knowledgebox}{Lectura de la figura: la mixture simula tipos de entrada, no un entorno de desarrollo completo}
+Child-directed speech aporta un estilo lingüístico interactivo, los subtitles aportan diálogo, los books aportan narrativa y Wikipedia aporta hechos y oraciones largas. Un niño real cuenta además con visión, acción, atención conjunta, corrección y retroalimentación social; una mixture de texto solo puede restringir el volumen de entrada lingüística, no reproducir el embodied learning.
+\end{knowledgebox}
+
+\begin{warningbox}{Developmentally plausible no equivale a cognitively equivalent}
+El objective de entrenamiento, las epochs y el orden con que el modelo recibe el corpus completo difieren del aprendizaje continuo de un niño; al modelo también le faltan un cuerpo y objetivos sociales. BabyLM permite poner a prueba el sample-efficient language modeling, pero por sí solo no puede demostrar teorías de la adquisición humana del lenguaje.
+\end{warningbox}
+
+\teachervoice{El ponente espera un intercambio en ambos sentidos entre la ciencia cognitiva y el NLP: el aprendizaje eficiente de los humanos puede inspirar modelos, y los experimentos controlados con modelos pequeños también pueden, a su vez, poner a prueba hipótesis sobre el aprendizaje del lenguaje. El valor está en contar con una plataforma de experimentos comparables, no en reducir al niño a un next-token predictor.}
+
+\subsection{Resumen de la sección}
+
+BabyLM estudia la sample efficiency con presupuestos del orden de sub-100M-word, impulsa la comparación de architecture, objective, curriculum y composition de los datos, y reduce la barrera de entrada a la investigación. La analogía infantil ofrece una referencia de volumen y de tipos de datos, pero no incluye los mecanismos completos de percepción, interacción y desarrollo.
+\section{De los modelos de lenguaje al Agent System}
+
+En el minuto 19, la clase pasa a los Agent. Este cambio no presenta otra arquitectura de modelo: coloca el reasoning procedure de la primera mitad dentro de un sistema que funciona de manera continua. El modelo debe recibir un objetivo, descomponer la tarea, invocar herramientas, observar resultados, guardar el estado y decidir si continúa. Al leer la segunda mitad hay que distinguir siempre entre \term{foundation model} y \term{agent system}: el primero aporta la capacidad de lenguaje y de razonamiento; solo el segundo se encarga del ciclo cerrado de acción.
+
+\subsection{Agenda de Agent: del «por qué» al «cómo controlar»}
+
+La diapositiva inicial enumera agent architecture, actions, computer interaction, long-term memory, personalization, multi-agent communication y future directions. El orden didáctico que propone es importante: primero explica por qué una sola llamada al modelo no basta, después aborda las interfaces de acción y solo al final llega a la colaboración en paralelo y a la gobernanza de la seguridad.
+
+\lecturefigure{slide-28-agent-introduction.jpg}{Agenda de la mitad de la clase dedicada a Agent}{Video de clase de Stanford 00:19:51}
+
+\begin{knowledgebox}{Lectura de la figura: los siete temas forman juntos el ciclo de vida del sistema}
+Architecture determina los límites entre componentes; action interface determina qué puede hacerse; memory y personalization determinan el estado entre sesiones; multi-agent determina cómo ampliar el rendimiento y la especialización, y future directions trata reliability, permissions y sandboxing. Si solo se construye uno de estos módulos, no se obtiene un agent al que se le pueda delegar trabajo a largo plazo.
+\end{knowledgebox}
+
+\teachervoice{Div pregunta primero: «¿por qué no simplemente entrenar un modelo de lenguaje más grande?». Su respuesta no es que la capacidad del modelo carezca de importancia, sino que una llamada única no tiene chaining, recursion, persistent state ni environment feedback; las tareas reales requieren un sistema, no solo un monolith.}
+
+\subsection{Por qué se necesitan los Agent: el lenguaje natural es solo la entrada}
+
+La diapositiva Building AI Agents plantea una thesis de la clase de 2023: las personas expresan su intención en lenguaje natural y la IA opera el software y las máquinas. Esta visión reduce la carga de que el usuario haga clic uno por uno en la interfaz, pero «100 veces más rápido» y «ocurrirá en cinco años» son predicciones del ponente, no hechos que el curso haya verificado. Desde la ingeniería, una formulación más sólida es esta: una natural-language interface puede reducir el costo de expresar una tarea, y que aumente o no la eficiencia depende de la tasa de éxito, del número de confirmaciones y del costo de recuperarse de los fallos.
+
+\lecturefigure{slide-29-building-ai-agents.jpg}{Building AI Agents: la visión del lenguaje natural a la operación de máquinas}{Video de clase de Stanford 00:20:30}
+
+\begin{importantbox}{Definición de Agent como ciclo cerrado}
+Sea el objetivo $g$, el estado interno $s_t$ y la observación del entorno $o_t$; en el paso $t$, el agent ejecuta
+\[
+p_t=\operatorname{Plan}(g,s_t,o_t),\qquad
+a_t=\operatorname{Act}(p_t),\qquad
+s_{t+1}=\operatorname{Update}(s_t,o_{t+1}).
+\]
+$p_t$ es el plan, $a_t$ es una acción sujeta a permisos y $o_{t+1}$ es la retroalimentación del entorno. Si el sistema solo genera $p_t$ sin ejecutar, observar ni actualizar, se parece más a un assistant o a un planner que a un agent loop completo.
+\end{importantbox}
+
+\begin{warningbox}{Automatizar la interfaz no elimina los costos por sí solo}
+Un Agent puede reducir los clics manuales, pero introduce latencia de inferencia, costo en tokens, acciones erróneas, cambios en los sitios web, permisos de cuentas y necesidades de auditoría. Al evaluarlo, hay que comparar el end-to-end task success con la intervención humana total, no solo mostrar una grabación en la que todo sale bien.
+\end{warningbox}
+
+\subsection{Agent Stack: el modelo es solo uno de los componentes}
+
+La diapositiva de arquitectura coloca el model en el centro y lo conecta con memory, planning, tools, reflection y environment. Aquí, Chain-of-Thought y Tree of Thoughts, vistos en la primera mitad, se convierten en métodos de planning; calculator, calendar y code interpreter se convierten en tools; el estado de corto y largo plazo pasa a memory, y la revisión posterior a la ejecución pasa a reflection.
+
+\lecturefigure{slide-30-agent-stack.jpg}{Agent Stack con memory, planning, tools y reflection}{Video de clase de Stanford 00:22:24}
+
+\begin{knowledgebox}{Términos clave: los seis componentes del Agent Stack}
+\begin{tabularx}{\textwidth}{L{0.18\textwidth}>{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+Componente & Problema que resuelve & Relación con esta clase \\
+\midrule
+Model & Entender el objetivo y generar planes candidatos & Es una neural compute unit; no acapara el estado del sistema \\
+Planning & Convertir el objetivo en pasos con dependencias & Puede usar CoT, ToT, decomposition \\
+Memory & Guardar el contexto actual y hechos entre tareas & Distingue context de persistent store \\
+Tools & Ejecutar operaciones precisas o externas & calculator, browser, code interpreter, apps \\
+Reflection & Revisar resultados y provocar revisiones & Requiere un verifier o señales observables del entorno \\
+Environment & Devolver cambios reales de estado & Determina si el plan sigue siendo coherente con la realidad \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\teachervoice{La clase compara construir un agent con construir una computer: el LLM es como la CPU, pero también hacen falta RAM, almacenamiento a largo plazo, I/O, red, interfaz y configuración del usuario. El valor didáctico de esta analogía es impedir que se equipare directamente un benchmark del modelo con la capacidad del sistema.}
+
+\subsection{MultiOn: un prototipo de clase, no una garantía general}
+
+La diapositiva de MultiOn presenta el browser agent que el ponente construía en ese momento y usa «poder operar internet mediante lenguaje natural» para motivar las demos siguientes. Esta diapositiva debe leerse como metadatos sobre la fuente del prototipo de la clase de 2023: indica de qué sistema provienen las demos, no que todos los sitios web, cuentas y tareas tengan la misma confiabilidad. Esta sección establece primero los niveles de evidencia; el siguiente capítulo analiza cuadro por cuadro lo que el prototipo mostró realmente.
+
+\lecturefigure{slide-31-multion-api.jpg}{Presentación del prototipo de browser-agent MultiOn}{Video de clase de Stanford 00:23:03}
+
+\begin{importantbox}{Cuatro niveles de evidencia}
+\begin{enumerate}
+  \item \textbf{Imagen de la clase}: la grabación muestra efectivamente varios estados de una ejecución concreta del flujo;
+  \item \textbf{Afirmación del ponente}: por ejemplo, «cero intervención humana» o «tiene permisos de compra», que son capability claims de la clase;
+  \item \textbf{Verificación independiente}: requiere un conjunto de tareas reproducible, registros de fallos, versiones y un protocolo de evaluación;
+  \item \textbf{Conclusión de despliegue}: además requiere evidencia de seguridad, permisos, recuperación y cumplimiento normativo.
+\end{enumerate}
+Estas notas atribuyen a la clase solo los dos primeros niveles y no los elevan automáticamente al tercero ni al cuarto.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Un Agent no puede resumirse con la definición «un modelo grande que invoca herramientas»: es un ciclo cerrado que forman en conjunto model, planning, memory, tools, reflection, environment y policy. Las live demos que siguen muestran con estados concretos el potencial de acción, y también dejan ver por qué las acciones irreversibles y las restricciones del entorno deben incorporarse al diseño.
+\section{Live Demos y límites de la acción}
+
+En clase se usan la compra de boletos de avión, la operación en dispositivos móviles, un examen de manejo y la Action API para mostrar la capacidad de acción visible de un agent. Una lectura de calidad no puede limitarse a repetir «lo logró»; debe preguntarse paso a paso: cómo se introduce el objetivo, qué devuelve el entorno, dónde ocurre un cambio de estado, qué pasos requieren confirmación y cómo se detiene o se recupera el sistema cuando falla.
+
+\subsection{Demo de compra de boletos de avión: de la solicitud al itinerary}
+
+El primer grupo de cinco cuadros registra un flujo de browser-agent flight-booking. La página inicial presenta primero el contexto de la tarea; después, la interfaz de desarrollo envía la solicitud, el navegador pasa a los resultados de búsqueda y al checkout, y al final muestra el itinerary. La secuencia de estados indica que el agent puede sostener la tarea a lo largo de varias páginas web, pero la grabación no informa cuántas veces se repitió la prueba, cómo se distribuyen los fallos ni todas las llamadas en segundo plano.
+
+\lecturefigure{slide-32-flight-demo-start.jpg}{Estado inicial de la demo de compra de boletos de avión}{Video de clase de Stanford 00:23:30}
+
+\begin{knowledgebox}{Lectura de la figura: confirmar primero los límites de la tarea, no la velocidad de la animación}
+El cuadro inicial solo demuestra que la demostración está por entrar en la tarea de vuelos. El lector debe registrar si la cuenta de partida, la ciudad de destino, las fechas, la preferencia de aerolínea y los permisos de pago estaban configurados de antemano; este hidden state influye de forma notable en la dificultad de la tarea y también determina si el resultado puede reproducirse.
+\end{knowledgebox}
+
+\lecturefigure{slide-33-flight-demo-code.jpg}{Envío de la solicitud de compra al Agent mediante la interfaz de desarrollo}{Video de clase de Stanford 00:23:36}
+
+\begin{knowledgebox}{Lectura de la figura: la instrucción debe convertirse en restricciones ejecutables}
+Una solicitud en lenguaje natural suele contener restricciones duras y preferencias flexibles. El sistema debe marcar la fecha, los aeropuertos, el número de personas y el presupuesto como hard constraints, y la aerolínea United, la franja de salida o el asiento como soft preferences; si ambas entran en conflicto, no puede sacrificar en silencio una restricción dura.
+\end{knowledgebox}
+
+\lecturefigure{slide-34-flight-demo-results.jpg}{El Agent recorre los resultados de búsqueda de vuelos}{Video de clase de Stanford 00:24:33}
+
+\begin{knowledgebox}{Lectura de la figura: la página de resultados es un problema de elección, no un estado de tarea completada}
+Este cuadro indica que el entorno ya devolvió vuelos candidatos. El Agent todavía debe comparar precio, escalas, zonas horarias, reglas de equipaje y preferencias, y guardar un audit trail de «por qué eligió esta opción». Que aparezca la página no significa que el candidato ya satisfaga el objetivo del usuario.
+\end{knowledgebox}
+
+\lecturefigure{slide-35-flight-demo-checkout.jpg}{El Agent entra en la etapa de checkout}{Video de clase de Stanford 00:24:51}
+
+\begin{warningbox}{El checkout es un límite de permisos}
+Buscar y llenar formularios suele ser reversible; la compra final puede generar cargos y costos de cancelación. Al entrar al checkout se debe mostrar un resumen estructurado y pedir confirmación explícita antes de ejecutar la purchase; una tarjeta de crédito guardada no puede interpretarse como una autorización permanente para cualquier transacción.
+\end{warningbox}
+
+\lecturefigure{slide-36-flight-demo-itinerary.jpg}{Estado final del itinerary en la grabación de la clase}{Video de clase de Stanford 00:25:15}
+
+\begin{knowledgebox}{Lectura de la figura: la página final todavía requiere verificar la postcondition}
+El sistema debe cotejar pasajero, fecha, aeropuertos, número de vuelo, precio total y confirmation number, y escribir el resultado en un registro consultable. Si la UI solo muestra el itinerary sin que se verifiquen los campos clave, todavía puede producirse un falso éxito de «flujo completado, tarea equivocada».
+\end{knowledgebox}
+
+\teachervoice{El ponente afirma que la demo ya estaba personalizada con su preferencia por United, su cuenta y su método de pago, y subraya que el agent tiene purchasing power. La señal más valiosa de la clase no es la exhibición técnica, sino que vincula directamente personalization, credential access e irreversible action.}
+
+\begin{lstlisting}[caption={Máquina de estados de compra de boletos con puerta de confirmación}]
+state = collect_constraints(request, user_profile)
+candidates = search_flights(state)
+choice = rank_and_explain(candidates, state)
+draft = fill_checkout(choice)
+assert validate(draft, state.hard_constraints)
+approval = ask_user_confirmation(draft.summary)
+if approval:
+    receipt = execute_purchase(draft)
+    verify_postconditions(receipt, state)
+else:
+    stop_without_charge()
+\end{lstlisting}
+
+\subsection{Demo móvil: las restricciones del entorno interrumpen el plan}
+
+El segundo grupo de cuadros lleva la misma idea de control por lenguaje natural al teléfono. La página principal de la platform, la solicitud por mensaje, la web search, el food result y el delivery-area failure forman una trayectoria con más valor didáctico, porque el último cuadro muestra explícitamente una limitación del entorno en lugar de recortarse como un video promocional de éxito total. Por eso esta sección toma como eje «cómo un fallo expone las restricciones del entorno», y no solo cuenta cuántas aplicaciones se recorrieron.
+
+\lecturefigure{slide-37-mobile-platform.jpg}{Entrada a la plataforma móvil de MultiOn}{Video de clase de Stanford 00:25:21}
+
+\begin{knowledgebox}{Lectura de la figura: el dispositivo móvil es una nueva superficie de I/O}
+El Agent debe manejar una UI de pantalla pequeña, permisos del sistema, notificaciones, cambios entre apps y el estado de la red. La entrada en lenguaje natural unifica la expresión de la intención, pero no unifica el estado de las aplicaciones subyacentes; cada app puede seguir teniendo su propio inicio de sesión, ubicación geográfica y reglas de confirmación.
+\end{knowledgebox}
+
+\lecturefigure{slide-38-mobile-message.jpg}{Expresión de la tarea mediante una interfaz de mensajes}{Video de clase de Stanford 00:25:39}
+
+\begin{knowledgebox}{Lectura de la figura: el mensaje es un objetivo, no una especificación completa}
+Una solicitud breve suele omitir presupuesto, cantidad, dirección y alternativas. El sistema debe leerlos de un profile confiable o preguntar; no puede usar conjeturas del modelo de lenguaje para llenar campos que tienen consecuencias económicas o de privacidad.
+\end{knowledgebox}
+
+\lecturefigure{slide-39-mobile-web-search.jpg}{El Agent móvil lanza una web search}{Video de clase de Stanford 00:26:03}
+
+\begin{knowledgebox}{Lectura de la figura: la ejecución entre aplicaciones requiere un estado de tarea compartido}
+Al pasar del mensaje a la búsqueda, el objetivo, las restricciones y las fuentes deben mantenerse coherentes. Si cada herramienta solo recibe texto libre, la información tiende a desviarse en las sucesivas reformulaciones; un task state estructurado permite que la búsqueda, el filtrado y el pedido compartan el mismo conjunto de campos.
+\end{knowledgebox}
+
+\lecturefigure{slide-40-mobile-food-result.jpg}{El Agent encuentra resultados de food ordering}{Video de clase de Stanford 00:26:21}
+
+\begin{knowledgebox}{Lectura de la figura: que un candidato sea visible no significa que pueda entregarse}
+La página del restaurante o del producto solo indica que la búsqueda tuvo éxito. La postcondition real incluye que la dirección de entrega esté dentro del área de cobertura, que el producto esté disponible, que el costo sea aceptable y que el tiempo estimado cumpla lo requerido. Un Agent benchmark debe incluir estas restricciones del entorno en la success definition.
+\end{knowledgebox}
+
+\lecturefigure{slide-41-mobile-delivery-limit.jpg}{La restricción del área de entrega bloquea la tarea}{Video de clase de Stanford 00:26:30}
+
+\begin{warningbox}{El fallo debe convertirse en un estado explícito}
+Una delivery-area constraint no es un error de razonamiento que desaparezca porque el modelo «piense un poco más». La conducta correcta es informar la causa del bloqueo, ofrecer alternativas viables y esperar a que el usuario elija, en lugar de hacer clic en bucle, ocultar el fallo o cambiar la dirección por cuenta propia.
+\end{warningbox}
+
+\teachervoice{Lo que más vale la pena conservar de este grupo de demos es el cuadro del fallo: el entorno le dice al agent que el plan actual no es viable. Anticipa el tema posterior de la plan divergence: sin retroalimentación real, un plan coherente en el lenguaje se aleja cada vez más del mundo ejecutable.}
+
+\subsection{Driving-test Claim e human-like interface}
+
+A continuación, la clase muestra una diapositiva con un marcador de posición MP4, y el ponente afirma que el agent puede completar un driving test en línea. Como la grabación no presenta las preguntas completas, las respuestas, la calificación ni experimentos repetidos, las notas lo registran como una capability claim y no como un resultado verificado de forma independiente. La siguiente diapositiva explica, desde la idea de «manos y ojos digitales e interfaces de tipo humano», por qué los investigadores quieren que el agent use directamente el software existente.
+
+\lecturefigure{slide-42-driving-test.jpg}{La online driving-test demo mencionada en clase}{Video de clase de Stanford 00:26:36}
+
+\begin{warningbox}{Una Claim no sustituye a una evaluation}
+Para verificar la capacidad en el driving-test se necesita, como mínimo, un conjunto público de preguntas o un protocolo de prueba cerrado, una revisión de filtración de preguntas, aleatorización, múltiples ejecuciones y un análisis de errores por categoría. Un ícono de archivo de video no puede sustentar conclusiones sobre tasa de aprobación, generalización o seguridad.
+\end{warningbox}
+
+\lecturefigure{slide-43-human-like-agents.jpg}{Why human-like AI agents: reutilizar entornos digitales diseñados para personas}{Video de clase de Stanford 00:28:27}
+
+\begin{knowledgebox}{Lectura de la figura: human-like se refiere a compatibilidad de interfaz, no a equivalencia cognitiva}
+El entorno digital ya cuenta con teclado, ratón, disposición visual y documentación en lenguaje natural. Que el agent use estas interfaces permite reutilizar el software existente y evita desarrollar primero una API para cada sitio web; el costo es la ambigüedad visual, la fragilidad de los clics, el estado oculto y una superficie de ataque mayor. Lo que describe es I/O compatibility, no que el agent entienda el mundo como una persona.
+\end{knowledgebox}
+
+\subsection{Cinco niveles de Autonomy: delegar permisos de forma gradual según el riesgo}
+
+La Autonomy slide toma prestada la intuición de los niveles de la conducción autónoma y lleva al agent desde el control humano total hacia una alta autonomía. El texto de la figura es pequeño; el objetivo didáctico no debería ser memorizar los nombres de los niveles, sino entender qué cambia en cada nivel: quién propone el plan, quién ejecuta las acciones, quién supervisa y quién asume la responsabilidad de la recuperación.
+
+\lecturefigure{slide-44-autonomy-levels.jpg}{Propuesta de cinco niveles de Agent Autonomy presentada en clase}{Video de clase de Stanford 00:28:45}
+
+\begin{importantbox}{Diseñar la autonomy según el riesgo de la acción}
+\begin{tabularx}{\textwidth}{L{0.10\textwidth}>{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+Nivel & Papel del sistema & Control recomendado \\
+\midrule
+L1 & Solo sugiere; el usuario ejecuta & Mostrar fundamentos y pasos editables \\
+L2 & Ejecuta acciones reversibles de bajo riesgo & Cada lote de acciones se puede previsualizar y cancelar \\
+L3 & Maneja tareas de varios pasos con confirmación en puntos clave & Colocar un gate antes de dinero, mensajes salientes o cambios de cuenta \\
+L4 & Autónomo dentro de un dominio acotado & Límites de presupuesto, dominios, tiempo y permisos \\
+L5 & Alta autonomía en un dominio amplio & Visión de la clase; el despliegue real todavía requiere supervisión externa y kill switch \\
+\bottomrule
+\end{tabularx}
+\end{importantbox}
+
+Si la pérdida potencial de la acción $a$ es $L(a)$, su probabilidad de error es $q(a)$ y su coeficiente de recuperabilidad es $r(a)\in[0,1]$, puede usarse
+\[
+R(a)=q(a)L(a)(1-r(a))
+\]
+como ordenamiento aproximado del riesgo. Cuanto mayor sea $R(a)$, más deben reducirse los permisos, añadirse confirmaciones o prohibirse la ejecución automática; esta fórmula es una abstracción de ingeniería de las notas, no un estándar dado en clase.
+
+\teachervoice{El ponente compara la autonomy con el proceso de niveles de la self-driving y reconoce que la full autonomy todavía enfrenta muchos problemas. La ruta sólida no es proclamar primero «totalmente automático», sino separar en capas las acciones reversibles de las irreversibles y ampliar gradualmente el dominio de autonomía ya verificado.}
+
+\subsection{Disyuntiva entre API y direct interaction}
+
+La Computer Interaction slide compara dos rutas: operar mediante la API que ofrece la aplicación, o hacer que el agent use directamente keyboard, mouse y la pantalla. La API suele ser estructurada, verificable y con permisos claros; la direct interaction tiene mayor cobertura, pero depende más de la estabilidad de la UI y de la localización visual.
+
+\lecturefigure{slide-45-computer-interaction.jpg}{Las dos rutas de la Agent computer interaction}{Video de clase de Stanford 00:31:06}
+
+\begin{knowledgebox}{Términos clave: API y operación directa}
+\begin{tabularx}{\textwidth}{L{0.18\textwidth}X X}
+\toprule
+Ruta & Ventajas & Riesgos principales \\
+\midrule
+API interaction & Parámetros y valores de retorno estructurados; facilita schema validation, reintentos y mínimo privilegio & Cobertura limitada; requiere soporte del proveedor del servicio; la API puede cambiar \\
+Keyboard/mouse & Reutiliza casi cualquier interfaz humana; despliegue rápido de prototipos & Coordenadas frágiles, ventanas emergentes ocultas, reconocimiento visual erróneo, prompt injection y clics equivocados \\
+Hybrid & Prioriza la API, recurre a la UI cuando falta, y comparte el task state & Enrutamiento y consistencia más complejos; debe marcarse el canal de ejecución actual \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\teachervoice{La clase plantea explícitamente el trade-off: la API es más safe y controllable; la direct interaction, más general. Las notas lo convierten en un principio de ingeniería: la generalidad no es un beneficio gratuito; cuanto más libre es la interfaz, más importantes son la verificación del entorno y el aislamiento de permisos.}
+
+\subsection{Action API: convertir el lenguaje natural en acciones controladas}
+
+El último grupo de cinco cuadros muestra el overview de la Action API, la llamada desde código, la interfaz de chat, el proceso de control y el resultado. Busca ofrecer una capa de lenguaje natural para que los desarrolladores no tengan que escribir a mano una automatización específica para cada acción de UI; pero la palabra «Action» del nombre de la API no debe ocultar el flujo de control: la solicitud todavía debe analizarse, ejecutarse, observarse, verificarse y detenerse. Esta sección lee cada cuadro siguiendo esa cadena de control, para no confundir una entrada unificada con una confiabilidad unificada.
+
+\lecturefigure{slide-46-action-api-overview.jpg}{Presentación en clase de la Action API de MultiOn}{Video de clase de Stanford 00:32:18}
+
+\begin{knowledgebox}{Lectura de la figura: una entrada unificada no implica una semántica unificada}
+La Action API puede unificar la forma de llamada, pero los sitios web, las aplicaciones y los permisos subyacentes siguen siendo distintos. Una implementación confiable debe convertir el lenguaje natural en una typed intent y conservar el dominio objetivo, las acciones permitidas, el número máximo de pasos y la condición de éxito.
+\end{knowledgebox}
+
+\lecturefigure{slide-47-action-api-code.jpg}{El desarrollador llama a la Action API desde código}{Video de clase de Stanford 00:32:21}
+
+\begin{knowledgebox}{Lectura de la figura: la llamada al SDK es solo el punto de partida del plano de control}
+Del lado del código se deben registrar, como mínimo, request id, policy, budget y callback; del lado de la ejecución se devuelven structured observations, y no solo un «listo». Así quien llama puede distinguir entre en ejecución, requiere confirmación, fallido y completado con verificación.
+\end{knowledgebox}
+
+\lecturefigure{slide-48-action-api-chat.jpg}{Action API y entrada de tareas en formato de chat}{Video de clase de Stanford 00:32:33}
+
+\begin{knowledgebox}{Lectura de la figura: la capa de chat se encarga de aclarar ambigüedades}
+Cuando a la solicitud le falta el objeto, el horario, el presupuesto o el destinatario, la chat interface debe preguntar por iniciativa propia. Enviar todo el lenguaje natural directamente al ejecutor convierte la conversational ambiguity en errores en el mundo real.
+\end{knowledgebox}
+
+\lecturefigure{slide-49-action-api-control.jpg}{El Agent toma el control de la interfaz de la aplicación para ejecutar acciones}{Video de clase de Stanford 00:32:42}
+
+\begin{warningbox}{Al controlar la interfaz hay que evitar el desfase entre observación y acción}
+El desplazamiento de la página, las ventanas emergentes o la carga asíncrona pueden invalidar coordenadas anteriores. Antes de cada acción debe volver a observarse el elemento objetivo, y después de ella debe comprobarse el cambio de estado esperado; si la observation no coincide, hay que detenerse en lugar de seguir con un plan caducado.
+\end{warningbox}
+
+\lecturefigure{slide-50-action-api-result.jpg}{Estado del resultado de la demo de Action API}{Video de clase de Stanford 00:33:06}
+
+\begin{knowledgebox}{Lectura de la figura: el Result debe vincularse a un success predicate}
+La pantalla de resultado solo cuenta como éxito si cumple un predicate declarado de antemano, por ejemplo «el mensaje objetivo se envió al destinatario correcto y con el contenido correcto». Que aparezca visualmente la app objetivo o el texto no basta para demostrar que el estado del backend ya se confirmó.
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Controlador observe-act-verify de la Action API}]
+for step in range(max_steps):
+    observation = observe_environment()
+    decision = policy.plan(task, observation, permissions)
+    if decision.requires_confirmation:
+        decision = confirm_with_user(decision)
+    result = execute(decision.action)
+    if satisfies_success_predicate(result, task):
+        return verified_success(result)
+    if result.is_blocked or result.risk_exceeded:
+        return safe_stop(result)
+return timeout_without_claiming_success()
+\end{lstlisting}
+
+\subsection{Resumen de la sección}
+
+Una Live demo puede mostrar la posibilidad end-to-end, pero por sí sola no aporta una tasa de éxito general. El flujo de compra de boletos revela la compra irreversible; el fallo en el móvil revela las restricciones del entorno; los niveles de autonomy revelan que la delegación de permisos debe avanzar según el riesgo, y la Action API muestra que una entrada unificada en lenguaje natural sigue necesitando typed state, confirmation gate y postcondition verification.
+\section{Neural Compute, Memory y Personalization}
+
+Tras la demostración de acciones, la clase vuelve al nivel de la arquitectura para explicar qué lugar ocupa el modelo dentro del sistema y cómo el agent conserva información entre pasos y entre sesiones. Lo que más se presta a confusión aquí son context, persistent memory y user profile: los tres le proporcionan información al modelo, pero difieren en ciclo de vida, confiabilidad y obligaciones de privacidad.
+
+\subsection{Model as Neural Compute Unit}
+
+La slide Neural Compute Unit dibuja el Transformer como el núcleo de cómputo entre la entrada y la salida, y usa la CPU analogy para subrayar que un sistema más grande puede invocarlo. La analogía ayuda a entender la modularity, pero una CPU ejecuta instrucciones deterministas, mientras que un modelo de lenguaje genera distribuciones de probabilidad; por eso el agent también necesita reglas externas y un verifier que acoten las salidas inciertas.
+
+\lecturefigure{slide-51-neural-compute-unit.jpg}{Analogía de la clase: el AI model como neural compute unit}{Video de la clase de Stanford 00:35:15}
+
+\begin{knowledgebox}{Lectura de la figura: qué falta además de las flechas de entrada y salida}
+En la figura, el model recibe instructions y context, y devuelve una response. Un agent real necesita además un scheduler que decida cuándo invocarlo, una memory layer que elija qué contexto usar, una tool layer que ejecute las acciones, una policy layer que verifique los permisos y un verifier que evalúe los resultados. El modelo es una compute unit, no un operating system completo.
+\end{knowledgebox}
+
+\teachervoice{El ponente recurre una y otra vez a la analogía CPU/chip: un modelo potente es solo una unidad de cómputo poderosa; lo que vuelve utilizable al sistema es la abstraction, la memory, la interface y el internet access que lo rodean. Esta idea atraviesa la figura del LLM OS que aparece más adelante.}
+
+\subsection{Context y Long-term Memory}
+
+La slide Long-term Memory divide la memory en memoria de trabajo y almacenamiento persistente. La context window se asemeja a un área de trabajo de corto plazo para la tarea actual y está limitada por el token budget; el persistent store guarda hechos entre sesiones, acciones pasadas o índices de documentos, y requiere gestionar la recuperación, la actualización, la eliminación y la provenance.
+
+\lecturefigure{slide-52-long-term-memory.jpg}{Memoria de trabajo y memoria de largo plazo del agent}{Video de la clase de Stanford 00:35:33}
+
+\begin{importantbox}{Flujo básico de la retrieval memory}
+Para cada entrada de memoria $m_i$ se calcula su embedding $e_i$; si el vector de la consulta $q$ es $e_q$, las entradas pueden ordenarse según
+\[
+\operatorname{score}(m_i\mid q)
+=\alpha\,\cos(e_q,e_i)
++\beta\,\operatorname{recency}(m_i)
++\gamma\,\operatorname{trust}(m_i)
+\]
+La similitud responde «¿es relevante?», recency se ocupa de la información desactualizada y trust registra la confiabilidad de la fuente. Los resultados recuperados todavía deben entrar en el context para que el modelo los use; la base de datos vectorial por sí misma no garantiza que los hechos sean correctos.
+\end{importantbox}
+
+\begin{warningbox}{El context no es memoria persistente, y los pesos del modelo tampoco son una base de datos de usuarios}
+La ventana de contexto desaparece o se trunca al terminar la solicitud; la memoria persistente, en cambio, requiere un almacenamiento explícito. Escribir secretos del usuario en el prompt, en los registros o en una base de datos vectorial sin mecanismo de eliminación genera riesgos en el ciclo de vida de los datos. El conocimiento de entrenamiento contenido en los pesos del modelo tampoco puede cumplir la función de un registro personal que se pueda corregir con precisión.
+\end{warningbox}
+
+\teachervoice{En clase se hace la distinción de forma intuitiva: el context es la short-term memory que el modelo puede ver en ese momento, y solo una base de datos u otro store constituye la long-term memory. El ponente señala además que las tareas largas se topan rápidamente con el context limit, por lo que la memory management es un problema de sistema.}
+
+\subsection{Personalization: preferencias explícitas, comportamiento implícito y retroalimentación}
+
+La slide Personalization plantea que el user agent puede aprender preferences y usar las actions pasadas para mejorar su comportamiento posterior. Las preferencias explícitas provienen de lo que el usuario configura directamente, por ejemplo, su aerolínea preferida; las implícitas provienen de los registros de clics, selecciones y modificaciones. Estas últimas tienen más ruido y es más fácil que rebasen lo que el usuario espera. Esta sección parte de las fuentes de las señales para explicar cómo entran las preferencias en la toma de decisiones y por qué es indispensable permitir que el usuario las consulte, corrija y elimine.
+
+\lecturefigure{slide-53-personalization.jpg}{Aprendizaje de preferencias personalizadas a partir de acciones históricas y retroalimentación}{Video de la clase de Stanford 00:37:39}
+
+\begin{knowledgebox}{Términos clave: tres tipos de señales de personalización}
+\begin{tabularx}{\textwidth}{L{0.18\textwidth}X X}
+\toprule
+Señal & Ejemplo & Principio de uso \\
+\midrule
+Explicit & «Solo vuelos directos», «No comprar automáticamente» & Se trata como restricción de alta prioridad; se puede consultar y editar \\
+Implicit & Elegir varias veces cierta aerolínea o cierto modelo de calzado & Solo como soft preference; evitar inferencias excesivas a partir de una sola acción \\
+Feedback & Aceptar, corregir, deshacer o presentar una queja & Registrar el contexto concreto de la tarea; distinguir un cambio de preferencia de un error del sistema \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+Si la utilidad básica de la tarea para el candidato recomendado $x$ es $U_{task}(x)$, la puntuación de preferencia personalizada es $U_{pref}(x)$ y el riesgo es $C_{risk}(x)$, puede escribirse
+\[
+U(x)=U_{task}(x)+\lambda U_{pref}(x)-\mu C_{risk}(x).
+\]
+$\lambda$ no debe ser tan grande que anule las hard constraints, y $\mu$ debe aumentar con el dinero, la privacidad y la irreversibilidad en juego. El objetivo de la Personalization es reducir las explicaciones repetidas, no reescribir los objetivos en lugar del usuario.
+
+\teachervoice{El ponente pone como ejemplo las preferencias al comprar zapatos y boletos de avión, y plantea aprender de manera continua a partir de human feedback. Estas notas añaden los límites necesarios: un clic del usuario puede ser solo una concesión momentánea y no debe fijarse para siempre como preferencia; el agent debe permitir consultar, corregir y olvidar.}
+
+\subsection{Challenges: el aprendizaje continuo trae consigo problemas de privacidad y control}
+
+La slide Challenges reúne collecting user preferences, active-learning preferences, learning from interactions, on-the-fly adaptation y privacy. Muestra que la personalization no consiste solo en mejorar la precisión de las recomendaciones, sino que es un problema de sistema integral que abarca la recolección de datos, la actualización en línea y el control por parte del usuario.
+
+\lecturefigure{slide-54-agent-challenges.jpg}{Los retos centrales de la long-term personalization}{Video de la clase de Stanford 00:39:54}
+
+\begin{warningbox}{Cuatro frentes de falla de un sistema de personalización}
+\begin{enumerate}
+  \item \textbf{Memoria errónea}: una sola operación equivocada se guarda a largo plazo;
+  \item \textbf{Inferencia no autorizada}: se infieren atributos sensibles a partir del comportamiento o se reutilizan en otros contextos;
+  \item \textbf{Preferencias obsoletas}: el usuario cambió, pero el sistema sigue actuando según el profile anterior;
+  \item \textbf{Automatización irreversible}: el modelo convierte directamente una soft preference en una compra o en un envío de información hacia el exterior.
+\end{enumerate}
+Las medidas de mitigación incluyen provenance, políticas de caducidad, edición visible para el usuario, purpose limitation y confirmation para las acciones de alto riesgo.
+\end{warningbox}
+
+\teachervoice{Al hablar del futuro de la personalization, el ponente plantea por iniciativa propia las privacy concerns y considera las autonomous irreversible actions un punto de peligro. En clase no se trató «saber más del usuario» como un objetivo incondicional, sino que se discutió junto con los permisos y el control.}
+
+\subsection{Resumen de la sección}
+
+La analogía de la neural compute unit deja claro que el modelo es solo el núcleo de cómputo; el context aporta un área de trabajo de corto plazo, el persistent store aporta estado entre sesiones y la personalization convierte las preferencias explícitas, el comportamiento implícito y la retroalimentación en restricciones controlables. Cuanto más duradera es la memoria, más necesita mecanismos de provenance, actualización, eliminación, permisos y confirmación.
+\section{Multi-Agent Systems: el paralelismo no vuelve al sistema automáticamente más inteligente}
+
+La clase pasa de un solo agent a múltiples agents; las motivaciones principales son la parallel execution, la task decomposition y la specialization. Este cambio se parece al paso de un solo hilo a múltiples hilos: puede reducir la wall-clock latency y ampliar la escala de procesamiento, pero también introduce problemas de comunicación, sincronización, estado compartido y acumulación de errores.
+
+\subsection{De un solo Agent a un Autonomous AI System}
+
+La slide de Multi-Agent System usa un agent de nivel superior y varios agents de nivel inferior para representar la asignación de tareas. La figura es sencilla, pero contiene decisiones de arquitectura fundamentales: quién posee el objetivo global, quién puede crear subtareas, si los workers comparten memory, quién verifica los resultados y si, ante una falla, se reintenta localmente o se replanifica de forma global. Esta sección primero hace explícitas estas decisiones implícitas y después analiza qué ahorra realmente la paralelización.
+
+\lecturefigure{slide-55-multi-agent-system.jpg}{Multi-Agent System formado por un manager y varios workers}{Video de la clase de Stanford 00:43:00}
+
+\begin{knowledgebox}{Lectura de la figura: la estructura de árbol implica un plano de control y un plano de ejecución}
+El manager pertenece al control plane y se encarga de la decomposition, el routing, el budget y la aggregation; los workers pertenecen al execution plane y llaman a sus propias herramientas para completar bounded tasks. Si cada worker puede crear nuevos workers sin límite, el sistema pierde su tope de recursos y sus límites de responsabilidad.
+\end{knowledgebox}
+
+\teachervoice{El ponente dice que, aunque un solo agent alcance una tasa de éxito muy alta, solo puede hacer una cosa a la vez, de forma secuencial; el beneficio directo de múltiples agents es, ante todo, la parallelization, no un aumento de la calidad del razonamiento surgido de la nada.}
+
+\subsection{Por qué Multi-Agent: paralelismo, escala y especialización}
+
+La slide Why Multi-Agent enumera parallelization unlock, task specialization, collaboration y agent-to-agent communication. Con el ejemplo de una búsqueda de muebles en Craigslist, varios workers pueden contactar candidatos en paralelo y luego el manager agrega los resultados; otro ejemplo es que un agent de spreadsheet, uno de Slack y uno de browser se encargan cada uno del dominio de herramientas que conocen.
+
+\lecturefigure{slide-56-why-multi-agent.jpg}{Motivaciones de Multi-Agent: paralelización, especialización y colaboración}{Video de la clase de Stanford 00:45:39}
+
+\begin{importantbox}{Beneficio del paralelismo y costo en confiabilidad}
+Si $n$ subtareas independientes tardan $\sum_i T_i$ en serie, el tiempo ideal en paralelo se aproxima a
+\[
+T_{parallel}\approx \max_i T_i+T_{route}+T_{sync}+T_{aggregate}.
+\]
+Cuando el costo de comunicación y agregación es demasiado alto, el paralelismo no necesariamente es más rápido. Si la tarea exige que los $n$ resultados sean correctos y la tasa de éxito de cada uno es $p$, bajo la aproximación de independencia la tasa de éxito de extremo a extremo es $p^n$; cuantas más subtareas haya, más importantes son la verificación y el reintento local.
+\end{importantbox}
+
+\begin{warningbox}{La Specialization también genera deuda de interfaces}
+Los agents especializados pueden reducir la complejidad del prompt y de las herramientas, pero el manager debe conocer las capacidades, el schema de entrada, los permisos y los modos de falla de cada worker. Un «chat grupal de expertos» sin un contract claro tiende a producir trabajo duplicado, desplazamiento de responsabilidades y confianza mutua en resultados erróneos.
+\end{warningbox}
+
+\subsection{Communication Protocol: los mensajes deben llevar el estado}
+
+La slide de Communication overview muestra al user, al manager y a los worker agents. La clase llama a la communication el mayor desafío y plantea un protocol estándar que exprese request, final response, success/failure, retry y security. El valor del protocolo no es solo unificar el formato, sino lograr que el estado de la tarea sea legible por máquina y susceptible de auditoría.
+
+\lecturefigure{slide-57-agent-communication-overview.jpg}{Estructura de comunicación entre user, manager y workers}{Video de la clase de Stanford 00:47:30}
+
+\begin{knowledgebox}{Campos mínimos de un Agent message}
+Un mensaje confiable debe incluir al menos \texttt{task\_id}, \texttt{parent\_id}, el objetivo, la fuente de la entrada, las herramientas permitidas, el deadline, el budget, el expected output schema, el status y la evidence. El texto libre puede explicar la intención, pero no sustituye un machine-checkable contract.
+\end{knowledgebox}
+
+\teachervoice{El ponente compara la agent communication con la miscommunication en las organizaciones humanas y anticipa que surgirán protocolos estándar para expresar éxito, falla, reintento e información de seguridad. Lo importante es reducir la pérdida de información, no que los agents hablen más como personas.}
+
+\subsection{Manager--Worker: reporte de éxito y repetición explícita}
+
+La slide Task muestra al manager asignando tareas a los agents y recibiendo actualizaciones de estado; la página siguiente muestra que, cuando un worker devuelve un resultado erróneo, el manager envía un re-do. En conjunto, ambas páginas muestran que la multi-agent reliability depende de las state transitions, no de difundir una tarea una sola vez y esperar cualquier respuesta en lenguaje natural.
+
+\lecturefigure{slide-58-agent-communication-task.jpg}{El manager asigna tareas y recibe el estado de los workers}{Video de la clase de Stanford 00:49:00}
+
+\begin{knowledgebox}{Lectura de la figura: el Manager debe mantener el authoritative task state}
+Cada subtarea necesita estados como queued, running, blocked, failed y verified. El «done» de un worker es solo una declaración; el manager también debe comprobar el output schema y la evidence; de lo contrario, una completion errónea contaminará la aggregation posterior.
+\end{knowledgebox}
+
+\lecturefigure{slide-59-agent-communication-redo.jpg}{Una tarea errónea provoca la instrucción re-do del manager}{Video de la clase de Stanford 00:49:51}
+
+\begin{knowledgebox}{Lectura de la figura: el reintento debe cambiar las condiciones, no repetirse mecánicamente}
+Un re-do eficaz debe incluir la failure reason, las restricciones corregidas, el presupuesto restante y el número máximo de intentos. Si la entrada, las herramientas y la estrategia no cambian, los retry ilimitados solo amplifican el costo; al superar el umbral, se debe escalar al usuario o cambiar de worker.
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Protocolo manager--worker con verificación y reintentos limitados}]
+def run_subtask(task, workers, retry_limit=2):
+    attempt = 0
+    feedback = None
+    while attempt <= retry_limit:
+        worker = route(task, workers, feedback)
+        report = worker.execute(task, feedback)
+        verdict = verify_schema_evidence_and_constraints(report, task)
+        if verdict.ok:
+            return mark_verified(report)
+        feedback = verdict.failure_reason
+        attempt += 1
+    return escalate_to_manager_or_user(task, feedback)
+\end{lstlisting}
+
+\teachervoice{La clase usa un re-do message very concrete para mostrar que un sistema multi-agent no termina con arrancar varios modelos al mismo tiempo: el manager debe saber si un worker se equivocó y reinyectar la información de corrección en el flujo. La sincronización y la comunicación son en sí mismas capacidades centrales.}
+
+\subsection{Resumen de la sección}
+
+Los principales beneficios de multi-agent provienen de la parallelization, la task decomposition y la specialization; sus principales costos provienen del routing, la communication, la synchronization, la aggregation y la compound failure. Un sistema manager--worker debe usar estado estructurado, evidence-based verification, reintentos limitados y rutas de escalamiento.
+\section{Reliability y Generalized AI Systems}
+
+Los últimos diez minutos convierten la demo optimista en un problema de sistemas: los agents pueden caer en bucles, son difíciles de probar, pueden quedar sin supervisión y, cuando les falta retroalimentación, producen plan divergence. Después, la clase se apoya en las figuras de LLM OS y de generalized AI system para intentar integrar chat, rules, task engine, router, apps, local index y reflection en una arquitectura unificada.
+
+\subsection{Key Issues: confiabilidad, bucles, evaluación y capacidad de detención}
+
+La slide Key Issues enumera reliability, looping, testing/benchmarking y problemas todavía inmaduros del tipo reset/deployment/observabilidad. La actitud de ingeniería más importante es esta: un agent failure no es una tasa de error única, sino un proceso dinámico en el que una acción modifica las observation y decision posteriores.
+
+\lecturefigure{slide-60-key-agent-issues.jpg}{Problemas clave de confiabilidad de los Autonomous Agents}{Video de la clase de Stanford 00:50:30}
+
+\begin{knowledgebox}{Lectura de la figura: cada uno de los cuatro tipos de problema requiere evidencia distinta}
+Reliability requiere la tasa de éxito por tarea y una clasificación de errores; looping requiere step limit y detección de estados repetidos; testing requiere entornos reproducibles y hidden test; oversight requiere trace, kill switch y una persona responsable. Un benchmark que solo evalúa la respuesta final no alcanza a cubrir los sistemas que actúan en entornos reales.
+\end{knowledgebox}
+
+\begin{importantbox}{Métricas por niveles de Agent Evaluation}
+\begin{tabularx}{\textwidth}{L{0.22\textwidth}X X}
+\toprule
+Nivel & Métricas de ejemplo & Fallas que no deben ignorarse \\
+\midrule
+Step & action validity, tool error & hacer clic en el objeto equivocado, parámetros fuera de rango \\
+Trajectory & progress, loop rate, budget & ejecución repetida, deriva del estado \\
+Task & verified success, human intervention & parece completada, pero la postcondition es incorrecta \\
+Safety & unauthorized action, recovery & exceso de privilegios, fuga de información, pérdida irreversible \\
+\bottomrule
+\end{tabularx}
+\end{importantbox}
+
+\teachervoice{El ponente enfatiza que siempre debe ser posible hacer stop al agent; si el sistema sigue en bucle o ejecuta acciones erróneas, las personas necesitan reset, oversight o un kill mechanism. La autonomía no consiste en eliminar la supervisión, sino en trasladarla de la operación paso a paso al control de límites y excepciones.}
+
+\subsection{Plan Divergence: un plan sin retroalimentación se aleja de la realidad}
+
+La slide Plan Divergence representa la desviación con un ideal plan en negro y una agent trajectory en rojo. Al principio el error puede ser pequeño, pero si el sistema sigue planificando únicamente a partir del texto que él mismo generó, sin leer el estado de la página web, los compiler error ni las correcciones del usuario, la desviación se acumula y se convierte en nuevas premisas erróneas. Esta sección vuelve al feedback loop para mostrar cómo usar señales externas verificables para devolver la trajectory al objetivo de la tarea.
+
+\lecturefigure{slide-61-plan-divergence.jpg}{Plan Divergence en ausencia de retroalimentación del entorno}{Video de la clase de Stanford 00:53:09}
+
+\begin{importantbox}{Ver al Agent como un sistema de control por retroalimentación}
+Sea $x_t^*$ el estado deseado, $x_t$ el estado real del entorno y $e_t=x_t^*-x_t$ el error. La planificación open-loop, sin retroalimentación, solo ejecuta acciones generadas de antemano; un closed-loop agent lee la observation en cada paso y usa
+\[
+a_t=\pi(g,x_t,e_t),\qquad x_{t+1}=F(x_t,a_t)
+\]
+para corregir las acciones posteriores. Lo importante no es que la fórmula sea compleja, sino que $x_t$ provenga de evidencia del entorno y no de lo que el modelo imagina.
+\end{importantbox}
+
+\begin{warningbox}{La autorreflexión no sustituye la verificación en el entorno}
+Hacer que el mismo modelo lea su propio plan puede corregir contradicciones evidentes, pero no le permite saber si la página web se envió, si el código compila o si el inventario cambió. Conviene priorizar external verifier como compiler, tests, API response, DOM state o receipt; la critique verbal solo sirve como complemento.
+\end{warningbox}
+
+\teachervoice{La clase toma el coding agent como ejemplo positivo: el compiler o el IDE devuelven errores explícitos, de modo que el agent sabe «te equivocaste». El ponente atribuye la divergence de los primeros sistemas AutoGPT-style a la falta de feedback confiable; esta explicación está más cerca de la causa raíz que simplemente aumentar las rondas de razonamiento.}
+
+\subsection{LLM OS: construir una capa operativa alrededor del modelo}
+
+La slide LLM OS de Karpathy coloca al LLM en el centro y lo conecta con conversational interface, tools, browser, storage, vision y otras I/O. No es un sistema operativo ya estandarizado, sino una architecture metaphor: el modelo funciona como compute kernel y la capa del sistema se encarga del contexto, los recursos, el enrutamiento y la seguridad.
+
+\lecturefigure{slide-62-llm-os.jpg}{Diagrama de arquitectura de LLM OS de Karpathy presentado en clase}{Video de la clase de Stanford 00:53:33}
+
+\begin{knowledgebox}{Lectura de la figura: qué responsabilidades corresponden a la analogía con un OS}
+La chat interface equivale al user shell; context/memory, al working set y al storage; el router, al scheduler; tools/apps, a devices y services; permissions/sandbox, a la protection boundary; reflection/verifier, al error handling. La analogía sirve para detectar componentes faltantes; no implica que el LLM tenga el determinismo ni las garantías de aislamiento de un OS tradicional.
+\end{knowledgebox}
+
+\teachervoice{El ponente señala que las personas no siguieron considerando la CPU como «la computadora en sí»; del mismo modo, tampoco debe considerarse siempre al chatbot como la forma final de la IA. El sistema necesita envolver el model con reglas, un motor de tareas, almacenamiento y herramientas para poder asumir trabajos más complejos.}
+
+\subsection{Generalized AI System: chat, rules, routing y reflection}
+
+La slide Generalized AI Systems muestra un flujo de datos más completo: el usuario escribe su entrada en la chat interface; el sistema la combina con las rules para crear una task, que pasa por el task engine y el router para distribuirse a apps/tools o al local index; después, los resultados regresan a reflection y al usuario. Al leer la figura conviene partir del orden de control y no de los nombres de los componentes.
+
+\lecturefigure{slide-63-generalized-ai-systems.jpg}{Boceto de Building Generalized AI Systems presentado en clase}{Video de la clase de Stanford 00:58:51}
+
+\begin{knowledgebox}{Lectura de la figura: una ruta de tarea segura}
+La entrada pasa primero por la verificación de reglas y la aclaración del objetivo; el task engine genera un bounded plan y el router elige browser, app, tool o local index; cada ejecutor devuelve evidence y reflection comprueba si se cumple el success predicate. Si no se cumple, el sistema revisa el plan dentro del presupuesto; si alcanza un límite de permisos o de riesgo, devuelve el control al usuario.
+\end{knowledgebox}
+
+\begin{warningbox}{Las rules deben restringir el plan antes de la ejecución}
+Si las prohibiciones solo se escriben en la plantilla de la respuesta final, el agent puede haber realizado ya una acción sin autorización. Las reglas deben intervenir en plan validation, tool authorization y argument checking; todo plan candidato que viole un principio inmutable debe rechazarse antes de ejecutarse.
+\end{warningbox}
+
+\teachervoice{La clase propone las «inherent rules»: si un plan generado por el sistema viola los principios, debe quedar invalidated automáticamente. A continuación, el manager/router decide si accede a browser, apps, tools o local files, y reflection evalúa si la tarea se completó correctamente.}
+
+\subsection{Future Needs: error correction, permissions y sandboxing}
+
+La última slide enumera error correction, security/user permissions, sandboxing y el despliegue de alto riesgo. Con ella, toda la discusión sobre Agents se concreta en los criterios de aceptación más realistas: no basta con completar el camino sin contratiempos; también hay que capturar errores, limitar el acceso, aislar la ejecución y proteger las operaciones business, financial y otras irreversibles.
+
+\lecturefigure{slide-64-future-needs.jpg}{Mecanismos de corrección de errores, seguridad y aislamiento que necesitarán los Agents futuros}{Video de la clase de Stanford 01:00:06}
+
+\begin{importantbox}{Ciclo mínimo de seguridad antes del despliegue}
+\begin{enumerate}
+  \item \textbf{Least privilege}: cada tool recibe solo los permisos necesarios para completar la tarea actual;
+  \item \textbf{Sandbox}: las operaciones de código, archivos y navegación se ejecutan en un entorno restringido;
+  \item \textbf{Confirmation gate}: se pide confirmación antes de pagos, eliminaciones, publicaciones, envíos y cambios de cuenta;
+  \item \textbf{Audit trail}: se guardan el objetivo, el plan, las acciones, las observaciones, las autorizaciones y los resultados;
+  \item \textbf{Recovery}: se admite cancelar, aplicar transacciones compensatorias, revertir versiones y pasar el control a una persona;
+  \item \textbf{Evaluation}: se prueban el exceso de privilegios, la inyección y la divergence en escenarios adversarial y en tareas de larga duración.
+\end{enumerate}
+\end{importantbox}
+
+\teachervoice{Al final, el ponente explica los permissions con un ejemplo muy concreto: el agent puede acceder a DoorDash, pero no necesariamente a la bank account; además, hay que evitar que borre el contenido de la computadora y establecer protecciones ante riesgos comerciales, financieros e irreversibles. No son funciones complementarias para el futuro, sino componentes de un agent que pueda desplegarse.}
+
+\subsection{Resumen de la sección}
+
+La Agent reliability debe evaluarse sobre la trajectory y el environment loop. La plan divergence muestra que la external feedback es necesaria; las figuras de LLM OS y de generalized-system muestran que chat, rules, task engine, router, tools, memory, reflection y permissions deben diseñarse como componentes explícitos; por su parte, la página de future-needs establece error correction, sandboxing e irreversible-action safeguards como requisitos para el despliegue.
+\section{Síntesis y ampliación}
+
+Esta clase responde con cuatro temas qué significa «Beyond LLMs». Emergent abilities nos recuerda distinguir entre un cambio real de capacidad y un metric artifact; Intermediate-Guided Reasoning extiende una sola generación a chain, tree, decomposition o program execution; BabyLM usa un presupuesto de datos restringido para indagar en la sample efficiency; y Agents coloca al modelo dentro de un sistema capaz de actuar, recordar, colaborar y corregir errores.
+
+\subsection{Marco unificado: la capacidad proviene del modelo, del proceso y del ciclo cerrado}
+
+Las dos mitades de la clase pueden unificarse en tres capas: el model aporta representación y generación probabilísticas, el inference procedure organiza los intermediate states y el system loop conecta los resultados con el environment. Una escala mayor no produce automáticamente un razonamiento fiel, una trayectoria de razonamiento más larga no produce automáticamente una acción correcta y más herramientas no producen automáticamente un sistema confiable. Cada capa requiere métricas propias y su propio análisis de fallas.
+
+\begin{importantbox}{Ocho conclusiones aplicables de esta sesión}
+\begin{enumerate}
+  \item Al reportar emergence, revisar al mismo tiempo la metric, el prompt, la task distribution y una métrica continua alternativa;
+  \item Para cada reasoning method, distinguir entre final-answer accuracy, step validity y compute cost;
+  \item Delegar con prioridad el cálculo exacto a un interpreter y verificar que el programa sea coherente con la semántica del problema;
+  \item Al comparar modelos pequeños, reportar al mismo tiempo data budget, architecture, objective y curriculum;
+  \item Evaluar por separado el foundation model y el agent system;
+  \item Definir para cada acción real sus permissions, su success predicate y su confirmation gate;
+  \item En Multi-agent, usar un task state estructurado, reintentos limitados y evidence aggregation;
+  \item La ejecución de larga duración debe apoyarse en external feedback, audit, sandbox y recovery.
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Cómo verificar una Agent Claim}
+
+Ante afirmaciones como «el agent puede reservar boletos, aprobar exámenes u operar cualquier software», puede revisarse en cinco pasos: primero, fijar la tarea y la versión; después, hacer públicos el estado inicial y los permisos; luego, ejecutar varias veces y guardar las trajectories completas; determinar el éxito con la postcondition del entorno y no con la autoevaluación del modelo; por último, reportar las categorías de falla, la intervención humana, el costo y los eventos irreversibles. Solo así una demo se convierte en evidence comparable.
+
+\begin{warningbox}{No presentar la visión de la clase de 2023 como hechos de productos de 2026}
+Esta sesión registra el contenido del curso del 2023-11-28. MultiOn, AutoGPT, Action API y LLM OS surgieron en un contexto histórico específico; las notas conservan su valor didáctico, pero no se apoyan en ellos para afirmar las capacidades actuales de los productos, la situación de las empresas ni los estándares de la industria.
+\end{warningbox}
+
+\subsection{Lecturas adicionales y resumen final}
+
+\enlargethispage{5\baselineskip}
+
+Se recomienda continuar por tres rutas: primero, leer el debate sobre emergent abilities y metric-choice, y comparar el exact-match discreto con la pérdida continua; segundo, leer Chain-of-Thought, Tree of Thoughts, PAL, Program of Thoughts y BabyLM Challenge para entender el proceso de razonamiento y la eficiencia de muestras; tercero, leer la revisión de Lilian Weng sobre LLM-powered autonomous agents y reexaminar la arquitectura vista en clase a la luz de la agent evaluation moderna, la computer-use safety y el diseño de sandbox. Al leer, conviene dar prioridad a los artículos, las páginas oficiales de los proyectos y los experimentos reproducibles, sin sustituir la evidencia por demos de productos.
+
+El verdadero «Beyond LLMs» no consiste en abandonar los LLM, sino en dejar de considerar una sola generación de texto como el punto final de la capacidad. Un sistema más confiable elige la intermediate representation adecuada, obtiene resultados verificables mediante herramientas, guarda en memory estados con provenance, ejecuta bounded tasks en paralelo con multi-agent y realiza acciones en el mundo real bajo permissions, feedback, reflection, sandboxing y human oversight.
+
+\end{document}

@@ -1,0 +1,588 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+
+\renewcommand{\notetitle}{Lecture 03: Vision Transformers — representaciones visuales generales, escalamiento y sesgo inductivo}
+\renewcommand{\noteauthors}{Elaborado a partir de la conferencia de Lucas Beyer, los subtítulos con marcas de tiempo y los artículos originales de VTAB/BiT/ViT/Scaling ViT/MLP-Mixer}
+\renewcommand{\notedate}{Curso Fall 2021 · versión source-first reescrita en 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{2022-07-12}
+\renewcommand{\videoduration}{1:08:36}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=BP5CM0YxbP8}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.96\textwidth]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\begin{document}
+\makecscover
+
+\section{Auditoría de fuentes: esta sesión no consiste en «trasladar el Transformer a las imágenes»}
+
+Esta conferencia suele reducirse a una sola frase: dividir la imagen en patches y luego introducirlos en un Transformer. Ese resumen omite la verdadera metodología. Lucas Beyer dedica primero casi la mitad del tiempo a discutir cómo definir una «representación visual general», cómo medir la transferencia rápida con VTAB, por qué la self-supervision no reprodujo automáticamente el éxito de NLP y cómo Big Transfer vincula los datos, la capacidad del modelo, la paciencia en el entrenamiento y la eliminación de duplicados; ViT es solo un experimento que, dentro de esta cadena de evidencia, reduce todavía más el sesgo inductivo visual.
+
+El video original no publica un PDF independiente de las slides. Este documento recupera 36 distinct teaching slides a partir de la grabación oficial de Stanford Online, y marca como intentional omissions el bumper, las páginas que solo sirven de separador, los progressive build repetidos, las páginas antiguas a las que se regresa varias veces durante la sesión de Q\&A y los cuadros en negro. El curso se impartió en 2021, y el texto principal conserva el contexto de investigación de ese momento; los desarrollos posteriores solo se señalan de forma explícita en la «ampliación» y no se atribuyen retroactivamente a la intención original del ponente.
+
+\lecturefigure{slide-01-title.jpg}{El título de la conferencia de Lucas Beyer pone el énfasis en el large-scale visual representation learning y no en una arquitectura particular.}{Video oficial 00:28.}
+
+\begin{knowledgebox}{Lectura de la figura: los tres calificativos del título}
+\textbf{Large-scale} indica que las conclusiones dependen de la escala de los datos, del modelo y del cómputo; \textbf{visual representation} indica que el objetivo es una representación intermedia transferible, no solo un clasificador concreto; \textbf{learning} indica que la pregunta de investigación es «qué estructuras pueden aprenderse a partir de los datos», y no suponer de antemano que el Transformer es naturalmente adecuado para todas las tareas visuales. Todas las curvas que aparecen más adelante deben leerse teniendo presentes estos tres calificativos.
+\end{knowledgebox}
+
+\begin{importantbox}{Los cuatro ciclos cerrados de esta sesión}
+\begin{enumerate}
+  \item \textbf{Ciclo de medición}: representación general $\rightarrow$ adaptación con pocas muestras $\rightarrow$ medición en múltiples tareas $\rightarrow$ corrección del objetivo;
+  \item \textbf{Ciclo de preentrenamiento}: escala de los datos $\times$ capacidad del modelo $\times$ recipe $\rightarrow$ representación transferible;
+  \item \textbf{Ciclo de arquitectura}: tokenización por patches $\rightarrow$ sequence model $\rightarrow$ learned spatial structure;
+  \item \textbf{Ciclo de escalamiento}: compute budget $\rightarrow$ model shape / schedule / regularization $\rightarrow$ sample efficiency.
+\end{enumerate}
+\end{importantbox}
+
+\begin{warningbox}{Los resultados históricos no pueden repetirse al margen de su protocol}
+«ViT supera a ResNet» no es una afirmación incondicional. Depende, como mínimo, del conjunto de datos de preentrenamiento, del número de pasos de entrenamiento, de la augmentation, de la regularization, del presupuesto de parámetros/compute, del patch size, del fine-tuning protocol y del conjunto de prueba. Omitir estas condiciones convierte por error una curva experimental en una ley de la arquitectura.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Lo que estudia esta sesión no es un block, sino cómo eliminar gradualmente los supuestos previos visuales en experimentos a gran escala y cómo validar las representaciones obtenidas mediante la transferencia, la robustez, la eficiencia y la auditoría de fugas. Las 36 slides constituyen el esqueleto de la evidencia; las explicaciones orales del docente se encargan de conectar «por qué se hace» con «qué no pueden demostrar los resultados».
+\section{Representación visual general: de la inducción humana con pocos ejemplos a un objetivo medible}
+
+Antes de pasar al modelo, hay que definir el objetivo. Una representación que solo funciona dentro del espacio de etiquetas del preentrenamiento se parece más a un conjunto de características especializadas. Una \term{general visual representation} (representación visual general) debería permitir que una tarea nueva alcance un desempeño confiable con muy pocos ejemplos y un costo de adaptación reducido. También debería abarcar problemas visuales distintos: imágenes naturales, escenas estructuradas, percepción remota, conteo y geometría.
+
+\subsection{El objetivo no es «ver», sino adaptarse rápidamente}
+
+El ponente plantea primero una visión centrada en los usuarios reales: en el futuro, una persona común podrá enseñarle al sistema una tarea visual nueva con unos cuantos ejemplos, sin necesidad de programar. Lo esencial no es la apariencia de robot, sino la adaptation interface: cuando el usuario proporciona ejemplos, ¿puede el sistema aprovechar la representación existente para entender rápidamente una nueva regla de clasificación?
+
+\lecturefigure{slide-02-goal-general-representation.jpg}{El objetivo de la investigación es una general visual representation, no la puntuación máxima en un solo benchmark.}{Video oficial 00:36.}
+
+\begin{knowledgebox}{Lectura de la figura: la representation es un activo común previo a la tarea}
+El modelo preentrenado puede escribirse como un mapeo de características $h=f_{\theta}(x)$, y la tarea posterior aprende después $g_{\phi}(h)$. Si $f_{\theta}$ es realmente general, una nueva $g_{\phi}$ debería requerir solo pocos datos o una actualización pequeña de parámetros. La figura no especifica clasificación, detección ni segmentación precisamente para subrayar que la representación antecede a cualquier tarea concreta. Para evaluarla hay que observar un conjunto de tareas posteriores, no solo la upstream accuracy.
+\end{knowledgebox}
+
+\lecturefigure{slide-03-why-visual-representation.jpg}{Una buena representación visual debería dar un «kick-start» a muchas tareas con entrada visual y reducir el costo de enseñanza para quienes no son especialistas.}{Video oficial 01:40.}
+
+\begin{importantbox}{Qué significa kick-start}
+Kick-start no significa resolver la tarea a costo cero, sino reducir de manera notable tres tipos de costo: \textbf{sample cost} (cuántos ejemplos etiquetados se necesitan), \textbf{optimization cost} (cuánto tiempo hay que entrenar y cuántos parámetros hay que actualizar) y \textbf{specification cost} (con cuánta precisión debe describir la tarea el usuario). Una representación puede mejorar la precisión final sin reducir estos costos y, por lo tanto, no puede considerarse fácil de adaptar.
+\end{importantbox}
+
+\teachervoice{Lucas explica la visión de la investigación con la idea de que «un niño o sus padres puedan enseñarle a un robot sencillo», y aclara que la representación visual es solo una parte de un sistema inteligente completo. Nota de clase: expresar el valor del aprendizaje de representaciones como costo de adaptación para el usuario es más verificable que afirmar de forma general que «el modelo es más inteligente».}
+
+\subsection{Qué referencia ofrece la representación visual humana}
+
+Las personas no solo son buenas para reconocer objetos conocidos. Con flores, imágenes satelitales y objetos abstractos, el ponente muestra que, aunque la semántica de las categorías sea desconocida, una persona puede inferir la regla a partir de unos pocos ejemplos. Lo que vale la pena imitar es la capacidad de combinar elementos de la representación para formar nuevas fronteras de decisión, no la de memorizar una enorme cantidad de nombres de categorías. Al leer los tres grupos de figuras siguientes, hay que determinar en cada caso si la tarea depende de experiencia semántica de largo plazo, de estadísticas visuales de bajo nivel o de reglas abstractas como la cantidad y las relaciones. Solo una representación que se adapte rápidamente a través de todos estos mecanismos se acerca a ser «general».
+
+\lecturefigure{slide-04-human-visual-representation.jpg}{La representación visual humana se usa como referencia de la capacidad de inducción con pocos ejemplos.}{Video oficial 01:48.}
+
+\begin{knowledgebox}{Lectura de la figura: el éxito con pocos ejemplos puede provenir de mecanismos distintos}
+La tarea de flores puede aprovechar la experiencia visual de largo plazo; las imágenes satelitales requieren transferir texturas y estructura espacial; la tarea de objetos abstractos puede depender de reglas de conteo o de relaciones. Las tres se presentan como few-shot classification, pero requieren invariance distintas. Un benchmark que solo contenga objetos naturales similares no puede distinguir entre «memorizar plantillas semánticas» y «formar una estructura visual general».
+\end{knowledgebox}
+
+\lecturefigure{slide-05-vtab-flowers.jpg}{Las categorías de flores del ejemplo de VTAB están cerca de la distribución de imágenes naturales; con pocos ejemplos basta para formar el concepto de cada categoría.}{Video oficial 02:00; Zhai et al. 2019.}
+
+\begin{knowledgebox}{Lectura de la figura: primero hay que juzgar la distancia entre la tarea y la distribución de preentrenamiento}
+Las imágenes de flores tienen texturas, colores y contornos reales, y suelen estar cerca de un preentrenamiento del tipo ImageNet. Si el modelo rinde bien en este tipo de tarea, puede deberse a una representación transferible o a la superposición semántica con las categorías o imágenes upstream. Al leer un benchmark, el primer paso no es mirar la puntuación, sino preguntar qué tan cerca están downstream y upstream en cuanto a origen de las imágenes, semántica de las etiquetas y estadísticas visuales.
+\end{knowledgebox}
+
+\lecturefigure{slide-06-vtab-objects.jpg}{La tarea de objetos abstractos exige inducir la regla de cada categoría a partir de la cantidad, la forma o las relaciones.}{Video oficial 03:04; VTAB structured tasks.}
+
+\begin{warningbox}{Few-shot no es tan simple como «entrenar con solo cinco imágenes»}
+Que el modelo vea pocos ejemplos etiquetados en la tarea posterior no significa que no haya visto patrones visuales similares. Hay que distinguir pretraining exposure, downstream labeled examples, hyperparameter tuning data y test examples. Si la recipe se ajusta repetidamente sobre varias tareas posteriores, el sistema en conjunto usa mucha más información que los $k$ ejemplos de una sola tarea.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Lo central de una representación general es adaptarse rápidamente a reglas diversas, no la precisión en una sola clasificación. Los ejemplos humanos indican que hay que cubrir a la vez semántica conocida, domain shift y razonamiento estructurado; esto conduce directamente al marco de medición multitarea de VTAB.
+\section{VTAB: cómo convertir lo «general» en un experimento reproducible}
+
+Sin un protocol, «general» se vuelve fácilmente un término de mercadotecnia. \term{VTAB} (Visual Task Adaptation Benchmark) divide la evaluación en upstream pretraining, un adaptation budget fijo y varias clases de downstream tasks. Así, los investigadores pueden comparar la capacidad de transferencia de una representación en una amplia variedad de tareas y, al mismo tiempo, se ponen al descubierto los atajos que solo funcionan en un dominio de datos concreto.
+
+\subsection{Upstream: primero se fija el problema, luego se comparan las representaciones}
+
+En el primer paso de VTAB, los investigadores pueden aprender representaciones con sus propios datos y modelos. El benchmark no impone un upstream dataset ni una architecture, pero exige que la adaptación posterior se haga con las mismas tareas y el mismo presupuesto. De este modo, lo que se compara es «la transferibilidad que produce todo el esquema de preentrenamiento», no solo el número de parámetros de un backbone.
+
+\lecturefigure{slide-07-vtab-upstream.jpg}{La etapa upstream de VTAB recibe los datos y el modelo de preentrenamiento, y entrega la representación que se va a evaluar.}{Video oficial 04:40; Zhai et al. 2019.}
+
+\begin{importantbox}{Definición de upstream / downstream}
+\term{upstream} se refiere a la etapa de preentrenamiento: se eligen los datos $D_u$, el objetivo $\mathcal{L}_u$ y los parámetros $\theta$. \term{downstream} se refiere a la etapa de la tarea objetivo: dado un conjunto etiquetado pequeño $D_t$, se aprende la cabeza de la tarea o se hace fine-tuning de los parámetros. En forma simplificada:
+\[
+\theta^{\star}=\arg\min_{\theta}\mathcal{L}_u(D_u;\theta),\qquad
+\phi_t^{\star}=\arg\min_{\phi_t}\mathcal{L}_t(D_t;\theta^{\star},\phi_t).
+\]
+Que la segunda expresión permita o no actualizar $\theta^{\star}$ depende del protocol: linear probe, partial fine-tuning o full fine-tuning.
+\end{importantbox}
+
+\subsection{Task families: ningún domain debe dominar las conclusiones}
+
+Un solo promedio oculta las diferencias entre tipos de tareas. VTAB divide las tareas en grupos como natural, specialized y structured. Las imágenes naturales se parecen a la distribución habitual del preentrenamiento. Las imágenes especializadas incluyen percepción remota, imágenes médicas o sensores específicos. Las tareas estructuradas se centran en la posición, el conteo, la profundidad y las relaciones. Una representación general debe ser estable en varios grupos, no destacar solo en los grupos semánticamente cercanos.
+
+\lecturefigure{slide-08-vtab-task-families.jpg}{VTAB muestrea natural, specialized y structured tasks de un espacio amplio de tareas visuales.}{Video oficial 06:00.}
+
+\begin{knowledgebox}{Lectura de la figura: antes del promedio, revisar las curvas por grupo}
+Las natural tasks pueden premiar la transferencia de semántica y texturas. Las specialized tasks ponen a prueba el domain shift. Las structured tasks dependen más de las relaciones espaciales. Si un método solo aventaja ampliamente en el grupo natural, conviene ser prudente antes de llamarlo «general». Se recomienda reportar el macro average, el promedio de cada grupo, la peor tarea, la varianza y el adaptation cost, en lugar de dar una sola puntuación total.
+\end{knowledgebox}
+
+\subsection{Adaptation: comprobar si la representación sirve con datos limitados}
+
+El último paso del benchmark consiste en adaptar y evaluar con un presupuesto fijo de ejemplos downstream. Lo que se compara aquí no es «quién alcanza la mayor exactitud tras un fine-tuning ilimitado», sino si la representación ya codificó estructura útil en un sistema de coordenadas que los datos escasos puedan aprovechar con facilidad. Al leer un transfer protocol, hay que registrar a la vez el número de ejemplos, los parámetros entrenables, el presupuesto de ajuste de hiperparámetros y la forma de la evaluación final, porque relajar cualquiera de ellos puede convertir «una mejor representación» en «un entrenamiento downstream más fuerte».
+
+\lecturefigure{slide-09-vtab-transfer-protocol.jpg}{VTAB transfiere la upstream representation a un conjunto de tareas downstream y luego agrega el desempeño de la adaptación.}{Video oficial 06:44.}
+
+\begin{knowledgebox}{Lectura de la figura: el adaptador también es una variable experimental}
+Un linear probe mide la separabilidad lineal de la representación. El full fine-tuning mide si la inicialización es favorable. Un parameter-efficient adapter mide la plasticidad a bajo costo. Cada protocolo responde una pregunta distinta. Si A usa full fine-tuning y B usa linear probe, la diferencia de puntuación puede deberse sobre todo a la capacidad de adaptación y no a la upstream representation.
+\end{knowledgebox}
+
+\begin{warningbox}{El diseño del benchmark también tiene blind spots}
+VTAB aporta amplitud, pero sigue siendo un conjunto finito de tareas. No cubre por completo detection, segmentation, video, open-vocabulary reasoning, calibration ni la seguridad. Además, tras años de optimizar contra un benchmark aparece el meta-overfitting: la comunidad de investigación convierte de forma indirecta la test suite en un objetivo de entrenamiento. Por eso, la conclusión debe redactarse como «más transferible bajo esta suite y este protocol».
+\end{warningbox}
+
+\teachervoice{El ponente describe VTAB como la versión formalizada del pequeño juego de pocos ejemplos presentado antes. Lo que el docente enfatiza no es que «19 tareas equivalen a toda la visión», sino que un protocol común obliga primero a los investigadores a responder en qué tipos de tareas es transferible la representación y cuál es el costo de adaptación.}
+
+\subsection{Resumen de la sección}
+
+VTAB descompone la representación general en upstream, task families y adaptation protocol. Se acerca más que la ImageNet accuracy por sí sola a la idea de «aprender rápidamente nuevas tareas visuales», pero sigue siendo necesario reportar por grupos, controlar la capacidad de adaptación y estar atentos al meta-overfitting del benchmark.
+\section{De SSL a BiT: el preentrenamiento a gran escala requiere una recipe completa}
+
+Una vez definida la medición, la clase repasa tres vías para obtener representaciones visuales: self-supervised pretraining, semi-supervised learning y large-scale supervised pretraining. El objetivo no es asignarles una clasificación permanente, sino mostrar que, en visión, el rendimiento depende de la acción conjunta de labels, data scale, model class, optimization y evaluation, y que no se puede copiar sin más el relato de éxito único de los modelos de lenguaje.
+
+\subsection{Hoja de ruta: cinco preguntas, no una respuesta}
+
+La slide de panorama coloca SSL, el aprendizaje semisupervisado, BiT, ViT y further scaling en una misma secuencia. Conviene entenderla como un programa experimental que reduce de forma continua los priors humanos, amplía datos y modelos, y luego verifica los resultados con transfer benchmarks. Cada etapa cambia a la vez la señal de supervisión, la clase de modelo o la escala de entrenamiento; por eso esta sección primero establece un registro de variables y después analiza los resultados, para no atribuir por error a un nombre nuevo la ganancia de un sistema completo.
+
+\lecturefigure{slide-10-overview.jpg}{La clase avanza de SSL, el aprendizaje semisupervisado y BiT hacia ViT, Scaling ViT y MLP-Mixer.}{Video oficial 07:20.}
+
+\begin{knowledgebox}{Lectura de la figura: qué variables cambia cada paso}
+SSL cambia la señal de supervisión; el aprendizaje semisupervisado combina labeled/unlabeled data; BiT amplía sobre todo los datos supervisados y el modelo; ViT cambia el architecture prior; Scaling ViT cambia la capacidad, la shape y el schedule; Mixer va más allá y elimina la attention. Si varias variables cambian a la vez, la conclusión solo puede atribuirse a la recipe completa, a menos que haya experimentos de ablación que aíslen cada contribución.
+\end{knowledgebox}
+
+\subsection{Self-supervised learning: una tarea sustituta visual no equivale automáticamente a semántica}
+
+El \term{self-supervised learning} (aprendizaje autosupervisado) construye la señal de supervisión a partir de los propios datos; por ejemplo, predice regiones ocultas, contrasta distintas vistas aumentadas o reconstruye la entrada. Reduce la dependencia de etiquetas humanas, pero el proxy objective puede premiar texturas, invariancia a los aumentos o atajos del conjunto de datos, en lugar de toda la estructura que requiere el downstream.
+
+\lecturefigure{slide-11-self-supervised-review.jpg}{Los primeros resultados de SSL en visión muestran que la elección de arquitectura y de tarea sustituta influye de manera notable en la transferencia.}{Video oficial 07:56.}
+
+\begin{knowledgebox}{Lectura de la figura: no compares solo la altura de las barras}
+Los métodos de la figura cambian a la vez la pretext task, la architecture y la training recipe. Un mean score más alto puede indicar que cierta combinación es más eficaz, pero no demuestra por sí solo que «los datos sin etiquetar superan a las etiquetas» ni que «cierta tarea sustituta descubrió la semántica». Hay que revisar una controlled comparison con el mismo backbone, el mismo compute y la misma augmentation, y observar si las structured/specialized tasks se benefician al mismo tiempo.
+\end{knowledgebox}
+
+\teachervoice{Lucas recuerda que el next-token target, que surge de forma natural en NLP, no tiene en visión un objetivo único que le corresponda por completo. Nota de clase: sin etiquetas no significa sin diseño; los investigadores introducen muchos priors en la augmentation, la positive-pair construction, el masking pattern y la architecture.}
+
+\subsection{Semi-supervised learning: el valor de las etiquetas depende de la clase de modelo}
+
+El \term{semi-supervised learning} (aprendizaje semisupervisado) usa a la vez pocos labeled data y muchos unlabeled data; entre sus mecanismos habituales están el pseudo-labeling, la consistency regularization y el teacher-student training. Parece una solución intermedia, pero la clase de modelo y el presupuesto de etiquetas modifican el beneficio: una architecture nueva puede hacer que las mismas etiquetas produzcan una ganancia mayor, o bien que los errores de las pseudoetiquetas se amplifiquen una y otra vez.
+
+\lecturefigure{slide-12-semi-supervised-review.jpg}{La vía semisupervisada compara combinaciones de presupuesto de etiquetas, clase de modelo y datos sin etiquetar.}{Video oficial 08:36.}
+
+\begin{warningbox}{Pseudo-label feedback loop}
+Si el teacher se equivoca sistemáticamente en cierta clase de muestras, la pseudo-label convierte el error en objetivo de entrenamiento. Se requieren confidence threshold, class balance, strong augmentation, held-out calibration y subgroup analysis. Una mejora de la exactitud global no demuestra que los domains minoritarios o las clases de cola larga no se hayan degradado.
+\end{warningbox}
+
+\subsection{Big Transfer: paciencia, capacidad y datos deben escalar juntos}
+
+BiT estudia la transfer con la familia ResNet preentrenada de forma supervisada a gran escala. Su valor duradero no es solo un checkpoint, sino las regularidades de ingeniería que aporta: más datos requieren más capacidad; los modelos grandes pueden parecer peores al inicio del entrenamiento; la adaptación downstream debe elegir el schedule y la regularization según la escala de los datos; la robustez y la deduplicación deben formar parte del reporte.
+
+\lecturefigure{slide-13-bit-summary.jpg}{BiT resume el entrenamiento paciente, la ampliación simultánea de datos y modelo, la few-shot transfer y la robustness.}{Video oficial 23:16; Kolesnikov et al. 2019.}
+
+\begin{knowledgebox}{Lectura de la figura: cómo se conectan las tres lecciones}
+La curva de entrenamiento de la izquierda indica que los modelos grandes necesitan una optimización más larga para mostrar su ventaja; el diagrama de dispersión del centro muestra que la escala de los datos y la capacidad del modelo determinan juntas la transfer; la curva few-shot de la derecha muestra que la representación puede reducir la cantidad de muestras que requiere el downstream; los resultados de ObjectNet de la parte inferior ponen a prueba el cambio de distribución. En conjunto, las cuatro partes indican que la upstream loss, la in-distribution accuracy, la few-shot transfer y la robustness son evidencias distintas, y que no se debe conservar solo la que luce mejor.
+\end{knowledgebox}
+
+\begin{importantbox}{Intuición del ajuste de capacidad}
+Sea $D$ la escala de los datos, $N$ la capacidad del modelo y $C$ el cómputo de entrenamiento. Si se fija un $N$ muy pequeño y solo se aumenta $D$, el modelo quizá no pueda absorber la estructura adicional; si se fija un $D$ muy pequeño y se aumenta $N$, es más fácil sobreajustar o depender de una regularization fuerte. El objetivo real es encontrar la combinación restringida por el compute
+\[
+(N^{\star},D^{\star})=\arg\min_{N,D:\,C(N,D)\le C_0}\mathcal{L}_{\text{transfer}}(N,D),
+\]
+y no maximizar por separado los parámetros o el número de muestras.
+\end{importantbox}
+
+\lecturefigure{slide-14-bit-large-scale-pretraining.jpg}{BiT establece una relación empírica entre el preentrenamiento a gran escala y la transferencia a múltiples tareas.}{Video oficial 23:44.}
+
+\begin{knowledgebox}{Lectura de la figura: la escala upstream no es el objetivo final}
+El eje horizontal corresponde a la evolución en el tiempo o en la escala; lo importante es que el supervised pretraining a gran escala produce checkpoints reutilizables. Un punto que encabeza la figura no significa que todas las tareas mejoren en la misma proporción; hay que volver a los resultados por grupo de VTAB/few-shot/ObjectNet para confirmar si el beneficio se extiende a varias tareas, si supera el costo del compute adicional, y revisar si la distribución de prueba se traslapa con el preentrenamiento.
+\end{knowledgebox}
+
+\teachervoice{El docente enfatiza reiteradamente «be patient»: los modelos más profundos y grandes pueden quedarse atrás al inicio del entrenamiento, y no se puede descartar una estrategia de escalamiento con experimentos cortos. La experiencia práctica indica que primero hay que asegurar un schedule suficientemente largo y una optimization estable, y después comparar la transfer final; de lo contrario, se compara el grado de madurez del entrenamiento y no el potencial del modelo.}
+
+\subsection{Deduplication: sin auditoría de datos no hay transferencia confiable}
+
+Los conjuntos de datos a gran escala pueden contener versiones idénticas o casi idénticas de las downstream test images. La \term{deduplication} (deduplicación) no solo retira archivos idénticos, sino que también debe detectar near-duplicates tras recortes, compresión, cambios de escala, variaciones de color y ediciones leves. Si las imágenes de prueba entran en el pretraining, la few-shot transfer hará pasar la memorización por generalización.
+
+\lecturefigure{slide-15-deduplication.jpg}{BiT aplica detección de casi duplicados a varios conjuntos de datos downstream y muestra muestras con posible fuga.}{Video oficial 25:00.}
+
+\begin{warningbox}{Los cuatro niveles de fuga de datos}
+\begin{enumerate}
+  \item \textbf{Exact duplicate}: el archivo o los píxeles son idénticos;
+  \item \textbf{Near duplicate}: cambios por recorte, escala, compresión o marca de agua;
+  \item \textbf{Semantic duplicate}: fotos contiguas del mismo objeto o escena;
+  \item \textbf{Label leakage}: el nombre del archivo, el texto de la página web o la metadata revelan la respuesta.
+\end{enumerate}
+Un hash basta para el primer nivel; los siguientes requieren perceptual embedding, nearest-neighbor review y provenance records.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El preentrenamiento visual no tiene un objetivo mágico único. SSL traslada los priors a la tarea sustituta, el aprendizaje semisupervisado necesita controlar la retroalimentación de las pseudoetiquetas, y BiT demuestra que los datos, la capacidad, la duración del entrenamiento y el protocolo de transferencia deben escalar juntos. Toda conclusión sobre transfer a gran escala debe ir acompañada de una deduplicación y una auditoría de distribución.
+\section{ViT: qué significa convertir una imagen en una secuencia}
+
+Una vez establecidos la escala de datos y el transfer protocol, la clase llega a ViT. Su hipótesis de investigación no es que «attention siempre supera a convolution», sino esta: cuando hay suficientes datos y compute, ¿es posible reducir los priors visuales codificados de forma rígida, como la locality y la translation equivariance, para que el modelo aprenda la estructura espacial a partir de los datos? Por ello, la simplicidad de ViT es una ventaja y, al mismo tiempo, una exigencia de escala.
+
+\subsection{Let the data speak: reducir la estructura visual diseñada a mano}
+
+En una CNN, el local receptive field, el weight sharing y el submuestreo jerárquico forman un sesgo inductivo fuerte. ViT conserva menos estructura bidimensional: primero divide la imagen en bloques y los proyecta linealmente, y después procesa los token con un Transformer encoder genérico. La pregunta de investigación deja de ser «cómo diseñar un mejor módulo convolucional» y pasa a ser «si los datos pueden compensar los priors que se retiraron».
+
+\lecturefigure{slide-16-letting-data-speak.jpg}{«ViT: letting the data speak» plantea la simplificación de la arquitectura como un experimento de escalamiento.}{Video oficial, 25:12.}
+
+\begin{knowledgebox}{Lectura de la figura: menos priors no significa menos supuestos}
+El patch size, la position embedding, el class token, la augmentation, el optimizer y la dataset composition siguen siendo decisiones de diseño de peso. Lo que se llama letting the data speak consiste en reducir, en términos relativos, la convolutional locality, no en eliminar el inductive bias. Unos priors más débiles suelen aumentar la flexibilidad de la representación, pero también amplían la sample complexity y la optimization burden.
+\end{knowledgebox}
+
+\lecturefigure{slide-17-cnn-vs-transformer.jpg}{La CNN codifica la estructura visual mediante una jerarquía de convoluciones; el Transformer ya demostró ser escalable en lenguaje, y ViT pregunta si puede aplicarse directamente a imágenes.}{Video oficial, 26:24.}
+
+\begin{knowledgebox}{Lectura de la figura: lo que se compara son las rutas de información y la forma de compartir parámetros}
+La convolución hace que los píxeles vecinos interactúen primero de manera local y amplía el receptive field a lo largo de las capas; la self-attention permite que cualquier patch establezca, en una sola capa, conexiones que dependen del contenido. La localidad de la CNN es más data-efficient; la interacción global de la attention es más flexible, pero su complejidad original crece de forma cuadrática con el número de token. No se trata de una dicotomía absoluta entre «local y global»: una CNN profunda también tiene un receptive field global, y ViT también aprende patterns locales.
+\end{knowledgebox}
+
+\subsection{Patch tokenization y class token}
+
+Sea la imagen de entrada $x\in\mathbb{R}^{H\times W\times C}$ y sea $P$ el lado de cada patch; entonces el número de token es $N=HW/P^2$. Cada patch se aplana en un vector de dimensión $P^2C$ y se proyecta a $D$ dimensiones mediante la matriz lineal $E$. Después se antepone un class token aprendible y se suma la position embedding:
+\[
+z_0=[x_{\mathrm{cls}};x_p^1E;x_p^2E;\ldots;x_p^NE]+E_{\mathrm{pos}}.
+\]
+Aquí $x_p^i$ es el $i$-ésimo patch, $x_{\mathrm{cls}}$ sirve para agregar la información de clasificación y $E_{\mathrm{pos}}$ aporta el orden espacial de los token.
+
+\lecturefigure{slide-18-vit-architecture.jpg}{ViT introduce la patch embedding, la position embedding y el class token en un Transformer encoder estándar.}{Video oficial, 28:32; Dosovitskiy et al. 2020.}
+
+\begin{knowledgebox}{Lectura de la figura: el diagrama de la arquitectura se lee de abajo hacia arriba}
+En la parte inferior, la imagen se divide en patches de tamaño fijo; la proyección lineal convierte cada patch en un token; la position embedding evita que la permutation invariance haga perder la información espacial; el encoder alterna multi-head self-attention y MLP; al final, el class token entra a la head de clasificación. El «Transformer estándar» de la figura sigue incluyendo LayerNorm, residual connection y el apilamiento de varias capas; no consiste en un único paso de attention.
+\end{knowledgebox}
+
+\begin{importantbox}{El costo computacional de la self-attention}
+Para $N$ token y un hidden size $D$, el attention score $QK^{\top}$ requiere aproximadamente $O(N^2D)$ de cómputo y $O(N^2)$ de almacenamiento intermedio. Como $N=HW/P^2$, reducir a la mitad el lado del patch cuadruplica el número de token y multiplica por dieciséis el área de la attention matrix. Por eso, en tareas de visión de alta resolución no basta con fijarse en el número de parámetros: también hay que considerar el número de token y la activation memory.
+\end{importantbox}
+
+\begin{lstlisting}[caption={Patchify and prepend a class token}]
+def vit_tokens(image, patch_size, projection, cls_token, pos_embed):
+    patches = split_into_patches(image, patch_size)
+    tokens = flatten(patches) @ projection
+    tokens = concatenate([cls_token, tokens], axis=0)
+    return tokens + pos_embed
+\end{lstlisting}
+
+\subsection{Resumen de la sección}
+
+El experimento central de ViT consiste en debilitar los priors convolucionales, no en demostrar que una imagen «es, en esencia, lenguaje». El patchify determina el número de token y el compute, la position embedding restituye el orden y el class token ofrece una interfaz de agregación; una arquitectura sencilla traslada una mayor carga a los datos, la optimización y la escala.
+\section{Datos y cómputo: cuándo supera ViT a la línea base convolucional}
+
+El diagrama de la arquitectura no basta para responder si ViT es eficaz. A continuación, la clase compara distintos conjuntos de datos de preentrenamiento y presupuestos de cómputo, y muestra que ViT puede quedar por debajo de una CNN con regularización fuerte cuando hay pocos datos, pero logra mejor transfer con más datos y una recipe adecuada. Aquí el objeto causal es el sistema de entrenamiento completo, no el componente de attention por sí solo.
+
+\subsection{Scaling with data: los supuestos a priori débiles necesitan más evidencia}
+
+Cuando el preentrenamiento se amplía de ImageNet a ImageNet-21k y JFT-300M, la mejora de rendimiento de ViT es más notoria. De forma intuitiva, el fuerte supuesto a priori convolucional aporta sample efficiency en el régimen de pocos datos; al crecer la escala de los datos, un modelo más flexible puede aprender estructuras más adecuadas a la distribución de la tarea, y el costo de la falta de supuestos a priori se compensa poco a poco con los datos.
+
+\lecturefigure{slide-19-scaling-with-data.jpg}{Resultados de ViT y BiT en ImageNet y en linear few-shot con distintas escalas de datos de preentrenamiento.}{Video oficial 30:24; Dosovitskiy et al. 2020.}
+
+\begin{knowledgebox}{Lectura de la figura: primero el eje horizontal, luego el punto de cruce}
+En la gráfica izquierda, el eje horizontal es la escala del conjunto de datos de preentrenamiento y el vertical es el top-1 de ImageNet; en la derecha, el eje horizontal es el número de muestras de JFT y el vertical es la linear few-shot accuracy. En el extremo de pocos datos, BiT/ResNet es más estable; en el extremo de muchos datos, la curva de ViT sube más rápido. Lo importante no es qué punto va adelante, sino que cada family de modelos responde a la escala de datos con una pendiente distinta. Las curvas no demuestran que con datos ilimitados se mantenga siempre la misma tendencia.
+\end{knowledgebox}
+
+\begin{warningbox}{La escala de datos no es un solo número de «cantidad de imágenes»}
+La escala efectiva también depende de label noise, class diversity, long-tail coverage, duplicate rate, resolution, domain breadth y augmentation. 300M muestras web muy repetidas no equivalen a 300M unidades de información independientes. Al comparar scaling curves conviene informar las estrategias de limpieza y muestreo.
+\end{warningbox}
+
+\subsection{Frontera de preentrenamiento: los resultados de un artículo son producto conjunto del sistema}
+
+La posición de un modelo en la performance frontier histórica depende en conjunto del dataset, el hardware, el optimizer, la training duration y la hyperparameter search. Que el punto de ViT quede por encima en la gráfica de evolución de modelos de ImageNet indica que esa recipe es competitiva; pero no es una ablación «architecture-only», ni implica que cualquier equipo pueda reproducir la misma ganancia con un presupuesto menor.
+
+\lecturefigure{slide-20-vit-pretraining.jpg}{ViT forma un nuevo punto de frontier en la gráfica histórica de ImageNet accuracy contra escala de preentrenamiento.}{Video oficial 30:32.}
+
+\begin{knowledgebox}{Lectura de la figura: la frontier solo compara las propuestas graficadas}
+En la gráfica de dispersión, «más arriba» significa mayor accuracy y «más a la derecha» suele significar más datos o mayor escala. La frontier indica qué es mejor entre las propuestas reportadas, no que los ejes de Pareto estén completos; si no se marcan energy, latency, memory, annotation cost y tuning attempts, la gráfica no puede responder sobre eficiencia de despliegue ni costo de investigación.
+\end{knowledgebox}
+
+\subsection{Position embedding: ¿la estructura espacial se aprende o se escribe de antemano?}
+
+Sin position embedding, la self-attention es aproximadamente permutation-equivariant respecto al orden de los tokens y no puede distinguir el orden espacial de un mismo conjunto de patches. ViT aprende un conjunto de vectores de posición absoluta; visualizar su similitud permite comprobar si el modelo recupera de la imagen bidimensional las relaciones de vecindad y la estructura de cuadrícula.
+
+\lecturefigure{slide-21-position-embeddings.jpg}{La similitud de las codificaciones de posición aprendidas muestra una estructura de vecindad bidimensional, y se compara con distintas formas de inicialización/compartición.}{Video oficial 33:56.}
+
+\begin{knowledgebox}{Lectura de la figura: el mapa de calor no prueba que «el modelo entiende el espacio»}
+Si la embedding similarity de cada posición con las demás es localmente suave, el entrenamiento recuperó la estructura de vecindad bidimensional. La tabla de la derecha compara el rendimiento de distintos diseños de position embedding. Esta evidencia solo indica que la representación contiene regularidades espaciales; no prueba que el modelo haya adquirido geometría a nivel de objeto, relaciones causales ni una scene understanding completa; para ello se necesita el respaldo de attention patterns, probes y downstream behavior.
+\end{knowledgebox}
+
+\teachervoice{En la sesión de Q\&A, Lucas vuelve a esta slide y explica que la función principal de la position embedding es distinguir posiciones, y que la estructura de adyacencia local puede surgir durante el entrenamiento. Nota de clase: la visualización es un indicio del mecanismo, no una prueba causal; debe combinarse con experimentos de eliminación, permutación, interpolación y transferencia de resolución.}
+
+\subsection{Compute-normalized comparison}
+
+Si solo se compara por número de parámetros, el cómputo real de ViT, Mixer y CNN puede diferir mucho. La clase observa el transfer performance sobre el eje de compute: con FLOPs similares, la estructura del modelo y la recipe de entrenamiento determinan si el cómputo se convierte en representaciones transferibles. Antes de leer la gráfica hay que separar la cantidad teórica de operaciones del costo real del sistema: los mismos FLOPs pueden corresponder a formas de matriz, memory traffic, grado de paralelismo y comunicación completamente distintos, por lo que aquí solo se compara la compute efficiency a nivel algorítmico.
+
+\lecturefigure{slide-22-scaling-with-compute.jpg}{Cada modelo forma una frontera de eficiencia distinta entre el compute de preentrenamiento y la transfer accuracy.}{Video oficial 39:24.}
+
+\begin{knowledgebox}{Lectura de la figura: los FLOPs no son tiempo ni costo}
+El eje horizontal de approximate compute facilita la comparación algorítmica, pero los mismos FLOPs pueden tener distinta latency, memory traffic y utilization en hardware diferente. Attention, convolution y MLP tienen distinta kernel efficiency; además, la comunicación distribuida no necesariamente se contabiliza. La gráfica puede responder «quién es más preciso con un presupuesto de cómputo teórico», pero no responde directamente «qué sistema es más barato o más rápido».
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La ventaja de ViT aparece en el regime donde los datos, la regularization y el compute son suficientes. Las curvas de scaling de datos muestran la pendiente de respuesta, la gráfica de frontier muestra la competitividad histórica, la position embedding aporta indicios de estructura espacial y la gráfica de compute recuerda que el número de parámetros no es la única medida de costo.
+\section{Forma del modelo, eficiencia de inferencia y campo receptivo efectivo}
+
+Una vez alcanzado cierto nivel de accuracy, el siguiente paso no consiste en ampliar a ciegas todas las dimensiones. La depth, la width, la MLP width, el número de heads y el patch size del Transformer modifican la optimización, la activation memory, la eficiencia de paralelización y la latencia de inferencia. La clase lo explica con tres análisis: shape, speed y receptive field. Con los mismos parámetros o el mismo compute, la elección de la forma puede cambiar los resultados de manera considerable.
+
+\subsection{El uniform scaling no siempre es la mejor opción}
+
+La \term{model shape} es la manera en que los parámetros se distribuyen entre la profundidad, la hidden width, la MLP width, las heads y la patch resolution. Ampliar todas las dimensiones por igual es sencillo, pero puede destinar el presupuesto a direcciones con un rendimiento marginal bajo. En la figura, cada color representa una forma distinta de scaling y se compara su desempeño promedio en función del relative compute.
+
+\lecturefigure{slide-23-transformer-shape.jpg}{La depth, la width, el patch size y la MLP width de ViT influyen de manera distinta en la compute efficiency.}{Video oficial, 46:20.}
+
+\begin{knowledgebox}{Lectura de la figura: que las curvas estén próximas no significa que los sistemas sean equivalentes}
+El eje vertical es la puntuación promedio y el horizontal, el relative compute. Una curva más alta indica mayor exactitud con el mismo presupuesto. El depth scaling puede aumentar los niveles de representación, pero alarga el camino secuencial; la width favorece la paralelización, pero amplía la activation; un patch más pequeño aumenta la resolución espacial, pero dispara el costo de la attention. La shape final debe considerar a la vez el throughput de entrenamiento, el batch de inferencia, la memory y la resolución objetivo.
+\end{knowledgebox}
+
+\subsection{Inference speed: las constantes de complejidad y la correspondencia con el hardware pueden invertir la clasificación}
+
+Los FLOPs teóricos solo describen la cantidad de operaciones; la inference speed real depende también de la kernel implementation, el batch size, la memory bandwidth y la accelerator shape. Las dense matrix operations de ViT aprovechan con facilidad el hardware moderno, pero el aumento del número de tokens amplía con rapidez la attention y la activation.
+
+\lecturefigure{slide-24-inference-speed.jpg}{Variación del throughput de inferencia de distintas variantes de ResNet y ViT según el tamaño de la imagen o del modelo.}{Video oficial, 47:56.}
+
+\begin{knowledgebox}{Lectura de la figura: las curvas de velocidad requieren hardware context}
+El eje vertical representa la velocidad o el throughput de inferencia y el horizontal corresponde al tamaño de la entrada o a la configuración del modelo. Al comparar, deben fijarse el accelerator, la precision, el batch size, el compiler y el preprocessing. Un modelo que lidera en throughput con batch grande puede quedar atrás en latencia con batch-1; que sea favorable para el entrenamiento en investigación tampoco implica que lo sea para dispositivos móviles.
+\end{knowledgebox}
+
+\begin{warningbox}{El patch size es un parámetro oculto del sistema}
+Reducir $P$ conserva información de grano fino, pero hace crecer $N=HW/P^2$. Esto afecta al mismo tiempo los FLOPs de attention, la memoria de KV y de activation, la tensor shape después de la carga de datos y la resolución de la dense prediction posterior. Reportar «ViT-B» sin indicar `/16` o `/32` omite una variable de costo esencial.
+\end{warningbox}
+
+\subsection{Effective receptive field: la attention también forma una estructura jerárquica}
+
+En teoría, cada capa de ViT permite interacción global, pero en la práctica las attention heads pueden ser más locales en las capas superficiales y ampliar su alcance en las profundas. El \term{effective receptive field} es la dependencia real del modelo respecto de distintas distancias espaciales, no el alcance teóricamente posible. Ayuda a determinar si la estructura local está codificada de forma fija o surge de los datos.
+
+\lecturefigure{slide-25-receptive-field.jpg}{La distancia media de atención de distintas capas y attention heads muestra la estructura de lo local a lo global que aprende ViT.}{Video oficial, 49:20.}
+
+\begin{knowledgebox}{Lectura de la figura: la nube de puntos muestra la heterogeneidad entre heads}
+El eje horizontal es la layer depth y el vertical, la attention distance promedio; cada punto puede corresponder a una head. En las capas superficiales hay heads locales, y en las profundas la mayoría de las heads abarca distancias mayores, lo que indica que el modelo forma una jerarquía. Sin embargo, el attention weight no equivale a la feature attribution ni basta por sí solo para demostrar la función causal de una head; se requieren experimentos de masking o de intervention para verificarlo.
+\end{knowledgebox}
+
+\teachervoice{En esta parte, el docente vuelve una y otra vez a la pregunta de «cómo se define una misma escala». El número de parámetros, los FLOPs, el throughput real y la capacidad de representación no coinciden. En la práctica, conviene desglosar el nombre del modelo en depth, width, patch, resolution y precision, para no ocultar las diferencias entre sistemas detrás de un solo número total de parámetros.}
+
+\subsection{Resumen de la sección}
+
+Escalar un modelo es un problema de asignación de recursos. La shape determina cómo se distribuye el cómputo entre depth, width y token resolution; el hardware determina cómo los FLOPs se traducen en velocidad, y el campo receptivo efectivo permite revisar la jerarquía espacial que el modelo aprende en realidad. Los tres factores determinan en conjunto si vale la pena un «ViT más grande».
+\section{Scaling ViT: los modelos más grandes requieren un nuevo régimen de entrenamiento}
+
+La segunda parte de la conferencia trata de further scaling. El objetivo no es simplemente aumentar los parámetros, sino encontrar una shape que quepa en el hardware, diseñar una learning-rate schedule lo bastante larga y estable, aplicar una regularization adecuada a la cabeza de la tarea y observar al mismo tiempo el SOTA, la few-shot sample efficiency y la scaling law. Scale es una lupa de la recipe: los problemas de optimización que en un modelo pequeño pasan inadvertidos se convierten en el cuello de botella de un modelo grande.
+
+\subsection{Lista de problemas de la segunda etapa}
+
+La diapositiva separadora presenta al equipo y las líneas de investigación de Scaling ViT, y recuerda que los resultados posteriores provienen de la colaboración entre modelo, entrenamiento y evaluación, no de una extrapolación directa del artículo original de ViT. Al leer este grupo de figuras conviene tratar «¿cabe el modelo?», «¿se entrenó el tiempo suficiente?» y «¿la cabeza para la tarea posterior sobreajusta?» como tres problemas independientes.
+
+\lecturefigure{slide-26-further-scaling-divider.jpg}{Further scaling up ViTs introduce la forma del modelo, el calendario de entrenamiento y la regularización para tareas posteriores.}{Video oficial 52:32.}
+
+\begin{knowledgebox}{Lectura de la figura: la diapositiva del equipo también es provenance}
+Esta diapositiva no tiene curvas, pero delimita que la evidencia posterior pertenece al trabajo Scaling Vision Transformers. Se conserva para no mezclar resultados de distintos artículos como si fueran un mismo experimento, y para recordar al lector que consulte el dataset, el compute, la model family y el appendix del artículo original, en lugar de copiar conclusiones solo a partir de las capturas de la clase.
+\end{knowledgebox}
+
+\subsection{Scale model: dónde colocar los parámetros}
+
+Al ampliar el modelo se puede aumentar la depth, la hidden width, la MLP width, las heads o usar patches más finos. Aun con un número de parámetros similar, distintas configuraciones pueden diferir enormemente en TPU/GPU memory y en matrix shape. El equipo partió de la memory feasibility y después buscó las estructuras con mejor rendimiento.
+
+\lecturefigure{slide-27-scaling-model-build.jpg}{Al seguir escalando ViT, las dimensiones del modelo y las restricciones de memoria del hardware determinan juntas las configuraciones viables.}{Video oficial 1:00:08.}
+
+\begin{knowledgebox}{Lectura de la figura: los círculos rojos son variables de diseño restringidas}
+La figura señala el bloque Transformer, las attention heads y las dimensiones de la MLP, para mostrar que scaling no es un único slider. Con memory fija, aumentar las layers obliga a guardar más activation; aumentar la width agranda las matrices y el optimizer state; reducir el patch aumenta los tokens. Aquí, \term{optimizer state} se refiere a los estados de actualización que Adam/AdamW guarda por cada parámetro, como el primer momento $m$ y el segundo momento $v$, que a menudo ocupan más memoria de entrenamiento que los propios parámetros. \term{activation checkpointing} (puntos de control de activaciones) guarda solo una parte de las forward activations y recalcula las demás durante el backward, con lo que intercambia compute adicional por memory; es distinto del training checkpoint que guarda los pesos del modelo. \term{sharding} (fragmentación), por su parte, divide parámetros, gradientes, optimizer state o activation entre varios dispositivos, de modo que estos estados ya no se replican completos en cada rank, pero introduce \term{collectives} (comunicación colectiva entre varios dispositivos), como all-reduce, reduce-scatter, all-gather y broadcast, que sirven para agregar o redistribuir los tensores de cada rank. El entrenamiento con baja precisión también puede desplazar el límite de lo viable, aunque exige atender el rango numérico y la precisión de acumulación.
+\end{knowledgebox}
+
+\lecturefigure{slide-28-model-shape-search.jpg}{Las regiones viables para distintos layer count y MLP width muestran cómo la memoria limita la shape search.}{Video oficial 1:00:48.}
+
+\begin{knowledgebox}{Lectura de la figura: distinguir primero lo inviable, lo viable y lo óptimo}
+Cada panel corresponde a una depth distinta, y los bloques de color indican las regiones que caben o su rendimiento. Las zonas blancas o truncadas suelen ser inviables por memory, lo cual no equivale a una precisión baja. La mejor shape es resultado conjunto del hardware, el lote, el parallelism y la metric objetivo; al cambiar de accelerator o de sequence length, el punto óptimo puede desplazarse.
+\end{knowledgebox}
+
+\subsection{Scale training: de una schedule finita a un calendario aproximadamente infinito}
+
+Los modelos grandes necesitan más pasos de optimización para entrar en el intervalo donde muestran su ventaja. Si se fija de antemano una schedule corta, al terminar el entrenamiento el modelo aún mejora con rapidez, y la comparación favorece sistemáticamente a los modelos pequeños. La llamada schedule «infinite» no significa entrenar literalmente sin fin, sino construir una learning-rate rule extensible que no requiera conocer de antemano el número final de pasos, de manera que el checkpoint siga siendo utilizable en varios puntos de presupuesto.
+
+\lecturefigure{slide-29-infinite-lr-schedules.jpg}{Comportamiento de distintas learning-rate schedules al prolongarse con los pasos de entrenamiento.}{Video oficial 1:00:56.}
+
+\begin{knowledgebox}{Lectura de la figura: la schedule debe desacoplarse del momento de detención}
+El cosine decay tradicional requiere conocer de antemano el número total de pasos; si se prolonga el entrenamiento sobre la marcha, la tasa de aprendizaje puede haber decaído ya demasiado. Una schedule extensible permite a los investigadores comparar checkpoints con distintos compute budgets sin volver a entrenar para cada punto final. La calidad de una curva depende además de la validation loss, la stability y la transfer final, no solo de la forma de la tasa de aprendizaje.
+\end{knowledgebox}
+
+\teachervoice{El «be patient» de Lucas se convierte aquí en un diseño de entrenamiento concreto: si un modelo grande necesita más tiempo para mostrar su ventaja, no puede evaluarse con una schedule corta diseñada para modelos pequeños. Nota de clase: las reglas de early stopping también forman parte de la comparación entre modelos.}
+
+\subsection{Head weight decay: los datos escasos de la tarea posterior requieren regularización local}
+
+El backbone preentrenado es muy grande, pero la classifier head de una tarea few-shot solo ve unas cuantas muestras y puede convertirse fácilmente en la vía de entrada del sobreajuste. Aplicar un weight decay distinto a la head puede cambiar el bias-variance tradeoff en el régimen de pocas muestras; una regularization uniforme no necesariamente conviene a la vez al backbone y a una head recién inicializada.
+
+\lecturefigure{slide-30-head-weight-decay.jpg}{Efecto del head weight decay en la búsqueda en malla few-shot y en las curvas de entrenamiento.}{Video oficial 1:01:00.}
+
+\begin{knowledgebox}{Lectura de la figura: observar si la región óptima es estable}
+El mapa de calor de la izquierda muestra combinaciones de label budget y weight decay; las curvas de la derecha comparan recipes. Con pocas muestras, una regularización más fuerte puede ser más importante; al aumentar las muestras, el valor óptimo cambia. Si el decay óptimo se elige solo sobre el test set, se produce selection leakage; debe usarse un validation protocol o una regla fijada de antemano.
+\end{knowledgebox}
+
+\subsection{Resultados: SOTA, sample efficiency y scaling law por separado}
+
+El modelo ampliado debe validarse en tres dimensiones: si mejora el rendimiento absoluto, si la transferencia con pocas muestras es más eficaz y si el rendimiento sigue una tendencia predecible con el compute. Corresponden, respectivamente, a la frontier, al adaptation cost y al planning value, y no pueden sustituirse por un único ImageNet top-1.
+
+\lecturefigure{slide-31-new-sota.jpg}{El ViT ampliado obtiene nuevos resultados en ImageNet, en desplazamiento de distribución y en métricas como VTAB.}{Video oficial 1:01:56; Zhai et al. 2021.}
+
+\begin{knowledgebox}{Lectura de la figura: cada columna de la tabla es un compromiso distinto}
+ImageNet mide la clasificación habitual; ImageNet-V2 pone a prueba el cambio de distribución tras un nuevo muestreo; ReaL corrige el problema de las etiquetas múltiples; ObjectNet acentúa el shift de pose y fondo; VTAB mide la transferencia a múltiples tareas. Que un modelo mejore en todas las columnas es más convincente que una mejora solo en el ImageNet original; aun así, no puede extrapolarse a detection, video ni open-world reliability.
+\end{knowledgebox}
+
+\lecturefigure{slide-32-sample-efficiency.jpg}{Los ViT más grandes muestran curvas de sample-efficiency distintas en condiciones de 10-shot, few-shot y full fine-tuning.}{Video oficial 1:02:40.}
+
+\begin{knowledgebox}{Lectura de la figura: el eje horizontal son las muestras de la tarea posterior; la separación entre curvas es el valor de la representación}
+Cuando hay muy pocas muestras, una mejor representation debería reducir la tasa de error; al aumentar las muestras, todos los modelos pueden converger, pero a distinta velocidad. Si el modelo grande solo aventaja con full-data, su ventaja no se debe necesariamente a la representación para pocas muestras; solo si también aventaja en 10-shot respalda mejor el objetivo original de hacer el kick-start de nuevas tareas.
+\end{knowledgebox}
+
+\lecturefigure{slide-33-vit-scaling-laws.jpg}{La relación entre el error de ViT y el compute/tamaño del modelo muestra un intervalo aproximadamente de ley de potencias.}{Video oficial 1:02:52.}
+
+\begin{importantbox}{Forma habitual de la scaling law}
+Dentro de un intervalo experimental limitado, puede usarse
+\[
+E(C)=E_{\infty}+aC^{-\alpha}
+\]
+para ajustar el error $E$ frente al compute $C$; $E_{\infty}$ es el término irreducible o de saturación, $a$ es el coeficiente de escala y $\alpha$ es el exponent empírico. La ley de potencias facilita planificar el presupuesto, pero no es una ley natural: el agotamiento de datos, el distribution shift, un cambio de optimizer o el metric ceiling pueden provocar un punto de inflexión.
+\end{importantbox}
+
+\begin{warningbox}{Antes de extrapolar hay que verificar tres cosas}
+Si el intervalo de ajuste abarca suficientes órdenes de magnitud; si distintas model families comparten el exponent; si todos los entrenamientos están cerca de su recipe óptima. Si los modelos pequeños están subentrenados y los grandes están bien entrenados, la scaling law aparente puede incorporar una optimization gap. Al extrapolar a un compute cien veces mayor que no se ha probado, deben reportarse el intervalo y la incertidumbre.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Scaling ViT descompone el problema de la escala en shape feasibility, schedule extensibility, head regularization, rendimiento absoluto, sample efficiency y scaling law. Un modelo más grande solo representa un avance creíble cuando su entrenamiento es maduro, su adaptación es estable y varias clases de evaluación mejoran a la vez.
+\section{MLP-Mixer: un experimento de control que debilita aún más el sesgo inductivo}
+
+Al final, la clase extiende con MLP-Mixer la idea de «dejar que los datos hablen». Mixer no usa convolution ni self-attention: aplica MLP de forma alternada sobre la dimensión de token y la dimensión de channel. No pretende demostrar que attention sea inútil, sino comprobar si, con preentrenamiento a gran escala, un dense mixing simple puede aprender representaciones visuales suficientemente buenas.
+
+\subsection{De ViT a Mixer: una pregunta de investigación, no un cambio de marca}
+
+La diapositiva de transición reinterpreta el éxito de ViT como «quizá la escala y los datos importen más que un operator específico». Por eso Mixer es una controlled provocation: conserva el patch embedding, la residual/normalization y la recipe a gran escala, sustituye el token interaction mechanism y observa si la transfer scaling se mantiene.
+
+\lecturefigure{slide-34-mixer-divider.jpg}{MLP-Mixer continúa con «letting the data speak» y retira además attention.}{Video oficial, 1:03:36.}
+
+\begin{knowledgebox}{Lectura de la figura: no concluir que «la arquitectura no importa»}
+Si Mixer resulta competitivo con grandes volúmenes de datos, eso solo indica que attention no es el único mecanismo para obtener representaciones sólidas. La estabilidad del entrenamiento, la compute efficiency, la resolution scaling, la dense prediction y el desempeño con pocos datos todavía pueden diferir. La conclusión más razonable es que existen varias combinaciones viables de operator, scale y recipe, y que hay que elegir según la tarea y las restricciones del sistema.
+\end{knowledgebox}
+
+\subsection{Token-mixing y channel-mixing}
+
+En la matriz de entrada $X\in\mathbb{R}^{N\times D}$, $N$ son los patch tokens y $D$ son los channels. La token-mixing MLP mezcla, para cada channel, a través de las $N$ posiciones; la channel-mixing MLP mezcla, para cada token, a través de los $D$ canales. Ambas se alternan junto con residual connection, de modo que la información puede propagarse entre posiciones espaciales y también combinarse en la dimensión de características.
+
+\lecturefigure{slide-35-mlp-mixer-architecture.jpg}{MLP-Mixer alterna las MLP de token-mixing y channel-mixing.}{Video oficial, 1:03:44; Tolstikhin et al. 2021.}
+
+\begin{importantbox}{Forma abstracta del bloque Mixer}
+Si se ignoran los detalles de LayerNorm, puede escribirse como
+\[
+U=X+W_2\,\sigma(W_1X^{\top})^{\top},\qquad
+Y=U+\sigma(UV_1)V_2.
+\]
+La primera expresión mezcla a lo largo de la dimensión de token y la segunda a lo largo de la dimensión de channel; $\sigma$ es una no linealidad. A diferencia de attention, los pesos de token mixing no dependen del contenido de la entrada actual, por lo que la interacción es estática; el costo y las propiedades de generalización también varían con el número de tokens y el tamaño de las matrices de pesos.
+\end{importantbox}
+
+\subsection{Scaling comparison: la pendiente de una familia de modelos importa más que un punto aislado}
+
+La última figura compara el desempeño linear few-shot de Mixer, ViT y BiT/ResNet a medida que crecen los datos de entrenamiento. Lo importante es que las tres clases de modelos se benefician de la escala, pero difieren en la pendiente, en el punto de partida con pocos datos y en el techo con muchos datos; esto respalda de nuevo el marco según el cual «el prior arquitectónico determina la sample efficiency y la escala de los datos determina si un modelo flexible logra alcanzar a los demás».
+
+\lecturefigure{slide-36-mixer-scaling.jpg}{Linear few-shot scaling de Mixer, ViT y BiT con distintos tamaños del conjunto de entrenamiento.}{Video oficial, 1:05:32.}
+
+\begin{knowledgebox}{Lectura de la figura: comparar el punto de partida, la pendiente y la zona de saturación}
+En el extremo de pocos datos, los modelos con un prior visual fuerte suelen partir de un punto más alto; conforme aumentan los datos de entrenamiento, las curvas de ViT/Mixer pueden ser más pronunciadas; que sigan a la cabeza en el extremo de muchos datos depende de la capacidad y de la recipe. Un solo punto con la mayor cantidad de datos no demuestra sample efficiency, y un solo punto con la menor cantidad tampoco demuestra asymptotic capability. Solo la curva completa muestra la relación de intercambio entre inductive bias y scale.
+\end{knowledgebox}
+
+\teachervoice{El ponente coloca Mixer al final no para anunciar que «MLP reemplaza a Transformer», sino para subrayar que la investigación debe seguir desglosando qué contribuyó realmente al resultado: attention, la patch representation, la escala, los datos o el régimen de entrenamiento. La postura que el docente expresa de viva voz es más cautelosa que el título de la slide.}
+
+\subsection{Resumen de la sección}
+
+MLP-Mixer demuestra que attention no es el único candidato para obtener representaciones visuales a gran escala. Lleva el hilo conductor de la clase a una conclusión más general: entre el sesgo inductivo, la escala de los datos y la eficiencia del sistema existe un intercambio, y las familias de modelos deben compararse mediante la scaling curve completa y la transfer en múltiples tareas.
+\section{Q\&A metodológica: qué es en realidad la escala de un modelo}
+
+La sesión final de preguntas y respuestas vuelve a enlazar varias slides. Alguien del público pregunta qué es más grande, un modelo de visión o uno de lenguaje. Lucas no da una cifra única, sino que distingue entre número de parámetros, FLOPs por muestra, estructura de tokenización y recursos de investigación. Esta teacher voice es importante porque evita que el lector reduzca la «scale» a una clasificación por número de parámetros.
+
+\subsection{Parámetros, FLOPs, memoria y datos no son la misma escala}
+
+El embedding de vocabulario extenso de un modelo de lenguaje aporta una gran cantidad de parámetros, mientras que la patch projection de visión tiene una estructura de parámetros distinta. Por otro lado, el número de tokens de imagen, la resolución y la attention activation influyen de manera notable en el compute. Un modelo puede tener menos parámetros y aun así más FLOPs, o bien tener muchos FLOPs de entrenamiento y reutilizarse con eficiencia en la inferencia.
+
+\begin{longtable}{L{0.19\textwidth}L{0.31\textwidth}L{0.40\textwidth}}
+\toprule
+Escala & Qué mide & Principal punto ciego \\
+\midrule
+Número de parámetros $N$ & Almacenamiento de pesos y parte de la capacidad de representación & No incluye activation, número de tokens, datos ni utilización real \\
+FLOPs de entrenamiento & Cantidad teórica de operaciones para completar el preentrenamiento & No incluye baja utilización, comunicación, experimentos fallidos ni costo de los datos \\
+FLOPs por muestra & Cantidad aritmética de un forward/backward & No equivale a wall-clock latency ni a energy \\
+Activation memory & Estados intermedios generados por la secuencia o resolución, el lote y el número de capas & Puede cambiarse por cómputo adicional mediante checkpointing \\
+Escala de datos $D$ & Cobertura de muestras e información & El número bruto de muestras no refleja repetición, ruido ni diversidad \\
+Eficiencia de muestras en tareas posteriores & Etiquetas que necesita la representación para adaptarse a una tarea nueva & Depende del adaptation protocol y de la task similarity \\
+\bottomrule
+\end{longtable}
+
+\begin{knowledgebox}{Términos clave: capacity, scale y efficiency}
+\term{capacity} es la capacidad del modelo para representar o ajustar funciones y no se caracteriza por completo con el número de parámetros; \term{scale} es el rango conjunto de datos, modelo y cómputo; \term{efficiency} exige especificar el denominador, por ejemplo accuracy per FLOP, per dollar, per joule o per labeled example. Decir «más eficiente» sin denominador no tiene significado técnico.
+\end{knowledgebox}
+
+\teachervoice{El juicio personal de Lucas es que ni el número de parámetros ni los FLOPs son la medida «única y correcta» del tamaño de un modelo. Si los modelos de visión eran entonces más pequeños, se debía en parte a diferencias en el interés de investigación y en la inversión de recursos, no a que las tareas de visión tuvieran un límite de capacidad demostrado. Nota de clase: la frontier observada también refleja la organización y la asignación de recursos.}
+
+\subsection{De los resultados de la clase a las decisiones de ingeniería}
+
+Si la tarea real tiene pocos datos y requisitos estrictos de latencia, una CNN con un prior fuerte o un modelo hybrid pueden ser más adecuados; si se cuenta con datos multidominio a gran escala, dense accelerators y necesidad de transferencia entre tareas, los modelos de tipo ViT pueden tener ventaja; si el sistema necesita dense prediction de alta resolución, también hay que reevaluar el token cost, la hierarchy y la memory. La elección del modelo debe deducirse a partir de las restricciones, no derivarse de la clasificación más reciente.
+
+\begin{importantbox}{Plantilla de decisión de ingeniería}
+\begin{enumerate}
+  \item Definir la downstream task family, el domain shift y el presupuesto de etiquetas;
+  \item Fijar las restricciones de latency, memory, training compute y data governance;
+  \item Comparar al menos una CNN/hybrid fuerte con un baseline de la ViT family;
+  \item Reportar a la vez full-data, few-shot, robustness, calibration y failure groups;
+  \item Realizar una dedup audit exact, near y semantic entre preentrenamiento y tareas posteriores;
+  \item Validar las conclusiones de FLOPs teóricos con un hardware profile real.
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La escala de un modelo no tiene una medida única. Los parámetros, los FLOPs, la activation, los datos y la eficiencia de muestras responden a preguntas distintas; además, la frontier de la investigación depende de la inversión de recursos. Las decisiones de ingeniería deben partir de las restricciones de la tarea y del sistema, y conservar varios baselines fuertes.
+\section{Síntesis y ampliación}
+
+Esta sesión parte de la pregunta «qué es una representación visual general» y, pasando por VTAB, BiT, ViT, Scaling ViT y MLP-Mixer, construye una metodología más duradera que memorizar arquitecturas:
+
+\begin{enumerate}
+  \item \textbf{Definir primero el objetivo de adaptación}: una representación general debe reducir el costo en muestras, en optimización y en especificación de las tareas nuevas;
+  \item \textbf{Medir con familias de tareas y no con una sola tabla de clasificación}: las natural, specialized y structured tasks revelan dimensiones distintas de la generalización;
+  \item \textbf{Distinguir upstream de downstream}: la representación preentrenada y la capacidad del adaptador deben controlarse por separado;
+  \item \textbf{Sin etiquetas no significa sin conocimiento previo}: el SSL traslada el diseño al proxy objective y a la augmentation;
+  \item \textbf{La escala es una variable conjunta}: los datos, la capacidad, la duración del entrenamiento y la regularization deben corresponderse;
+  \item \textbf{La deduplicación es un requisito de validez científica}: los casi duplicados hacen pasar la memorización por transferencia;
+  \item \textbf{ViT es un experimento que debilita los conocimientos previos visuales}: el patch, la position y el class token siguen constituyendo decisiones de diseño explícitas;
+  \item \textbf{Los datos determinan el intervalo en el que el sesgo inductivo aporta valor}: un conocimiento previo fuerte mejora la eficiencia con pocos datos, y un modelo flexible puede alcanzarlo con muchos datos;
+  \item \textbf{Compute-normalized sigue sin equivaler a eficiencia del sistema}: los FLOPs, la latency, la memory y la utilization deben reportarse por separado;
+  \item \textbf{La shape y el schedule forman parte del scaling}: un modelo grande no puede evaluarse con el régimen de entrenamiento corto de un modelo pequeño;
+  \item \textbf{La scaling law es un modelo empírico local}: sirve para planificar, pero hay que reportar el intervalo de ajuste y el riesgo de puntos de inflexión;
+  \item \textbf{El sentido de Mixer es una comparación contrafactual}: la attention no es el único mecanismo; el objeto causal es la recipe completa.
+\end{enumerate}
+
+\begin{importantbox}{Tarea del curso: diseñar una evaluación confiable de representaciones visuales}
+Elige un modelo preentrenado y tres downstream tasks claramente distintas. Define la upstream provenance, el método de deduplicación y dos protocol, linear probe y full fine-tuning; reporta para cada grupo de tareas la media y el peor caso (mean/worst-case), 10-shot/full-data, la calibration, los FLOPs de training/inference y la latency real. Por último, escribe al menos tres «cosas que los resultados no pueden demostrar» y explica, si el presupuesto de datos se multiplicara por diez, en qué familia de modelos esperarías que cambiara la pendiente de la curva.
+\end{importantbox}
+
+\begin{warningbox}{Autoevaluación final: no mezclar cinco tipos de éxito}
+\textbf{Upstream fit}, \textbf{in-distribution accuracy}, \textbf{few-shot transfer}, \textbf{robustness} y \textbf{deployment efficiency} son cinco tipos distintos de éxito. Si un artículo o un sistema solo demuestra uno de ellos, la conclusión debe limitarse a ese; no se puede sustituir la representación general por el top-1 de ImageNet, ni el costo real de servicio por los FLOPs teóricos.
+\end{warningbox}
+
+\subsection{Lecturas adicionales}
+
+{\small
+\begin{itemize}[nosep,leftmargin=*]
+  \item \href{https://arxiv.org/abs/1910.04867}{\textbf{VTAB}}: benchmark de adaptación de representaciones visuales multitarea y diseño por task-family.
+  \item \href{https://arxiv.org/abs/1912.11370}{\textbf{Big Transfer (BiT)}}: preentrenamiento supervisado a gran escala, recipe de transferencia y robustness.
+  \item \href{https://arxiv.org/abs/2010.11929}{\textbf{An Image is Worth 16x16 Words}}: arquitectura ViT, scaling de datos y transfer.
+  \item \href{https://arxiv.org/abs/2106.10270}{\textbf{How to Train Your ViT?}}: augmentation, regularization, dataset size y training recipe.
+  \item \href{https://arxiv.org/abs/2106.04560}{\textbf{Scaling Vision Transformers}}: model shape, schedule, few-shot y scaling laws.
+  \item \href{https://arxiv.org/abs/2105.01601}{\textbf{MLP-Mixer}}: token/channel mixing y data-scale comparison.
+\end{itemize}
+}
+
+\end{document}

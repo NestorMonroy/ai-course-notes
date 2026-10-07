@@ -1,0 +1,1101 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+\usepackage{multicol}
+
+\renewcommand{\notetitle}{Lecture 34: panorama del Transformer, de los datos al aprendizaje continuo}
+\renewcommand{\noteauthors}{Elaborado a partir de la clase oficial de Steven Feng, Karan Singh, Jenny Duan y Chelsea Zou, del deck de 123 páginas y de los subtítulos hechos por personas}
+\renewcommand{\notedate}{CS25 V5 · versión reescrita source-first de 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{Clase: 2025-04-01; publicación: 2025-04-18}
+\renewcommand{\videoduration}{1:01:28}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=JKbtWimlzAE}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.97\textwidth,height=0.49\textheight,keepaspectratio]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\let\standardtableofcontents\tableofcontents
+\renewcommand{\tableofcontents}{%
+  \begingroup
+  \small
+  \setlength{\parskip}{0pt}
+  \standardtableofcontents
+  \endgroup
+}
+
+\begin{document}
+\makecscover
+
+\section{Mapa del curso y fundamentos del Transformer: la arquitectura es solo la primera capa}
+
+Esta clase inaugural de V5 no vuelve a presentar el Transformer como una sola fórmula de attention. Los cuatro ponentes descomponen los sistemas modernos en diez niveles interconectados: representación y attention, recetas de datos, cómputo en tiempo de inferencia, optimización de preferencias, agent loop, interfaces de visión y de neuroimagen, y adaptación continua después del despliegue. Al recorrer toda la clase conviene preguntarse una y otra vez: ¿lo que cambia un método son los parámetros, los datos, el proceso de inferencia, las herramientas externas o el ciclo cerrado entre el modelo y el entorno?
+
+
+\lecturefigure{slide-001.jpg}{CS25 Transformers United V5: entrada al curso y a las conferencias}{CS25 V5 official deck, p.~1}
+
+\subsection{Compromiso del curso: de los mecanismos a los límites}
+
+Los takeaways del curso colocan attention, aplicaciones entre dominios, frontier research y limitations en la misma diapositiva. Este orden importa: entender cómo funciona un modelo no equivale a entender por qué un sistema tiene éxito; ver la expansión de las aplicaciones tampoco autoriza a ignorar el costo, la confiabilidad y las carencias del aprendizaje continuo. Por eso, estos apuntes escriben cada sección en cuatro pasos: «mecanismo—evidencia—límites—decisión de ingeniería».
+
+
+\lecturefigure{slide-012.jpg}{Mecanismos, aplicaciones, métodos de frontera y problemas abiertos que el curso espera que los estudiantes dominen}{CS25 V5 official deck, p.~12}
+
+\teachervoice{00:01:20--00:01:58, el ponente divide explícitamente todo el overview en pretraining/data, post-training, applications y weaknesses. Nota de clase: no son cuatro buzzwords independientes, sino los cuatro puntos de intervención del ciclo de vida de un modelo.}
+
+\begin{importantbox}{Las cuatro capas de interfaz de un sistema Transformer moderno}
+\begin{enumerate}
+  \item \textbf{Representation/architecture}: cómo los tokens se convierten en vectores e interactúan entre sí;
+  \item \textbf{Training data/objective}: de qué distribuciones y funciones de pérdida aprende el modelo;
+  \item \textbf{Inference/post-training}: cómo se añaden búsqueda, preferencias y herramientas antes y después del despliegue;
+  \item \textbf{Environment/update}: cómo el sistema actúa, recibe retroalimentación y cambia de forma continua.
+\end{enumerate}
+Todos los métodos que siguen deben ubicarse primero en una de estas capas; solo después se discute el acoplamiento entre capas.
+\end{importantbox}
+
+\subsection{Embedding: cómo entran los tokens discretos en un espacio continuo}
+
+El texto no puede usarse directamente como entrada de operaciones matriciales. Sea $|V|$ el tamaño del vocabulario, $d$ la dimensión oculta, $E\in\mathbb{R}^{|V|\times d}$ la embedding table y $x_i$ el id del $i$-ésimo token; entonces
+\[
+e_i=E[x_i].
+\]
+Aquí $e_i\in\mathbb{R}^{d}$ es el vector denso del token. Un embedding estático asigna el mismo vector a la misma palabra; un contextual embedding, en cambio, actualiza la representación en las capas posteriores según el contexto, de modo que ``bank'' puede separarse entre una oración sobre la orilla de un río y otra sobre un banco.
+
+
+\lecturefigure{slide-014.jpg}{Word embeddings: similitud semántica, aritmética de vectores y limitaciones de las representaciones estáticas}{CS25 V5 official deck, p.~14}
+
+\teachervoice{00:06:23--00:07:32, Steven parte de que «las palabras no son números», explica primero el dense vector y luego señala que el static embedding no distingue palabras polisémicas. Este orden nos recuerda que attention resuelve la interacción con el contexto, no la tokenización en sí.}
+
+\begin{knowledgebox}{Primer uso: tokenization y embedding}
+La tokenization corta la cadena original en tokens de palabras, subpalabras o bytes; el embedding mapea después cada id de token a un vector entrenable. La primera determina la longitud de la secuencia y los límites del vocabulario; el segundo determina el espacio de representación inicial del modelo. Ambos suelen aparecer juntos, pero no son la misma operación.
+\end{knowledgebox}
+
+\subsection{Self-attention: Q, K y V son una interfaz de recuperación}
+
+Dada la matriz de la secuencia $X\in\mathbb{R}^{n\times d}$, el modelo aprende
+\[
+Q=XW_Q,\qquad K=XW_K,\qquad V=XW_V,
+\]
+y calcula la scaled dot-product attention:
+\[
+\operatorname{Attn}(Q,K,V)=\operatorname{softmax}\!\left(\frac{QK^{\top}}{\sqrt{d_k}}\right)V.
+\]
+$Q$ es la pregunta que plantea la posición actual, $K$ es el índice que cada posición usa para el emparejamiento, $V$ es el contenido que realmente se agrega y $d_k$ es la dimensión de las keys; dividir entre $\sqrt{d_k}$ sirve para controlar la escala del producto punto.
+
+
+\lecturefigure{slide-015.jpg}{El Transformer en dos minutos: self-attention permite que los tokens se emparejen de forma suave con el contexto}{CS25 V5 official deck, p.~15}
+
+
+\lecturefigure{slide-016.jpg}{Analogía de la biblioteca para QKV: consulta, índice de resúmenes y contenido de los libros}{CS25 V5 official deck, p.~16}
+
+\teachervoice{00:07:37--00:08:19, el ponente explica Q/K/V con la búsqueda de un libro: el tema que se necesita es la query, el resumen del libro es la key y el contenido del libro es el value; attention no toma un solo libro, sino que pondera de forma suave varios resultados coincidentes.}
+
+\begin{warningbox}{Los attention weights no son una explicación completa}
+Los pesos indican cómo la capa actual mezcla los values; no equivalen automáticamente a importancia causal, a razones semánticas ni a evidencia de la respuesta final. Los residuales, la MLP, las capas posteriores y el contenido de los values modifican la salida; al leer un attention map hay que tratarlo como evidencia de un cómputo local, no como una conclusión completa de interpretabilidad.
+\end{warningbox}
+
+
+\lecturefigure{slide-017.jpg}{Attention map: distintas capas y heads aprenden distintas relaciones entre tokens}{CS25 V5 official deck, p.~17}
+
+\subsection{Orden, múltiples heads y el block completo}
+
+La attention pura no tiene ninguna señal de posición respecto a la permutación de los tokens, por lo que necesita positional encoding. La forma sinusoidal clásica es
+\[
+\mathrm{PE}_{(p,2j)}=\sin\!\left(p/10000^{2j/d}\right),\qquad
+\mathrm{PE}_{(p,2j+1)}=\cos\!\left(p/10000^{2j/d}\right),
+\]
+donde $p$ es la posición y $j$ es el índice de dimensión. Los sistemas modernos también usan con frecuencia RoPE o learned position; el objetivo común es que el mismo token produzca una geometría de interacción distinta en posiciones distintas.
+
+
+\lecturefigure{slide-018.jpg}{Positional encoding: inyectar orden en una attention permutation-equivariant}{CS25 V5 official deck, p.~18}
+
+La multi-head attention divide la dimensión oculta en varios subespacios:
+\[
+\operatorname{MHA}(X)=\operatorname{Concat}(h_1,\ldots,h_H)W_O,
+\quad h_r=\operatorname{Attn}(XW_Q^{(r)},XW_K^{(r)},XW_V^{(r)}).
+\]
+Distintos heads pueden especializarse en sintaxis local, referencias de largo alcance, formato o rasgos de la tarea; pero aumentar el número de heads no aumenta la capacidad de forma lineal: el efecto real depende también del ancho, los datos y la estabilidad del entrenamiento.
+
+
+\lecturefigure{slide-019.jpg}{Multi-head attention: subespacios de relaciones en paralelo y apilamiento jerárquico}{CS25 V5 official deck, p.~19}
+
+
+\lecturefigure{slide-020.jpg}{Transformer completo: combinación de attention, MLP, residuales y múltiples capas}{CS25 V5 official deck, p.~20}
+
+\begin{knowledgebox}{Lectura a fondo: qué intercambios de recursos hace realmente una capa de Transformer}
+Attention permite que cada token lea información de otras posiciones, mientras que la MLP transforma las características de cada posición de forma independiente; el residual suma la información nueva a la representación anterior y la normalization estabiliza la escala. Durante el entrenamiento hay que guardar o recalcular las activations intermedias; durante la inferencia se guarda la KV cache de los tokens previos. Así, el mismo diagrama de block corresponde a tres tipos de cuello de botella: las secuencias largas hacen crecer el cómputo de attention y la KV cache, una MLP ancha aumenta los parámetros y el costo de la multiplicación de matrices, y la profundidad aumenta el número de capas en serie y las activations. Al leer un diagrama de arquitectura no basta con contar módulos; hay que introducir batch, sequence length, hidden size y precision en la contabilidad de recursos. El llamado «Transformer final» es solo una topología funcional; FlashAttention, GQA, quantization, parallelism y el serving scheduler son los que determinan su latency y su throughput en hardware real. El diagrama tampoco expresa los datos de entrenamiento ni el optimizer, por lo que no es posible predecir, a partir de la estructura del block, el conocimiento final del modelo ni su comportamiento de alineación.
+\end{knowledgebox}
+
+\teachervoice{00:08:34--00:09:16, Steven recupera primero el orden con positional encoding y luego explica la ampliación de la capacidad con múltiples capas y múltiples heads. Los apuntes advierten: ``more parameters'' es una condición de capacidad de representación, no un sustituto de la calidad de los datos ni de la generalización.}
+
+\subsection{Del block al LLM system}
+
+Hoy el Transformer abarca lenguaje, visión, voz, biología y video porque attention ofrece una plantilla general de token interaction. Lo realmente difícil en cada dominio es la token interface, la función objetivo y las restricciones de evaluación: las imágenes usan patches, la neuroimagen usa secuencias ROI-by-time y un agent necesita además action y environment feedback.
+
+
+\lecturefigure{slide-021.jpg}{Transformers Today: el patrón de cómputo común a lenguaje, visión, voz, biología y video}{CS25 V5 official deck, p.~21}
+
+
+\lecturefigure{slide-022.jpg}{Large Language Models: arquitectura, datos, escala, post-training y aplicaciones forman un sistema}{CS25 V5 official deck, p.~22}
+
+\begin{knowledgebox}{Términos clave: del Transformer al LLM system}
+El \textbf{base model} son los parámetros obtenidos en el preentrenamiento; el \textbf{post-training} ajusta el comportamiento con instruction/preference data; el \textbf{inference stack} administra la KV cache, el batching y las llamadas a herramientas; la \textbf{product layer} incluye además retrieval, memory, permissions y UI. La Slide 22 comprime todas estas capas en un solo diagrama. Al leer la figura, primero hay que identificar la entrada y la salida de cada capa y luego preguntar a qué capa pertenece una falla: la falta de un hecho puede ser un problema de data, la latencia puede ser un problema de serving y una acción sin autorización es un problema de agent policy. La figura no demuestra que un base model más grande vaya a corregir automáticamente todos los defectos de las capas superiores.
+\end{knowledgebox}
+
+\teachervoice{00:09:20--00:10:10, la clase describe el LLM como un Transformer escalado más datos a gran escala, que después pasa por post-training y por el empaquetado como aplicación. Lo que el docente enfatiza no es que «la arquitectura no importa», sino que la arquitectura es solo un tramo de la cadena de capacidades del producto.}
+
+\begin{knowledgebox}{De la next-token loss al modelo de lenguaje}
+El objetivo más común del preentrenamiento autorregresivo es
+\[
+\mathcal{L}_{\text{NLL}}=-\sum_{t=1}^{T}\log p_{\theta}(x_t\mid x_{<t}).
+\]
+$x_t$ es el token actual, $x_{<t}$ es el contexto previo y $\theta$ son los parámetros. Este objetivo ofrece una supervisión unificada, pero no establece directamente la confiabilidad factual, el uso de herramientas, la coherencia con las preferencias ni la memoria de largo plazo; estas capacidades deben moldearse en conjunto mediante datos, post-training o componentes del sistema.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El núcleo del Transformer consiste en mapear tokens discretos a vectores y hacerlos interactuar repetidamente mediante attention de múltiples heads con señal de posición y MLP. Las capacidades de un LLM moderno no pueden explicarse con un solo block: la distribución de entrenamiento, el objetivo de optimización, el cómputo en tiempo de inferencia, las interfaces de retroalimentación y el entorno de despliegue también determinan el resultado. La siguiente sección se ocupa de la variable que más a menudo se subestima: los datos.
+\section{Estrategia de datos: además de la escala, la calidad, la estructura y las etapas de aprendizaje}
+
+La sección anterior expuso cómo calcula el modelo; esta sección se pregunta de qué distribución aprende realmente el modelo. La estrategia de datos no se reduce a «recolectar más páginas web»: el source mix, el filtrado por calidad, el orden, la tasa de repetición y la proporción por etapas modifican el gradiente. La clase primero plantea el problema mediante una comparación con el aprendizaje humano y después muestra, con dos proyectos de investigación concretos, cómo convertir la intuición en experimentos.
+
+\subsection{Por qué los datos son el backbone y no un depósito de combustible}
+
+La sección anterior explicó cómo procesa un block los tokens; ahora hay que dirigir la atención a la distribución de muestras que genera el gradiente. Se dice que los datos son el backbone porque el modelo interioriza como comportamiento predeterminado los hechos, formatos y estrategias que aparecen con alta frecuencia, en lugar de consultarlos uno por uno como una base de datos al terminar el entrenamiento. Al leer este apartado, distinga primero entre la «cantidad» del corpus y la «densidad efectiva de supervisión»: un mismo token, si está repetido, es erróneo o no guarda relación con el objetivo, puede aportar a la capacidad una contribución marginal completamente distinta.
+
+Para una distribución de datos $q(x)$, el objetivo de entrenamiento optimiza en realidad
+\[
+\mathbb{E}_{x\sim q}\big[\ell_{\theta}(x)\big].
+\]
+Cambiar $q$ cambia los conocimientos, el estilo, el idioma y los patrones de razonamiento que el modelo ve recompensados una y otra vez. Aumentar el volumen de datos solo amplía el número de muestras; si el ruido, la repetición o el sesgo de dominio crecen al mismo tiempo, los tokens adicionales pueden producir rendimientos decrecientes e incluso sobrescribir capacidades ya adquiridas.
+
+
+\lecturefigure{slide-024.jpg}{Impacto de los datos en la IA: acoplamiento entre calidad, cómputo, escala y aplicaciones}{CS25 V5 official deck, p.~24}
+
+
+\lecturefigure{slide-025.jpg}{Estrategias de datos más inteligentes: prioridad a la calidad, proporciones por etapa y selección activa}{CS25 V5 official deck, p.~25}
+
+\begin{knowledgebox}{Lectura de la figura: cómo leer la cadena de impacto de los datos}
+Primero siga la cadena causal de la slide 24, de data a model behavior, y después lea la lista de estrategias de la slide 25. El primer paso es comparar quality y diversity: la primera reduce el ruido; la segunda evita que la capacidad se estreche. El segundo paso es ver si la selection consiste en filtrar antes del entrenamiento, hacer sampling durante el entrenamiento o realizar active collection después del entrenamiento; las tres etapas tienen costos distintos. El tercer paso es comprobar si la metric coincide con la capacidad objetivo. La figura respalda que «las decisiones sobre los datos influyen en el modelo», pero de un diagrama de flujo no puede deducirse que cierto filtro sea eficaz en todas las scales.
+\end{knowledgebox}
+
+\begin{importantbox}{Los cinco controles de la estrategia de datos}
+\begin{enumerate}
+  \item \textbf{Quality}: si las muestras son correctas, coherentes y de alta densidad informativa;
+  \item \textbf{Diversity}: si los idiomas, dominios, tareas y formas de expresión cubren la cola larga;
+  \item \textbf{Structure}: formas secuenciales como diálogos, cuentos, código y demostraciones;
+  \item \textbf{Scale}: número de tokens y número de repeticiones;
+  \item \textbf{Schedule}: proporción en que aparecen los distintos datos en las fases tempranas y tardías del entrenamiento.
+\end{enumerate}
+Un mismo corpus puede dar lugar a modelos distintos con schedules distintos.
+\end{importantbox}
+
+\subsection{Humanos y LLM: las diferencias son hipótesis de investigación, no pruebas de semejanza con el cerebro}
+
+La clase contrasta baby/ChatGPT y brain/neural network para plantear un conjunto de preguntas abiertas. Los humanos aprenden de forma continua, actúan con objetivos, reciben percepciones multimodales y obtienen retroalimentación en un entorno social; los LLM clásicos optimizan el next-token objective principalmente en un único preentrenamiento fuera de línea a gran escala. El valor de esta comparación es generar ejes experimentales, no afirmar que los mecanismos biológicos ya se comprenden.
+
+
+\lecturefigure{slide-026.jpg}{Baby y ChatGPT, brain y neural network: comparación entre dos tipos de sistemas de aprendizaje}{CS25 V5 official deck, p.~26}
+
+
+\lecturefigure{slide-027.jpg}{Diferencias entre el aprendizaje humano continuo, orientado a objetivos, multimodal y con inducción estructurada, y el entrenamiento en una sola etapa de los LLM}{CS25 V5 official deck, p.~27}
+
+\teachervoice{00:12:38--00:14:46, Steven enumera el aprendizaje continuous, goal-directed, multimodal y hierarchical como posibles razones de que los humanos sean más eficientes, y al mismo tiempo usa repetidamente «potential» y «might». Las notas conservan estos puntos como hypotheses y no los presentan como conclusiones de la neurociencia.}
+
+\begin{warningbox}{Tres trampas al comparar la eficiencia de datos}
+La supervisión que reciben los humanos no se limita a caracteres contables; la visión, la acción, la recompensa, la interacción social y la retroalimentación del entorno a largo plazo difícilmente pueden convertirse en tokens. Además, las funciones objetivo del modelo y del humano son distintas. Por último, los límites de la capacidad de «saber hablar» no son equivalentes. Por ello, «los niños reciben muchos menos tokens» sirve para plantear una pregunta, pero no demuestra por sí solo que cierta fuente de datos sea una explicación suficiente.
+\end{warningbox}
+
+
+\lecturefigure{slide-028.jpg}{Cuentos y diálogos infantiles: datos muy estructurados, muy interactivos y orientados al aprendiz}{CS25 V5 official deck, p.~28}
+
+
+\lecturefigure{slide-029.jpg}{De internet a ChatGPT: un corpus web masivo pero heterogéneo}{CS25 V5 official deck, p.~29}
+
+\subsection{Por qué estudiar modelos pequeños y datos pequeños}
+
+La comparación human/LLM anterior señala muchos factores posibles, pero si se validan directamente con el modelo más grande, el presupuesto solo alcanza para uno o dos puntos, y cualquier conclusión quedará entrelazada con los hiperparámetros y la aleatoriedad. El valor científico de los modelos pequeños está en descomponer un problema grande en curvas densas: repetir el entrenamiento, sustituir datos y observar la convergencia y los tipos de error. También son un objetivo de deployment, porque los modelos locales inciden en la privacidad, la latencia y la accesibilidad; sin embargo, estos dos valores deben separarse: que los modelos pequeños sean fáciles de estudiar no permite suponer que su ordenamiento de scaling coincida necesariamente con el de los modelos grandes.
+
+Los experimentos a pequeña escala reducen el costo de reproducción, permiten a los investigadores ejecutar varios seeds, hacer ablations más densas y examinar la dinámica del entrenamiento; también favorecen el uso on-device, la privacidad y la investigación abierta. Pero los resultados de modelos pequeños no pueden extrapolarse directamente al trillion-token regime: hay que distinguir entre «descubrir mecanismos candidatos» y «demostrar beneficios a gran escala».
+
+
+\lecturefigure{slide-030.jpg}{Eficiencia, interpretabilidad, apertura y valor científico de estudiar modelos pequeños y datos pequeños}{CS25 V5 official deck, p.~30}
+
+\begin{knowledgebox}{Lectura de la figura: la investigación con modelos pequeños tiene dos cadenas de valor}
+Una es el \textbf{scientific proxy}: múltiples seeds a bajo costo, ablations densas y observación de la learning curve; la otra es el \textbf{deployment target}: on-device, baja latencia, privacidad y accesibilidad. Al leer la slide 30, no mezcle ambas cadenas. Que un método tenga un mecanismo claro en un modelo de 100M no implica que su ordenamiento se mantenga en uno de 70B; que un modelo de 3B pueda ejecutarse localmente tampoco implica que sea adecuado para responder preguntas de alto riesgo. La conclusión correcta es que la pequeña escala ofrece mejor resolución experimental y establece una Pareto frontier independiente para el despliegue.
+\end{knowledgebox}
+
+\teachervoice{00:13:55--00:14:46, el docente vincula el valor de los modelos pequeños con la ejecución local, la controlabilidad, el acceso al código abierto y la investigación cognitiva. Experiencia práctica: el producto más valioso de los experimentos pequeños son tendencias verificables y casos de falla, no una simulación barata de un entrenamiento grande.}
+
+\subsection{Resumen de la sección}
+
+La estrategia de datos abarca a la vez calidad, estructura, diversidad, escala y schedule. La comparación con el aprendizaje humano aporta dimensiones comprobables, y los modelos pequeños ofrecen un campo experimental de bajo costo. Las dos investigaciones siguientes responden, respectivamente, si los corpus orientados a niños son más eficaces y si los datos de alta calidad deben concentrarse en la fase final del entrenamiento.
+\section{TinyDialogues: ¿es el corpus dirigido a niños la respuesta?}
+
+La primera investigación reduce «los humanos aprenden con gran eficiencia de datos» a una pregunta que se puede someter a experimento: con un modelo pequeño fijo y un token budget fijo, ¿qué efecto relativo tienen el child-directed speech, la conversación natural, los cuentos, Wikipedia y los TinyDialogues sintéticos? Al leer este grupo de slides conviene fijarse en el conjunto de datos, la métrica, el orden de los resultados y la incertidumbre, y no limitarse a recordar un ganador.
+
+
+\lecturefigure{slide-031.jpg}{EMNLP 2024: Is Child-Directed Speech Effective Training Data for Language Models?}{CS25 V5 official deck, p.~31}
+
+
+\lecturefigure{slide-032.jpg}{Pregunta de investigación: cómo se comparan el corpus infantil humano, los diálogos sintéticos y los datos de BabyLM}{CS25 V5 official deck, p.~32}
+
+\teachervoice{00:14:49--00:16:20, Steven presenta explícitamente el trabajo como una prueba (test): si la distribución de la entrada que reciben los niños explica su mayor eficiencia de datos. En la clase no se afirma que los datos sean la única causa, y se mantiene también la explicación alternativa de que «human brain learns differently».}
+
+\subsection{Conjuntos de datos: no hay que tratar la «conversación» como una categoría homogénea}
+
+La investigación compara fuentes como CHILDES, TinyDialogues, la mezcla de BabyLM, Wikipedia y OpenSubtitles. Difieren en vocabulario, longitud de las oraciones, turnos de diálogo, estructura narrativa y ruido; por ello, la conclusión debe formularse como «el desempeño de una distribución concreta en un conjunto concreto de evaluaciones», y no generalizarse como «la conversation siempre es mejor».
+
+
+\lecturefigure{slide-033.jpg}{Matriz de conjuntos de datos: CHILDES, TinyDialogues, BabyLM, Wikipedia y OpenSubtitles}{CS25 V5 official deck, p.~33}
+
+
+\lecturefigure{slide-034.jpg}{TinyDialogues: corpus de diálogos generado por un modelo grande y orientado a cuatro tipos de objetivos de aprendizaje}{CS25 V5 official deck, p.~34}
+
+
+\lecturefigure{slide-035.jpg}{Diseño de la generación de TinyDialogues: restricciones de vocabulario, hechos, narración y argumentación}{CS25 V5 official deck, p.~35}
+
+
+\lecturefigure{slide-036.jpg}{Ejemplo de TinyDialogues: diálogos largos y estructurados con señales de aprendizaje explícitas}{CS25 V5 official deck, p.~36}
+
+\begin{knowledgebox}{Los datos sintéticos no son automáticamente de alta calidad}
+El valor de los datos sintéticos proviene de que permiten controlar la cobertura de tareas, la dificultad y el formato; sus riesgos incluyen errores del teacher model, uniformidad de estilo, filtración de plantillas y autorrefuerzo. Al evaluarlos hay que registrar el modelo generador, el prompt, las reglas de filtrado y la deduplicación, en lugar de tratar «synthetic» como una etiqueta de calidad independiente.
+\end{knowledgebox}
+
+\subsection{Experimentos y evaluación: la capacidad lingüística no es un solo número}
+
+Los experimentos fijan el modelo y el token budget, cambian los datos de entrenamiento y comparan con varias seeds. La evaluación abarca a la vez lexical/global ordering, contrastes gramaticales al estilo de BLiMP, world similarity y tareas de significado léxico y semántica. Si solo se observa la perplexity, puede pasarse por alto la generalización estructural; si solo se observa la accuracy discreta, se amplifica el ruido de los umbrales.
+
+
+\lecturefigure{slide-037.jpg}{Diseño experimental: tamaño del modelo y presupuesto fijos, se sustituye el corpus de entrenamiento}{CS25 V5 official deck, p.~37}
+
+
+\lecturefigure{slide-038.jpg}{Métricas de evaluación: sintaxis, orden de palabras, world similarity y juicios semánticos}{CS25 V5 official deck, p.~38}
+
+La perplexity se define como la exponencial de la log-verosimilitud negativa promedio por token:
+\[
+\operatorname{PPL}=\exp\!\left(-\frac{1}{T}\sum_{t=1}^{T}\log p(x_t\mid x_{<t})\right).
+\]
+Intuitivamente puede entenderse como el «número efectivo de opciones» del modelo en cada paso, pero no se puede comparar mecánicamente entre tokenizers, corpus o idiomas distintos, ni equivale directamente a la exactitud factual o a la tasa de éxito en una tarea.
+
+\subsection{Resultados: la evidencia mixta importa más que una historia atractiva}
+
+Esta subsección continúa el diseño experimental; su propósito no es encontrar un ganador que pueda ir en un titular promocional, sino comprobar en qué métricas se sostiene cada hipótesis sobre los datos. Al leer los resultados, primero hay que ver la consistencia de un mismo corpus a lo largo de varias tareas y después la varianza entre seeds y la velocidad de convergencia; si un tipo de datos solo encabeza una métrica aislada, eso se parece más a una coincidencia con la tarea (task matching) que a una ventaja general de los datos. Por último, hay que comparar la posición relativa de los corpus synthetic, natural conversation y mixed, para no fusionar la «conversación» en una sola categoría.
+
+La tabla de resultados muestra que los distintos datos se ordenan de manera diferente en lexical ordering y en global ordering; los TinyDialogues sintéticos aportan una mejora clara, pero no superan en todas las métricas a la mezcla de múltiples fuentes de BabyLM. Las curvas de convergencia también recuerdan que hay que observar la velocidad, la varianza y si realmente se alcanza la saturación, en lugar de reportar solo el punto final.
+
+
+\lecturefigure{slide-039.jpg}{Resultados de GPT-2 por conjunto de datos: comparación multidimensional de métricas zero-shot}{CS25 V5 official deck, p.~39}
+
+
+\lecturefigure{slide-040.jpg}{Resultados de global ordering: clasificación de los distintos corpus en la tarea de orden de oraciones}{CS25 V5 official deck, p.~40}
+
+
+\lecturefigure{slide-041.jpg}{Comportamiento de convergencia: curvas de entrenamiento, varianza y velocidad de aprendizaje con distintas fuentes de datos}{CS25 V5 official deck, p.~41}
+
+\begin{knowledgebox}{Lectura a fondo: cómo juzgar si un experimento con datos se acerca a una conclusión causal}
+Primero, confirmar que, aparte del corpus, se mantienen fijos el token budget, la model architecture, el optimizer, el tokenizer y el número de pasos de entrenamiento; de lo contrario, las diferencias entre modelos podrían deberse a cómputo adicional. Segundo, revisar la varianza entre seeds y la checkpoint curve para descartar una inicialización fortuita o una clasificación propia de un solo momento. Tercero, verificar la evaluation contamination: si los datos de entrenamiento contienen directamente el formato de la prueba o casi duplicados, la supuesta mejora de calidad de los datos podría ser solo una filtración. Cuarto, hacer un mechanism probe, por ejemplo controlando el vocabulario, la longitud de las oraciones, los turnos de diálogo o la cobertura temática, para determinar si la mejora proviene del child-directed style, de la synthetic structure o de la diversity. Por último, reproducir el resultado con distintos tamaños de modelo y en al menos una evaluación externa. Las slides de TinyDialogues dan un primer paso importante, pero sirven más como evidencia de que «el diálogo estructurado merece seguir investigándose» que como veredicto final sobre la teoría del aprendizaje infantil.
+\end{knowledgebox}
+
+\teachervoice{00:19:43--00:20:18, el docente conserva los resultados contraintuitivos: el child-directed speech puro rinde menos que datos más diverse; TinyDialogues supera a la conversación natural, pero aun así no se impone al strongest mixed corpus. Los resultados negativos convierten el «secreto de los datos infantiles» en una hipótesis más precisa sobre diversity/structure.}
+
+
+\lecturefigure{slide-042.jpg}{Hallazgos: conclusiones sobre datos diversos, diálogos sintéticos y global-development ordering}{CS25 V5 official deck, p.~42}
+
+
+\lecturefigure{slide-043.jpg}{Conclusión de la investigación: los datos que permiten un aprendizaje eficiente resultan de la acción conjunta de la estructura, la calidad y la diversidad del corpus}{CS25 V5 official deck, p.~43}
+
+\begin{knowledgebox}{Lectura de la figura: tres niveles de evidencia en los resultados de TinyDialogues}
+El primer nivel es el \textbf{within-metric ranking}: comparar conjuntos de datos dentro de una misma evaluación. El segundo nivel es la \textbf{cross-metric consistency}: si la ventaja se mantiene a través de tareas lexical, ordering, grammar y semantic. El tercer nivel son las \textbf{learning dynamics}: si la ventaja aparece temprano, tarde o solo en un checkpoint aislado. Lo importante de las slides 39--43 no es una celda en particular, sino que el mixed corpus y el synthetic dialogue resultan complementarios. Las figuras no controlan todos los tokenizers, tamaños de modelo y longitudes de entrenamiento, por lo que al extrapolar hay que conservar esas condiciones.
+\end{knowledgebox}
+
+\begin{warningbox}{Lo que esta investigación no puede demostrar}
+No puede demostrar que los niños aprendan principalmente mediante el diálogo, ni que un LLM más grande conserve el mismo orden; el tamaño del modelo, el tokenizer, los pasos de entrenamiento y la evaluation suite pueden cambiar los resultados. La conclusión más sólida es: \textbf{la estructura de la distribución de los datos merece someterse a ablaciones sistemáticas, igual que la arquitectura del modelo}.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La investigación de TinyDialogues convierte una intuición ambiciosa inspirada en el cerebro en un dataset-controlled experiment. El hallazgo principal no es que «el corpus infantil sea el mejor», sino que la diversity, la estructura del diálogo y el control sintético contribuyen cada uno de manera distinta; las métricas múltiples y las curvas de convergencia revelan los mecanismos de los datos mejor que un solo leaderboard.
+\section{Two-Phase Pretraining: cuándo deben aparecer los datos de alta calidad}
+
+La segunda investigación sobre datos lleva la pregunta de la source selection a la schedule: si los tokens de alta calidad son escasos, ¿conviene aumentar su proporción al final del entrenamiento? El esquema de dos fases no consiste simplemente en «primero datos peores y luego mejores»; primero usa una broad mixture para construir capacidades generales y después usa una blend de alta calidad ya validada para modificar los gradientes de la etapa final, al mismo tiempo que evita la repetición excesiva.
+
+
+\lecturefigure{slide-046.jpg}{Two-Phase Pretraining: datos organizados por fases para mejorar la LLM accuracy}{CS25 V5 official deck, p.~46}
+
+
+\lecturefigure{slide-047.jpg}{Optimizar la LLM pretraining data selection: calidad, mezcla y schedule}{CS25 V5 official deck, p.~47}
+
+
+\lecturefigure{slide-048.jpg}{Contribuciones principales: definición, evaluación, análisis fine-grained y escalabilidad}{CS25 V5 official deck, p.~48}
+
+\teachervoice{00:21:03--00:22:30, Steven describe el trabajo como una validación sistemática del two-phase pretraining y enfatiza que primero se hacen prototipos de las blends con un token budget más pequeño. Sugerencia práctica: la receta de datos, al igual que los hiperparámetros del modelo, requiere cheap proxy experiments.}
+
+\subsection{Formalización: phase y blend son dos controles independientes}
+
+La sección anterior presentó la intuición de two-phase; esta sección la descompone en variables que pueden controlarse por separado. Solo con una formalización los investigadores pueden distinguir si la ganancia proviene de los datos de la segunda fase, del momento en que aparecen, de la duración del entrenamiento o de tokens adicionales. Esta distinción también determina el presupuesto experimental: fijar el total de tokens permite estudiar la schedule, fijar la phase duration permite estudiar la blend, y cambiar ambas a la vez solo produce una recipe a la que no puede atribuirse la causa.
+
+Sea $q_1$ la distribución de datos de la primera fase con $T_1$ pasos, y $q_2$ la de la segunda fase con $T_2$ pasos; el objetivo total puede escribirse como
+\[
+\mathcal{L}=\sum_{t=1}^{T_1}\mathbb{E}_{x\sim q_1}[\ell_t(x)]
++\sum_{t=T_1+1}^{T_1+T_2}\mathbb{E}_{x\sim q_2}[\ell_t(x)].
+\]
+La calidad, la diversidad y la tasa de repetición de $q_2$ son variables distintas de la proporción $T_2/(T_1+T_2)$; solo al cambiar una a la vez puede determinarse si la ganancia proviene de la blend o de la duration.
+
+
+\lecturefigure{slide-049.jpg}{Two-phase approach: phase 1 de amplia cobertura y phase 2 de alta calidad}{CS25 V5 official deck, p.~49}
+
+
+\lecturefigure{slide-050.jpg}{Data sources: Common Crawl, Wikipedia, libros, artículos y datos de tareas}{CS25 V5 official deck, p.~50}
+
+
+\lecturefigure{slide-051.jpg}{Evaluation suite: razonamiento, conocimiento, matemáticas, programación y sentido común}{CS25 V5 official deck, p.~51}
+
+
+\lecturefigure{slide-052.jpg}{Model/training setup: arquitectura fija y configuración de entrenamiento uniforme}{CS25 V5 official deck, p.~52}
+
+\begin{knowledgebox}{Upsampling y effective repetition}
+Si una fuente de datos tiene originalmente $N$ tokens y durante el entrenamiento se muestrean $rN$, el upsampling factor es $r$. Un valor $r>1$ aumenta el peso del gradiente de ese dominio, pero también incrementa el riesgo de memorization y de diminishing return. El volumen de datos, la probabilidad de muestreo y el número de pasos de entrenamiento deben reportarse juntos.
+\end{knowledgebox}
+
+\subsection{Blend strategy: alta calidad no equivale a una sola fuente}
+
+La formalización definió $q_2$; ahora hay que preguntar de qué sources se compone. Lo que se llama high-quality no es el nombre de una fuente, sino una combinación de filtrado, estructura del documento, densidad de hechos, correspondencia con el dominio y tasa de repetición; un libro de alta calidad y un fragmento de código de alta calidad también contribuyen de manera distinta a cada benchmark. Por ello, al leer una tabla de blends no basta con mirar la quality label: hay que rastrear la proporción de cada categoría, el número real de repeticiones de los tokens de cada categoría y si la mejora aparece a la vez en conocimiento, razonamiento, matemáticas y code.
+
+La segunda fase vuelve a mezclar web high-, medium- y low-quality con curated sources. Al leer una tabla de blends, primero se observa la proporción de cada tipo de datos y luego si las métricas de las tareas mejoran de forma simultánea: una blend puede mejorar el conocimiento pero perjudicar el code, o elevar el promedio pero reducir la cobertura de la cola larga.
+
+
+\lecturefigure{slide-053.jpg}{Two-phase data blending: phase 1 de amplia cobertura, phase 2 orientada a alta calidad}{CS25 V5 official deck, p.~53}
+
+
+\lecturefigure{slide-054.jpg}{Impacto de la Phase 2 blending en el rendimiento: resultados multitarea de distintas recetas}{CS25 V5 official deck, p.~54}
+
+\begin{knowledgebox}{Lectura a fondo: cómo evitar la average-score illusion en las tablas de Phase-2}
+El promedio de una tabla multitarea oculta los conflictos entre tareas. Primero se agrupan las métricas en knowledge, reasoning, math, code y commonsense, y se observa si una blend produce un desplazamiento general o solo mejora en un grupo; después se compara la absolute gain con la baseline variance, para no presentar una fluctuación mínima como una mejora estable. Si la receta incluye más task-like curated data, también hay que revisar la benchmark format contamination. Las gráficas de pastel representan la sampling share, no la unique data share: una fuente de datos con una proporción pequeña pero muestreada repetidamente puede aportar una gran cantidad de gradiente. Por último, se dividen las gains entre el compute adicional y el data curation cost para obtener la ganancia por unidad de costo. Solo cuando la ventaja se mantiene en varios grupos de tareas, con varias seeds y a mayor escala, hay fundamentos para afirmar que la schedule mejoró el general pretraining, y no que se hizo un ajuste local a la evaluación.
+\end{knowledgebox}
+
+\teachervoice{00:22:30--00:23:11, el ponente dice que todas las phase-two blends probadas superan a la simple continuation y mantienen la ventaja al aumentar tokens/modelo. Las notas conservan el alcance de «tested blends» y no lo extrapolan a que cualquier receta de dos fases sea eficaz.}
+
+\subsection{Sobremuestreo y duración de la fase: más no siempre es mejor}
+
+Una vez definida la blend, el entrenamiento todavía enfrenta una cuestión temporal: cuántas veces deben aparecer los mismos tokens de alta calidad y en qué longitud de la fase final deben concentrarse. Si solo se observa la final loss, es fácil confundir la memorization con aprendizaje efectivo; una lectura más confiable considera a la vez la held-out task, la domain diversity y la phase length curve. El turning point de la figura no es una constante fija, sino un recordatorio de que el equipo debe buscar la duration en lugar de suponer que «cuanto más largo, mejor».
+
+Si la segunda fase muestra muchas veces una pequeña cantidad de datos de alta calidad, la loss de entrenamiento puede seguir bajando, pero la ganancia en generalización se satura. Este compromiso puede expresarse de forma simplificada así:
+\[
+G(r)=B(r)-\lambda M(r),
+\]
+donde $B(r)$ es la ganancia que aporta la mayor exposición a datos de alta calidad, $M(r)$ es el costo de memorización y estrechamiento de la distribución causado por la repetición, y $\lambda$ representa la sensibilidad de la tarea al sobreajuste. El $r$ óptimo suele estar en un punto interior y no en el infinito.
+
+
+\lecturefigure{slide-055.jpg}{¿Es eficaz el Phase 2 upsampling?: ganancia, proporción y rendimientos decrecientes}{CS25 V5 official deck, p.~55}
+
+
+\lecturefigure{slide-056.jpg}{Two-phase scalability: tendencias con mayor token budget y modelos más grandes}{CS25 V5 official deck, p.~56}
+
+
+\lecturefigure{slide-057.jpg}{Phase duration: una fase final de alta calidad demasiado corta o demasiado larga puede no ser óptima}{CS25 V5 official deck, p.~57}
+
+\begin{knowledgebox}{Lectura a fondo: por qué la phase duration cambia el modelo y no solo el peso de los datos}
+Al inicio del entrenamiento, las representaciones del modelo todavía se están formando, y los datos de amplia cobertura permiten construir vocabulario, hechos y patrones generales; en la etapa final, la learning rate, el optimizer state y la basin en la que se encuentran los parámetros ya son distintos, por lo que el mismo lote de tokens de alta calidad produce en ese momento direcciones de actualización diferentes. Por ello, la two-phase schedule no es una simple ponderación de dos conjuntos de datos estáticos: también aprovecha la dependencia de la trayectoria de optimización. Al leer la curva de duration hay que reportar también la learning-rate schedule y si se reinicia el optimizer; si la phase 2 coincide con un cambio en la tasa de aprendizaje, la ganancia puede deberse a ambos factores. También hay que revisar si las tareas que mejora la phase 2 sacrifican capacidades multilingual, creative o long-tail. En la práctica de ingeniería, la phase duration puede plantearse como una Pareto search: en el eje horizontal, los unique tokens/repetitions de alta calidad; en el eje vertical, la ganancia multitarea y el olvido; después se elige una región estable y no un único punto máximo.
+\end{knowledgebox}
+
+\teachervoice{00:23:11--00:24:00, en clase se enfatiza que la phase 2 no puede alargarse indefinidamente y que un upsampling excesivo produce detrimental o diminishing returns. Esta caveat se acerca más a una receta aplicable que la afirmación de que «los datos de alta calidad son eficaces».}
+
+\begin{lstlisting}[caption={Esqueleto de experimento reproducible para una two-phase data schedule}]
+phase1 = mix(broad_web, books, code, multilingual)
+phase2_candidates = propose_quality_blends()
+for blend in phase2_candidates:
+    proxy = train_small_model(phase1, blend, fixed_tokens=True)
+    evaluate(proxy, multi_task_suite, multiple_seeds=True)
+selected = choose_pareto_blend(quality, diversity, stability)
+train_full_model(phase1, selected, report_repetition=True)
+\end{lstlisting}
+
+\subsection{Integrar las dos investigaciones en una data strategy}
+
+TinyDialogues modifica la source structure; two-phase pretraining modifica la schedule. Ambas muestran que la data effectiveness no es una puntuación intrínseca y única de cada muestra, sino una relación de correspondencia entre source, model, objective, etapa de entrenamiento y evaluación.
+
+
+\lecturefigure{slide-058.jpg}{Two-phase findings: conclusión integral sobre datos estructurados de alta calidad y escalabilidad}{CS25 V5 official deck, p.~58}
+
+
+\lecturefigure{slide-060.jpg}{Unified insights: data lessons comunes a los datos pequeños y al pretraining a gran escala}{CS25 V5 official deck, p.~60}
+
+
+\lecturefigure{slide-061.jpg}{Síntesis de la investigación sobre datos: calidad, estructura, programación temporal y experimentos reproducibles son igual de importantes}{CS25 V5 official deck, p.~61}
+
+\begin{knowledgebox}{Términos clave: source, blend, schedule y curriculum}
+\textbf{Source} es la categoría de datos original; \textbf{blend} es la proporción de muestreo dentro de una misma fase; \textbf{schedule} describe cómo cambia esa proporción a lo largo de los pasos de entrenamiento; \textbf{curriculum} además puede ordenar los datos de forma intencional según dificultad o capacidad. Two-phase pretraining es una piecewise-constant schedule y no equivale a cualquier curriculum. Al leer las slides 53--61 hay que reportar a la vez el número de tokens por phase, los unique tokens de cada tipo de datos, las effective repetitions y la escala del modelo; de lo contrario, no es posible reproducir la intensidad real de la «fase de alta calidad».
+\end{knowledgebox}
+
+\begin{importantbox}{Data-centric decision rule}
+Primero hay que preguntar «qué capacidad falta» y después elegir la source que aporte la supervisión correspondiente; seleccionar la blend con experimentos a pequeña escala con varias seeds; al aumentar la escala, verificar que el orden se mantenga; por último, reportar la tasa de repetición, los costos de derechos de autor y privacidad, y los de long-tail. No hay que tomar una tabla de aggregate score como una universal recipe.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Lo esencial de two-phase pretraining no es «dar buenos datos al final», sino convertir la blend y la duration en variables que pueden someterse a ablación. Una fase de alta calidad puede mejorar el rendimiento multitarea, pero el sobremuestreo tiene rendimientos decrecientes; la vía de ingeniería más confiable combina proxy experiment, multi-task evaluation y scale validation.
+\section{Inference-Time Reasoning: cambiar el grafo de cómputo sin modificar los pesos}
+
+Una vez que se tiene un pretrained model, el siguiente paso no tiene por qué ser actualizar los parámetros de inmediato. Prompt, search, decomposition, code execution y note insertion pueden modificar el proceso de resolución del problema en inference time. El curso ubica estos métodos sobre un mismo eje: todos dan al modelo más cómputo intermedio o estructura externa, pero difieren en costo, verificabilidad y patrón de propagación de errores.
+
+
+\lecturefigure{slide-063.jpg}{Post-training o inference-time compute: distintos puntos de intervención}{CS25 V5 official deck, p.~63}
+
+\teachervoice{00:25:09--00:26:20, Chelsea pone en el mismo plano fine-tuning, feedback, prompting y retrieval, y señala que la CoT ofrece una ventana observable. Las notas advierten: un rationale legible no equivale necesariamente al proceso de cómputo causal real del modelo.}
+
+\subsection{Linear Chain-of-Thought y ejemplos}
+
+La subsección anterior dividió el post-training en varias interfaces; aquí se estudia primero la más ligera: sin modificar parámetros, solo se pide al modelo que produzca pasos intermedios. Al leer los ejemplos de CoT hay que revisar por separado la problem decomposition, la validez local de cada paso y la final answer; no se debe concluir que el razonamiento es más profundo solo porque el texto es más largo. También hay que registrar el token budget, porque una direct answer y una chain larga no implican la misma cantidad de cómputo.
+
+La CoT sustituye el mapeo directo $x\rightarrow y$ por $x\rightarrow z_{1:k}\rightarrow y$, donde $z_i$ es un paso textual intermedio. Su beneficio puede provenir de descomponer una función compleja en transformaciones locales breves, de aumentar el test-time compute o de facilitar la localización de errores; pero los pasos intermedios también pueden ser fluidos y, aun así, erróneos.
+
+
+\lecturefigure{slide-064.jpg}{Chain-of-Thought: desplegar un razonamiento complejo en pasos intermedios visibles}{CS25 V5 official deck, p.~64}
+
+
+\lecturefigure{slide-065.jpg}{Ejemplo de CoT: contraste entre la respuesta directa y el razonamiento paso a paso}{CS25 V5 official deck, p.~65}
+
+\begin{warningbox}{Faithfulness y usefulness deben evaluarse por separado}
+La CoT puede mejorar la exactitud o la facilidad de depuración, pero no garantiza que cada oración refleje fielmente el mecanismo interno. La evaluación debe considerar al mismo tiempo, como mínimo, final accuracy, step validity, self-consistency y la sensibilidad a rationales irrelevantes.
+\end{warningbox}
+
+\subsection{Cómo mejorar la chain: búsqueda, supervisión y modelos pequeños}
+
+Entre los métodos de mejora están pedir al modelo que revise lo anterior, buscar varias rutas, puntuar con un verifier, entrenar con step-level supervision o destilar reasoning traces de un modelo más fuerte. En los modelos pequeños, una chain larga puede rebasar su capacidad, por lo que la compact decomposition y la semantic understanding cobran más importancia.
+
+
+\lecturefigure{slide-066.jpg}{Improving CoT: verifier, self-consistency y supervisión del proceso}{CS25 V5 official deck, p.~66}
+
+
+\lecturefigure{slide-067.jpg}{Smaller models: indicaciones paso a paso, comprensión semántica y límites de capacidad}{CS25 V5 official deck, p.~67}
+
+
+\lecturefigure{slide-068.jpg}{Generalizing CoT: transferencia entre dominios, entre niveles de dificultad y de estructura}{CS25 V5 official deck, p.~68}
+
+\begin{knowledgebox}{Lectura a fondo: la CoT generalization tiene al menos cuatro sentidos}
+El primero corresponde a problemas nuevos de la misma distribución, en los que el modelo reutiliza la misma plantilla de solución; el segundo, a la extrapolación de dificultad, cuando el problema requiere más pasos; el tercero, a la transferencia de dominio, de chains matemáticas a sentido común, planeación o código; el cuarto, a la transferencia estructural, que abstrae estrategias componibles a partir del formato superficial de los ejemplos. Los métodos de las slides 66--68 pueden mejorar uno de estos tipos y perjudicar otro. Al evaluar conviene variar la redacción, el orden y la información irrelevante para probar si el modelo depende del template; usar un adversarial intermediate step para comprobar si realmente lee la chain; comparar small/large models para determinar si el beneficio está limitado por la capacidad, y, por último, medir la transfer en tareas sin ejemplos. Lo que se llama «generalized CoT» solo tiene un sentido claro una vez que se explicitan estos límites.
+\end{knowledgebox}
+
+\teachervoice{00:26:25--00:29:12, en clase la CoT se amplía a un conjunto de inference procedures, no a un único prompt. Experiencia práctica: al comparar métodos hay que fijar el token budget o el wall-clock; de lo contrario, «razona mejor» puede significar solo «usó más muestreo».}
+
+\subsection{Tree, Program y decomposition}
+
+Tree of Thoughts genera varios candidatos en cada paso y busca entre ellos:
+\[
+s_{t+1}^{(j)}=f_{\theta}(s_t,a_t^{(j)}),\qquad
+j^{\star}=\arg\max_j V(s_{t+1}^{(j)}).
+\]
+$s_t$ es el estado actual, $a_t^{(j)}$ es un thought candidato y $V$ es el evaluador. Este método convierte la generación en search, pero su desempeño depende de la proposal diversity y de la evaluator calibration.
+
+
+\lecturefigure{slide-069.jpg}{Tree-of-Thoughts: generación en varias ramas, evaluación y retroceso}{CS25 V5 official deck, p.~69}
+
+
+\lecturefigure{slide-070.jpg}{Program-of-Thought: el intérprete de código asume el cálculo exacto}{CS25 V5 official deck, p.~70}
+
+Socratic decomposition, least-to-most y computation graph descomponen el problema en subproblemas dependientes; la diferencia está en si la descomposición es dialógica, secuencial o una estructura de grafo explícita. Program-of-Thought delega la aritmética al interpreter, lo que reduce la carga del modelo de lenguaje en la ejecución exacta, pero introduce la necesidad de un sandbox y de manejar errores de código.
+
+
+\lecturefigure{slide-071.jpg}{Socratic questioning: indagación recursiva de los subproblemas clave}{CS25 V5 official deck, p.~71}
+
+
+\lecturefigure{slide-072.jpg}{Least-to-Most prompting: resolver primero los subproblemas sencillos y luego combinarlos}{CS25 V5 official deck, p.~72}
+
+
+\lecturefigure{slide-073.jpg}{Program of Thoughts: división del trabajo entre la planeación en lenguaje y el cómputo ejecutable}{CS25 V5 official deck, p.~73}
+
+
+\lecturefigure{slide-074.jpg}{Computation Graphs: explicitar las dependencias como un grafo}{CS25 V5 official deck, p.~74}
+
+
+\lecturefigure{slide-075.jpg}{Self-Notes: insertar en la secuencia de entrada anotaciones intermedias recuperables}{CS25 V5 official deck, p.~75}
+
+\begin{knowledgebox}{Lectura a fondo: la aceptación de un reasoning method no puede basarse solo en la final accuracy}
+En la CoT lineal hay que revisar por muestreo si cada paso es válido y si algún error se compensa por azar más adelante; en tree search hay que medir proposal diversity, branching factor, evaluator accuracy y el costo de la búsqueda; en Program-of-Thought hay que separar el planning error del execution error y restringir en el sandbox el acceso a archivos y a la red, así como el tiempo de ejecución; en decomposition hay que verificar que los subproblemas cubran el objetivo original y que el orden de dependencias esté completo; en self-notes hay que observar si los tokens posteriores realmente usan el contenido insertado. También conviene comparar con un baseline bajo el mismo token/tool budget total, porque el solo hecho de muestrear más eleva la pass rate. El informe final debe incluir como mínimo accuracy, cost, latency, verification rate, abstention y failure taxonomy. Solo así puede juzgarse si el método añade cómputo verificable o únicamente una generación más larga y más costosa.
+\end{knowledgebox}
+
+
+\lecturefigure{slide-076.jpg}{Latent-space CoT: añadir cómputo intermedio en el espacio oculto}{CS25 V5 official deck, p.~76}
+
+\begin{knowledgebox}{Lectura de la figura: los dos ejes de la reasoning taxonomy}
+En el eje horizontal, según el \textbf{espacio de representación}, se distinguen la chain textual, el programa, el grafo y el latent state; en el eje vertical, según la \textbf{estrategia de control}, se distinguen la generación por una sola ruta, la votación entre múltiples muestras, la búsqueda en árbol y el verifier externo. La slide 76 lleva el pensamiento al latent space, con lo que reduce el ancho de banda textual, pero sacrifica la posibilidad de inspección. Las slides anteriores, en cambio, recurren a estructuras más explícitas a cambio de capacidad de verificación. Al comparar métodos hay que fijar total sampled tokens, tool calls y evaluator compute; de lo contrario, el beneficio de los métodos de búsqueda no puede separarse de la capacidad del modelo base.
+\end{knowledgebox}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{L{0.18\textwidth} X X X}
+\toprule
+Método & Recurso añadido & Ventaja & Principal punto de falla \\
+\midrule
+Linear CoT & tokens generados adicionales & sencillo, legible & cadena de errores, alucinaciones con exceso de confianza \\
+Tree search & múltiples muestras y evaluator & permite retroceder, varias rutas & costo alto, sesgo del evaluador \\
+Program/Tool & ejecutor externo & cálculo exacto, verificable & seguridad, errores de interfaz y de código \\
+Decomposition & estructura de subproblemas & reduce la dificultad local & descomposición errónea, dependencias omitidas \\
+Latent reasoning & cómputo en estados ocultos & sin el límite del ancho de banda textual & difícil de interpretar y de supervisar \\
+\bottomrule
+\end{tabularx}
+\caption{Clasificación de los métodos de inference-time reasoning según los recursos y los modos de falla.}
+\end{table}
+
+\begin{lstlisting}[caption={Pseudocódigo de reasoning search con presupuesto limitado}]
+frontier = [initial_state(problem)]
+for depth in range(max_depth):
+    candidates = expand(frontier, samples_per_state)
+    checked = verify_with_tools(candidates)
+    frontier = top_k(checked, score="validity_then_reward")
+    if solved(frontier[0]):
+        return frontier[0]
+return best_with_uncertainty(frontier)
+\end{lstlisting}
+
+\subsection{Resumen de la sección}
+
+Inference-time reasoning modifica el grafo de cómputo de la resolución sin necesidad de actualizar los pretrained weights. CoT, tree, program, decomposition y latent chain añaden, respectivamente, tokens, search, herramientas, estructura o cómputo en estados ocultos; una comparación justa debe controlar el presupuesto y reportar el verifier, las herramientas y la recuperación ante fallas.
+\section{Preference Optimization: quién define «una mejor respuesta»}
+
+El prompting puede cambiar una inferencia concreta, pero si se busca que el modelo se incline de forma duradera hacia conductas útiles, seguras o acordes con un estilo determinado, es necesario actualizar los parámetros. La entrada común de la preference optimization son pares chosen/rejected o una reward signal; los métodos difieren en si entrenan un reward model, si muestrean en línea, cómo construyen la baseline y cómo representan las preferencias de una población.
+
+\subsection{RLHF: reward model más policy optimization}
+
+RLHF suele ajustar primero un reward model $r_{\phi}(x,y)$ y después optimiza
+\[
+\max_{\theta}\;\mathbb{E}_{y\sim\pi_{\theta}(\cdot\mid x)}[r_{\phi}(x,y)]
+-\beta D_{\mathrm{KL}}(\pi_{\theta}\|\pi_{\mathrm{ref}}).
+\]
+El término KL limita cuánto se aleja la policy del reference model. El costo del sistema proviene de la preference collection, el reward model, los rollouts y la estabilidad del RL; el reward hacking muestra que la puntuación sustituta no equivale al valor real para el usuario.
+
+
+\lecturefigure{slide-078.jpg}{Pipeline de RLHF: comparaciones humanas, reward model y policy optimization}{CS25 V5 official deck, p.~78}
+
+\teachervoice{00:29:13--00:31:32, el ponente separa el prompting del preference training: el primero aporta un scaffold en inference time; el segundo usa human/AI feedback para cambiar los parámetros del modelo. Esta frontera importa más que los acrónimos.}
+
+\subsection{DPO y RLAIF: cambiar el origen de la señal de entrenamiento}
+
+DPO usa directamente preference pairs para optimizar el log-ratio de la policy respecto de la reference:
+\[
+\mathcal{L}_{\mathrm{DPO}}=-\log\sigma\!\left(\beta\left[
+\log\frac{\pi_{\theta}(y^+\mid x)}{\pi_{\mathrm{ref}}(y^+\mid x)}-
+\log\frac{\pi_{\theta}(y^-\mid x)}{\pi_{\mathrm{ref}}(y^-\mid x)}
+\right]\right).
+\]
+Prescinde del RL loop explícito con reward model, pero sigue dependiendo de la calidad de los pares, de la reference y de la distribución de preferencias. RLAIF sustituye parte de la anotación humana por un AI judge; reduce costos, pero introduce en la cadena de supervisión el sesgo, la capacidad y la manipulabilidad del judge.
+
+
+\lecturefigure{slide-079.jpg}{DPO: optimizar la policy directamente a partir de preference pairs}{CS25 V5 official deck, p.~79}
+
+
+\lecturefigure{slide-080.jpg}{RLAIF: ampliar la anotación de preferencias con AI feedback}{CS25 V5 official deck, p.~80}
+
+\begin{warningbox}{La judge capability es uno de los límites del entrenamiento}
+Si el AI judge no puede identificar errores factuales, estrategias de largo plazo o riesgos de seguridad sutiles, escribirá ese ruido en los preference data. Usar un judge más fuerte no resuelve por sí solo el sesgo homogéneo; se requieren human audit, desacuerdo entre varios judges, adversarial prompts y outcome-based checks.
+\end{warningbox}
+
+\subsection{GRPO, KTO y heterogeneous preferences}
+
+GRPO construye la advantage a partir del rendimiento relativo de un grupo de sampled responses, con lo que evita parte del costo de un value model independiente. En forma simplificada:
+\[
+A_i=\frac{r_i-\mu_G}{\sigma_G+\epsilon},
+\]
+donde $\mu_G,\sigma_G$ son la media y la desviación estándar de la reward dentro del grupo. Depende de la group diversity y de la reward reliability.
+
+
+\lecturefigure{slide-081.jpg}{GRPO: reward relativa dentro del grupo y actualización de la policy}{CS25 V5 official deck, p.~81}
+
+KTO toma de la prospect theory la loss aversion y admite etiquetas desirable/undesirable en lugar de pairs estrictos; destaca el valor asimétrico de los resultados negativos. Variational Preference Learning, por su parte, modela como variable latente las preferencias de distintos grupos demographic o profiles, y reconoce que «una reward promedio» puede borrar desacuerdos reales.
+
+
+\lecturefigure{slide-082.jpg}{KTO: loss aversion y señales de preferencia no pareadas}{CS25 V5 official deck, p.~82}
+
+
+\lecturefigure{slide-083.jpg}{Variational preference learning: personalización y preferencias de poblaciones heterogéneas}{CS25 V5 official deck, p.~83}
+
+\begin{warningbox}{Cinco niveles de validación antes de poner en producción un preference method}
+El primer nivel revisa la consistencia de las preference labels, la cobertura de grupos y los atributos sensibles; el segundo mide la held-out pair accuracy, sin tomar la reward-model accuracy como la calidad final del producto; el tercero usa benchmarks multidimensionales para medir por separado helpfulness, truthfulness, harmlessness, style y diversity; el cuarto hace blinded human comparison sobre live-like prompts y registra el disagreement en lugar de promediarlo a la fuerza; el quinto realiza adversarial evaluation para buscar reward hacking, sycophancy, over-refusal y judge manipulation. También hay que comparar el base/reference drift, la KL, la longitud de las respuestas y la calibración. Si un método obtiene un win-rate fuera de línea más alto a costa de colapso de modos, de borrar las preferencias de grupos específicos o de una menor exactitud factual, no representa un avance global. Los loss diagrams de las slides solo definen la trayectoria de optimización; la aceptación debe volver a la distribución real de conductas.
+\end{warningbox}
+
+\begin{knowledgebox}{Términos clave: reward, preference y value}
+\textbf{Preference label} expresa la elección relativa entre dos respuestas; \textbf{reward model} asigna un escalar a un par entrada-respuesta; \textbf{value/critic} estima el rendimiento futuro; \textbf{reference policy} impide que la actualización se aleje del modelo original; \textbf{judge} puede ser una persona o una IA. Las diferencias entre RLHF, DPO, GRPO y KTO provienen de cómo se combinan estos objetos. Al leer las slides 78--83, conviene dibujar primero el grafo de supervisión y después revisar la loss; memorizar solo las fórmulas hace pasar por alto que la reward distribution, la población que anota y la KL constraint son las que delimitan la conducta.
+\end{knowledgebox}
+
+\teachervoice{00:31:32--00:34:13, la clase vincula GRPO, KTO y variational preferences con group-relative reward, loss aversion y demographic heterogeneity, respectivamente. Lo que el docente enfatiza son las objective assumptions, no declarar que algún método sea óptimo en general.}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{L{0.13\textwidth} L{0.20\textwidth} X X}
+\toprule
+Método & Fuente de supervisión & Componentes que elimina/agrega & Riesgo principal \\
+\midrule
+RLHF & Preferencias humanas & reward model + RL & reward hacking, rollouts costosos \\
+DPO & pair data & Sin RL loop explícito & pair bias, dependencia de la reference \\
+RLAIF & AI judge & Mayor capacidad de anotación & judge bias y errores homogéneos \\
+GRPO & group rewards & Baseline relativa & Calidad de group/reward \\
+KTO & binary desirability & No requiere pairs & Supuestos del value model \\
+VPL & profile-conditioned data & Variable latente de preferencia & Privacidad, segmentación y equidad \\
+\bottomrule
+\end{tabularx}
+\caption{Interfaces de supervisión y modos de falla de los métodos de preference optimization.}
+\end{table}
+
+\begin{lstlisting}[caption={Esqueleto mínimo de auditoría de un pipeline de preference data}]
+prompts = stratified_sample(real_use, safety_edges, long_tail)
+responses = generate_candidates(policy, prompts)
+labels = collect_preferences(humans, ai_judges, outcomes)
+audit_disagreement(labels, by_domain=True, by_group=True)
+train_preference_method(labels, reference_model)
+validate(helpfulness, factuality, safety, calibration, diversity)
+\end{lstlisting}
+
+\subsection{Resumen de la sección}
+
+Lo central de la preference optimization no son los acrónimos, sino quién proporciona la señal, cómo se convierte esa señal en loss y respecto de qué baseline se actualiza el modelo. RLHF, DPO, RLAIF, GRPO, KTO y VPL difieren en costo y en supuestos; ningún método puede sustituir con una sola reward los objetivos reales y multidimensionales del producto.
+\section{Self-Improving Agents: un ciclo de retroalimentación no equivale a evolución autónoma}
+
+La preference optimization actualiza la policy durante el entrenamiento; un agent, en cambio, percibe, planea, llama herramientas, actúa y recibe retroalimentación en un ciclo dentro del entorno. El curso divide la self-improvement en refinement, reflection, ReAct y tree search. Aquí, la improvement suele ser una mejora de la conducta en una sola tarea o una sola sesión; no debe reinterpretarse automáticamente como que el modelo aprendió de forma permanente una capacidad nueva.
+
+\subsection{Definición mínima de un agent}
+
+Los métodos de la sección anterior agregan razonamiento o actualizan parámetros, sobre todo, dentro de una sola solicitud; un agent, en cambio, conecta el modelo a un state y un environment que persisten. El error más común al definir un agent es dibujar solo una flecha circular sin indicar de dónde vienen las observaciones, qué permisos tienen las acciones, si la memory es confiable y cuándo se detiene. La ecuación de estado siguiente hace explícitos estos objetos, de modo que refinement y tree search tengan después un punto de aplicación claro.
+
+Un agent puede abstraerse como
+\[
+s_{t+1}=F(s_t,o_t,m_t),\qquad a_t=\pi_{\theta}(s_t,\mathcal{T}),
+\]
+donde $o_t$ es la observación, $m_t$ es la memory, $\mathcal{T}$ es el conjunto de herramientas y $a_t$ es la acción; el entorno devuelve entonces la siguiente observación. El modelo base es solo una parte de $\pi_{\theta}$; los permisos, el estado, el schema de las herramientas, la recuperación ante errores y las condiciones de paro también determinan la conducta del sistema.
+
+
+\lecturefigure{slide-085.jpg}{What is an AI Agent: entorno, modelo, objetivo, herramientas, memoria y acciones}{CS25 V5 official deck, p.~85}
+
+\teachervoice{00:34:20--00:35:20, Chelsea define un agent como un sistema capaz de percibir el entorno, tomar decisiones y actuar, y enumera memory, tools y feedback. Nota de clase: envolver una llamada al modelo en una función no basta para obtener agent reliability.}
+
+\subsection{Refinement y reflection}
+
+Refinement hace que el modelo genere una respuesta, encuentre sus debilidades y la revise; reflection pone más énfasis en extraer de cada failure experiencia reutilizable y escribirla en la memory. Ambas pueden caer en un confirmation loop: si el mismo modelo responde y revisa, un supuesto erróneo puede reforzarse una y otra vez.
+
+
+\lecturefigure{slide-086.jpg}{Self-improvement: refinement, reflection, exploración y razonamiento por múltiples rutas}{CS25 V5 official deck, p.~86}
+
+
+\lecturefigure{slide-087.jpg}{Refinement: generación, evaluación, retroalimentación y revisión iterativa}{CS25 V5 official deck, p.~87}
+
+
+\lecturefigure{slide-088.jpg}{Reflection: extraer experiencia de los fallos y actualizar la estrategia posterior}{CS25 V5 official deck, p.~88}
+
+\begin{warningbox}{La self-critique necesita un ancla externa}
+Sin tool outcome, test, human check o un verifier independiente, «ya lo revisé» es solo otro fragmento generado. En ingeniería, la critique debe convertirse en aserciones ejecutables que luego verifique el entorno; lo que no pueda verificarse debe conservar su uncertainty.
+\end{warningbox}
+
+\subsection{ReAct y LATS: conectar el reasoning con action/search}
+
+ReAct alterna entre thought y action, de modo que el modelo actualiza su plan según la observation. LATS extiende la ruta única a múltiples action trajectories y agrega la feedback con una selección MCTS-like; aumenta la exploración, pero multiplica el costo de las llamadas a herramientas, de la gestión del estado y de las ramas erróneas.
+
+
+\lecturefigure{slide-089.jpg}{ReAct: alternancia de reasoning, action y observation}{CS25 V5 official deck, p.~89}
+
+
+\lecturefigure{slide-090.jpg}{LATS: agent search por múltiples rutas, agregación de retroalimentación y búsqueda en árbol}{CS25 V5 official deck, p.~90}
+
+\begin{warningbox}{Protocolo de confiabilidad para la agent improvement}
+Cada iteration debe guardar el state de entrada, el plan del modelo, la action real, el tool output, la verifier evidence y la memory write; de lo contrario, cuando el sistema falle no podrá distinguirse si fue un error de planeación, de herramienta, de permisos o una contaminación de la memoria. Para refinement, mide la exactitud después de la revisión y los errores nuevos que introduce; para reflection, mide si la memoria realmente mejora tareas futuras similares sin propagar errores; para ReAct, mide los parámetros de las herramientas, el observation parsing y las condiciones de paro; para LATS, mide el beneficio marginal de aumentar el presupuesto de búsqueda y el evaluator bias. En producción también se necesitan action idempotency, transaction rollback, secret isolation y una ruta de escalamiento a personas. Lo que se llama self-improving solo es una capacidad de ingeniería si reduce los fallos de forma sostenida con evidence auditable, no si el modelo genera más texto de autoevaluación.
+\end{warningbox}
+
+\begin{knowledgebox}{Lectura de la figura: las cuatro formas de self-improvement modifican estados distintos}
+Refinement reescribe la answer actual; reflection escribe la experiencia de los fallos en la memory; ReAct actualiza la trajectory actual con la observation; LATS mantiene en el search tree varias candidatas junto con su valor. La estructura de árbol de la Slide 90 respalda «explorar más rutas», pero no demuestra que la puntuación de la búsqueda sea confiable. Al leer la figura, marca primero state, action, feedback y persistent memory, y luego pregúntate si el entorno puede verificar los errores. Si la feedback la sigue generando el mismo modelo sin ningún ancla, el ciclo puede limitarse a redactar el error original de forma más completa.
+\end{knowledgebox}
+
+\teachervoice{00:35:20--00:39:10, en clase se distinguen sucesivamente refinement, reflection, ReAct y LATS. Experiencia práctica: la diferencia entre estos mecanismos está en dónde se escribe la feedback: en el texto actual, en la memory de largo plazo, en el state del entorno o en el search tree.}
+
+\begin{lstlisting}[caption={Agent loop con verificación y límites de permisos}]
+state = initialize(goal, permissions, budget)
+while not done(state):
+    proposal = model.plan(state)
+    action = policy_gate(proposal, permissions)
+    observation = execute_in_sandbox(action)
+    evidence = verify_outcome(observation)
+    state = update_memory(state, action, evidence)
+    if repeated_failure(state): escalate_or_stop(state)
+\end{lstlisting}
+
+\subsection{Resumen de la sección}
+
+La capacidad de un agent surge del ciclo cerrado entre el modelo y el entorno. Refinement reescribe respuestas, reflection escribe experiencia, ReAct conecta herramientas y LATS agrega búsqueda por múltiples rutas; una self-improvement realmente confiable depende de outcomes verificables, control de permisos, presupuesto y paro ante fallos, no de un diálogo consigo mismo sin fin.
+\section{Vision y VLM: cambiar la token interface y conservar el interaction pattern}
+
+Lo esencial en la transferencia de Transformer entre dominios no es tratar la imagen «como texto», sino diseñar una nueva tokenización y un nuevo objective. ViT divide la imagen en patches, CLIP alinea los embeddings de imagen y texto, y los VLM conectan después el encoder visual con el modelo de lenguaje mediante un projector, cross-attention o unified tokens.
+
+\subsection{Vision Transformer: un patch es un token visual}
+
+Para una imagen de $H\times W$ y patches de $P\times P$, hay en total
+\[
+N=\frac{HW}{P^2}
+\]
+patch tokens. Cada patch se aplana y se proyecta linealmente a $d$ dimensiones; luego se agregan el position embedding y el class token. La complejidad crece con $N^2$, por lo que la alta resolución aumenta rápidamente el attention cost.
+
+
+\lecturefigure{slide-093.jpg}{ViT methodology: patchify, linear projection y Transformer encoder}{CS25 V5 official deck, p.~93}
+
+
+\lecturefigure{slide-094.jpg}{ViT vs CNN: sesgo inductivo de la convolución local frente a la interacción global entre tokens}{CS25 V5 official deck, p.~94}
+
+\teachervoice{00:39:11--00:41:34, Karan pasa de la patch tokenization a la comparación entre ViT y CNN, y de ahí a CLIP y los VLM. Lo que el docente enfatiza es cómo un mismo interaction mechanism se extiende mediante distintas input interfaces, no que el preprocesamiento sea igual para todas las modalidades.}
+
+\subsection{CLIP y VLM: el espacio alineado no es el sistema generativo en sí}
+
+CLIP usa una pérdida contrastiva imagen-texto dentro del lote:
+\[
+\mathcal{L}_{\text{CLIP}}=-\frac{1}{B}\sum_i
+\log\frac{\exp(s(v_i,t_i)/\tau)}{\sum_j\exp(s(v_i,t_j)/\tau)}+\text{sym.}
+\]
+$v_i,t_i$ son los embeddings de imagen y de texto, $s$ es la similitud y $\tau$ es la temperatura. CLIP aprende un espacio de recuperación entre modalidades; un VLM además necesita conectar la representación visual a un decoder generativo y resolver alta resolución, OCR, grounding y hallucination.
+
+
+\lecturefigure{slide-095.jpg}{CLIP: los encoders de imagen y de texto se alinean en un embedding space compartido}{CS25 V5 official deck, p.~95}
+
+
+\lecturefigure{slide-097.jpg}{VLM basics: vision encoder, adapter/projector y language model}{CS25 V5 official deck, p.~97}
+
+\begin{knowledgebox}{Términos clave: patch, encoder, projector y grounding}
+Un \textbf{patch token} es el vector de un bloque local de la imagen; el \textbf{vision encoder} extrae la representación visual; el \textbf{projector/adapter} proyecta la dimensión visual a la interfaz del modelo de lenguaje; la \textbf{cross-attention} permite que un conjunto de tokens consulte a otro; el \textbf{grounding} exige que el texto se alinee con entidades o regiones de la imagen. La slide 97 dibuja estos módulos como un pipeline de VLM. En la lectura de la figura conviene revisar el número de tokens visuales, la resolución, qué partes se congelan y cuáles se entrenan, y la loss de lenguaje; que los módulos estén conectados no significa que el modelo realmente localice la evidencia.
+\end{knowledgebox}
+
+\begin{knowledgebox}{Relación jerárquica entre ViT, CLIP y VLM}
+ViT es una arquitectura de encoder visual; CLIP es un paradigma de entrenamiento contrastivo imagen-texto; un VLM es un sistema capaz de comprender o generar de forma conjunta contenido visual y lingüístico. Un VLM puede usar ViT y un preentrenamiento tipo CLIP, pero los tres términos no son sinónimos.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La extensión entre modalidades cambia primero la token interface y, en segundo lugar, el objective de preentrenamiento y la forma de alineación. ViT, CLIP y los VLM resuelven, respectivamente, la codificación visual, la representación entre modalidades y la interacción generativa; el costo de la alta resolución, el grounding y la hallucination todavía requieren una evaluación independiente.
+\section{Transformer for fMRI: de secuencias de ROI a representaciones de redes cerebrales}
+
+El caso de Karan muestra «la misma arquitectura con distinta geometría de datos». La fMRI no es clasificación de imágenes: la entrada son señales de baja frecuencia que varían en el tiempo en múltiples brain regions of interest (ROI), con mucho ruido, pocas muestras y grandes diferencias entre individuos. Para transferir con éxito hay que redefinir el token, el mask objective, la cross-attention y la downstream validation.
+
+\subsection{Interfaz de datos: secuencias ROI-by-time}
+
+La fMRI refleja la actividad neuronal de forma indirecta mediante la blood-oxygen-level-dependent signal. Si se escriben $R$ ROI y $T$ puntos temporales como $X\in\mathbb{R}^{T\times R}$, pueden tomarse como token las ventanas temporales o los embedding de ROI. La matriz de correlación describe la functional connectivity estática, pero difícilmente representa dependencias dinámicas, no lineales y direccionales.
+
+
+\lecturefigure{slide-099.jpg}{fMRI: functional connectivity, averaging y correlation maps}{CS25 V5 official deck, p.~99}
+
+
+\lecturefigure{slide-100.jpg}{Brain functional networks: partición en ROI y etiquetas de red}{CS25 V5 official deck, p.~100}
+
+
+\lecturefigure{slide-101.jpg}{Early ML: matrices de correlación, características diseñadas a mano y clasificadores tradicionales}{CS25 V5 official deck, p.~101}
+
+\begin{warningbox}{La correlación entre regiones cerebrales no equivale a conexión causal}
+La matriz de correlación se ve afectada por entradas comunes, el preprocesamiento y la frecuencia de muestreo. La attention o los embedding que aprende un Transformer tampoco pueden interpretarse directamente como mecanismos causales neuronales; ante todo son representaciones predictivas, y deben validarse por separado frente a intervention, reproducción entre sujetos y outcome clínico.
+\end{warningbox}
+
+\subsection{Foundation model objective: masked prediction}
+
+El curso adopta data-driven self-supervision: se ocultan algunos ROI/time tokens y con el resto de la actividad cerebral se predicen las regiones faltantes. Si el conjunto de máscara es $M$, puede escribirse
+\[
+\mathcal{L}_{\text{mask}}=\sum_{(t,r)\in M}\|x_{t,r}-\hat{x}_{t,r}\|_2^2.
+\]
+Este objetivo obliga al modelo a aprender dependencias entre regiones y a lo largo del tiempo, en lugar de apoyarse en etiquetas de enfermedad definidas por personas; sin embargo, el beneficio del preentrenamiento depende de la cohort diversity, del scanner/site shift y del mask design.
+
+
+\lecturefigure{slide-102.jpg}{Foundation models for fMRI: masked modeling y encoder transferible}{CS25 V5 official deck, p.~102}
+
+
+\lecturefigure{slide-103.jpg}{Data-driven approach: aprendizaje automático de representaciones a partir de secuencias de todo el cerebro}{CS25 V5 official deck, p.~103}
+
+\teachervoice{00:41:34--00:45:16, Karan introduce los datos ROI-by-time directamente en el Transformer y construye un self-supervised objective mediante la reconstrucción de regiones ocultas. La idea de la clase: primero buscar una tarea que aproveche datos sin etiquetar y después discutir el downstream diagnosis.}
+
+\subsection{Cross-attention y variantes de arquitectura}
+
+Dados un unmasked context $C$ y target region queries $Q_T$, la cross-attention es
+\[
+H_T=\operatorname{softmax}\!\left(\frac{Q_TK_C^{\top}}{\sqrt{d_k}}\right)V_C.
+\]
+La región cerebral objetivo consulta activamente al resto de la red, en lugar de simplemente promediar todas las ROI. El modelo también puede usar distintas estructuras de encoder/decoder en las dimensiones de region, time y subject; la elección debe validarse por generalización y compute, no copiando los bloques de NLP.
+
+
+\lecturefigure{slide-104.jpg}{Cross-attention: predicción de la target region oculta a partir de las regiones cerebrales visibles}{CS25 V5 official deck, p.~104}
+
+
+\lecturefigure{slide-105.jpg}{fMRI model architectures: encoder-decoder y conexiones de attention}{CS25 V5 official deck, p.~105}
+
+\begin{knowledgebox}{Lectura a fondo: la arquitectura para fMRI debe seguir los ejes de los datos, no las convenciones de NLP}
+La señal cerebral tiene cuatro ejes principales de variación: time, region, subject y site. Si el token representa una ventana temporal, la attention es buena para aprender dependencias a lo largo del tiempo; si el token representa una ROI, puede aprender la interaction entre redes; si ambos se aplanan directamente, la secuencia resulta muy larga y semánticamente mezclada. La cross-attention permite que la target region consulte las context regions, y el encoder-decoder puede separar la observación de la predicción, pero todas estas estructuras deben compararse con temporal convolution simple, graph model y correlation baseline. Un mask ratio demasiado bajo vuelve la reconstrucción demasiado fácil; uno demasiado alto elimina el contexto predecible. El subject embedding puede absorber las diferencias individuales, pero también puede filtrar la identidad. El split más importante es por subject/site y no por time points aleatorios; de lo contrario, la autocorrelación entre escaneos cercanos infla los resultados. El diagrama de arquitectura es solo un hypothesis space; lo que determina la evidence quality es un protocol riguroso.
+\end{knowledgebox}
+
+\subsection{Resultados: primero la representation, después la downstream task}
+
+Las diapositivas de resultados muestran a la vez métricas de reconstruction/modeling, network dependence y downstream classification. Al leer las figuras, primero hay que verificar si el train/test split cruza subject/site, y luego comparar correlation baseline, linear model y foundation representation; si solo se divide aleatoriamente dentro del mismo sitio, el modelo puede aprovechar shortcuts del scanner o demográficos.
+
+
+\lecturefigure{slide-106.jpg}{Modeling results I: métricas de reconstrucción y agrupación por redes cerebrales}{CS25 V5 official deck, p.~106}
+
+
+\lecturefigure{slide-107.jpg}{Modeling results II: comparación entre arquitecturas y regiones}{CS25 V5 official deck, p.~107}
+
+
+\lecturefigure{slide-108.jpg}{Network dependence: dependencias predictivas entre distintas redes cerebrales}{CS25 V5 official deck, p.~108}
+
+
+\lecturefigure{slide-109.jpg}{Downstream task: uso de embedding para caracterizar enfermedades o individuos}{CS25 V5 official deck, p.~109}
+
+
+\lecturefigure{slide-110.jpg}{Downstream results: foundation representation frente a baseline tradicional}{CS25 V5 official deck, p.~110}
+
+\begin{knowledgebox}{Lectura de la figura: orden de la evidencia en las diapositivas de resultados de fMRI}
+Primero hay que ver si la representation es eficaz en la held-out signal reconstruction, después la estructura de dependencias entre las distintas network y, solo al final, la downstream disease classification. Aunque la Slide 110 muestre una accuracy mayor, todavía hay que preguntar por el subject-level split, la site leakage, la class balance y la calibration. Los gráficos de pastel o las visualizaciones de embedding solo describen cómo agrupa el modelo; no demuestran causalidad clínica. La conclusión más fuerte posible es «esta representación aporta información predictiva incremental bajo este protocol», no «el modelo entiende el cerebro» ni que pueda usarse directamente para diagnóstico.
+\end{knowledgebox}
+
+\teachervoice{00:45:16--00:48:02, el ponente explica la cross-attention como la predicción de la región objetivo a partir del contexto de todo el cerebro, e informa que la learned representation supera a los correlation/linear baselines en la downstream disease task. La nota advierte: es evidencia con datos y split específicos, no una conclusión sobre despliegue clínico.}
+
+\begin{knowledgebox}{Niveles de validación de un foundation model en neurociencia}
+\begin{enumerate}
+  \item si la masked reconstruction supera a un baseline simple;
+  \item si la representation es estable entre subject/site;
+  \item si la downstream task se reproduce en una cohort externa;
+  \item si tiene calibration, equidad y utility clínica;
+  \item si la explicación del modelo concuerda con los mecanismos neuronales conocidos y con la intervention.
+\end{enumerate}
+Superar los dos primeros niveles no implica que los tres últimos se cumplan automáticamente.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El caso de fMRI muestra que la transferibilidad del Transformer proviene de la token interaction, no del nombre de NLP. La tokenización por ROI/time, el masked objective, la cross-attention y la validación entre cohort determinan juntos el éxito o el fracaso; el modelo puede aprender representaciones útiles, pero ni la attention ni la correlación pueden elevarse directamente a explicaciones causales del cerebro.
+\section{Futuro, Scaling Limits y Continual Learning}
+
+La última sección pasa de la visión de las aplicaciones a las carencias de capacidad. El curso no presenta los modelos más grandes como la única respuesta, sino que examina en orden la controlabilidad y la memoria, la interacción corporizada y la eficiencia, la interpretabilidad, el punto de saturación de la expansión de escala y la adaptación continua después del despliegue. El paso didáctico más importante aquí es darle límites estrictos al «aprendizaje continuo»: RAG, el contexto largo y el fine-tuning periódico pueden actualizar la conducta, pero no equivalen a que el modelo adquiera de forma permanente nuevas capacidades durante el despliegue.
+
+Para juzgar si una propuesta realmente logra aprendizaje continuo, pueden plantearse cuatro preguntas seguidas: si el conocimiento nuevo se escribió en los parámetros o en un almacenamiento externo, si la actualización se conserva entre sesiones, si la capacidad en tareas anteriores pasó por pruebas de regresión y si una actualización errónea puede localizarse y revertirse. Si falta cualquiera de ellas, el sistema quizá siga siendo útil, pero es más adecuado llamarlo recuperación aumentada, adaptación con contexto temporal o reentrenamiento fuera de línea. Esta distinción cambia directamente el diseño de la evaluación: no basta con mostrar que una respuesta mejoró una vez; también hay que medir la persistencia, el olvido, el conocimiento en conflicto y el costo de actualización.
+
+\subsection{Aplicaciones futuras y capacidades faltantes}
+
+Los casos de aplicación anteriores ya mostraron que el Transformer puede transferirse entre texto, imágenes y señales cerebrales; las future slides del cierre extrapolan esta generalidad a videos más largos, medicina, medio ambiente y mundos interactivos. Al leer estas páginas de visión, conviene separar tres niveles: «técnicamente se puede construir una demo», «es eficaz en un benchmark» y «puede asumir responsabilidades reales». Cada nivel posterior exige nuevos datos, validación del sistema, regulación y límites de responsabilidad humana.
+
+Los generalist agents, la generación de video, los humanos digitales, el diagnóstico, el monitoreo ambiental y los NPC de videojuegos requieren combinar el Transformer con sistemas externos. La lista de aplicaciones respalda un espacio de oportunidades; no demuestra que el modelo ya cumpla los requisitos de confiabilidad, tiempo real, privacidad y responsabilidad.
+
+
+\lecturefigure{slide-111.jpg}{Aplicaciones futuras: generalist agents, video, humanos digitales, medicina, medio ambiente y mundos interactivos}{CS25 V5 official deck, p.~111}
+
+
+\lecturefigure{slide-112.jpg}{Capacidades faltantes I: eficiencia de cómputo, controllability, brain alignment y generalización entre dominios}{CS25 V5 official deck, p.~112}
+
+
+\lecturefigure{slide-113.jpg}{Capacidades faltantes II: memoria externa, automejora, autonomía, emociones y alineación de valores}{CS25 V5 official deck, p.~113}
+
+\begin{knowledgebox}{Lectura a fondo: reescribir la future wishlist como capacidades verificables}
+``Infinite memory'' debe reescribirse como recuperar la experiencia correcta a lo largo de periodos prolongados, resolver conflictos y atender solicitudes de eliminación; ``autonomy'' debe reescribirse como completar tareas largas dentro de los permisos y el presupuesto, y escalar a tiempo ante la incertidumbre; ``emotional intelligence'' requiere reconocer emociones en contextos interculturales, evitar la manipulación y calibrar la confianza; ``embodiment'' requiere un ciclo cerrado de percepción y acción, seguridad física y sim-to-real; ``self-improvement'' requiere, a su vez, nuevas capacidades medibles, olvido controlado y rollback. Solo al descomponer los grandes sustantivos en observable criteria puede el equipo diseñar benchmarks, red teaming y umbrales de puesta en producción. Las slides 111--113 respaldan una agenda de investigación; no respaldan conclusiones directas sobre el calendario de la AGI ni sobre la readiness de un producto.
+\end{knowledgebox}
+
+\teachervoice{00:48:03--00:50:01, en clase primero se enumeran las aplicaciones y luego los missing ingredients: memory, continual learning, embodiment, autonomy y ethics. Advertencia de estas notas: la visión y las carencias de capacidad deben escribirse una junto a la otra, para evitar que el roadmap se convierta en una lista de mercadotecnia.}
+
+\subsection{Minified models e interpretabilidad}
+
+Los LLM on-device buscan menor memory, latency y energy. El almacenamiento de parámetros es aproximadamente
+\[
+M_{\text{weights}}=N_{\text{params}}\cdot b/8,
+\]
+donde $b$ son los bits per parameter; en la práctica hay que sumar el KV cache, las activations y los runtime buffers. Quantization, distillation, sparsity y el rediseño de la arquitectura modifican, cada uno a su manera, la calidad y la compatibilidad con el hardware.
+
+
+\lecturefigure{slide-114.jpg}{LLM minified/on-device: baja latencia, privacidad, costo y accesibilidad}{CS25 V5 official deck, p.~114}
+
+
+\lecturefigure{slide-115.jpg}{Interpretabilidad: mecanismos internos, failure analysis y retos de transparencia}{CS25 V5 official deck, p.~115}
+
+\begin{knowledgebox}{Lectura a fondo: el objetivo de la interpretabilidad debe definirse primero}
+La mechanistic interpretability intenta localizar circuits internos; la feature attribution explica qué entradas influyeron en una salida concreta; el behavioral testing describe las regularidades del sistema mediante prompts contrafactuales; el monitoring detecta anomalías durante el despliegue. Las cuatro responden preguntas distintas. Que un probe pueda predecir si una capa contiene un concepto no significa que el modelo realmente use ese concepto; que un saliency map parezca razonable no garantiza causal faithfulness; una neuron edit que corrige un hecho puede dañar conocimiento no relacionado. Si el objetivo es el control de seguridad, también hay que preguntar si la explicación es reproducible, si permite anticipar fallas, si puede orientar la mitigation y si un adversary puede eludirla. El valor de la slide 115 está en convertir el problema de «demasiados parámetros, imposibles de enumerar» en una agenda de investigación; no respalda tomar ninguna herramienta de visualización como prueba de que la transparencia se logró.
+\end{knowledgebox}
+
+\begin{warningbox}{Un modelo pequeño no es automáticamente más seguro, y ser interpretable no equivale a ser controlable}
+Tener menos parámetros puede facilitar el despliegue y la experimentación, pero el modelo aún puede alucinar, filtrar información o sufrir ataques mediante prompts. Si un método de interpretabilidad solo es estable en toy tasks, tampoco puede servir directamente como production safety guarantee; debe combinarse con red teaming, permissions, monitoring y human oversight.
+\end{warningbox}
+
+\subsection{Scaling limits: rendimientos marginales, datos y olvido}
+
+El curso plantea que el scaling del preentrenamiento podría presentar diminishing returns, y señala que el post-training también está limitado por el base model knowledge, la reward signal y el catastrophic forgetting. Si la capacidad $P(C)$ crece con el compute $C$, puede usarse la pendiente local
+\[
+\alpha(C)=\frac{d\log P}{d\log C}
+\]
+para monitorear los rendimientos marginales; que $\alpha$ disminuya no significa el «fin» del scaling, pero indica que los datos, el objective, la architecture o la evaluation podrían convertirse en el nuevo cuello de botella.
+
+
+\lecturefigure{slide-116.jpg}{Limits of Scaling: datos, costo, saturación de conocimiento y rendimientos marginales}{CS25 V5 official deck, p.~116}
+
+
+\lecturefigure{slide-117.jpg}{What is next: nuevas arquitecturas, datos, hardware, teoría y adaptability}{CS25 V5 official deck, p.~117}
+
+\begin{knowledgebox}{Lectura de la figura: el scaling limit no es una curva de una sola variable}
+Las slides 116--117 enumeran a la vez data scarcity, hardware cost, architecture, post-training y comprensión teórica. Al leer la figura, primero hay que distinguir entre \textbf{capability saturation}, \textbf{benchmark saturation} y \textbf{economic saturation}: que el puntaje no suba puede deberse a que la evaluación llegó a su techo, y un costo inaceptable puede aparecer aun cuando la capacidad sigue mejorando. Una caída en la slope local justifica buscar nuevos cuellos de botella, pero no demuestra que todos los ejes de escala hayan dejado de funcionar. Un mejor experimento fija un recurso y explora por separado model, data, compute e inference budget.
+\end{knowledgebox}
+
+\teachervoice{00:50:05--00:54:40, el ponente enlaza on-device, interpretabilidad, pretraining saturation, post-training limits y catastrophic forgetting. La postura expresada en clase es que «el siguiente paso no es solo crecer», pero sigue siendo un juicio de investigación de 2025, no un punto final del scaling ya demostrado.}
+
+\subsection{Definición estricta de continual learning}
+
+El continual/lifelong learning se refiere a que el modelo, después del despliegue, actualice continuamente sus capacidades a partir de nuevas experiencias y al mismo tiempo conserve las anteriores. Como mínimo deben medirse simultáneamente
+\[
+\text{Plasticity}=P_{\text{new}}^{\text{after}}-P_{\text{new}}^{\text{before}},\qquad
+\text{Forgetting}=P_{\text{old}}^{\text{before}}-P_{\text{old}}^{\text{after}}.
+\]
+Mejorar solo en la tarea nueva olvidando gravemente las anteriores no es un éxito; colocar hechos nuevos en una base de datos vectorial tampoco actualiza las capacidades de los parámetros.
+
+
+\lecturefigure{slide-118.jpg}{Continual learning: mejora continua después del despliegue a partir de retroalimentación, experiencia y datos nuevos}{CS25 V5 official deck, p.~118}
+
+
+\lecturefigure{slide-119.jpg}{Qué mecanismos requiere un verdadero lifelong learning: gradientes, memoria, módulos y meta-learning}{CS25 V5 official deck, p.~119}
+
+\teachervoice{00:54:43--00:57:10, el docente excluye explícitamente RAG, el in-context learning, un fine-tuning único, el retraining periódico y la distillation por sí sola, y define el continual learning como una actualización permanente y fundamental de las capacidades después del despliegue. Esta definición es bastante estricta; estas notas la conservan como instructor position.}
+
+\subsection{Model editing y varias rutas aproximadas}
+
+ROME localiza mediante causal tracing las capas y representaciones relacionadas con la predicción de un hecho, y después aplica una rank-one update; MEMIT lo extiende a la edición en lote de múltiples hechos. Son adecuados para actualizar conocimiento, pero no equivalen a aprender habilidades de matemáticas o de planeación, y además enfrentan problemas de locality, generalization y related-fact consistency.
+
+
+\lecturefigure{slide-120.jpg}{Model editing: causal localization y rank-one update en ROME}{CS25 V5 official deck, p.~120}
+
+Otras rutas incluyen mistake-driven updates, lifelong mixture-of-experts, compressed prompt memory y progressive prompts. Respectivamente, modifican pesos, agregan experts, mantienen una prompt memory externa o combinan soft prompts; deben clasificarse según el «lugar de la actualización» y no por su nombre.
+
+
+\lecturefigure{slide-121.jpg}{Continual-learning works I: ROME/MEMIT, mistake updates y lifelong MoE}{CS25 V5 official deck, p.~121}
+
+
+\lecturefigure{slide-122.jpg}{Continual-learning works II: prompt memory, CLOB y progressive prompts}{CS25 V5 official deck, p.~122}
+
+\begin{knowledgebox}{Términos clave: los métodos de aprendizaje continuo se clasifican según «dónde ocurre la actualización»}
+RAG actualiza la base de conocimiento externa; CLOB y los progressive prompts actualizan la memoria de prompts; ROME y MEMIT modifican pesos locales; el ajuste continuo (continual fine-tuning) actualiza los pesos globales; el lifelong MoE agrega o congela experts; el meta-learning, por su parte, actualiza la regla de adaptación. Las slides 120--122 contienen muchos nombres, pero basta con la coordenada «dónde ocurre la actualización» para asimilarlos. Solo cuando la experiencia nueva puede cambiar de forma permanente la capacidad objetivo, y al mismo tiempo se conservan las capacidades anteriores con posibilidad de auditoría y reversión, se acerca uno al continual learning en sentido estricto; de lo contrario, lo más preciso podría ser hablar solo de retrieval, adaptation o memory augmentation.
+\end{knowledgebox}
+
+\teachervoice{00:57:10--01:00:16, en clase se distinguen uno por uno ROME/MEMIT, CEM, lifelong MoE, CLOB y los progressive prompts, y se ofrece un juicio personal: un verdadero continual learning podría requerir actualizar el «brain/weights» del modelo. Estas notas conservan también el valor de ingeniería de la ruta de memoria externa.}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{L{0.18\textwidth} L{0.20\textwidth} X X}
+\toprule
+Mecanismo & Lugar de la actualización & Qué puede resolver & Principal carencia \\
+\midrule
+RAG/prompt memory & Contexto externo & Acceso a conocimiento nuevo, trazabilidad & No cambia las capacidades fundamentales \\
+Model editing & Pesos/representaciones locales & Corrección de hechos & Hechos relacionados, habilidades y estabilidad \\
+Continual fine-tuning & Pesos globales & Nuevos dominios y habilidades & Olvido, costo, gobernanza de datos \\
+Lifelong MoE & Experts nuevos/anteriores & Extensión modular & Enrutamiento, capacidad y deriva de los expertos \\
+Progressive prompts & Soft prompts & Adaptación a tareas & Explosión combinatoria, actualización no fundamental \\
+Meta-learning & Regla de actualización & Adaptación más rápida & Entrenamiento complejo, estabilidad difícil \\
+\bottomrule
+\end{tabularx}
+\caption{Métodos de adaptación continua clasificados por lugar de la actualización y límites de capacidad.}
+\end{table}
+
+\begin{lstlisting}[caption={Protocolo mínimo de continual-learning evaluation}]
+for task in task_stream:
+    before = evaluate(model, old_tasks + [task])
+    model = update(model, task.data, bounded_compute=True)
+    after = evaluate(model, old_tasks + [task])
+    log(plasticity=after[task]-before[task])
+    log(forgetting=before[old_tasks]-after[old_tasks])
+    audit(edit_locality, calibration, safety, rollback)
+\end{lstlisting}
+
+\subsection{Resumen de la sección}
+
+La ruta futura exige al mismo tiempo modelos más pequeños, más transparentes y con mayor capacidad de adaptación, en lugar de solo aumentar los parámetros. Los rendimientos marginales locales del scaling podrían disminuir; el continual learning, por su parte, exige controlar el olvido mientras se adquieren nuevas capacidades. RAG, model editing, MoE expansion y weight updates actualizan estados distintos, y deben evaluarse conjuntamente con plasticity, forgetting, locality y el costo del sistema.
+
+
+\begin{importantbox}{Niveles de evidencia entre secciones: no escribas todas las slides como el mismo tipo de hecho}
+Esta clase contiene al menos cuatro tipos de evidencia. El primero son las \textbf{definiciones y mecanismos de cálculo}, como Q/K/V, la DPO loss, los patches de ViT y la cross-attention, que pueden verificarse con fórmulas e implementaciones; el segundo son los \textbf{resultados experimentales específicos}, como TinyDialogues, el two-phase pretraining y el downstream performance con fMRI, que solo son válidos bajo el modelo, los datos y el protocol dados; el tercero son las \textbf{heurísticas de ingeniería}, como filtrar el blend primero con un modelo pequeño o anclar la self-critique con un verifier, que deben volver a probarse en un entorno nuevo; el cuarto son los \textbf{juicios de investigación y las visiones}, como la scaling saturation, la idea de que un verdadero continual learning requiere modificar los pesos o los futuros generalist agents, que deben marcarse como speaker opinion con su fecha. Antes de citar cualquier conclusión, el lector debe clasificarla y luego decidir si necesita reproducir el código, complementar experimentos, hacer pruebas de carga del sistema o tratarla solo como una pregunta de investigación. Solo así el overview se convierte en un mapa para tomar decisiones, en lugar de mezclar definiciones, resultados y predicciones en una lista con autoridad.
+\end{importantbox}
+\section{Síntesis y ampliación}
+
+El valor del overview de V5 está en desplegar el Transformer, que suele presentarse como un solo architecture diagram, en su ciclo de vida completo. Embedding/attention definen la interfaz de cómputo; la estructura de los datos y el schedule determinan los gradientes; CoT y search aumentan el test-time compute; la preference optimization modifica el comportamiento a largo plazo; el agent coloca al modelo en un ciclo cerrado con el entorno; la visión y la fMRI muestran la transferencia de la token interface; y el continual learning se pregunta cómo cambia realmente un modelo después de su despliegue.
+
+\subsection{Doce conclusiones centrales}
+
+\begin{enumerate}
+  \item El Transformer block es un componente básico de los sistemas de IA modernos, no la explicación de un producto completo.
+  \item Q/K/V cumplen, respectivamente, los papeles de consulta, índice de coincidencia y contenido que se agrega.
+  \item La calidad, la estructura, la diversidad, la escala y el schedule de los datos deben diseñarse en conjunto.
+  \item La comparación con el aprendizaje humano puede generar hipótesis experimentales, pero no demuestra por sí misma mecanismos similares a los del cerebro.
+  \item El mixed result de TinyDialogues indica que una diverse mixture suele ser más robusta que datos elegidos por una sola intuición.
+  \item La ganancia del preentrenamiento en dos fases depende del blend y de la duration; el sobremuestreo produce rendimientos decrecientes.
+  \item CoT, tree, program y decomposition modifican la inference computation; no son una misma forma de «razonamiento».
+  \item La diferencia central entre los preference methods está en la fuente de supervisión, el baseline y las objective assumptions.
+  \item El self-improvement de un agent requiere verification externa, permisos y condiciones de parada.
+  \item La transferencia a ViT/VLM/fMRI depende, antes que nada, de una token interface y un objective correctos.
+  \item Los scaling limits deben juzgarse por la pendiente local y los nuevos cuellos de botella, no con consignas que proclamen su fin o su continuidad ilimitada.
+  \item El continual learning debe adquirir nuevas capacidades, controlar el olvido e indicar dónde ocurre la actualización, todo a la vez.
+\end{enumerate}
+
+\subsection{Una tabla que articula toda la clase}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}L{0.17\textwidth}L{0.20\textwidth}L{0.28\textwidth}L{0.25\textwidth}@{}}
+\toprule
+Nivel & Objeto principal & Métodos típicos & Pregunta de aceptación \\
+\midrule
+Architecture & token interaction & attention, ViT, cross-attention & ¿La representación y la complejidad son razonables? \\
+Data & distribución de entrenamiento & TinyDialogues, two-phase blend & ¿Son estables las múltiples métricas, la tasa de repetición y la scale? \\
+Inference & test-time compute & CoT, ToT, tools & Presupuesto, faithfulness, verificación \\
+Preference & comportamiento de los parámetros & RLHF, DPO, GRPO, KTO & judge, reward, diferencias entre grupos \\
+Agent & ciclo cerrado con el entorno & ReAct, reflection, LATS & Permisos, outcome, recuperación \\
+Adaptation & actualización tras el despliegue & editing, MoE, continual FT & plasticity, forgetting, rollback \\
+\bottomrule
+\end{tabular}
+\caption{Mapa de seis niveles de un sistema Transformer, del cómputo a la adaptación continua.}
+\end{table}
+
+\subsection{Lista de verificación para la investigación práctica}
+
+\begin{importantbox}{Antes de iniciar un nuevo proyecto con Transformer, responda}
+\begin{enumerate}
+  \item ¿Cómo se tokeniza la entrada y qué relaciones requieren attention?
+  \item ¿Qué señal de los datos de entrenamiento supervisa la capacidad objetivo?
+  \item ¿La mejora proviene de más parámetros, más tokens, un schedule distinto o test-time search?
+  \item ¿Se usa human/AI feedback? ¿Quién audita al judge?
+  \item ¿Cuáles son los límites de permisos de las herramientas, la memory y el environment?
+  \item ¿La evaluación cubre distribution shift, costo, calibration y recuperación ante fallas?
+  \item ¿La actualización tras el despliegue es memory externa, editing local o aprendizaje de pesos?
+  \item ¿La nueva capacidad se obtiene a costa de catastrophic forgetting?
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Conjunto mínimo de registros para la reproducción}
+
+Ya sea que se reproduzca un método de data, reasoning, preference, agent o continual learning, deben guardarse source/version, el hash de los datos, las semillas aleatorias, el modelo y el tokenizer, el optimizer/schedule, el compute total de entrenamiento e inferencia, el protocol de evaluación completo, las muestras fallidas y las reglas de juicio humano. Si se usa un AI judge, herramientas o una base de recuperación, también hay que fijar su versión y sus permisos. Solo con toda esta información otro equipo puede reproducir, atribuir y auditar las mejoras que muestran las figuras; de lo contrario, incluso la curva más atractiva de un overview sirve solo como pista y no como fundamento para decisiones de ingeniería.
+
+\subsection{Preguntas de autoevaluación}
+
+\begin{enumerate}
+  \item ¿Cuáles son las formas matriciales y la semántica de Q, K y V? ¿Por qué se divide entre $\sqrt{d_k}$?
+  \item ¿En qué se diferencian el static embedding y la contextual representation?
+  \item ¿Por qué TinyDialogues no respalda la conclusión simple de que «el corpus puramente infantil es el mejor»?
+  \item ¿Por qué en el preentrenamiento en dos fases el blend y la duration deben someterse a ablación por separado?
+  \item ¿Qué recurso agrega cada uno de CoT, ToT, PoT y el computation graph?
+  \item ¿En qué difieren RLHF, DPO, RLAIF, GRPO y KTO en cuanto a supervisión e infraestructura?
+  \item ¿Por qué la self-refinement puede reforzar errores cuando no hay un verifier externo?
+  \item ¿Por qué ViT, CLIP y VLM no son sinónimos?
+  \item ¿Qué aprende el masked objective de un fMRI foundation model y qué no puede demostrar?
+  \item ¿Qué diferencia hay entre una caída de la pendiente local del scaling y que «la scaling law deje de cumplirse»?
+  \item ¿Qué estado actualizan, respectivamente, RAG, model editing y continual fine-tuning?
+  \item ¿Cómo medir a la vez la plasticity y el forgetting en el continual learning?
+\end{enumerate}
+
+\subsection{Lecturas adicionales}
+
+\begin{itemize}
+  \item Vaswani et al., \emph{Attention Is All You Need}: Q/K/V, multi-head attention y encoder-decoder.
+  \item Dosovitskiy et al., \emph{An Image is Worth 16x16 Words}: Vision Transformer.
+  \item Wei et al., \emph{Chain-of-Thought Prompting Elicits Reasoning in Large Language Models}.
+  \item Rafailov et al., \emph{Direct Preference Optimization}: preference pairs y policy objective.
+  \item Yao et al., \emph{ReAct} y \emph{Tree of Thoughts}: reasoning/action y search.
+  \item Meng et al., \emph{ROME}; Mitchell et al., \emph{MEMIT}: model editing.
+  \item Los primary papers de TinyDialogues y del preentrenamiento en dos fases citados en las Lecture slides: dos tipos de experimentos sobre la estructura de los datos y el schedule.
+\end{itemize}
+
+\end{document}

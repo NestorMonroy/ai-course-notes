@@ -1,0 +1,662 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+
+\renewcommand{\notetitle}{Lecture 05: Switch Transformer—escalar los parámetros con enrutamiento disperso, en lugar de escalar el cómputo de cada token}
+\renewcommand{\noteauthors}{Elaborado a partir de la conferencia de Barret Zoph e Irwan Bello, los subtítulos manuales oficiales y los artículos originales de Switch Transformer / GShard / V-MoE}
+\renewcommand{\notedate}{CS25 V1 · Versión reescrita source-first de 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{2022-07-14}
+\renewcommand{\videoduration}{1:05:44}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=U8J32Z3qV8s}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.96\textwidth]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\begin{document}
+\makecscover
+
+\section{Auditoría de fuentes y pregunta central: ¿qué amplía realmente la dispersión?}
+
+El título de esta sesión puede inducir con facilidad una impresión errónea: como si bastara con escribir que el modelo tiene «billones» de parámetros para que cada token pase por un cómputo de billones de parámetros. Lo que la sesión discute en realidad es otra cosa: dotar al modelo de un gran \textbf{conjunto de parámetros seleccionables}, pero activar para cada token solo a unos pocos expertos, con lo que se desacopla parcialmente el número total de parámetros del cómputo por token. Entender esto es la condición previa para leer todas las gráficas posteriores de velocidad, calidad y hardware.
+
+Esta reescritura usa la grabación oficial de Stanford Online, los subtítulos oficiales en inglés elaborados manualmente, 38 diapositivas docentes completas recuperadas de la grabación en 1080p y seleccionadas a mano, así como los artículos originales de Switch Transformer, GShard, T5, mT5 y V-MoE. La grabación no publicó un slide PDF independiente, por lo que cada figura indica el tiempo del video; las animaciones repetidas, la portada y las diapositivas a las que se regresó varias veces durante el Q\&A no se insertan de nuevo, pero la explicación oral se conserva en el texto.
+
+\lecturefigure{slide-01-title.jpg}{Tema de la sesión: Scaling Transformers through Sparsity.}{Video oficial de Stanford Online 00:00:06--00:01:41.}
+
+Después de esta diapositiva de título, el expositor no entra directamente en la fórmula de enrutamiento, sino que vuelve primero a los hechos empíricos de dense scaling: la loss de los modelos de lenguaje sigue una tendencia de ley de potencias predecible en función de los parámetros, los datos y el presupuesto de cómputo. La pregunta de investigación de MoE no es negar el dense scaling, sino esta: ¿es posible añadir otra dimensión de escalamiento, la de los «parámetros de uso condicional», manteniendo aproximadamente constante el cómputo por ejemplo?
+
+\lecturefigure{slide-02-neural-scaling-laws.jpg}{Dense neural scaling laws: los modelos más grandes tienen mayor eficiencia de muestra y existe un tamaño óptimo que varía de forma suave con el presupuesto.}{Video oficial de Stanford Online 00:01:42--00:02:35.}
+
+La forma empírica del dense scaling puede expresarse con una ecuación simplificada:
+
+\[
+\mathcal{L}(N)=\mathcal{L}_{\infty}+aN^{-\alpha},\qquad a>0,\ \alpha>0.
+\]
+
+Aquí, $\mathcal{L}(N)$ denota la pérdida de validación con un tamaño de parámetros $N$; $\mathcal{L}_{\infty}$ es la cota inferior irreducible bajo esa distribución de datos y esos supuestos de modelado; $a$ controla la escala vertical, y $\alpha$ determina la velocidad con la que decae el beneficio marginal de agrandar el modelo. Esta ecuación describe una tendencia empírica; no garantiza que cualquier arquitectura, conjunto de datos o hardware pueda extrapolarse sobre la misma curva.
+
+\teachervoice{El docente enfatiza primero el significado de la scaling law: da a los investigadores la confianza de que «aumentar la escala todavía puede traer beneficios», pero el artículo original estudia principalmente dense model. Por ello, esta sesión presenta la sparsity como un nuevo eje estructural, en lugar de presentar MoE como un módulo local ajeno al scaling.}
+
+\lecturefigure{slide-03-new-axis-sparsity.jpg}{Un nuevo eje de escalamiento: aumentar los parámetros de uso disperso e intentar desacoplarlos del cómputo por ejemplo.}{Video oficial de Stanford Online 00:02:36--00:03:05.}
+
+\begin{importantbox}{El invariante central de la contabilidad de recursos}
+Al discutir un sparse model hay que reportar a la vez al menos cinco cantidades: \textbf{número total de parámetros}, \textbf{parámetros activados por token}, \textbf{FLOPs por token}, \textbf{volumen de comunicación entre dispositivos} y \textbf{tiempo wall-clock}. Decir solo «más parámetros con el mismo cómputo» es incompleto, porque los parámetros no activados siguen ocupando el dispositivo o la memoria principal, y el enrutamiento produce además comunicación all-to-all y desbalance de carga.
+\end{importantbox}
+
+\begin{warningbox}{Un billón de parámetros no significa que se ejecute un billón de parámetros}
+Los 1.6T de Switch-C son el tamaño total del conjunto de parámetros disponibles, no el active path de cada token. A la inversa, que los active FLOPs sean pocos tampoco significa que el sistema no tenga costo: el almacenamiento, la comunicación, los búferes de capacidad, las formas de compilación y la inferencia con baja tasa de procesamiento exponen costos adicionales.
+\end{warningbox}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Cantidades de recursos que deben separarse al leer sparse scaling.}
+\begin{tabularx}{\textwidth}{L{0.22\textwidth}X X}
+\toprule
+Cantidad & Pregunta que responde & Lectura errónea frecuente \\
+\midrule
+Número total de parámetros & ¿Cuántos pesos aprendibles almacena el modelo en total? & Tomarlo como el cómputo por token. \\
+Parámetros activados & ¿Por cuáles pesos de expert pasa realmente un token? & Ignorar que tokens distintos siguen rutas distintas. \\
+FLOPs & ¿Cuál es la carga aritmética teórica? & Usar los FLOPs como sustituto directo de la latencia real. \\
+Volumen de comunicación & ¿Cuántos datos transmiten el token dispatch y la agregación de resultados? & Ignorar que all-to-all se vuelve el cuello de botella. \\
+wall-clock & ¿Cuánto tarda en alcanzar la calidad objetivo con un hardware, un lote y una implementación dados? & Generalizar sin considerar el hardware ni el escenario de tasa de procesamiento. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Resumen de la sección}
+
+Lo que esta sesión amplía son los \textbf{parámetros disponibles de forma condicional}, no un aumento incondicional del cómputo por token. Todos los resultados posteriores deben interpretarse según estas cinco coordenadas: parámetros totales, parámetros activados, FLOPs, comunicación y tiempo.
+\section{Fundamentos de MoE: expertos, router y parámetros condicionales}
+
+Solo después de definir con claridad los límites de recursos se puede definir Mixture of Experts (MoE, mezcla de expertos). Aquí, los «expertos» no son roles lingüísticos asignados manualmente, sino varias subredes que se aprenden; la «mezcla» tampoco significa ejecutar cada vez todas las subredes y promediarlas, sino que el router elige unas pocas rutas según la entrada. Esta idea es anterior al Transformer: en 1991, Adaptive Mixtures of Local Experts ya proponía que una gating network aprendiera la división del trabajo.
+
+\lecturefigure{slide-04-adaptive-mixtures-history.jpg}{Hilo histórico desde Adaptive Mixtures of Local Experts hasta los modelos de lenguaje neuronales dispersos.}{Video oficial de Stanford Online 00:03:06--00:04:01.}
+
+\begin{knowledgebox}{Glosario: primero, precisar el lenguaje del enrutamiento}
+\begin{tabularx}{\textwidth}{L{0.22\textwidth}X}
+\toprule
+Término & Definición precisa en esta clase \\
+\midrule
+MoE & Un grupo de experts más un router; cada entrada activa solo unos pocos experts, por lo que los parámetros se usan de forma condicional. \\
+expert & Suele ser un bloque independiente de parámetros de una feed-forward network (FFN); no equivale a una profesión interpretable por personas. \\
+router / gating & Red ligera que calcula, a partir de la representación del token, las puntuaciones o probabilidades de los experts y decide la ruta de dispatch. \\
+top-1 / top-2 & Cada token elige uno o dos experts de mayor puntuación, respectivamente; la segunda opción suele aumentar el cómputo y la comunicación. \\
+sparse activation & La mayoría de los experts no se ejecuta para el token actual; es distinto de podar permanentemente los pesos a cero. \\
+load balance & Hacer que la cantidad de tokens que recibe cada expert sea parecida, para facilitar multiplicaciones matriciales regulares por lotes. \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+Sea la representación del token $x\in\mathbb{R}^{d}$, con $E$ experts y parámetros del router $W_r$. El gating estándar puede escribirse como:
+
+\[
+p_i(x)=\operatorname{softmax}(W_rx)_i,
+\qquad
+y(x)=\sum_{i\in\mathcal{S}(x)} g_i(x)E_i(x).
+\]
+
+Donde $p_i(x)$ es la probabilidad del router de que el token se asigne al $i$-ésimo expert; $\mathcal{S}(x)$ es el conjunto de experts elegido por top-$k$; $g_i(x)$ es el peso que, una vez hecha la elección, escala la salida; $E_i(x)$ es la salida de la FFN del $i$-ésimo expert; $y(x)$ es la salida de la capa dispersa. Solo se ejecutan los experts de $\mathcal{S}(x)$.
+
+\lecturefigure{slide-05-moe-gating-equations.jpg}{Probabilidades de gating de MoE, selección de experts y salida ponderada.}{Video oficial de Stanford Online 00:04:02--00:04:25.}
+
+\begin{importantbox}{La esencia de MoE}
+MoE no consiste en «poner a votar varios modelos completos y promediarlos», sino en ejecutar un router muy pequeño para cada token y luego invocar unos pocos bloques de parámetros FFN. Permite que distintos tokens usen pesos distintos y, aun así, mantener un active compute similar.
+\end{importantbox}
+
+\teachervoice{La definición oral de Irwan Bello es importante: cada entrada recibe aproximadamente la misma cantidad de cómputo, pero se le aplican pesos distintos. Esta formulación distingue la sparsity de «simplemente reducir pasos de cómputo» y anticipa la discusión posterior sobre adaptive computation.}
+
+Los primeros MoE dispersos lograron un éxito notable en traducción automática, pero su uso práctico exigía resolver tres problemas de sistemas. Primero, el enrutamiento hace que la cantidad de tokens por expert cambie dinámicamente; segundo, colocar los experts en distintos dispositivos genera comunicación; tercero, el router, la baja precisión y las fluctuaciones de carga amplifican la inestabilidad del entrenamiento. La contribución de Switch Transformer no fue proponer MoE por primera vez, sino reducir estos obstáculos a un esquema más simple, entrenable y escalable.
+
+\lecturefigure{slide-06-moe-success-and-challenges.jpg}{Éxitos de los primeros MoE y sus obstáculos de complejidad, comunicación y estabilidad.}{Video oficial de Stanford Online 00:04:26--00:05:37.}
+
+\begin{warningbox}{No tomar la expert specialization como un hecho a priori}
+El router puede formar una división del trabajo por temas, idiomas o sintaxis, pero también puede aprender particiones numéricas más difíciles de interpretar. Los nombres de los expertos suelen ser resultado del análisis, no restricciones previas al entrenamiento; ver que cierto token va con más frecuencia a cierto expert no permite concluir directamente que ese expert posee una «habilidad» estable y causal.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+MoE se compone de bloques de parámetros expert y un router; su núcleo es la selección condicional de parámetros por token. Amplía la capacidad disponible, pero introduce problemas de formas dinámicas, comunicación, estabilidad y balanceo de carga.
+\section{Switch Layer: por qué simplificar top-2 a top-1}
+
+Con la definición general de MoE establecida, esta sección pasa a las restricciones concretas de Switch Transformer. No sustituye todas las operaciones del Transformer por expertos: conserva la self-attention e inserta Switch layers solo en algunas posiciones de FFN. Así aprovecha que las FFN concentran una gran cantidad de parámetros en los modelos grandes, y al mismo tiempo evita volver dinámicas la estructura de atención, las rutas residuales y todas las capas.
+
+\lecturefigure{slide-07-switch-transformer-layer.jpg}{Switch layer: el router elige un FFN expert para cada token.}{Video oficial de Stanford Online 00:05:38--00:07:21.}
+
+La regla top-1 de Switch es:
+
+\[
+i^*(x)=\arg\max_{i\in\{1,\ldots,E\}}p_i(x),
+\qquad
+y(x)=p_{i^*}(x)E_{i^*}(x).
+\]
+
+Aquí, $i^*(x)$ es el índice del expert con la probabilidad más alta del router; $p_{i^*}(x)$ es el peso de gate que se conserva; $E_{i^*}(x)$ es el único expert que se ejecuta; $y(x)$ es la salida de la capa. En comparación con top-2, top-1 reduce de dos a una las evaluaciones de expert FFN por token y disminuye el volumen de datos de dispatch.
+
+\begin{lstlisting}[caption={Pseudocódigo conceptual del enrutamiento top-1 de Switch.}]
+def switch_layer(tokens, router, experts):
+    logits = router(tokens)
+    probs = softmax(logits, axis=-1)
+    expert_id = argmax(probs, axis=-1)
+    gate = gather(probs, expert_id)
+    output = dispatch_to_one_expert(tokens, expert_id, experts)
+    return gate * output
+\end{lstlisting}
+
+\begin{importantbox}{top-1 es una decisión de diseño de sistemas, no solo la eliminación de un término matemático}
+Quitar una ruta de expert cambia a la vez los FLOPs de las FFN, la comunicación de tokens, el capacity buffer, el entrenamiento del router y el comportamiento ante desbordamientos. Por eso el valor de top-1 debe evaluarse con time-to-quality y con la eficiencia en hardware, y no solo comparando la loss con el mismo número de pasos.
+\end{importantbox}
+
+\teachervoice{Barret Zoph aclara en particular que los modelos reales suelen colocar una sparse layer solo cada dos o cada cuatro capas. El cálculo del router en float32 también ocupa una proporción mínima. Dicho de otro modo, el «Switch Transformer» sigue teniendo una gran cantidad de estructura de Transformer dense convencional.}
+
+Cambiar top-2 por top-1 no basta. La clase resume el sistema utilizable en cuatro mecanismos de control: router selective precision, una escala de inicialización más pequeña, una regularización de fine-tuning más fuerte en las capas de expert y un balanceo de carga diferenciable. Cada uno atiende, respectivamente, los errores numéricos, la magnitud inicial de las activaciones, el sobreajuste en tareas posteriores y el aprovechamiento del hardware.
+
+\lecturefigure{slide-08-improved-training-methodology.jpg}{Los cuatro tipos de mejoras de entrenamiento de Switch Transformer.}{Video oficial de Stanford Online 00:07:22--00:08:49.}
+
+\begin{knowledgebox}{Lectura de la figura: de qué se encarga cada una de las cuatro mejoras}
+Selective precision se encarga de la estabilidad numérica del router; reduced initialization scale, de la magnitud de las activaciones y los gradientes al inicio del entrenamiento; higher regularization, del sobreajuste que produce una gran capacidad de parámetros con pocos datos; load-balancing loss, de que los tokens formen lotes de expert de tamaño aproximadamente igual. No son cuatro variantes de un mismo truco, sino que cubren cuatro niveles: numérico, de optimización, de generalización y de sistemas.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La Switch layer sustituye solo algunas FFN y usa top-1 routing. La solución realmente utilizable es «enrutamiento simple más cuatro tipos de mecanismos de control», no un argmax aislado.
+\section{Entrenamiento estable: precisión, inicialización, regularización y balanceo de carga}
+
+La sección anterior enumeró la pila de estabilidad; esta sección explica, uno por uno, por qué cada elemento es necesario. La inestabilidad de los modelos dispersos no se debe solo a la gran cantidad de parámetros, sino también a una cadena de decisiones de enrutamiento discretas: una pequeña variación numérica en los router logits puede cambiar el argmax, y entonces el token entra en un expert completamente distinto. Por ello, el error no es solo un ligero desplazamiento del valor de salida, sino un salto en la ruta de cómputo.
+
+\subsection{Selective precision: elevar a float32 solo la pequeña parte sensible}
+
+Para entrenar modelos grandes suele usarse bfloat16, que reduce la memoria de GPU y acelera la multiplicación de matrices; sin embargo, la softmax dentro del router depende de la función exponencial. Si el redondeo de los logits altera el orden de las probabilidades, la ruta top-1 cambia. La decisión de Switch no es devolver toda la red a float32, sino elevar la precisión solo del cómputo local del router y luego regresar el resultado a la red principal de baja precisión.
+
+\lecturefigure{slide-09-selective-precision.jpg}{Selective precision: el router usa float32, mientras que el resto conserva la tasa de procesamiento de bfloat16.}{Video oficial de Stanford Online 00:08:50--00:10:21.}
+
+\[
+\operatorname{softmax}(z)_i=\frac{e^{z_i}}{\sum_j e^{z_j}}.
+\]
+
+Aquí, $z_i$ es el router logit del $i$-ésimo expert; la exponencial $e^{z_i}$ amplifica las diferencias de entrada; el denominador normaliza las puntuaciones de todos los experts. Si el error de baja precisión cambia cuál $z_i$ es el máximo, cambia la elección discreta del expert; por eso el router necesita más protección de precisión local que una rama residual continua ordinaria.
+
+\teachervoice{El criterio de ingeniería que da el expositor es que usar float32 en el router es una operación prácticamente gratuita: no implica comunicación entre dispositivos, su costo de cómputo es mínimo en comparación con las multiplicaciones de matrices de la FFN y las sparse layers no aparecen en todas las capas; por ello, la diferencia de tasa de procesamiento en la tabla queda dentro del ruido de medición.}
+
+\begin{warningbox}{Selective precision no significa «la precisión mixta es segura automáticamente»}
+Que el entrenamiento en baja precisión sea estable depende de las operaciones sensibles. En la softmax, la normalización, las acumulaciones y el ordenamiento del enrutamiento hay que revisar desbordamientos, subdesbordamientos, empates y cambios del argmax; no puede suponerse que todas las rutas de control toleran bfloat16 solo porque las grandes multiplicaciones de matrices sí lo hacen.
+\end{warningbox}
+
+\subsection{Inicialización más pequeña: controlar primero el rango dinámico del enrutamiento y de los experts}
+
+Al inicio del entrenamiento, los experts todavía no han formado una división del trabajo estable, y el router también cambia con rapidez. Si la inicialización produce activaciones y logits demasiado grandes, la softmax se satura prematuramente; unos cuantos experts reciben más tokens y gradientes, lo que refuerza aún más el desequilibrio. Reducir la escala de inicialización hace que la red parta de una región más suave y da oportunidad de que el balanceo de carga y la loss de la tarea principal moldeen juntos el comportamiento.
+
+\lecturefigure{slide-10-reduced-initialization-scale.jpg}{Reducir la escala de inicialización puede mejorar la estabilidad y la calidad de los modelos sparse expert.}{Video oficial de Stanford Online 00:10:22--00:10:51.}
+
+\teachervoice{Esta diapositiva conserva una lección práctica muy valiosa: la causa raíz de un sistema complejo no necesariamente requiere una corrección compleja. Los autores observaron que la inicialización estándar es más sensible en los sparse experts y que simplemente reducir la escala mejoró notablemente la calidad; conviene diagnosticar primero la magnitud, la saturación y la distribución de los gradientes antes de apilar algoritmos nuevos.}
+
+\begin{knowledgebox}{Qué es la «escala de inicialización»}
+La escala de inicialización determina la magnitud típica de los pesos al comenzar el entrenamiento y, con ello, influye en las activaciones, los router logits y los gradientes. Si es demasiado pequeña, la señal puede quedar débil; si es demasiado grande, puede provocar saturación, concentración de rutas o explosión de gradientes. La conclusión aquí es una calibración empírica para esta arquitectura y esta configuración de entrenamiento; no implica que todos los MoE deban adoptar incondicionalmente la misma constante de escalamiento.
+\end{knowledgebox}
+
+\subsection{Expert dropout: cuanto mayor es la capacidad de parámetros, más fácil es el sobreajuste en tareas posteriores}
+
+Los datos de preentrenamiento son enormes, pero tareas posteriores como SuperGLUE pueden tener solo decenas de miles de ejemplos. El conjunto total de parámetros de un sparse model es muy grande; aunque cada token pase por un solo expert, el modelo puede memorizar rápidamente los datos pequeños durante el fine-tuning. Por eso la clase aumenta el dropout de las capas de expert, en lugar de trasladar sin cambios la regularización del T5 denso.
+
+\lecturefigure{slide-11-higher-regularization-fine-tuning.jpg}{Aumentar el dropout de las capas de expert mitiga el sobreajuste del sparse model en datos pequeños de tareas posteriores.}{Video oficial de Stanford Online 00:10:52--00:12:47.}
+
+\begin{knowledgebox}{Lectura de la figura: no buscar un único «dropout óptimo global»}
+La tabla compara varias tareas posteriores, cuyos tamaños de datos y niveles de ruido difieren. Primero hay que ver si el sparse model necesita más regularización que el dense baseline y después si el punto óptimo coincide entre tareas. Si el dropout óptimo varía según la tarea, la conclusión debe ser «se necesita más regularización y hay que ajustarla», no anunciar una constante universal.
+\end{knowledgebox}
+
+\subsection{Load-balancing loss: alinear la masa de probabilidad con el número real de tokens}
+
+Si solo se optimiza la loss de modelado del lenguaje, el router puede enviar una gran cantidad de tokens a unos cuantos experts. Esto no solo reduce la división del trabajo, sino que también sobrecarga algunos dispositivos mientras otros quedan ociosos. Switch usa una loss auxiliar para que la «proporción realmente enviada» y la «probabilidad promedio del router» sean más uniformes entre los experts.
+
+\[
+\mathcal{L}_{\text{aux}}=\alpha E\sum_{i=1}^{E} f_iP_i.
+\]
+
+Aquí, $\alpha$ es el peso de la loss auxiliar; $E$ es el número de experts; $f_i$ es la proporción de tokens del lote que realmente se enrutan al $i$-ésimo expert; $P_i$ es la probabilidad promedio del router para ese expert. Si tanto el tráfico como la probabilidad se concentran en los mismos pocos experts, el producto interno crece; la optimización conjunta impulsa un uso más equilibrado.
+
+\lecturefigure{slide-12-load-balance-loss.jpg}{Balanceo de carga diferenciable: restringe a la vez la proporción discreta de tokens y la probabilidad promedio del router.}{Video oficial de Stanford Online 00:12:48--00:13:29.}
+
+\begin{importantbox}{El balanceo de carga no es un término de regularización decorativo}
+Conecta el objetivo de aprendizaje con la ejecución en hardware. Con la carga equilibrada, cada expert puede recibir lotes de tokens de tamaño similar, lo que facilita usar una dense matrix multiplication eficiente; el desequilibrio, en cambio, provoca overflow, padding, esperas y una menor utilización de los dispositivos.
+\end{importantbox}
+
+\begin{warningbox}{Equilibrio no significa que todos los experts deban aprender lo mismo}
+El objetivo es que la carga sea aproximadamente uniforme, no que las salidas sean idénticas. Un peso de balanceo demasiado fuerte puede suprimir una specialization significativa; uno demasiado débil produce experts sobrecargados. En la práctica, deben monitorearse a la vez la loss principal, la aux loss, el expert token histogram, la overflow rate y la router entropy.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Selective precision protege el enrutamiento discreto; una inicialización más pequeña evita la saturación temprana; un expert dropout más fuerte atiende el sobreajuste en tareas posteriores, y la load-balancing loss restringe el enrutamiento aprendible para que produzca lotes casi equilibrados que el hardware pueda ejecutar.
+\section{La compilación estática frente al enrutamiento dinámico: Capacity Factor y Token Dropping}
+
+Hasta ahora parece que el router puede decidir libremente cuántos tokens recibe cada expert; sin embargo, XLA, Mesh TensorFlow y los kernels de los aceleradores prefieren tensor shapes estáticas. El sistema debe reservar un número fijo de espacios para cada expert antes de la ejecución, lo que convierte el enrutamiento dinámico en un problema de planificación de capacidad.
+
+\lecturefigure{slide-13-static-graph-dynamic-architecture.jpg}{La contradicción: el grafo compilado de forma estática necesita formas fijas, mientras que el router produce una asignación dinámica de tokens.}{Video oficial de Stanford Online, 00:13:30--00:14:37.}
+
+Si un routing group tiene $T$ tokens, $E$ experts y un capacity factor $\gamma$, la capacidad suele escribirse así:
+
+\[
+C=\left\lceil \gamma\frac{T}{E}\right\rceil.
+\]
+
+Aquí, $C$ es el número de espacios para tokens que se reserva a cada expert; $T/E$ es el número promedio de tokens con un equilibrio perfecto, y $\gamma$ es el factor de capacidad. Con $\gamma=1$ casi no hay margen adicional; con $\gamma>1$ disminuye el overflow, pero aumentan el buffer, la comunicación y el posible cómputo de padding.
+
+\begin{importantbox}{El compromiso triple del capacity factor}
+Al aumentar $\gamma$, el token dropping suele disminuir, pero suben el límite de transferencia entre dispositivos, el buffer de recepción y el límite del lote de la FFN. Al reducir $\gamma$, el sistema resulta más barato, pero exige un router mejor equilibrado y obliga a aceptar que algunos tokens omitan el cómputo del expert.
+\end{importantbox}
+
+\lecturefigure{slide-14-expert-capacity-factor.jpg}{Capacity factor de 1.0 y de 1.5: los espacios adicionales reducen el overflow, pero elevan el costo del sistema.}{Video oficial de Stanford Online, 00:14:38--00:15:55.}
+
+\begin{knowledgebox}{Lectura de la figura: primero cuente los tokens, luego los espacios}
+En la figura izquierda, los espacios de cada expert solo cubren el reparto ideal, y los tokens que exceden la capacidad de los experts más solicitados se descartan; la figura derecha agrega cerca de un 50\% de margen y se procesan más tokens. Al compararlas no basta con preguntar «¿se descartan tokens?»; también hay que preguntar cuánta memoria del acelerador, cuánto ancho de banda de comunicación y cuánto límite de multiplicación de matrices se asignaron a esos espacios vacíos.
+\end{knowledgebox}
+
+A continuación se muestra un capacity-aware dispatch conceptual. Una implementación real reordena los tokens por dispositivo y los intercambia mediante collective communication; aquí solo se muestra la lógica de control de capacidad.
+
+\begin{lstlisting}[caption={Pseudocódigo de top-1 dispatch con expert capacity.}]
+def capacity_dispatch(tokens, expert_id, expert_count, capacity):
+    slots = [[] for _ in range(expert_count)]
+    residual = zeros_like(tokens)
+    for token, target in zip(tokens, expert_id):
+        if len(slots[target]) < capacity:
+            slots[target].append(token)
+        else:
+            residual[token.index] = token  # expert path is skipped
+    expert_outputs = run_batched_experts(slots)
+    return combine(expert_outputs) + residual
+\end{lstlisting}
+
+\subsection{Por qué «No Token Left Behind» no funcionó}
+
+Intuitivamente, descartar tokens parecería perjudicar siempre la calidad. Los autores probaron un enrutamiento en varias etapas: si el expert top-1 ya está lleno, el token se envía a la segunda o tercera opción hasta que obtenga un espacio. Sin embargo, el experimento no mostró mejoras e incluso pudo empeorar los resultados. Una explicación es que el router ya expresó «a dónde quiere ir este token»; forzar el uso de un expert de menor rango no es necesariamente mejor que omitir la subcapa de ese expert, porque la ruta residual conserva la representación del token.
+
+\lecturefigure{slide-15-no-token-left-behind.jpg}{No Token Left Behind: esquema de varias etapas que sigue enrutando los tokens en overflow hacia experts subóptimos.}{Video oficial de Stanford Online, 00:15:56--00:18:18.}
+
+\teachervoice{El ponente lo calificó expresamente como un resultado negativo sorprendente: el equipo era optimista y suponía que «garantizar que no se descarten tokens» sería mejor, pero el modelo resultó bastante robusto al token dropping, y el cómputo erróneo de un expert subóptimo podía incluso ser perjudicial. Unas buenas notas de clase deben conservar este tipo de intuiciones refutadas por los experimentos, en lugar de dejar solo la receta final exitosa.}
+
+\begin{warningbox}{Un dropped token no desaparece de la red}
+En un Switch block, el token en overflow suele omitir la FFN del expert, pero puede seguir propagándose por la residual connection. Entender el dropping como «eliminar tokens de entrada» lleva a una lectura muy equivocada del experimento; lo que realmente falta es la transformación del expert en esa capa.
+\end{warningbox}
+
+\subsection{La sparsity no es lo mismo que la adaptive computation}
+
+En la sesión de Q\&A, un estudiante preguntó si, dado que distintos tokens pasan por distintos experts, eso equivale a que distintos tokens usen distinta cantidad de cómputo. La distinción que dieron los dos ponentes fue la siguiente: esta clase estudia principalmente \textbf{parámetros distintos con una cantidad de cómputo similar}; la adaptive computation pone el énfasis en que distintos tokens usen distinto número de pasos o distintos FLOPs. Esto último es más difícil en aceleradores SPMD (Single Program Multiple Data), porque los dispositivos esperan que las muestras de un lote ejecuten un programa con las mismas reglas.
+
+\teachervoice{Irwan Bello explicó que la sparsity y la adaptive computation están relacionadas, pero son independientes: la primera consiste principalmente en que cada muestra use parámetros distintos; la segunda, en que cada muestra use una cantidad de cómputo distinta. La estrategia de investigación de Barret Zoph fue primero trasladar el LSTM MoE existente al Transformer y estabilizarlo, para después avanzar gradualmente hacia un cómputo dinámico más general.}
+
+La receta final combina top-1, selective precision, una inicialización más pequeña, expert dropout, load balance y capacity control. Ninguna implementación que reproduzca solo uno de estos componentes debería afirmar que reproduce el comportamiento de entrenamiento del Switch Transformer.
+
+\lecturefigure{slide-16-putting-it-all-together.jpg}{La receta completa de Switch: top-1 routing más estabilidad, regularización y control de carga.}{Video oficial de Stanford Online, 00:25:32--00:27:07.}
+
+\begin{importantbox}{Lista de verificación para auditar la implementación}
+Registre la frecuencia de las sparse layers, el número de experts, el capacity factor, la overflow rate, el peso de la aux-loss, la router precision, el escalamiento de la inicialización, el expert dropout, la comunicación del dispatch y el tiempo por paso. Sin estos campos, la etiqueta «top-1 MoE» por sí sola no permite explicar las diferencias entre resultados.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La compilación estática exige asignar de antemano la expert capacity. El capacity factor intercambia costo del sistema por menos overflow; los experimentos muestran que un dropping razonable puede ser mejor que forzar el envío de tokens a experts subóptimos. La sparsity sigue cambiando principalmente la ruta de los parámetros y no equivale a resolver por completo la adaptive computation.
+\section{Cómo leer los experimentos: Top-1, Top-2, pasos, tiempo y Scaling Law}
+
+Una vez definidas la arquitectura y las restricciones del sistema, lo importante en los experimentos no es buscar una «gráfica de victoria de Switch», sino distinguir en orden la quality per step, la quality per wall-clock, la ganancia en parámetros con FLOPs fijos y los rendimientos marginales decrecientes que provoca la comunicación. Algunos ejes verticales de la conferencia muestran la negative log perplexity; la perplexity ordinaria (PPL) es la exponencial de la entropía cruzada y es mejor cuanto menor sea, mientras que la negative log PPL es mejor cuanto mayor sea.
+
+Si la entropía cruzada promedio por token es $H$, entonces:
+
+\[
+\operatorname{PPL}=e^{H},\qquad -\log(\operatorname{PPL})=-H.
+\]
+
+Aquí, $H$ es la log-verosimilitud negativa promedio por token; la PPL puede entenderse, de forma aproximada, como el «número efectivo de opciones» que enfrenta el modelo, pero no equivale directamente a exactitud factual, capacidad de razonamiento ni calidad en tareas posteriores; $-\log(\operatorname{PPL})$ solo invierte el signo, de modo que un valor mayor representa una loss menor.
+
+\subsection{Top-1 y Top-2: el factor de capacidad modifica el frente de Pareto}
+
+Con capacity alta, Top-2 usa dos experts por token, y la calidad por paso puede ser mejor; pero también aumenta el cómputo de la FFN y la comunicación. Cuando se reduce el capacity factor, Switch top-1 puede alcanzar la calidad objetivo a un costo menor. La conclusión correcta no es que «top-1 sea matemáticamente más potente», sino que, con el hardware y la configuración de capacidad de la conferencia, forma un mejor punto de Pareto en time-to-quality.
+
+\lecturefigure{slide-17-comparison-moe-switch.jpg}{Calidad, velocidad y time-to-quality de MoE top-2 y Switch top-1 con distintos capacity factor.}{Video oficial de Stanford Online 00:27:08--00:28:57.}
+
+\begin{knowledgebox}{Lectura de la figura: el orden de comparación determina la conclusión}
+Primero verifica si el capacity factor es el mismo; después observa la calidad por paso; luego, la speed y el tiempo necesario para alcanzar el mismo umbral de calidad. Si top-2 es mejor en el eje de step y top-1 es más rápido en el eje de time, ambas cosas no se contradicen. Por último, revisa si la capacity baja provoca más dropping y si los autores redistribuyeron el cómputo ahorrado a las capas dense.
+\end{knowledgebox}
+
+\teachervoice{El ponente formula la conclusión como Pareto efficiency: top-2 con capacity alta puede tener mejor step quality, pero top-1 con capacity baja reduce comunicación, cómputo y memoria, por lo que alcanza antes el umbral de calidad. Esta precisión es mucho más exacta que decir simplemente «Switch beats MoE».}
+
+\begin{warningbox}{No trasladar las conclusiones de Pareto de un hardware a otro}
+Distintas interconexiones, batch size, expert placement, kernels y compiladores cambian la proporción que ocupa la comunicación. El time-to-quality del artículo es una medición de un sistema específico; al llevarlo a un clúster de GPU o a un servicio de bajo rendimiento, es necesario volver a hacer el benchmark.
+\end{warningbox}
+
+\subsection{Aumentar los experts: primero los pasos de entrenamiento, después el tiempo real}
+
+Esta sección lee el mismo conjunto de experimentos de escalamiento sobre dos ejes horizontales. Si se fija que cada token active solo unos pocos experts, aumentar el número de experts incrementa los parámetros totales y la capacidad asignable. Por pasos de entrenamiento, más experts suelen reducir la loss más rápido y alcanzar un mejor valor asintótico; pero las curvas se van acercando, lo que indica que el escalamiento de parámetros tiene rendimientos marginales decrecientes.
+
+\lecturefigure{slide-18-scaling-experts-per-training-step.jpg}{Comparación por pasos de entrenamiento: aumentar el número de experts mejora la calidad, pero la ganancia disminuye progresivamente.}{Video oficial de Stanford Online 00:28:58--00:29:43.}
+
+\begin{knowledgebox}{Lectura de la figura: el paso de entrenamiento no es una unidad de costo uniforme}
+Cada paso del eje horizontal puede incluir distintos costos de comunicación y de padding. Que una curva se desplace hacia la izquierda o hacia arriba indica mayor eficiencia por paso de optimización, pero no permite deducir directamente que el entrenamiento sea más rápido. También hay que verificar si, con distinto número de experts, se mantienen el mismo batch, los mismos active FLOPs, el mismo capacity factor y la misma frecuencia de sparse layer.
+\end{knowledgebox}
+
+Al cambiar el eje horizontal a wall-clock, el costo de comunicación entra en la gráfica. Si más experts abarcan más dispositivos, dispatch y combine hacen más lento cada paso; por eso, la «ganancia por paso» debe ser suficiente para compensar que «cada paso sea más lento» antes de convertirse en una ganancia en tiempo real.
+
+\lecturefigure{slide-19-scaling-experts-per-time.jpg}{Comparación por wall-clock: al entrar el costo de comunicación, la ganancia según el número de expertos se reordena.}{Video oficial de Stanford Online 00:29:44--00:30:51.}
+
+\begin{importantbox}{El par mínimo de gráficas en un reporte experimental}
+Como mínimo, reporta al mismo tiempo quality-versus-step y quality-versus-time. La primera diagnostica la optimización y la eficiencia de muestras; la segunda responde si el sistema es realmente más rápido. Si además se agregan quality-versus-FLOPs y el costo, se pueden distinguir las ganancias algorítmicas, las ganancias de hardware y la transferencia de recursos.
+\end{importantbox}
+
+\subsection{Sparse scaling law: con FLOPs fijos, aumentar parámetros sigue aportando ganancia}
+
+La conferencia extiende además la dense scaling law al sparse setting: con FLOPs por token aproximadamente fijos, aumentar los sparsely activated parameters todavía puede mejorar la loss. Las curvas de la figura no descienden linealmente de forma indefinida; conforme aumentan los experts, la ganancia se reduce gradualmente, lo que indica que la capacidad utilizable, la cobertura de datos, el aprendizaje del enrutamiento y la comunicación limitan en conjunto el escalamiento.
+
+\lecturefigure{slide-20-sparse-scaling-laws.jpg}{Curvas empíricas de scaling al aumentar los parámetros dispersos con FLOPs por token fijos.}{Video oficial de Stanford Online 00:30:52--00:31:29.}
+
+\begin{knowledgebox}{Lectura de la figura: FLOPs fijos no equivalen a costo total fijo}
+La mejora en el eje vertical respalda que «los parámetros condicionales tienen valor propio», pero el eje horizontal no incluye por completo el almacenamiento de parámetros, los checkpoint, el optimizer state, el número de dispositivos ni la comunicación. La figura demuestra la tendencia de la loss predicha en la configuración experimental; no demuestra que agregar experts sin límite sea siempre rentable.
+\end{knowledgebox}
+
+\subsection{Expert parallelism, model parallelism y ganancias a pequeña escala}
+
+Expert parallelism coloca distintos experts en distintos dispositivos; model parallelism, en cambio, divide los mismos pesos dense o una dimensión del tensor. Ambos pueden complementarse: el primero amplía el conjunto de parámetros condicionales y el segundo permite que un solo bloque dense también se reparta entre dispositivos. La comparación de la figura muestra que, combinados, todavía pueden seguir mejorando, en lugar de obligar a elegir uno de los dos.
+
+Aquí, sharding (fragmentación) significa dividir los parámetros o tensores a lo largo de alguna dimensión entre distintos dispositivos, de modo que cada dispositivo solo almacene o calcule una parte, en lugar de replicar todos los pesos completos. Expert parallelism puede verse como una disposición particular que usa al expert como unidad natural de fragmentación.
+
+\lecturefigure{slide-21-expert-vs-model-parallelism.jpg}{Comparación de calidad entre expert parallelism y model parallelism, y su relación complementaria.}{Video oficial de Stanford Online 00:31:30--00:32:57.}
+
+\begin{knowledgebox}{Explicación del concepto: parallelism no es una sola cosa}
+\textbf{Data parallelism} replica el modelo, divide las muestras y sincroniza los gradientes; \textbf{model parallelism} divide los parámetros o tensores de una misma capa; \textbf{expert parallelism} hace que distintos dispositivos alojen distintos experts y distribuye los tokens mediante all-to-all. Los tres resuelven cuellos de botella de memoria y cómputo diferentes.
+\end{knowledgebox}
+
+La dispersión tampoco es eficaz solo a escala muy grande. La conferencia muestra que en modelos más pequeños sigue habiendo ganancias consistentes, lo que significa que los investigadores pueden validar primero el router, la capacity y la implementación del sistema a una escala asequible, sin que «entrenar un modelo de un billón de parámetros» sea un requisito previo para usar MoE.
+
+\lecturefigure{slide-22-effective-at-small-scale.jpg}{Switch Transformer sigue mostrando ganancias a menor escala y con distinto número de experts.}{Video oficial de Stanford Online 00:32:58--00:34:03.}
+
+\teachervoice{El docente enfatiza el significado de los resultados a pequeña escala: si un método solo funciona a escalas extremas, es difícil iterar y reproducirlo; observar tendencias consistentes en modelos más pequeños permite al equipo validar primero la implementación y la estabilidad del entrenamiento, y después aumentar el número de dispositivos.}
+
+La última curva advierte que, con un presupuesto de cómputo fijo, seguir aumentando los parámetros termina produciendo rendimientos marginales claramente decrecientes. Las causas posibles incluyen que cada expert reciba menos muestras de entrenamiento efectivas, que al router le cueste aprender particiones confiables, el aumento del almacenamiento de parámetros y de la comunicación, y que los datos mismos no basten para entrenar más grados de libertad.
+
+\lecturefigure{slide-23-parameters-fixed-compute-diminishing-returns.jpg}{Con un presupuesto de cómputo fijo y solo aumentando parámetros, terminan apareciendo rendimientos marginales decrecientes.}{Video oficial de Stanford Online 00:34:04--00:36:25.}
+
+\begin{warningbox}{«Más parámetros, más eficiencia de muestras» también tiene condiciones}
+Con un total de datos fijo, cuantos más expertos haya, menos tokens puede ver realmente cada expert. Si el router asigna de forma muy desigual o algunos expertos permanecen en arranque en frío durante mucho tiempo, los parámetros adicionales se convierten en capacidad sin entrenar. Conviene reportar la expert utilization, el número de tokens por expert y la distribución de uso de cola larga.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Para leer los experimentos de MoE hay que distinguir step, time, FLOPs y costo total del sistema. La ventaja de Top-1 proviene de un compromiso de Pareto con una capacity y un hardware específicos; más experts mejoran la calidad, pero la comunicación, la cobertura de datos y el aprendizaje del enrutamiento producen rendimientos marginales decrecientes.
+\section{Ejecución distribuida: cómo se combinan Data, Model y Expert Parallelism}
+
+Las curvas anteriores muestran que expert parallelism funciona; esta sección responde además a la pregunta «¿dónde se colocan realmente los pesos?». La escalabilidad de MoE proviene de repartir los expertos entre dispositivos y, al mismo tiempo, dejar que los token se desplacen entre dispositivos según el enrutamiento; esto puede superponerse con la replicación de muestras de data parallel y con la partición de tensores de model parallel. El verdadero objeto de diseño no es una capa aislada, sino los datos, los pesos y el token movement sobre la malla de dispositivos.
+
+\lecturefigure{slide-24-contextualizing-parallelism.jpg}{Cómo colocan los pesos en la malla de dispositivos data, model y expert parallelism.}{Video oficial de Stanford Online 00:36:26--00:41:35.}
+
+\begin{knowledgebox}{Lectura de la figura: primero pregunta «qué se replica, qué se parte y qué se mueve»}
+Data parallelism replica los pesos y mueve estadísticas de gradientes; model parallelism parte un mismo peso y mueve activaciones intermedias o sumas parciales; expert parallelism hace que cada tarjeta tenga experts distintos y mueve los token a su dispositivo de destino. Los colores de las casillas de la figura indican a quién pertenecen los pesos, no que los token permanezcan siempre en la tarjeta original.
+\end{knowledgebox}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Recursos y patrones de comunicación de los tres tipos de paralelismo.}
+\begin{tabularx}{\textwidth}{L{0.19\textwidth}L{0.23\textwidth}X X}
+\toprule
+Modalidad & Objeto que se parte o se replica & Comunicación principal & Objetivo principal \\
+\midrule
+Data parallel & Modelo replicado, batch partido & all-reduce / reduce-scatter de gradientes & Aumentar el rendimiento y el batch global \\
+Model parallel & Parámetros de una capa o dimensiones del tensor partidos & all-gather, reduce-scatter o activaciones punto a punto & Hacer caber un solo modelo dense \\
+Expert parallel & experts partidos, dispatch dinámico de token & all-to-all de token y combine de resultados & Ampliar el conjunto de parámetros condicionales \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{importantbox}{Qué son las collectives}
+Las collectives son primitivas de comunicación colectiva entre varios dispositivos, como all-reduce, reduce-scatter, all-gather y all-to-all. En MoE, lo decisivo suele ser all-to-all: cada dispositivo envía sus token locales a los demás dispositivos según el expert de destino y, después de ejecutar el expert, devuelve los resultados a su posición original en la secuencia.
+\end{importantbox}
+
+\subsection{De T5-Base a Switch-C: los parámetros de diseño no se reducen al número de experts}
+
+La tabla de diseño de modelos modifica a la vez el dense hidden size, el número de capas, los heads, el número de experts, la frecuencia de las sparse layers y la disposición del paralelismo. El total de parámetros puede crecer hasta el billón, pero el active path solo incluye el expert seleccionado. Al comparar modelos hay que igualar los FLOPs por token y el hardware de entrenamiento; de lo contrario, «el mismo cómputo» puede significar solo una aritmética teórica parecida, mientras que la comunicación real es distinta.
+
+\lecturefigure{slide-25-design-choices-switch-models.jpg}{Dimensiones dense, número de experts, cantidad de parámetros y diseño de cómputo de la familia de modelos Switch.}{Video oficial de Stanford Online 00:41:36--00:43:21.}
+
+Un cálculo simplificado permite expresar la diferencia entre parámetros totales y parámetros activos:
+
+\[
+P_{\text{total}}=P_{\text{shared}}+E\,P_{\text{expert}},
+\qquad
+P_{\text{active/token}}\approx P_{\text{shared}}+kP_{\text{expert}}.
+\]
+
+Aquí, $P_{\text{shared}}$ son los parámetros compartidos, como attention, embedding y capas dense; $P_{\text{expert}}$ son los parámetros de un solo expert; $E$ es el número total de experts; $k$ es el número de experts elegidos por token, que en Switch suele ser 1. Aumentar $E$ incrementa rápidamente el total de parámetros, pero la parte de experts activos solo crece con $k$.
+
+\begin{warningbox}{El optimizer state sigue creciendo con el total de parámetros}
+Adam/AdamW mantiene para cada parámetro un momento de primer orden $m$ y un momento de segundo orden $v$; este optimizer state, junto con los pesos, los gradientes y los checkpoint, depende del total de parámetros. Aunque cada token active un solo expert, durante el entrenamiento sigue siendo necesario almacenar y actualizar el enorme conjunto de parámetros al que se accede.
+\end{warningbox}
+
+\subsection{«Los parámetros guardan conocimiento, los FLOPs hacen razonamiento» es solo una hipótesis por verificar}
+
+El ponente plantea una intuición: más parámetros podrían ser más adecuados para almacenar knowledge, mientras que más active compute podría ser más adecuado para reasoning. Lo importante es que de inmediato la califica como «mostly unsubstantiated theory». Esta frase debe convertirse en una pregunta experimental: una vez fijados la upstream quality, los active FLOPs o los datos, ¿mejoran los parámetros dispersos adicionales, de forma independiente, las tareas factuales, composicionales y de razonamiento?
+
+\lecturefigure{slide-26-parameters-knowledge-compute-reasoning.jpg}{Hipótesis acotada del ponente: los parámetros podrían inclinarse hacia la capacidad de conocimiento y los FLOPs hacia el razonamiento.}{Video oficial de Stanford Online 00:43:22--00:43:57.}
+
+\teachervoice{Lo que más vale conservar aquí de la teacher voice no es un eslogan, sino la «etiqueta de incertidumbre». El ponente dice por iniciativa propia que es mostly unsubstantiated theory; por lo tanto, las notas no pueden elevarla a ley comprobada, y mucho menos afirmar con base en ella que los modelos dispersos memorizan mejor por naturaleza y que los modelos dense razonan mejor por naturaleza.}
+
+\begin{importantbox}{Diseño experimental falsable}
+Elige un conjunto de tareas knowledge-heavy, reasoning-heavy y mixtas, y controla por separado la upstream loss, los active FLOPs, el total de parámetros, los token de entrenamiento y el aumento por recuperación; después compara dense y sparse. Solo cuando se controlan estos factores de confusión es posible discutir el efecto independiente de la capacidad de parámetros y de la profundidad de cómputo.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+MoE distribuye los parámetros condicionales mediante expert parallelism y lo combina con data/model parallelism. Los parámetros totales y los parámetros activos deben contabilizarse por separado; «los parámetros sirven para el conocimiento, el cómputo sirve para el razonamiento» es, en esta clase, una hipótesis de investigación, no una conclusión.
+\section{Cadena de evidencia: ¿la Upstream Quality se traduce en Downstream Quality?}
+
+Esta sección pasa del diseño del sistema a la evidencia. Si el sparse model solo obtiene una pretraining loss más baja gracias a un mayor número total de parámetros, la mejora en las tareas posteriores podría ser solo una consecuencia de la upstream quality y no de la forma de los parámetros en sí. Por ello, el expositor plantea una pregunta de control: con la misma upstream quality, ¿los sparse parameters adicionales siguen mejorando por sí mismos la downstream task?
+
+\lecturefigure{slide-27-upstream-quality-research-question.jpg}{Pregunta de investigación: una vez fijada la upstream pretraining quality, ¿la forma del total de parámetros sigue influyendo en las tareas posteriores?}{Stanford Online, video oficial 00:43:58--00:44:17.}
+
+\begin{knowledgebox}{Concepto previo: upstream y downstream}
+La upstream task es el objetivo de preentrenamiento a gran escala, por ejemplo, el text-to-text denoising sobre C4; las downstream tasks son evaluaciones de transferencia como SuperGLUE o TriviaQA. Que ambas estén correlacionadas no significa que sean equivalentes: modelos con la misma pretraining loss pueden tener representaciones, distribuciones de capacidad y comportamientos de fine-tuning distintos.
+\end{knowledgebox}
+
+\subsection{SuperGLUE: la correlación es clara, pero no prueba la causalidad de los parámetros}
+
+En la figura, la upstream quality de los modelos dense y Switch se correlaciona con la mejora en SuperGLUE. Si ambos tipos de puntos caen, en general, cerca de la misma tendencia, gran parte del beneficio downstream puede explicarse por una mejor pretraining quality; solo si los puntos sparse quedan sistemáticamente más arriba al mismo nivel de upstream se respalda que la forma de los parámetros aporta algo adicional.
+
+\lecturefigure{slide-28-upstream-vs-superglue.jpg}{Relación entre la upstream quality y la SuperGLUE quality en Dense y Switch.}{Stanford Online, video oficial 00:44:18--00:45:19.}
+
+\begin{knowledgebox}{Lectura de la figura: compara en horizontal, no solo a lo largo de la curva}
+Primero compara los puntos dense y sparse en valores cercanos de upstream quality sobre el eje horizontal; después observa el error y la escala del modelo. Ver solamente que ambos suben conforme mejora el upstream demuestra una correlación, pero no prueba que «más parámetros dispersos sean eficaces por sí mismos a igual calidad».
+\end{knowledgebox}
+
+\begin{warningbox}{Correlation no es identificación del mecanismo}
+Las familias de modelos cambian a la vez el número de parámetros, el tiempo de entrenamiento, la regularización, el enrutamiento y la estabilidad de la optimización. La tendencia de una gráfica de dispersión no basta para identificar cuál de estos factores provoca la diferencia downstream; se requieren experimentos con matched-quality, matched-compute y varias semillas aleatorias.
+\end{warningbox}
+
+Switch-C lleva el total de parámetros a cerca de 1.6T y aparece en la figura como un nuevo punto extremo. Su importancia está en mostrar que el sistema puede entrenarse y que el scaling continúa, no en anunciar que todas las tareas obtienen una mejora proporcional por la cifra de «un billón». Un punto extremo también puede ejercer un apalancamiento muy fuerte sobre la tendencia de la regresión, por lo que debe analizarse junto con los resultados de escala intermedia.
+
+\lecturefigure{slide-29-switch-c-trillion-parameter.jpg}{Al añadir Switch-C, con cerca de 1.6T parámetros, se observa la tendencia de escalamiento de upstream y SuperGLUE.}{Stanford Online, video oficial 00:45:20--00:46:01.}
+
+\teachervoice{El expositor no presenta Switch-C como el único atractivo, sino que lo usa para comprobar si la tendencia continúa. En términos de ingeniería, la pregunta más importante es si, con el mismo tiempo de dispositivo, la misma active compute y las mismas restricciones de servicio, vale más la pena que una configuración sparse o dense más pequeña.}
+
+\subsection{TriviaQA: las tareas knowledge-heavy ofrecen otra perspectiva}
+
+TriviaQA se orienta más a preguntas y respuestas sobre conocimiento, por lo que sirve para poner a prueba la intuición de que «más parámetros pueden almacenar conocimiento». En la figura, la upstream quality sigue correlacionada positivamente con la puntuación en TriviaQA, pero una sola gráfica de correlación no basta para atribuir la mejora a la capacidad de almacenamiento: la cobertura del corpus de entrenamiento, la tokenización, el fine-tuning y las reglas de coincidencia de respuestas influyen en el resultado.
+
+\lecturefigure{slide-30-upstream-vs-triviaqa.jpg}{Relación entre la upstream quality y la calidad en TriviaQA.}{Stanford Online, video oficial 00:46:02--00:46:27.}
+
+\begin{knowledgebox}{Lectura de la figura: qué respalda esta figura y qué no}
+Respalda que «un mejor preentrenamiento suele ir acompañado de un mejor resultado en TriviaQA» y aporta evidencia de que vale la pena seguir investigando la sparse capacity; no prueba que el modelo almacene hechos internamente de forma localizable, ni que el número de parámetros importe más que la cobertura de datos, la recuperación o la active compute.
+\end{knowledgebox}
+
+\subsection{Fine-tuning de Base/Large y entrenamiento en 101 idiomas}
+
+Esta sección traslada la evidencia del modelo más grande a escalas de uso más común y a distribuciones multilingües. Si el método sparse solo funcionara en el modelo más grande, su valor de ingeniería sería muy limitado. La clase muestra resultados de fine-tuning en los niveles Base y Large, lo que indica que también se obtienen beneficios a escalas más comunes; además, los experimentos multilingües usan mT5 como dense baseline y observan una ventaja general en 101 idiomas.
+
+\lecturefigure{slide-31-fine-tuning-base-and-large.jpg}{Resultados de fine-tuning a escala Base y Large.}{Stanford Online, video oficial 00:46:28--00:47:07.}
+
+\begin{knowledgebox}{Lectura de la tabla: además del promedio, busca las tareas que fallan}
+Primero compara la calidad promedio y los FLOPs de dense y sparse a la misma escala; después revisa si alguna tarea se degrada. Una mejora promedio puede ocultar sensibilidad en tareas con pocos datos, secuencias largas o clases desbalanceadas; al desplegar, conviene conservar los resultados per-task en lugar de reportar solo el aggregate score.
+\end{knowledgebox}
+
+Un entorno multilingüe tiene de forma natural entradas heterogéneas, y el router puede formar una división de rutas por idioma, morfología o tema; pero eso no significa que cada idioma obtenga automáticamente un expert propio. Lo que realmente hay que revisar es la distribución entre idiomas de recursos altos y bajos, la cobertura del tokenizer, la expert utilization y si algunos idiomas se descartan sistemáticamente por overflow.
+
+\lecturefigure{slide-32-multilingual-training.jpg}{Entrenamiento en 101 idiomas con mT5 como línea base y tendencia de la calidad.}{Stanford Online, video oficial 00:47:08--00:47:41.}
+
+\teachervoice{El expositor presenta como un resultado importante que «los 101 idiomas mejoran», pero una reproducción en ingeniería debería reportar los resultados por idioma. Una mejora en el macropromedio no significa que ya estén resueltos los idiomas de pocos recursos, la equidad y la cobertura del enrutamiento.}
+
+\begin{warningbox}{La división por idiomas puede generar una nueva cola larga}
+Si el router concentra los idiomas de muchos recursos en experts estables, los idiomas de pocos recursos pueden recibir menos entrenamiento o un mayor dropping. Conviene medir por idioma la expert entropy, el overflow, el número de tokens y la downstream quality, para que el throughput global no oculte degradaciones locales.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La upstream quality es una variable explicativa importante de la downstream quality, pero una gráfica de correlación no prueba por sí sola el efecto causal independiente de los parámetros dispersos adicionales. Los resultados de Base/Large y multilingües amplían el ámbito de aplicación y, al mismo tiempo, exigen una auditoría más detallada por tarea y por idioma.
+\section{Destilación: convertir un teacher disperso en un student más fácil de desplegar}
+
+La ventaja de MoE en el entrenamiento no implica que todo despliegue convenga conservar la distribución de expertos. Los escenarios con lote pequeño, dispositivos de borde o almacenamiento de parámetros limitado pueden requerir más bien un student dense más pequeño. La Distillation (destilación de conocimiento) hace que el student aprenda la distribución suave, las representaciones ocultas o las salidas de la tarea del teacher; pero, como comprime el «enorme conjunto de parámetros condicionales» a una capacidad menor, es necesariamente una conversión entre calidad, parámetros, latencia y complejidad de implementación.
+
+\lecturefigure{slide-33-distillation-techniques.jpg}{Técnicas de destilación de Switch Transformer y línea base al estilo de DistilBERT.}{Video oficial de Stanford Online 00:47:42--00:48:23.}
+
+Un objetivo de destilación común puede escribirse como:
+
+\[
+\mathcal{L}=\lambda\mathcal{L}_{\text{hard}}+(1-\lambda)\tau^2
+\operatorname{KL}\!\left(p_T^{(\tau)}\,\|\,p_S^{(\tau)}\right).
+\]
+
+Donde $\mathcal{L}_{\text{hard}}$ es la loss del student respecto de las etiquetas reales o del objetivo original de preentrenamiento; $p_T^{(\tau)}$ y $p_S^{(\tau)}$ son, respectivamente, las distribuciones suaves del teacher y del student a temperatura $\tau$; KL es la diferencia entre distribuciones; $\lambda$ equilibra el objetivo duro y la señal del teacher. Distintos esquemas de destilación pueden añadir además hidden-state matching o usar únicamente datos generados por el teacher.
+
+\begin{knowledgebox}{Términos clave: destilar no es cuantizar}
+La Distillation entrena un student nuevo para aproximar el comportamiento del teacher; la quantization, en cambio, reduce el ancho en bits numérico de los pesos o activaciones del mismo modelo. La primera cambia la estructura y la capacidad de los parámetros; la segunda cambia principalmente la precisión de la representación. Ambas pueden combinarse, pero sus modos de falla son distintos.
+\end{knowledgebox}
+
+\subsection{Destilar el modelo preentrenado: se comprimen los parámetros y también la capacidad condicional}
+
+La destilación en el preentrenamiento compara teachers dense y sparse con distintos students. Al leer la tabla hay que considerar a la vez los parámetros, los FLOPs de entrenamiento o de inferencia, la calidad upstream y la proporción recuperada. Si el student reduce mucho sus parámetros pero solo conserva parte de la calidad del teacher, eso no es un fracaso de la destilación, sino una transacción de Pareto explícita; la pregunta real es si resulta mejor que entrenar directamente un dense model de la misma escala.
+
+\lecturefigure{slide-34-distilling-pretrained-model.jpg}{Destilación de un teacher sparse en la etapa de preentrenamiento y el compromiso entre parámetros y calidad.}{Video oficial de Stanford Online 00:48:24--00:50:58.}
+
+\begin{knowledgebox}{Lectura de la tabla: hay que añadir la línea base «student de la misma escala entrenado directamente»}
+Comparar solo el teacher con el student destilado lleva a tomar «la caída inevitable al reducir la capacidad» como una conclusión sobre la destilación. Debe añadirse un student de la misma estructura entrenado desde cero, para determinar cuánta calidad recupera realmente la señal del teacher y si el costo adicional de la destilación vale la pena.
+\end{knowledgebox}
+
+\teachervoice{La pregunta sustantiva de la sesión de Q\&A fue el objetivo de despliegue: si al final hay que obtener un dense model pequeño, ¿por qué no entrenarlo desde el principio? La destilación solo se justifica cuando el teacher sparse aporta mejores objetivos suaves, aumento de datos o supervisión de representaciones, y cuando esos beneficios superan el costo de entrenar al teacher.}
+
+\subsection{Destilar modelos de SuperGLUE con fine-tuning}
+
+Otra vía es hacer primero el fine-tuning del teacher Switch en SuperGLUE y después destilar el comportamiento de la tarea. Se ajusta mejor a un producto específico, pero su alcance de generalización es más estrecho: el student puede conservar la puntuación de la tarea y, aun así, dejar de tener la capacidad general de preentrenamiento del teacher. Antes del despliegue hay que decidir si se necesita un «student general» o un «student especializado en la tarea».
+
+\lecturefigure{slide-35-distilling-finetuned-superglue.jpg}{Destilación de un teacher de SuperGLUE ya sometido a fine-tuning: conversión entre calidad de la tarea y tamaño del modelo.}{Video oficial de Stanford Online 00:50:59--00:57:07.}
+
+\begin{importantbox}{Las cuatro dimensiones para validar una destilación}
+Reportar a la vez: la calidad conservada respecto del teacher, la ganancia respecto de una scratch baseline de la misma escala, el costo de entrenamiento de extremo a extremo y la latencia o el throughput en el hardware objetivo. Si solo se reporta la razón de compresión de parámetros, no es posible juzgar si el despliegue es realmente mejor.
+\end{importantbox}
+
+\begin{warningbox}{La destilación no elimina los sesgos del teacher}
+El student aprende la distribución y los errores del teacher. Si el router sparse presenta desequilibrios respecto de idiomas, temas o grupos, la destilación puede fijar ese comportamiento en el student dense, en lugar de promediarlo automáticamente.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La destilación es una conversión con pérdida desde un teacher sparse de alta capacidad hacia un modelo pequeño para despliegue. La línea base correcta es un student de la misma escala entrenado directamente, y las métricas correctas incluyen a la vez la calidad, el costo de entrenamiento y el rendimiento en hardware real.
+\section{Cierre y ampliación: del MoE de lenguaje al Vision MoE}
+
+Al final de la clase, primero se resumen los resultados de Switch en modelado de lenguaje y después se presenta un trabajo nuevo en el ámbito visual. Las dos partes muestran que la interfaz central de los expertos dispersos puede reutilizarse entre modalidades, pero que el significado de un token, la estructura de redundancia y el orden de importancia cambian la estrategia de routing. En texto, por lo general se busca que cada token reciba un cómputo similar; con los patches de una imagen, en cambio, puede admitirse un procesamiento selectivo más agresivo.
+
+\lecturefigure{slide-36-wrapping-up.jpg}{Resumen de la clase: enrutamiento simple, entrenamiento estable, aceleración del preentrenamiento, multilingüismo y escala de billones de parámetros.}{Video oficial de Stanford Online 00:57:08--01:00:43.}
+
+\begin{knowledgebox}{Lectura de la figura: convertir los «resultados» en enunciados condicionales}
+Switch simplifica el MoE y, dados una línea base de T5, los datos de C4/mT5, TPU y una implementación en Mesh TensorFlow, obtiene ganancias de velocidad y de calidad; entrena un modelo de un billón de parámetros, pero cada token activa solo unos pocos experts; mejora el desempeño multilingüe promedio, pero aún hay que revisar el enrutamiento por idioma (per-language) y el costo de despliegue.
+\end{knowledgebox}
+
+El MoE visual trata los image patches como tokens e inserta sparse expert layers en el Transformer. Las imágenes tienen mucha redundancia local, por lo que el router no solo puede decidir «qué expert usar», sino también «qué patches merecen ocupar la capacity limitada». Con esto, la sparsity empieza a acercarse a la adaptive computation.
+
+\lecturefigure{slide-37-sparse-models-computer-vision.jpg}{V-MoE: extensión del sparse expert scaling a la clasificación de imágenes.}{Video oficial de Stanford Online 01:00:44--01:01:15.}
+
+\begin{knowledgebox}{Qué es un token visual}
+El Vision Transformer divide la imagen en patches y proyecta cada patch como un token. En V-MoE, lo que procesa cada expert es la representación de un patch; no se elige un solo expert para cada imagen completa. Patches distintos pueden enrutarse a experts distintos.
+\end{knowledgebox}
+
+Cuando el capacity factor es menor que 1, la priority routing primero estima la importancia de cada token y después asigna los espacios de los experts a los patches de mayor prioridad. Si $\gamma=0.5$, la capacidad alcanza solo para la mitad de los tokens de una distribución idealmente uniforme; ya no se trata solo de un overflow accidental, sino de una asignación deliberada del presupuesto de cómputo. El fondo de la imagen o las regiones repetidas pueden omitirse, y los patches de los objetos relevantes reciben más cómputo de las capas dispersas.
+
+\lecturefigure{slide-38-priority-routing-vision-moe.jpg}{Priority routing en Vision MoE: cuando la capacidad no alcanza, se procesan primero los patches importantes.}{Video oficial de Stanford Online 01:01:16--01:02:10.}
+
+\teachervoice{El ponente considera muy prometedor bajar el capacity factor por debajo de 1: en imágenes, incluso si solo cerca de una décima parte de los patches pasa por la sparse layer, la calidad puede mantenerse buena. En ese punto, la sparsity empieza a modificar a la vez la «selección de parámetros» y la «asignación del cómputo».}
+
+\begin{warningbox}{El priority score también es una hipótesis aprendida}
+Un patch omitido no necesariamente es «poco importante». Si el priority router asigna de forma sistemática puntajes bajos a objetos pequeños, texto, regiones de borde o clases minoritarias, la exactitud promedio puede ocultar esa fragilidad. Conviene hacer pruebas de oclusión, por subgrupos, de calibración y fuera de distribución.
+\end{warningbox}
+
+\subsection{Límites de despliegue señalados en las preguntas y respuestas}
+
+La sesión de Q\&A del final añadió tres límites que las slides no presentan completos. Primero, con C4, SuperGLUE y las longitudes de secuencia habituales de entonces, el attention map no era el principal costo de memoria; los pesos pesaban más, así que la attention lineal no necesariamente resuelve primero el cuello de botella. Segundo, una de las restricciones directas para seguir aumentando los experts es que los parámetros tienen que almacenarse en algún lugar. Tercero, la eficiencia por parámetro almacenado de un sparse model suele ser menor que la de un dense model; por eso resulta más adecuado para el preentrenamiento y para servicios de rendimiento medio a alto, y no necesariamente para solicitudes individuales de baja latencia en los dispositivos más pequeños.
+
+\begin{table}[H]
+\centering
+\small
+\caption{Juicios por escenario surgidos en las preguntas y respuestas de la clase.}
+\begin{tabularx}{\textwidth}{L{0.28\textwidth}X X}
+\toprule
+Escenario & Beneficio posible & Riesgo principal \\
+\midrule
+Preentrenamiento a gran escala & Los parámetros condicionales amplían la capacidad; alto rendimiento con paralelismo data/expert & all-to-all, almacenamiento, checkpoint y estabilidad \\
+Servicio de rendimiento medio a alto & El lote puede agrupar tokens por expert y repartir el costo de comunicación & Experts saturados, deriva del enrutamiento y latencia entre máquinas \\
+Solicitud individual de baja latencia / dispositivos de borde & Posible reducción de los active FLOPs & El total de pesos difícilmente cabe; un lote pequeño no permite formar GEMM de experts eficientes \\
+Contexto muy largo & El MoE amplía la capacidad de la FFN & El costo de attention/KV puede volverse otro cuello de botella independiente \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\teachervoice{El juicio final de Barret Zoph es mesurado: si el objetivo es «colocar el modelo más potente en el dispositivo más pequeño posible», la per-weight efficiency de un dense model puede ser mejor; si se trata de preentrenamiento masivo y de servicios de rendimiento medio a alto, es más probable que la sparsity aporte grandes beneficios. El escenario de aplicación determina la conclusión.}
+
+\subsection{Resumen de la sección}
+
+Los resultados de Switch en lenguaje muestran que los parámetros condicionales pueden escalarse; V-MoE va más allá y usa priority routing para repartir un cómputo limitado. Las preguntas y respuestas recuerdan que el almacenamiento, el lote, la interconexión, la longitud del contexto y la eficiencia por peso determinan si el sparse deployment ofrece de verdad una ventaja.
+\section{Síntesis y ampliación}
+
+El núcleo de Switch Transformer no es «usar un router para obtener mágicamente un modelo de un billón de parámetros», sino plantear la expansión condicional de parámetros como un sistema de extremo a extremo: el router decide la ruta, la capacity restringe las rutas dinámicas a lotes estáticos, el load balance eleva la utilización del hardware, la selective precision y la inicialización protegen el entrenamiento, el expert dropout atiende el sobreajuste en tareas posteriores, la expert parallelism se encarga de distribuir los parámetros, y los experimentos deben separar step, time, FLOPs y costo total.
+
+\begin{enumerate}
+  \item \textbf{Lo que la dispersión escala es el conjunto de parámetros seleccionables}: los parámetros totales pueden crecer con el número de experts, mientras que los active experts por token siguen controlados por top-$k$;
+  \item \textbf{Top-1 es una elección de Pareto}: reduce el FFN de expert, la comunicación y los requisitos de capacidad, pero que resulte superior depende del hardware y de la calidad objetivo;
+  \item \textbf{Router es una ruta de control numérico}: softmax y argmax son sensibles al redondeo; usar float32 de forma local evita, con un costo mínimo, que la ruta se invierta;
+  \item \textbf{Load balance es la interfaz entre el algoritmo y el sistema}: la loss auxiliar convierte probabilidades aprendibles en lotes por expert aproximadamente regulares;
+  \item \textbf{Capacity factor es una perilla explícita de costo}: una capacidad mayor reduce el dropping, pero amplía el buffer, la comunicación y el cómputo potencial;
+  \item \textbf{Los resultados negativos importan igual}: enviar los tokens de overflow a experts subóptimos no es necesariamente mejor que omitir la subcapa de expert;
+  \item \textbf{Scaling debe validarse sobre varios ejes horizontales}: step, wall-clock, FLOPs, almacenamiento de parámetros y costo responden preguntas distintas;
+  \item \textbf{Parallelism se puede combinar}: data, model y expert parallelism dividen, respectivamente, las muestras, los tensores y los parámetros condicionales;
+  \item \textbf{La correlación en tareas posteriores no equivale a una prueba del mecanismo}: upstream loss, parámetros totales, active compute y cobertura de datos requieren un control emparejado;
+  \item \textbf{La destilación es una conversión de despliegue con pérdida}: debe compararse con un student scratch de la misma escala y contabilizarse el costo de entrenamiento del teacher;
+  \item \textbf{Vision priority routing avanza hacia el cómputo adaptativo}: cuando la capacity es menor que 1, el modelo decide activamente qué patches reciben cómputo de expert;
+  \item \textbf{El escenario de aplicación determina el valor}: MoE se orienta más al entrenamiento a gran escala y a un rendimiento de procesamiento medio o alto; no es automáticamente adecuado para lotes pequeños, dispositivos de borde ni contextos extremadamente largos.
+\end{enumerate}
+
+\begin{importantbox}{Tarea del curso: realizar una auditoría matched-resource de MoE}
+Implementa un Transformer dense pequeño y un MoE top-1, emparejando los tokens de entrenamiento, los active FLOPs y el wall-clock total. Barre al menos el número de experts, el capacity factor y el peso de la aux-loss; reporta PPL, time-to-quality, overflow, expert entropy, tiempo de all-to-all, memoria de GPU pico y per-task fine-tuning. Agrega además un dense baseline con el mismo número de parámetros y un dense baseline con los mismos active FLOPs, y responde si la ganancia proviene de la capacidad, del cómputo, de la regularización o de la implementación del sistema.
+\end{importantbox}
+
+\begin{warningbox}{Autoverificación final: seis conceptos que no deben confundirse}
+Los \textbf{parámetros totales} no equivalen a los \textbf{parámetros activados}; los \textbf{FLOPs} no equivalen a la \textbf{latencia}; el \textbf{equilibrio de carga} no equivale a \textbf{expertos idénticos}; el \textbf{token dropping} no equivale a \textbf{eliminar tokens}; la \textbf{upstream correlation} no equivale al \textbf{efecto causal de los parámetros}; la \textbf{sparsity} no equivale a \textbf{cualquier adaptive computation}.
+\end{warningbox}
+
+\subsection{Lecturas adicionales}
+
+Se sugiere leer los materiales originales en el orden «mecanismo histórico — expansión del sistema — receta de Switch — extensión multilingüe y visual»:
+
+{\small
+\begin{itemize}[nosep,leftmargin=*]
+  \item \href{https://doi.org/10.1162/neco.1991.3.1.79}{\textbf{Adaptive Mixtures of Local Experts}}: primera formalización del gating y de los expertos locales.
+  \item \href{https://arxiv.org/abs/1701.06538}{\textbf{Sparsely-Gated MoE}}: precursor clave del cómputo condicional a gran escala, el enrutamiento y el equilibrio de carga.
+  \item \href{https://arxiv.org/abs/2001.08361}{\textbf{Scaling Laws for Neural Language Models}}: contexto empírico del dense scaling.
+  \item \href{https://arxiv.org/abs/2006.16668}{\textbf{GShard}}: sharding automático y sistema de cómputo condicional a gran escala.
+  \item \href{https://arxiv.org/abs/2101.03961}{\textbf{Switch Transformers}}: fuente principal sobre top-1 routing, selective precision, capacity, experimentos y destilación.
+  \item \href{https://arxiv.org/abs/1910.10683}{\textbf{T5}} y \href{https://arxiv.org/abs/2010.11934}{\textbf{mT5}}: líneas base dense text-to-text y de 101 idiomas.
+  \item \href{https://arxiv.org/abs/2106.05974}{\textbf{V-MoE}}: sparse experts visuales, priority routing y asignación adaptativa con capacidad menor que 1.
+  \item \href{https://github.com/tensorflow/mesh}{\textbf{Mesh TensorFlow}}: contexto de la implementación distribuida y del código de sharding en que se desarrolló el trabajo original.
+\end{itemize}
+}
+
+\end{document}

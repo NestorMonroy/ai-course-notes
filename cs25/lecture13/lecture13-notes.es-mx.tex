@@ -1,0 +1,660 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+
+\renewcommand{\notetitle}{Lecture 13: Capacidades emergentes de los modelos de lenguaje grandes y Scaling}
+\renewcommand{\noteauthors}{Elaborado a partir de la conferencia de Jason Wei, las diapositivas oficiales, subtítulos hechos por personas y los artículos originales}
+\renewcommand{\notedate}{CS25 V2 · versión reescrita source-first de 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{Clase: 2023-01-24; publicación: 2023-05-21}
+\renewcommand{\videoduration}{1:07:48}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=tVtOevLrt5U}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.94\textwidth]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\newcommand{\videofigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.94\textwidth]{images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\begin{document}
+\makecscover
+
+\section{Auditoría de fuentes y mapa de lectura: qué responde realmente esta clase}
+
+Esta clase se grabó el 24 de enero de 2023. Jason Wei conecta, mediante una cadena didáctica continua, dos temas de investigación que entonces acababan de formarse. Primero: ¿por qué la language-model loss puede disminuir de forma suave con la escala, mientras que ciertas capacidades en tareas parecen surgir de golpe, como si cruzaran un umbral? Segundo: ¿por qué la chain-of-thought (CoT, cadena de pensamiento) no funciona en todos los modelos, sino que produce una ganancia significativa solo cuando el modelo ya tiene suficiente capacidad básica? En esta reescritura, las 37 páginas oficiales de Google Slides son el eje visual. Las páginas 1--36 contienen material didáctico, y la página 37 es solo de agradecimientos. La comparación en vivo en OpenAI Playground entre las respuestas sin CoT y con CoT se recuperó extrayendo fotogramas exactos de la grabación oficial.
+
+\lecturefigure{slide-01.jpg}{Tema de la clase: Scaling unlocks emergent abilities in language models}{Página 1 de las diapositivas oficiales}
+
+La palabra ``unlock'' del título es importante. No afirma que el número de parámetros cree por sí mismo un módulo misterioso. Lo que dice es que, cuando el modelo, los datos, el cómputo de entrenamiento y la forma de uso entran juntos en cierta región, empiezan a ser medibles capacidades que antes no se veían en las métricas de la tarea. Conviene leer esta clase como un curso sobre «cómo interpretar curvas» y no tomar ``emergence'' como un término de mercadotecnia.
+
+\lecturefigure{slide-02.jpg}{Ruta de la clase: capacidades emergentes, U-shaped scaling, CoT, BIG-Bench, razonamiento entre idiomas y self-consistency}{Página 2 de las diapositivas oficiales}
+
+Las diapositivas tratan primero la relación entre la escala del preentrenamiento y la capacidad en tareas, y después pasan a las intervenciones de razonamiento en prompting-time. Las dos partes no son reseñas paralelas. La CoT es precisamente un caso clave: muestra que un método puede ser inútil, o incluso perjudicial, en modelos pequeños y, en cambio, abrir nuevas regiones de tareas en modelos grandes. La self-consistency muestra además que aumentar el presupuesto de muestreo durante la inferencia también tiene un umbral de escala.
+
+\begin{importantbox}{La pregunta central de esta clase}
+Dada una curva de escala del modelo contra desempeño, ¿cómo distinguimos entre una mejora suave, un umbral de medición, un cambio real de mecanismo y la ganancia que aportan las técnicas de prompting? Más aún, si los datos, el postentrenamiento, la metric y el inference compute pueden desplazar la curva, ¿qué magnitud debe ir en el eje horizontal?
+\end{importantbox}
+
+\teachervoice{Al inicio, el ponente subraya que una de las razones por las que este trabajo es importante es que investigadores de Google, DeepMind y Stanford construyeron un marco de observación común. Ante todo, es un lenguaje que permite el diálogo entre distintos modelos, tareas y equipos, y no una ley natural sobre un umbral fijo de parámetros.}
+
+\subsection{Límites de la evidencia y principios de la reescritura}
+
+Estas notas reconstruyen estrictamente la argumentación anterior a la fecha de la clase. La página oficial del curso recomienda tres artículos: Emergent Abilities, Chain-of-Thought Prompting y Scaling Instruction-Finetuned Language Models. Las diapositivas también usan directamente resultados de primera mano como scaling laws, BIG-Bench, BIG-Bench Hard, multilingual CoT y self-consistency. El debate que surgió más adelante en 2023 sobre si «la emergencia es un metric artifact» tiene valor para la investigación, pero no forma parte del contenido de la clase del 24 de enero, así que no se presentará retroactivamente como conclusión del ponente en ese momento.
+
+\begin{warningbox}{El material histórico no debe reescribirse con información posterior}
+En esta clase, ``emergent'' es un término operativo: los modelos pequeños quedan cerca del azar en la metric elegida y los modelos grandes lo superan con claridad. No equivale automáticamente a que haya aparecido dentro del modelo un nuevo circuito discreto, ni demuestra que exista una relación causal única entre el umbral y los parámetros del modelo. Estas notas conservan la evidencia presentada en clase y, al mismo tiempo, señalan con claridad las limitaciones que introducen la metric, los datos y la familia de modelos.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Al leer las gráficas que siguen, hay que tener presentes tres preguntas: qué es exactamente el eje horizontal; si el eje vertical tiene una baseline aleatoria o humana; y si el punto de inflexión de la curva proviene de la capacidad del modelo, la calidad de los datos, el postentrenamiento, el prompt o de la acción conjunta de estos factores con la metric. Todos los juicios posteriores sobre «emergencia» deben volver a estas tres preguntas.
+\section{Scaling Laws suaves y capacidades de tarea no suaves}
+
+La sección anterior fijó los límites de la evidencia; esta sección establece la comparación más básica. La held-out loss de los modelos de lenguaje suele seguir una power law suave en función del cómputo, los datos y los parámetros; en cambio, las métricas de tarea que de verdad interesan al usuario pueden mantenerse en chance level durante un intervalo muy largo antes de subir con rapidez. Ambas curvas pueden ser válidas al mismo tiempo, porque difieren en el objeto que miden, en la escala y en la forma de aplicar el umbral.
+
+\subsection{Primero el mapa del artículo, después cada curva}
+
+Las diapositivas muestran primero la portada del artículo y la lista de tareas para recordar al lector que la ``emergence'' no se generaliza a partir de un caso vistoso, sino que es un catálogo de fenómenos reunido a lo largo de varias familias de modelos, few-shot tasks y prompting techniques. El catálogo por sí solo no demuestra un mecanismo unificado, pero sí plantea preguntas de comparación reutilizables.
+
+\lecturefigure{slide-03.jpg}{Emergent Abilities of Large Language Models: el artículo y el catálogo de capacidades}{Diapositivas oficiales, página 3; Wei et al., TMLR 2022}
+
+Al leer esta figura, conviene distinguir primero entre «catalog» y «theory». El artículo reúne los fenómenos de umbral en tareas de arithmetic, symbolic manipulation, language understanding y otras, así como ciertas técnicas de prompting que solo funcionan en modelos más grandes; no ofrece una teoría cerrada capaz de predecir todos los umbrales directamente a partir de los parámetros y de la composición de los datos.
+
+\subsection{Scaling law: lo predecible es la loss promedio}
+
+La conclusión típica de las scaling laws es que, cuando las demás condiciones están controladas, la test loss disminuye aproximadamente según una ley de potencias en función de los parámetros del modelo $N$, el número de tokens de entrenamiento $D$ o el cómputo de entrenamiento $C$. En la clase se usan los tres grupos de gráficas de Kaplan et al. para establecer una línea base «suave y extrapolable», y luego se define la emergencia como el cambio a nivel de tarea que las curvas de los modelos pequeños no pueden revelar directamente. Primero hay que entender cómo cambia el error de predicción promedio; solo así se evita interpretar el abrupt-looking score de algún benchmark posterior como una contradicción con el loss scaling.
+
+\lecturefigure{slide-04.jpg}{Mejora predecible de la loss al crecer el modelo, los datos y el cómputo}{Diapositivas oficiales, página 4; Kaplan et al., 2020}
+
+\begin{knowledgebox}{Lectura de la figura: qué dicen las tres curvas de scaling}
+Los ejes horizontales representan, respectivamente, compute, dataset size y parameter count; el eje vertical es la held-out language-model loss. Primero, compare la tendencia rectilínea global en coordenadas log--log, no un punto aislado; segundo, observe que se trata del error de next-token prediction promediado sobre la distribución, no de la exactitud en una tarea discreta; por último, una loss baja indica que el modelo predice mejor la distribución de los datos, pero no nos dice directamente si supera la random baseline de una tarea determinada.
+\end{knowledgebox}
+
+El cómputo de entrenamiento suele expresarse con una relación aproximada:
+\[
+C \propto N D,
+\]
+donde $C$ son las floating-point operations (FLOPs) del preentrenamiento, $N$ es el número de parámetros que intervienen en los cálculos hacia adelante y hacia atrás, y $D$ es el número de tokens de entrenamiento. La constante de proporcionalidad depende de la estructura del Transformer, la longitud de secuencia, si se repiten los datos de entrenamiento y los detalles de implementación; por ello no es una contabilidad exacta, sino solo una explicación de por qué, en una familia de modelos con $D$ fijo, el número de parámetros y los FLOPs de entrenamiento pueden dar ejes horizontales similares.
+
+\teachervoice{Al inicio de la clase, por un problema al compartir la pantalla, se repitió tres veces la misma conclusión: la mejora de la loss es predecible, y la emergence de la que trata esta sesión es precisamente el cambio en las tareas que resulta difícil de predecir si solo se observan modelos pequeños. Este pequeño incidente dejó, de hecho, muy clara la diferencia entre ambos tipos de evidencia.}
+
+\subsection{De la intuición física a una definición medible}
+
+La intuición científica de ``More is Different'' ayuda a entender por qué un cambio cuantitativo puede producir un cambio cualitativo, pero la investigación en modelos de lenguaje necesita una operational definition reproducible. De lo contrario, cualquier salida sorprendente podría llamarse emergencia a posteriori, y el concepto perdería su valor comparativo.
+
+\lecturefigure{slide-05.jpg}{La emergence en la ciencia: los cambios cuantitativos dan lugar a cambios cualitativos}{Diapositivas oficiales, página 5; Anderson 1972 y Jacob Steinhardt 2022}
+
+En la clase se usan dos ejemplos intuitivos para ilustrar que «la escala cambia los estados alcanzables»: una pequeña cantidad de uranium y una cantidad suficientemente densa de uranium se encuentran en regímenes de reacción distintos; tampoco hay una simple diferencia lineal entre las moléculas pequeñas y el DNA en su capacidad para codificar información. La analogía solo sirve para construir la intuición y no sustituye los experimentos controlados en modelos de lenguaje, porque los parámetros, los datos y los algoritmos no son una magnitud escalar única como la masa física.
+
+\lecturefigure{slide-06.jpg}{Definición operativa de las capacidades emergentes de los grandes modelos de lenguaje y los tres ejes de scale}{Diapositivas oficiales, página 6; Wei et al., 2022}
+
+\begin{importantbox}{Definición operativa}
+Si una ability no se detecta en modelos más pequeños y sí se detecta en modelos más grandes, se le llama emergent ability. Para la few-shot classification, en la clase se concreta además «no detectada» como cercana a la random accuracy, y «detectada» como significativamente superior a la random accuracy. Esta definición depende de la tarea, el prompt, la metric, la baseline y la familia de modelos que se compara.
+\end{importantbox}
+
+\begin{warningbox}{No sustituya el eje horizontal por «inteligencia»}
+Los training FLOPs, el número de parámetros y la cantidad de datos de entrenamiento son tres ejes de recursos distintos. Aunque estén muy correlacionados dentro de una misma familia de modelos, ninguno de ellos puede llamarse directamente intelligence. La calidad de los datos, la token mixture, la architecture, el optimizer y el post-training pueden modificar la capacidad efectiva de modelos con el mismo número de parámetros.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Una scaling law suave describe el error de predicción promediado sobre la distribución; una emergent-ability plot describe si una tarea concreta supera la baseline en una metric concreta. La primera puede mejorar de forma continua mientras la segunda permanece estancada durante mucho tiempo, porque la exactitud en la tarea puede manifestarse solo cuando varias subhabilidades alcanzan una confiabilidad mínima.
+\section{Umbral few-shot, Inverse Scaling y U-shaped Scaling}
+
+Con la definición operativa en mano, el siguiente paso no es buscar de inmediato un mecanismo misterioso, sino aprender a leer las figuras. El few-shot prompting coloca varios exemplar de input--output en el contexto para que un frozen language model siga prediciendo la respuesta; si el modelo pequeño solo adivina y el grande puede aprovechar los exemplar para resolver la tarea, se tiene lo que en clase se llama few-shot emergence.
+
+\subsection{Cómo el few-shot prompting se convierte en un experimento medible}
+
+El experimento requiere definir con claridad el prompt, el input no visto, la target label y el chance baseline. Si la exactitud aleatoria de una tarea de clasificación binaria es $0.5$, que un modelo pequeño quede alrededor de $0.5$ no prueba que «no entienda nada», pero al menos indica que la interface actual no convierte su conocimiento en un desempeño utilizable; solo cuando el modelo grande supera de forma sostenida el baseline puede decirse que la capacidad es medible bajo esa interface. Dicho de otro modo, juzgar una capacidad no es la impresión subjetiva que deja leer una salida del modelo, sino aplicar el mismo elicitation procedure a una serie de scale checkpoints, compararlos y comprobar si la mejora rebasa lo que pueden explicar el ruido de muestreo, el desbalance de clases y la elección fortuita del prompt.
+
+\lecturefigure{slide-07.jpg}{Definición de emergencia en una few-shot prompted task}{Diapositivas oficiales, p. 7; Wei et al., 2022}
+
+Para una clasificación balanceada de $K$ clases, puede usarse como apoyo para comparar el chance-normalized gain:
+\[
+G_{\mathrm{chance}}=\frac{a-1/K}{1-1/K},
+\]
+donde $a$ es la exactitud y $1/K$ es la línea base aleatoria. $G_{\mathrm{chance}}=0$ significa que no se supera el azar y $G_{\mathrm{chance}}=1$ significa la calificación perfecta. Facilita observar «cuánto se supera el chance» entre tareas con distinto número de clases, pero no elimina la prompt sensitivity ni la varianza de las muestras.
+
+\lecturefigure{slide-08.jpg}{Curvas de few-shot emergence en varias tareas}{Diapositivas oficiales, p. 8; Wei et al., 2022}
+
+\begin{knowledgebox}{Lectura de la figura: primero el baseline, luego el punto de inflexión}
+En cada gráfica pequeña, el eje horizontal es el número de FLOPs de entrenamiento o el tamaño del modelo, y el vertical es la metric de cierta tarea. Primero, ubica el random baseline; segundo, observa si los puntos de los modelos pequeños oscilan alrededor del baseline; tercero, determina si el modelo grande supera el baseline en varios puntos consecutivos, y no solo en un punto aislado que podría ser ruido; cuarto, compara si el punto de inflexión coincide entre distintas familias de modelos. Lo «repentino» describe una curva de tarea con muestreo escaso; no significa que la representación interna se genere instantáneamente entre dos checkpoint contiguos.
+\end{knowledgebox}
+
+\teachervoice{El ponente explica estas figuras eje por eje: el horizontal es la escala, el vertical es el desempeño, y la línea punteada o el valor conocido es el nivel aleatorio. Lo que se enfatiza en clase no es «ver la curvatura a simple vista», sino el criterio de que el modelo pequeño no supera el azar y el grande empieza a superarlo de forma estable.}
+
+\subsection{Dos tareas concretas: pruebas de conocimiento y transcripción fonética}
+
+Las gráficas pequeñas y abstractas hacen que el lector pase por alto las task mechanics, por lo que las diapositivas presentan a continuación dos ejemplos más concretos. Uno es un conjunto de preguntas de opción múltiple de varias disciplinas; el otro consiste en convertir oraciones en inglés al International Phonetic Alphabet (IPA, Alfabeto Fonético Internacional). Ambos exigen que el modelo transforme los ejemplos del contexto en un nuevo formato de salida.
+
+\lecturefigure{slide-09.jpg}{Fenómeno de umbral few-shot en preguntas de opción múltiple de varias tareas}{Diapositivas oficiales, p. 9; datos de Hendrycks et al., 2020}
+
+En este tipo de benchmark, la raw accuracy mezcla conocimiento, comprensión del enunciado, comparación de opciones y formato de salida. Si el modelo pequeño no ejecuta de forma estable cualquiera de estos pasos, la calificación total queda cerca del azar; el aumento de escala puede hacer que varios pasos se vuelvan «suficientemente confiables» al mismo tiempo, lo que produce un punto de inflexión notorio en la aggregate metric. La figura por sí sola no nos dice qué paso mejora primero.
+
+\lecturefigure{slide-10.jpg}{Comportamiento emergente en la tarea de transcripción del inglés al IPA}{Diapositivas oficiales, p. 10; BIG-Bench}
+
+El ejemplo del IPA muestra un espacio de salida de baja frecuencia: la entrada es una oración común en inglés, pero el objetivo contiene secuencias de símbolos fonéticos que rara vez se le pide al modelo generar conforme a reglas. Al leer la figura conviene separar «si reconoce la intención de la tarea», «si domina la correspondencia de fonemas» y «si puede producir caracteres especiales de forma estable»; que la exactitud de la tarea cruce el umbral solo indica que la cadena completa por fin es utilizable, lo cual no equivale a que cada subcapacidad nazca al mismo tiempo.
+
+\subsection{Por qué la inverse scaling puede ser solo la primera mitad de la curva}
+
+Si solo se observa que el small model supera al medium model, es fácil concluir que «seguir aumentando la escala lo hará cada vez peor». En clase se usa un ejemplo deliberately provocative de selección de palabras para mostrar que, al crecer, el modelo puede reproducir con mayor fidelidad las asociaciones comunes de la distribución de entrenamiento y, por ello, alejarse primero del objetivo de la tarea; al seguir creciendo, una instruction/context understanding más sólida puede revertir de nuevo la tendencia.
+
+\lecturefigure{slide-11.jpg}{Inverse scaling can become U-shaped}{Diapositivas oficiales, p. 11; Wei, Tay, and Le, 2022}
+
+\begin{knowledgebox}{Lectura de la figura: tres tramos para explicar la U-shape}
+El small model, el medium model y el large model de la figura no deberían recibir solo la etiqueta de «bueno/malo». En el primer tramo, es posible que el modelo aún no haya aprendido un prior fuerte; en el segundo, el prior se vuelve fuerte, pero el control de la tarea es insuficiente; en el tercero, la context sensitivity, el instruction following o capacidades de composición de nivel superior alcanzan al prior. La verdadera conclusión didáctica es que, mientras la curva no cubra escalas mayores, no debe extrapolarse una pendiente negativa local como si fuera una ley permanente.
+\end{knowledgebox}
+
+\begin{warningbox}{Los checkpoint escasos generan dramatismo visual}
+Si el eje horizontal tiene solo tres o cuatro modelos, el punto mínimo de la U-shape y el «umbral» solo pueden ubicarse de manera aproximada. Distintos prompt, seed, metric o particiones de datos también pueden desplazar la curva. La formulación correcta es «se observó una inversión de tendencia en la familia de modelos y la configuración evaluadas», y no «toda inverse scaling acabará resolviéndose con la escala».
+\end{warningbox}
+
+\subsection{Emergent prompting technique: el método también tiene un umbral}
+
+Lo anterior trata de la task ability; después, las diapositivas desplazan la perspectiva hacia la intervention: un mismo método de RLHF o de prompting puede no aportar ganancia positiva en un modelo pequeño y mostrar delta solo en uno grande. Por lo tanto, la eficacia de un método no puede validarse únicamente en un modelo pequeño y barato para luego extrapolarse sin más.
+
+\lecturefigure{slide-12.jpg}{Una intervención puede tener ganancia negativa en un modelo pequeño y volverse positiva en uno grande}{Diapositivas oficiales, p. 12; Wei et al., 2022}
+
+\begin{knowledgebox}{Lectura de la figura: se compara el delta dentro de una misma escala}
+Primero compara el baseline con la intervention en cada escala, en lugar de comparar solo las puntuaciones absolutas de los extremos izquierdo y derecho. En el modelo pequeño, la línea naranja queda por debajo de la azul, lo que indica que la intervención ocupa capacidades de representación u optimización que el modelo aún no tiene; en el modelo grande, la línea naranja supera a la azul, lo que indica que la misma intervención por fin puede aprovechar una base capability más fuerte. Este ejemplo también recuerda que hay que distinguir entre la escala de preentrenamiento, el prompting y el weight-changing post-training.
+\end{knowledgebox}
+
+\teachervoice{Un estudiante pregunta si todos estos modelos pasaron por instruction fine-tuning, y el ponente responde con claridad que este conjunto de figuras de base-model emergence no aplicó instruction fine-tuning. Después usa el RLHF para explicar que probar un método solo en modelos pequeños y observar que falla no basta para demostrar que tampoco funcione en modelos más grandes.}
+
+\subsection{Resumen de la sección}
+
+La few-shot emergence es un fenómeno a nivel de tarea relativo al chance baseline; la tendencia negativa local de la inverse scaling puede revertirse a mayor escala; y una intervention de prompting o de post-training también puede tener su propio umbral de capacidad. Los tres puntos se oponen a un error común: extrapolar linealmente a todo el intervalo de escalas a partir de experimentos con un número limitado de modelos pequeños.
+\section{Por qué se mueve el umbral: datos, posentrenamiento y eje de la métrica}
+
+Si se entiende la emergence como un disparador ligado a un número fijo de parámetros, no es posible explicar por qué distintas familias de modelos cruzan el umbral en momentos diferentes en la misma tarea. Esta sección sigue el orden de las diapositivas para desglosar tres mecanismos de desplazamiento: mejores datos pueden hacer que una capacidad aparezca antes; un fine-tuning dirigido puede trasladar a modelos más pequeños una conducta ya descubierta; y usar la loss o la perplexity (perplejidad, es decir, la exponencial de la held-out cross-entropy, la entropía cruzada) como eje horizontal puede reinterpretar «distinto tamaño» como «distinta calidad efectiva».
+
+\subsection{La frontera de capacidades no es una línea vertical fija}
+
+Las diapositivas usan una frontera de capacidades dibujada a mano para imaginar el espacio de tareas como una región que crece con la escala del modelo. La línea punteada de la figura es solo una posición de observación; la zona oscura representa las tareas que los modelos más pequeños no pueden resolver y los más grandes sí, y la zona blanca, las tareas que los modelos actuales todavía no resuelven; no es una 100B boundary dictada por el universo. Este diagrama conceptual responde a «cómo se expande el conjunto de capacidades», no anuncia para cada tarea un umbral de parámetros inamovible; por eso debe leerse junto con la evidencia posterior sobre data, fine-tuning y model-quality.
+
+\lecturefigure{slide-13.jpg}{Esquema dibujado a mano de la escala de los modelos de lenguaje y la región de tareas alcanzables}{Diapositivas oficiales, página 13; Wei et al., 2022}
+
+\begin{knowledgebox}{Lectura de la figura: explicación en clase de los colores y la zona blanca}
+La zona azul oscuro representa las tareas que los modelos pequeños ya pueden realizar; las nuevas franjas de color representan las emergent abilities que solo se alcanzan al rebasar la escala actual; la zona blanca de la esquina superior derecha no es «irresoluble en teoría», sino aún no resuelta por los modelos actuales. Un estudiante preguntó si la zona blanca depende necesariamente de 100B parámetros, y el ponente respondió con claridad: el umbral es solo una observación sobre los modelos existentes, y mejores data, architecture y algorithm pueden perfectamente desplazar la frontera hacia la izquierda.
+\end{knowledgebox}
+
+\begin{importantbox}{Descubrir una capacidad y comprimirla son dos problemas distintos}
+Los modelos grandes se usan a menudo como capability discovery engine: revelan qué conductas pueden existir en un sistema lo bastante general. Una vez que una conducta se describe con claridad, los investigadores pueden recopilar o generar datos dirigidos y, mediante fine-tuning, distillation o herramientas, lograr que un modelo más pequeño la aprenda. Lo primero enfrenta unknown unknowns; lo segundo, objetivos conocidos.
+\end{importantbox}
+
+\subsection{Better data: evidencia correlacional y evidencia controlada}
+
+La clase compara primero LaMDA, GPT-3 y PaLM, y observa que en PaLM cierta capacidad aparece con menos parámetros. La running hypothesis del ponente es que PaLM tiene mejores datos, pero él mismo reconoce de inmediato que el costo del preentrenamiento a gran escala impide hacer una ablación completa de las diferencias entre modelos. Por lo tanto, la comparación entre familias de modelos aporta indicios, pero no puede demostrar por sí sola que los datos sean la única causa.
+
+\lecturefigure{slide-14.jpg}{Mejores datos de entrenamiento pueden hacer que una capacidad aparezca en modelos más pequeños}{Diapositivas oficiales, página 14; Wei et al., 2022}
+
+\begin{warningbox}{La comparación entre familias de modelos no es una prueba causal sobre los datos}
+PaLM y LaMDA/GPT-3 difieren a la vez en data mixture, architecture, tokenizer, optimization y compute allocation. El ponente llama a la calidad de los datos la hipótesis principal, pero no afirma haber realizado una ablation controlada. Una lectura de la figura de calidad debe señalar tanto el observed shift como la causal uncertainty.
+\end{warningbox}
+
+Para obtener evidencia causal más sólida, la siguiente figura pasa a un experimento pequeño y controlable: se fijan la escala del modelo y la mayor parte del corpus de entrenamiento, se modifica solo la frecuencia de aparición de ciertos verb en el conjunto de entrenamiento, y luego se observa el subject--verb agreement error. Aquí el eje horizontal se acerca más a la variable que realmente se manipula.
+
+\lecturefigure{slide-15.jpg}{Experimento controlado: la in-domain verb frequency reduce los errores gramaticales}{Diapositivas oficiales, página 15; Wei et al., 2022}
+
+\begin{knowledgebox}{Lectura de la figura: la correlación en modelos grandes y la ablación en modelos pequeños se complementan}
+El eje horizontal es la frecuencia del verb objetivo en los datos de entrenamiento y el eje vertical es el error rate; a medida que aumenta la in-domain exposure, el error disminuye. Este toy result no basta para explicar toda la emergence de PaLM, pero demuestra que «con compute, model size y el resto de los datos aproximadamente fijos, los datos relevantes para la tarea pueden desplazar la curva de capacidad». Esto da un respaldo mecánicamente creíble a la comparación entre modelos grandes.
+\end{knowledgebox}
+
+\teachervoice{En la sesión de preguntas, un estudiante insistió en si la diferencia de PaLM proviene de los datos o de la arquitectura. El ponente no inventó una respuesta limpia; explicó que el preentrenamiento a gran escala no permite realizar de forma económica el conjunto completo de ablaciones, y luego usó el experimento de verb-frequency, más pequeño y controlable, para mostrar la parte que sí puede demostrarse.}
+
+\subsection{Fine-tuning: trasladar una desired behavior conocida a modelos pequeños}
+
+Cuando los investigadores ya saben que el objetivo es instruction following, step-by-step reasoning o cierto estilo, pueden optimizar directamente esa conducta. Las diapositivas se apoyan en resultados de RLHF / instruction-following para mostrar que un modelo pequeño, tras un posentrenamiento dirigido, puede superar en la distribución objetivo a un modelo más grande con un posentrenamiento débil.
+
+\lecturefigure{slide-16.jpg}{El fine-tuning orientado a una desired behavior puede hacer que un modelo pequeño supere a un base model más grande}{Diapositivas oficiales, página 16; resultados relacionados con InstructGPT}
+
+\begin{knowledgebox}{Lectura de la figura: el tamaño del modelo no es la única clave de ordenamiento}
+Primero se compara la escala de los modelos con una misma training recipe; luego, los métodos de post-training con una misma escala de modelo. El pequeño RLHF/instruction-tuned model marcado en verde supera a un base model más grande en la métrica de preferencia humana, lo que indica que la conducta objetivo puede inducirse antes mediante supervisión de alta densidad de información; pero esto no significa que el modelo pequeño haya adquirido el conjunto completo de capacidades del modelo grande en todas las tareas desconocidas.
+\end{knowledgebox}
+
+Un estudiante preguntó si es posible hacer distill de una emergent ability a un modelo pequeño, y el ponente respondió que sí: el modelo grande puede generar datos y el modelo pequeño se somete después a fine-tune con esos datos. La limitación es que los investigadores deben saber de antemano qué conducta generar; las capacidades aún no descubiertas no pueden incluirse una por una como objetivos de entrenamiento.
+
+\subsection{¿El eje horizontal debe ser parámetros, FLOPs o perplexity?}
+
+El número de parámetros y los FLOPs de entrenamiento facilitan la comparación pública, pero son solo indicadores indirectos de la model quality. Si los datos y los algoritmos mejoran de forma notable, un modelo más pequeño puede tener una held-out loss menor y acercarse más, en las downstream task, a un modelo antiguo más grande. Por eso, en clase se propone poner la perplexity o la dev-set loss en el eje horizontal, para observar si la capacidad en las tareas varía de manera más consistente con la calidad predictiva efectiva.
+
+\lecturefigure{slide-17.jpg}{Distintos ejes de scale: parámetros, FLOPs de entrenamiento, loss y perplexity}{Diapositivas oficiales, página 17; Wei et al., 2022}
+
+\begin{knowledgebox}{Concepto previo: cross-entropy y perplexity}
+Sea $x_t$ el token real y $p_\theta(x_t\mid x_{<t})$ la probabilidad condicional que asigna el modelo. La cross-entropy promedio es
+\[
+H=-\frac{1}{T}\sum_{t=1}^{T}\log p_\theta(x_t\mid x_{<t}),
+\]
+y la perplexity se define como
+\[
+\mathrm{PPL}=\exp(H).
+\]
+Intuitivamente, la PPL puede entenderse como el «número efectivo de opciones equiprobables» que enfrenta el modelo en cada paso; por lo general, cuanto menor, mejor. Pero depende del tokenizer, del evaluation corpus y del domain mismatch, por lo que no puede compararse sin condiciones entre configuraciones arbitrarias ni sustituye a la exactitud en la tarea.
+\end{knowledgebox}
+
+\begin{warningbox}{La perplexity no es una puntuación global de comprensión}
+Predecir mejor el siguiente token en WikiText-103 no garantiza mayor fiabilidad en medicina, código o razonamiento de varios pasos. El valor de poner la PPL en el eje horizontal es reducir la confusión de «mismo número de parámetros, pero distinta calidad de entrenamiento»; sigue siendo un proxy promedio sobre una held-out distribution específica.
+\end{warningbox}
+
+\teachervoice{En clase, el ponente explicó la perplexity como la capacidad de next-word prediction sobre texto held-out, y reconoció que, si en el futuro modelos pequeños alcanzan una perplexity menor con mejores datos y algoritmos, las gráficas de emergence trazadas por número de parámetros y por calidad del modelo podrían diferir de forma notable.}
+
+\subsection{El cambio sociológico de que few-shot supere al fine-tuning}
+
+Cuando un pretrained model general, con solo unos cuantos exemplar en el contexto, puede superar a ciertos state-of-the-art system entrenados para una sola tarea, el flujo de trabajo de investigación cambia también: los equipos ya no necesitan recopilar primero miles de labels para cada tarea, sino que pueden probar antes la interface de un modelo unificado. Ese es el sentido de lo que las diapositivas llaman ``surprising finetuning''.
+
+\lecturefigure{slide-18.jpg}{Al aumentar la escala, el few-shot prompting supera en varias tareas a los fine-tuned baseline anteriores}{Diapositivas oficiales, página 18; Wei et al., 2022}
+
+\begin{knowledgebox}{Lectura de la figura: qué significa rebasar la baseline verde}
+La línea verde es el task-specific fine-tuned result previo, y los puntos azules son el few-shot pretrained model a medida que cambia la escala. Rebasarla solo demuestra que, con ese benchmark, ese prompt y esa definición de costo, la accuracy del modelo general supera a la baseline anterior; no demuestra que el fine-tuning haya perdido valor, porque un sistema en producción también debe considerar latency, serving cost, privacy, estabilidad y una gran cantidad de in-domain labels.
+\end{knowledgebox}
+
+En clase se distinguió con claridad este punto de la ingeniería de producto. Un general model orientado a tareas desconocidas busca que un solo conjunto de pesos cubra una amplia gama de capacidades y admite un cómputo costoso; una tarea conocida como Google Translate cuenta con abundantes datos paralelos y restricciones estrictas de latency, por lo que suele ser más adecuada para un modelo pequeño especializado. ``Más general'' y ``más adecuado para el despliegue'' no son el mismo ordenamiento.
+
+\subsection{Resumen de la sección}
+
+El umbral de una capacidad puede desplazarse mediante better data, targeted fine-tuning, distillation, architecture y metric choice. El número de parámetros es solo la coordenada más visible, no la única causa. La distinción más importante para la investigación es esta: la correlación entre familias de modelos aporta el fenómeno, la ablation controlada a pequeña escala aporta indicios causales y las restricciones de producción determinan la elección final.
+\section{Límites de la evidencia sobre la emergence y sus implicaciones de ingeniería}
+
+En este punto, las diapositivas dejan de añadir casos y pasan a resumir qué puede respaldar la emergence y qué no. Puede mostrar que seguir escalando los modelos quizá abra regiones de tareas que los experimentos con modelos pequeños no pueden predecir. También puede recordar a la investigación en seguridad que preste atención a posibles undesirable capabilities. Sin embargo, todavía no permite predecir umbrales precisos, describir el límite a escala infinita ni establecer la proporción óptima de la arquitectura.
+
+\lecturefigure{slide-19.jpg}{Resumen de la emergence: escala, datos, fine-tuning y preguntas abiertas}{Diapositiva oficial 19; Wei et al., 2022}
+
+\begin{knowledgebox}{Lectura de la figura: separar el resumen en observaciones, inferencias y preguntas abiertas}
+La observación es que varias few-shot abilities y prompting techniques muestran un comportamiento de umbral en las familias de modelos evaluadas. La inferencia de ingeniería es que el límite de un método no debe juzgarse solo con modelos pequeños. Al mismo tiempo, conviene explorar cómo los datos y el posentrenamiento pueden desplazar ese límite hacia la izquierda. Las preguntas abiertas incluyen cómo predecir capacidades nuevas, cómo elegir el eje horizontal correcto, cómo hacer ablaciones confiables con el costo de un preentrenamiento a gran escala y si las undesirable abilities también podrían aparecer de forma similar.
+\end{knowledgebox}
+
+\teachervoice{El ponente llama a la emergence un implicit argument para seguir con el scaling, porque una expansión costosa puede traer capacidades difíciles de enumerar de antemano. También afirma con claridad que predecir emergencias futuras sigue siendo difícil y que no conoce un método suficientemente general. No se trata de sostener que «la escala lo resuelve todo», sino de un argumento de investigación sobre beneficios y riesgos desconocidos.}
+
+\subsection{Por qué el preentrenamiento a gran escala difícilmente produce una teoría limpia}
+
+Un estudiante pregunta cómo deberían repartirse los nuevos parámetros entre depth, attention heads y embedding width. El ponente responde que en ese momento no existía una principled recipe; muchas decisiones dependían de la capacidad de las TPU y de la experiencia de ingeniería. Además, una pretraining ablation completa es extremadamente costosa. Por eso suelen verse las curve de unas pocas model family, pero falta el control de una sola variable que exigiría un diseño experimental ideal.
+
+\begin{warningbox}{«No haber hecho ablaciones» no es «un problema menor»}
+Si cambian al mismo tiempo data, tokenizer, architecture y optimizer, el desplazamiento de un umbral solo puede atribuirse a la recipe completa. Reducirlo a «más parámetros hacen que aparezca la capacidad» es una atribución excesiva. Los apuntes, las revisiones de artículos y los comunicados de producto deben distinguir entre las relaciones observables y los mecanismos no verificados.
+\end{warningbox}
+
+\subsection{Los Benchmark también envejecen}
+
+Algunas tareas de BIG-Bench se mantuvieron flat con GPT-3/LaMDA. Cuando apareció PaLM, decenas de ellas superaron el baseline. Incluso durante la clase se descubrió que ChatGPT quizá ya había resuelto una tarea de la lista. Por eso, un Benchmark no es una escala estática de dificultad. Las mejoras de los modelos, los métodos de prompting y la contaminación de datos pueden hacer que una etiqueta «hard» pierda validez rápidamente.
+
+\begin{importantbox}{Una lista reutilizable para auditar afirmaciones sobre emergence}
+\begin{enumerate}
+  \item ¿Se reporta un baseline de chance, human o prior-system?
+  \item ¿Se cubren model scales suficientemente densas y se reportan barras de error o varias seed?
+  \item ¿Cambian al mismo tiempo data, architecture y post-training entre familias de modelos?
+  \item ¿La metric es continua o convierte una calidad continua en un umbral mediante exact match?
+  \item ¿Se pueden reproducir los resultados con un prompt nuevo, otra task split y una familia de modelos independiente?
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La emergence es un empirical pattern que vale la pena medir, pero no es una teoría causal completa. Su uso más valioso es mostrar dónde falla la extrapolación. Un método ineficaz en modelos pequeños puede funcionar en modelos grandes, una tendencia negativa que parece estable en modelos pequeños puede invertirse y los benchmark antiguos también pueden superarse rápidamente.
+\section{Chain-of-Thought: convertir los Token de respuesta en trayectorias de razonamiento}
+
+La segunda mitad de las diapositivas pasa de «qué puede hacer el modelo» a «cómo volver utilizables las capacidades que ya tiene». Un few-shot prompt estándar solo muestra question--answer; un CoT prompt muestra question--intermediate reasoning--answer, de modo que el modelo produce una serie de token intermedios componibles antes de generar la respuesta final. Es a la vez interface design y un aumento de la sequential inference computation.
+
+\subsection{Motivación de la investigación: a una tarea compleja no se le puede dar solo medio segundo}
+
+Una tarea sencilla puede requerir apenas un label, pero una task compleja de arithmetic, symbolic reasoning o commonsense necesita conservar estados intermedios. La intuición de la clase es esta: si una persona escribe los pasos al resolver un problema, exigir a un autoregressive model que emita de inmediato un final token equivale a no darle tiempo para desplegar el cálculo.
+
+\lecturefigure{slide-20.jpg}{El artículo de Chain-of-Thought Prompting y el contexto de su demostración pública}{Diapositivas oficiales, p. 20; Wei et al., NeurIPS 2022}
+
+Esta diapositiva de transición reúne el artículo, el equipo y la presentación en Google I/O, lo que muestra que CoT ya había pasado de prototipo de investigación a la atención del público. Para estas notas, lo importante no es el escenario del anuncio, sino el interface change, muy pequeño, de la siguiente figura: si se incluye o no la reasoning path en el exemplar.
+
+\lecturefigure{slide-21.jpg}{Diferencia estructural entre standard prompting y chain-of-thought prompting}{Diapositivas oficiales, p. 21; Wei et al., 2022}
+
+\begin{knowledgebox}{Lectura de la figura: lo único nuevo es un proceso intermedio que puede imitarse}
+A la izquierda, el standard prompt solo muestra la question y la final answer, y ante un problema nuevo el modelo adivina directamente el resultado; a la derecha, el CoT prompt escribe los pasos de cálculo en la respuesta de ejemplo, así que el modelo continúa generando una reasoning path similar y después da la final answer. No se actualizan los weights ni se llama a una calculator externa; el cambio ocurre en el context y en la longitud de la generación.
+\end{knowledgebox}
+
+Desde la descomposición de probabilidad, la generación estándar de la respuesta puede escribirse como $p(a\mid q,e)$, donde $q$ es la pregunta y $e$ son los exemplars. CoT introduce una secuencia de token intermedios $z=(z_1,\ldots,z_m)$:
+\[
+p(a,z\mid q,e)=\prod_{i=1}^{m}p(z_i\mid q,e,z_{<i})\;p(a\mid q,e,z).
+\]
+La secuencia intermedia permite que el modelo escriba paso a paso en el context las multiplicaciones, las actualizaciones de estado y las subconclusiones; se trata de una intuición sobre el mecanismo, que no garantiza que los pasos textuales correspondan fielmente al cálculo interno ni que cada paso sea correcto.
+
+\begin{lstlisting}[caption={Diferencia mínima entre un few-shot prompt estándar y un CoT prompt}]
+standard = """Q: There are 15 trees and later 21. How many added?
+A: 6
+Q: 23 apples, use 20, buy 6. How many remain?
+A:"""
+
+cot = """Q: There are 15 trees and later 21. How many added?
+A: 21 - 15 = 6. The answer is 6.
+Q: 23 apples, use 20, buy 6. How many remain?
+A:"""
+\end{lstlisting}
+
+\teachervoice{El ponente compara CoT con un profesor que pide a sus alumnos ``show your work''. Más adelante añade que no es justo darle a una persona un problema difícil y exigirle la respuesta en medio segundo; los token intermedios le dan al modelo espacio para desplegar un cálculo secuencial, pero por qué los pasos en lenguaje natural resultan tan eficaces seguía siendo, en 2023, una pregunta abierta.}
+
+\subsection{Demo en vivo: el mismo problema pasa de 33 a 9}
+
+La diapositiva ``CoT demo'' del deck oficial es solo un título, por lo que hay que volver a la grabación. En vivo se usa la misma arithmetic task: una cafetería tiene 23 apples, usa 20 y compra 6 más. Sin CoT exemplars, text-davinci-001 responde directamente 33; al cambiar a un preset con derivación intermedia, el modelo escribe $23-20=3$, $3+6=9$ y llega a la respuesta correcta.
+
+\lecturefigure{slide-22.jpg}{La clase pasa de las diapositivas a la CoT demo en OpenAI Playground}{Diapositivas oficiales, p. 22}
+
+Esta diapositiva de transición, casi vacía, no contiene resultados, pero marca un cambio en la fuente de la evidencia: las dos figuras siguientes no son ilustraciones del artículo, sino el live system state de la misma clase. La comparación debe conservar model, temperature, task y prompt preset; no basta con una sola captura del caso exitoso.
+
+\videofigure{demo-no-cot-math-wrong.jpg}{Sin CoT: el modelo responde directamente 33 y no combina correctamente «usa 20, compra 6»}{Video oficial, 00:39:54}
+
+\begin{knowledgebox}{Lectura de la figura: el fallo no es simplemente una suma mal hecha}
+Los tres exemplar de arriba son question--short answer, y ante el problema nuevo el modelo mantiene el patrón de «dar directamente un número». El 33 probablemente proviene de combinar de forma errónea el 23 con parte de las variaciones; como no hay estados intermedios visibles, no podemos ubicar si el error ocurrió en la subtraction, en la addition o en la interpretación del enunciado. Este es justamente el punto ciego de diagnóstico de la only-final-answer interface.
+\end{knowledgebox}
+
+\videofigure{demo-cot-math-correct.jpg}{Con CoT: el modelo calcula primero que quedan 3, luego suma las 6 compradas y obtiene 9}{Video oficial, 00:40:17}
+
+\begin{knowledgebox}{Lectura de la figura: el acierto proviene de actualizaciones de estado verificables}
+Los exemplars del CoT preset escriben primero cada cambio de cantidad como una operación. La salida del problema nuevo conserva, en orden, la cantidad inicial, la cantidad consumida, el resto y lo añadido, así que el lector puede verificar los dos pasos locales $23-20=3$ y $3+6=9$. La figura respalda que «esta vez el prompt hizo que este modelo acertara y mostrara sus pasos», pero no demuestra que los pasos reflejen fielmente el proceso causal interno del modelo.
+\end{knowledgebox}
+
+La clase también muestra la last-letter concatenation: con el standard prompt, para ``Elon Musk'' el modelo produce `sk`; con CoT, primero toma la última letra de Elon, `n`, y la de Musk, `k`, y luego produce `nk`. Esto indica que el efecto no se limita a la arithmetic, sino que se extiende a cualquier task que pueda descomponerse en estados intermedios generables.
+
+\subsection{Por qué la ganancia de CoT también emerge con la escala}
+
+Tener pasos intermedios no garantiza que un modelo pequeño se beneficie. Un modelo pequeño puede acumular errores en una salida más larga, o simplemente no lograr abstraer la decomposition rule a partir del exemplar; un modelo grande tiene más probabilidad de generar correctamente cada paso, por lo que el delta entre CoT y standard prompting crece con la escala.
+
+\lecturefigure{slide-23.jpg}{GSM8K y StrategyQA: la ganancia de CoT aparece en modelos suficientemente grandes}{Diapositivas oficiales, p. 23; Wei et al., 2022}
+
+\begin{knowledgebox}{Lectura de la figura: comparar standard y CoT a la misma escala}
+El eje horizontal es la escala del modelo; el vertical es, respectivamente, el performance en grade-school math y en commonsense reasoning. En los modelos pequeños ambos prompt dan resultados bajos, e incluso CoT no lleva ventaja; al entrar en la región de modelos más grandes, la curva de CoT sube con claridad y supera el fine-tuned state of the art de entonces. La evidencia central es el interaction effect que crece con la escala, no solo una puntuación alta aislada del modelo más grande.
+\end{knowledgebox}
+
+\begin{warningbox}{El texto de CoT no es automáticamente una explicación confiable}
+El modelo puede llegar a la respuesta correcta y escribir pasos erróneos, o escribir pasos fluidos y terminar en una respuesta incorrecta. CoT mejora la observabilidad y el desempeño en la tarea, pero no puede tomarse directamente como mechanistic interpretability. Hace falta una verificación adicional con step verification, answer checking, counterfactual prompts o tools externas.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La esencia de CoT es que un frozen model genere token intermedios componibles antes de responder. La demo en vivo mostró la comparación sobre el mismo problema, y las curvas de GSM8K/StrategyQA mostraron la scale interaction. Es una inference interface, no una weight update; aumenta la sequential computation, pero no garantiza que la reasoning trace sea fiel ni correcta.
+\section{BIG-Bench Hard: del promedio a la heterogeneidad por tarea}
+
+Una sola demo de arithmetic puede ser simplemente cherry-pick, por eso las diapositivas pasan a BIG-Bench Hard (BBH): de BIG-Bench se seleccionan las tareas difíciles en las que los modelos de entonces quedaban por debajo del average human rater, y luego se compara de forma sistemática answer-only contra CoT. Este diseño descompone la pregunta «¿puede hacer razonamiento complejo?» en varias task mechanics, como navegación, ordenamiento, lógica y seguimiento de estado.
+
+\subsection{Cómo define el benchmark lo «hard»}
+
+La dificultad de BBH proviene de las condiciones de construcción, no de una propiedad permanente: en las tareas seleccionadas, ningún modelo superó al average human en los resultados originales de BIG-Bench. El prompt incluye task description, worked examples, options y reasoning trace; por lo tanto, lo que se evalúa es si el modelo puede inferir el algorithm a partir de la descripción en lenguaje natural y de los exemplars.
+
+\lecturefigure{slide-24.jpg}{Selección de tareas de BIG-Bench Hard y estructura del prompt con CoT}{Diapositiva 24 del material oficial del curso; Suzgun et al., 2022}
+
+\begin{knowledgebox}{Lectura de la figura: dos ejemplos que miden estados intermedios distintos}
+Navigation exige actualizar de forma continua la dirección y las coordenadas, y al final decidir si se volvió al origen; word sorting exige comparar las letras iniciales, manejar prefijos idénticos y mantener el orden de salida. Ninguna de las dos tareas es misteriosa para una persona, pero ambas requieren que el modelo mantenga un estado coherente a lo largo de varios tokens. El valor de CoT está en escribir explícitamente las actualizaciones de estado, en lugar de adivinar solo al final un yes/no o una lista.
+\end{knowledgebox}
+
+\subsection{Además del promedio, hay que ver cuántas tareas cruzan la línea humana}
+
+Si solo se reporta la aggregate accuracy, unas pocas tareas con grandes ganancias pueden ocultar muchos fracasos. Las diapositivas reportan a la vez la performance promedio y la «proporción de tareas que superan al average human rater», y muestran la heterogeneidad con un mapa de tareas en rojo y azul. Las dos metric responden, respectivamente, a «cuánto mejora el total» y «cuánto se amplía la cobertura de capacidades».
+
+\lecturefigure{slide-25.jpg}{Panorama de resultados de BBH: rendimiento promedio, número de tareas que superan al humano y mapa por tarea}{Diapositiva 25 del material oficial del curso; Suzgun et al., 2022}
+
+\begin{knowledgebox}{Lectura de la figura: primero entender el subset bias, luego la ganancia}
+BBH selecciona de origen tareas en las que los modelos anteriores quedaban por debajo del humano, así que el baseline answer-only bajo es by construction. Al agregar CoT, tanto el promedio de davinci-002 como el número de tareas que superan al average-human aumentan; el mapa rojo y azul de abajo muestra que la ganancia no es uniforme. La conclusión debe ser que CoT desbloquea la mayoría de las tareas difíciles, pero no todas, y no que «el modelo supera al humano en todo».
+\end{knowledgebox}
+
+\teachervoice{En clase se explican una por una las dos metric y se señala que el average human ronda 67, mientras que el best human es más alto. El ponente no presenta «la mayoría de las tareas supera al average human» como un nivel humano general, sino que lo restringe al conjunto de problemas, el prompt y el método de calificación de BBH.}
+
+\subsection{Scaling: el delta positivo de CoT tiene su propio umbral}
+
+La siguiente figura descompone los resultados del modelo más grande en varias escalas. Si CoT solo añadiera información al prompt, todos los modelos deberían obtener una ganancia relativa similar; sin embargo, las curvas muestran que los modelos pequeños no necesariamente obtienen un delta positivo, y solo alrededor de davinci-002 / PaLM 62B se observa un beneficio estable en el aggregate. Este scale sweep es fundamental desde el punto de vista metodológico, porque convierte un «caso de éxito en el modelo más grande» en una prueba de la interacción entre la intervention y la base capability.
+
+\lecturefigure{slide-26.jpg}{Scaling de CoT en BBH: la ganancia positiva requiere un tamaño de modelo suficiente}{Diapositiva 26 del material oficial del curso; Suzgun et al., 2022}
+
+\begin{knowledgebox}{Lectura de la figura: el delta identifica mejor que la puntuación absoluta el umbral de un método}
+En cada panel se compara no-CoT con CoT para el mismo modelo, en lugar de comparar solo las puntuaciones absolutas de modelos distintos. En los modelos pequeños, la reasoning trace puede introducir errores adicionales; solo los modelos grandes aprovechan la trace para descomponer la tarea, y entonces aparece una diferencia positiva estable. El umbral de la figura es una posición empírica para una model family y un task aggregate específicos; no debe escribirse como una regla fija de 62B para todo sistema con CoT.
+\end{knowledgebox}
+
+\subsection{Emergence: No-CoT sigue plano y la curva de CoT empieza a subir}
+
+El relato más contundente de la clase surge del contraste: la performance answer-only sigue casi flat en las escalas evaluadas, mientras que CoT hace subir de forma notable a los modelos más grandes. Aquí «desbloquear» significa que la interface permite que una capacidad composicional ya existente, pero no invocable directamente, se refleje en la metric; no demuestra que, tras el preentrenamiento, el modelo carezca por completo del conocimiento relevante.
+
+\lecturefigure{slide-27.jpg}{Emergence de CoT en BBH: answer-only se mantiene plano y CoT abre el crecimiento del rendimiento}{Diapositiva 27 del material oficial del curso; Suzgun et al., 2022}
+
+\begin{knowledgebox}{Lectura de la figura: el prompt puede cambiar la frontera de capacidad que observamos}
+Si solo se evalúa no-CoT, los investigadores podrían concluir que «seguir escalando no produce avances»; al agregar reasoning exemplars, la misma familia de modelos muestra ganancias asociadas a la escala. Esto indica que la capability evaluation no puede separarse del elicitation method. La figura respalda que «CoT eleva la capacidad medible en este escenario», pero no demuestra que toda flat curve pueda desbloquearse con un mejor prompt.
+\end{knowledgebox}
+
+\begin{importantbox}{Al evaluar la capacidad de un modelo hay que reportar también el elicitation budget}
+El modelo, el prompt, los few-shot examples, el generated-token budget, la sampling strategy y las external tools definen en conjunto una prueba de capacidad. Reportar solo el parameter count y la final accuracy lleva a registrar una interface failure como capability absence, y también oculta una inference-time search costosa bajo la idea de que «el modelo en sí es más inteligente».
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+BBH extiende CoT de un ejemplo aislado a un conjunto de tareas difíciles. El promedio, la proporción de tareas que superan al humano y el mapa por tarea muestran en conjunto ganancias heterogéneas; el scale sweep indica además que CoT es en sí una emergent prompting technique. Por ello, las curvas de capacidad deben interpretarse junto con el elicitation method.
+
+\section{Composicionalidad entre idiomas y corrección de errores con Scaling}
+
+Si CoT solo memorizara plantillas matemáticas en inglés, no debería mantener un buen desempeño en idiomas de baja frecuencia. A continuación, el material de clase usa MGSM para mostrar multilingual reasoning y después recurre a error analysis y a un task-spectrum diagram para discutir por qué scaling puede corregir al mismo tiempo errores de semantic understanding, missing steps y arithmetic mistakes.
+
+\subsection{Multilingual CoT: por qué los idiomas de baja frecuencia son una prueba exigente}
+
+MGSM traduce manualmente 250 problemas de GSM8K a diez typologically diverse languages y exige que el modelo lea el problema y razone en el idioma correspondiente. Bengali tiene una proporción muy baja en los datos de preentrenamiento; por lo tanto, si el modelo aun así resuelve la tarea, esto indica al menos que la comprensión del idioma y el razonamiento matemático pueden combinarse hasta cierto punto, y que no se trata solo de reproducir un gran número de plantillas del mismo idioma.
+
+\lecturefigure{slide-28.jpg}{Multilingual CoT: diez idiomas, Bengali de baja frecuencia y evidencia de composicionalidad}{Diapositiva 28 del material oficial; Shi et al., ICLR 2023}
+
+\begin{knowledgebox}{Lectura de la figura: no basta con ver la altura promedio de las barras}
+Primero hay que observar cómo se construye el benchmark: los mismos problemas matemáticos se traducen entre idiomas para mantener fija, en la medida de lo posible, la reasoning difficulty; después se compara la relación entre language frequency y accuracy. Que los idiomas de pocos recursos rindan mejor de lo que predeciría su frecuencia es evidencia de compositionality. Esto no significa que el desempeño sea equitativo entre todos los idiomas, ni descarta la ayuda que aportan el estilo de traducción, la tokenización y los símbolos numéricos compartidos.
+\end{knowledgebox}
+
+\teachervoice{El ponente enfatizó que Bengali ocupa una fracción mínima de los datos de preentrenamiento y, sin embargo, aparece un surprisingly good result. Lo interpretó como evidencia de que el modelo puede combinar dos habilidades, «entender Bengali» y «hacer matemáticas»; al mismo tiempo, en la sesión de preguntas reconoció que aún no hay respuesta sobre cuánto mecanismo interno comparte el razonamiento entre idiomas.}
+
+\subsection{Qué errores corrige Scaling}
+
+Decir «los modelos grandes son mejores» es demasiado burdo. El material de clase compara las salidas CoT de PaLM 62B y 540B y clasifica las mejoras en categorías de error como semantic understanding, one-step missing y arithmetic. Que varias categorías de error disminuyan simultáneamente indica que la escala no corrige solo un módulo aritmético acotado, sino que aumenta la confiabilidad en varios eslabones de la cadena de la tarea.
+
+\lecturefigure{slide-29.jpg}{De PaLM 62B a 540B: disminuyen simultáneamente varias categorías de errores de CoT}{Diapositiva 29 del material oficial; Wei et al., 2022}
+
+\begin{knowledgebox}{Lectura de la figura: la Error taxonomy es un diagnóstico, no un mecanismo completo}
+El gráfico de barras contabiliza, según una clasificación manual, las fallas del modelo más pequeño y cuántas de ellas corrige el modelo más grande. Si mejoran semantic, missing step y arithmetic, la conclusión más conservadora es que scaling tiene un efecto amplio sobre diversos observable failure modes; de ello no puede afirmarse que todas las causas internas sean las mismas, ni puede descartarse que los límites entre categorías se traslapen.
+\end{knowledgebox}
+
+\subsection{La frontera bidimensional entre complejidad de la tarea y escala del modelo}
+
+La frontera de capacidades anterior solo representaba model scale; aquí se añade task complexity. Standard prompting cubre tareas sencillas y de trayectoria corta; CoT empuja el límite hacia math word problems, symbolic reasoning y hard commonsense; seguir aumentando el tamaño del modelo amplía todavía más la región utilizable.
+
+\lecturefigure{slide-30.jpg}{Frontera de capacidades de CoT según Language-model scale y task complexity}{Diapositiva 30 del material oficial; Wei et al., 2022}
+
+\begin{knowledgebox}{Lectura de la figura: varias palancas de ingeniería empujan la frontera en conjunto}
+El eje horizontal es la escala del modelo; el eje vertical puede entenderse como el número de pasos de composición o la dificultad que exige la tarea; la región azul es lo que puede resolver un standard prompt y la región rosa es lo que agrega CoT. La frontera no se desplaza a la derecha únicamente con los parámetros: better data, fine-tuning, tools, verification y más inference compute también pueden ampliar la región. La figura es un modelo conceptual para organizar preguntas de investigación, no un diagrama de fases físico que pueda ajustarse directamente a datos.
+\end{knowledgebox}
+
+\begin{warningbox}{«Emitir más token» no equivale a «cualquier filler funciona»}
+En la sesión de preguntas se mencionó que el control de igual longitud `x x x ...` no reproduce la ganancia de CoT, y que dar primero la respuesta y luego la explicación suele funcionar peor. El cómputo adicional es parte de la intuición, pero los token intermedios deben portar información lingüística relacionada con la estructura del problema; de lo contrario, solo alargan la salida.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Multilingual CoT respalda la composición de habilidades y no la mera memorización de plantillas en inglés; error analysis muestra que scaling corrige al mismo tiempo varios tipos de fallas observables; y el task-spectrum diagram reúne la escala del modelo y la complejidad de la tarea en un mismo marco. Los tres siguen siendo evidencia de comportamiento y no deben exagerarse como la explicación definitiva de los mecanismos internos de razonamiento.
+\section{Self-Consistency: cambiar presupuesto de muestreo por confiabilidad}
+
+Una sola CoT todavía puede tomar una dirección equivocada desde el principio. Self-consistency no le pide al modelo que corrija la misma reasoning path; en cambio, muestrea varias rutas con una temperature distinta de cero y luego vota sobre la final answer. Si la respuesta correcta puede alcanzarse por varias rutas válidas y las rutas erróneas están más dispersas, el majority vote mejora la confiabilidad.
+
+\subsection{De una sola ruta a la marginalización de la respuesta}
+
+Sea $z$ la reasoning path y $a$ la final answer. Idealmente se querría comparar
+\[
+p(a\mid q)=\sum_z p(a,z\mid q),
+\]
+pero no es posible enumerar todas las $z$. Self-consistency muestrea del modelo $M$ rutas $z^{(1)},\ldots,z^{(M)}$, extrae las respuestas correspondientes $a^{(m)}$ y aproxima la respuesta más probable con el conteo empírico de votos:
+\[
+\hat a=\arg\max_a \sum_{m=1}^{M}\mathbf{1}\!\left[a^{(m)}=a\right].
+\]
+Esto se acerca más a hacer marginalization sobre la respuesta que a elegir el texto individual de mayor probabilidad.
+
+\lecturefigure{slide-31.jpg}{Self-consistency: muestrear varias rutas de CoT y votar por mayoría sobre la respuesta final}{Diapositiva 31 del material oficial del curso; Wang et al., ICLR 2023}
+
+\begin{knowledgebox}{Lectura de la figura: la diversidad de rutas y la coincidencia de respuestas deben darse a la vez}
+En la figura, un mismo problema produce varias derivaciones en lenguaje natural; algunas rutas son erróneas, pero la respuesta correcta se repite en distintas derivaciones válidas. Si la temperature es demasiado baja, todas las muestras son casi idénticas y el voto no aporta información nueva; si es demasiado alta, las rutas pierden las restricciones de la tarea y aumenta el ruido en las respuestas. La ganancia de Self-consistency proviene de un conjunto de muestras relacionadas, pero no idénticas.
+\end{knowledgebox}
+
+La temperature $T$ ajusta la next-token distribution:
+\[
+p_T(x_i)=\frac{\exp(\ell_i/T)}{\sum_j\exp(\ell_j/T)},
+\]
+donde $\ell_i$ es el logit del token. Con $T\to 0$ se aproxima a greedy decoding; una $T$ mayor aumenta la probabilidad de tokens poco probables y la diversity de las rutas. No es una simple «perilla de exactitud»: debe ajustarse junto con el sample count, la answer extraction y la task difficulty.
+
+\begin{lstlisting}[caption={Marco mínimo de implementación de Self-consistency}]
+from collections import Counter
+
+def self_consistent_answer(model, prompt, samples=16, temperature=0.7):
+    answers = []
+    for _ in range(samples):
+        trace = model.generate(prompt, temperature=temperature)
+        answers.append(extract_final_answer(trace))
+    return Counter(answers).most_common(1)[0][0]
+\end{lstlisting}
+
+\subsection{Resultados: por qué un recurso sencillo produce una ganancia grande}
+
+El material del curso compara greedy CoT con self-consistency en varios reasoning benchmarks. En clase se destaca el ejemplo de GSM8K, que pasa de alrededor de 56 a 74, para mostrar que el inference-time sampling puede lograr ganancias del mismo orden que las mejoras de entrenamiento; el costo es que cada problema requiere generar varias reasoning traces largas.
+
+\lecturefigure{slide-32.jpg}{Self-consistency mejora el rendimiento de CoT en varios benchmarks}{Diapositiva 32 del material oficial del curso; Wang et al., 2022}
+
+\begin{knowledgebox}{Lectura de la figura: detrás de la mejora de Accuracy hay un inference cost multiplicado}
+Cada grupo de barras compara greedy CoT con self-consistency. El aumento en el eje vertical indica que el voto filtró una parte de los errores a nivel de ruta, pero la comparación también debería incluir los generated tokens, la latency y el API cost. La configuración mostrada en clase podría muestrear unas 40 rutas; el expositor señala además que en muchos dataset unas 16 ya bastan para obtener buenas ganancias, y que el presupuesto óptimo varía según la tarea.
+\end{knowledgebox}
+
+\begin{warningbox}{El voto mayoritario requiere que «los errores no estén muy correlacionados»}
+Si el modelo malinterpreta sistemáticamente un concepto en cierto tipo de problema, muestrear 100 rutas puede producir 100 respuestas erróneas parecidas. Self-consistency es más adecuada para los stochastic errors a nivel de ruta que para conocimiento faltante, una definición equivocada del problema o un answer extractor contaminado. Al ponerla en producción conviene trazar la curva accuracy--cost, en lugar de reportar solo el resultado con el mayor número de muestras.
+\end{warningbox}
+
+\teachervoice{Un estudiante pregunta cuántas chain se necesitan; el expositor responde que depende del dataset y que con unas 16 suelen verse ganancias. Después explica la temperature como elegir al azar el siguiente token a partir de la learned distribution, en lugar de tomar siempre el token de mayor probabilidad. En clase también se aclara que este método aumenta el inference-time compute.}
+
+\subsection{Self-consistency también puede ser emergente}
+
+Si el base model todavía no puede generar una CoT con sentido, muestrear muchas veces solo produce muchas rutas inestables o igualmente erróneas. Por eso la brecha entre self-consistency y greedy CoT también crece con la escala: primero se necesita un path generator suficientemente fuerte para que el voto disponga de una señal correcta aprovechable.
+
+\lecturefigure{slide-33.jpg}{La ganancia de Self-consistency aparece a medida que crece la escala del modelo}{Diapositiva 33 del material oficial del curso; Wang et al., 2022}
+
+\begin{knowledgebox}{Lectura de la figura: dos umbrales superpuestos}
+El primer umbral es si el modelo, mediante CoT, puede generar ocasionalmente rutas completas correctas; el segundo es si la masa de probabilidad de la respuesta correcta basta para formar una plurality entre muestras diversas. Cuando un modelo pequeño no cumple ninguno de los dos, el delta de self-consistency es cercano a cero; solo cuando un modelo grande los supera, el presupuesto de muestreo se convierte en rendimiento.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Self-consistency aproxima la marginalización de la respuesta mediante el muestreo de varias rutas y cambia inference cost por accuracy. La temperature aporta diversity y el majority vote agrega la final answer; el éxito del método depende del base model, la estructura de la tarea, la correlación de los errores y el sample budget, por lo que también tiene un intervalo de eficacia scale-dependent.
+\section{Discusión, conclusiones y agenda de investigación}
+
+Las últimas tres diapositivas devuelven los resultados al terreno del método de investigación. El ponente no afirma que el CoT ya esté explicado, ni que la prompt engineering vaya a existir para siempre; lo que enumera son las conclusiones que podían obtenerse de los experimentos en ese momento, las preguntas sobre el mecanismo que aún falta responder y su juicio personal sobre las direcciones en las que pueden participar los estudiantes.
+
+\subsection{¿Desaparecerá la prompt engineering?}
+
+En la sesión de preguntas se distinguen las easy, well-specified tasks de las increasingly hard, underspecified tasks. Los modelos más grandes pueden hacer que un multiple-choice sencillo sea más robust frente a la redacción, pero cuanto más capaz es el modelo, más se le emplea para objetivos complejos; en ese caso, cómo describir las restricciones, aportar evidence y especificar la decomposition y la verification sigue siendo interface design.
+
+\lecturefigure{slide-34.jpg}{Chain-of-thought discussion: la persistencia del prompting y las preguntas abiertas}{Diapositiva 34 del material oficial}
+
+\begin{knowledgebox}{Lectura de la figura: separar las conclusiones conocidas de los mecanismos desconocidos}
+La evidencia de la clase respalda que el CoT funciona en varios benchmark, idiomas y modelos, y muestra un umbral de escala; queda sin resolver qué experiencias del pretraining hacen que el modelo aprenda a usar reasoning traces, qué relación guardan esas traces con el cómputo interno y qué tareas se generalizan a partir del few-shot CoT. El valor de la diapositiva de Discussion está precisamente en mantener a la vista los unknowns que hay detrás de los resultados exitosos.
+\end{knowledgebox}
+
+\teachervoice{Alguien preguntó si el CoT es solo el compute que aportan los token adicionales. El ponente mencionó que el control con relleno de igual longitud (equal-length filler) no funciona, y sostuvo que el lenguaje es importante para guiar el reasoning; cuando alguien preguntó por dar primero la respuesta y luego la explicación, dijo que por lo general es peor. Estos son negative controls importantes, pero aun así calificó explícitamente ``why CoT works'' como una pregunta abierta.}
+
+\subsection{Conclusiones de toda la clase}
+
+Las diapositivas condensan las dos partes de la clase en tres niveles: las capacidades pueden presentar un umbral en la metric de la tarea conforme crece la escala; el prompting, el fine-tuning y la data quality desplazan la frontera medible; el CoT y la self-consistency muestran que un inference-time method también debe corresponder a la base-model capability.
+
+\lecturefigure{slide-35.jpg}{Conclusiones de la clase: una perspectiva unificada de Scaling, CoT y self-consistency}{Diapositiva 35 del material oficial}
+
+\begin{importantbox}{Los seis puntos más valiosos de toda la clase}
+\begin{enumerate}
+  \item El smooth loss scaling y el thresholded task performance pueden darse al mismo tiempo.
+  \item Juzgar la emergence depende de la model family, el prompt, la metric y el baseline.
+  \item Better data, architecture y post-training pueden desplazar el umbral empírico hacia modelos más pequeños.
+  \item El CoT aporta decomposition y sequential computation mediante token intermedios, pero no garantiza que la explicación sea fiel.
+  \item BBH y el multilingual CoT muestran que la ganancia se extiende entre tareas e idiomas, aunque con una heterogeneidad notable.
+  \item La self-consistency convierte las inference samples en accuracy; deben reportarse explícitamente el cost y la error correlation.
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Direcciones de investigación que propone el ponente}
+
+En enero de 2023, la realidad era que escalar sin más los foundation model correspondía sobre todo a unos cuantos laboratorios industriales. Por eso el ponente sitúa las direcciones accesibles para los estudiantes en better prompting, capability characterization, applications, benchmarks y compute-efficient methods: estos trabajos permiten aprovechar mejor los modelos existentes y, a la vez, poner a prueba los límites de la scaling narrative.
+
+\lecturefigure{slide-36.jpg}{Looking forward: los intereses de investigación personales del ponente}{Diapositiva 36 del material oficial}
+
+\begin{knowledgebox}{Lectura de la figura: qué nivel del problema atiende cada una de las cinco direcciones}
+La investigación en Scaling amplía la base capability; el better prompting mejora la elicitation; la characterization construye un mapa de capacidades; el applied work lleva los modelos a workflow reales; los benchmarks ofrecen mediciones que no se saturan rápidamente; y los compute-efficient methods reducen la barrera de entrada del entrenamiento y la inferencia. No se sustituyen entre sí, sino que avanzan en conjunto desde cinco niveles: capacidad, interfaz, medición, aplicación y recursos.
+\end{knowledgebox}
+
+\teachervoice{Al cerrar, el ponente dijo que los benchmark existentes se resuelven muy rápido y que se necesitan evaluaciones nuevas y más difíciles; también que conviene investigar métodos más compute-efficient, para que no solo la industria pueda usar modelos más capaces. Este cierre coloca en una misma agenda de investigación los beneficios del scaling y el costo de acceso.}
+
+\subsection{Resumen de la sección}
+
+La forma de la prompt engineering puede cambiar, pero definir objetivos claros, descomponer tareas y verificar resultados no desaparecerá por sí solo. La madurez de la clase está en lo siguiente: los resultados de comportamiento son sólidos y la explicación de los mecanismos sigue siendo cautelosa; escalar modelos merece investigación, pero los datos, la evaluación y la eficiencia también determinan si una capacidad puede descubrirse, reproducirse y desplegarse.
+\section{Síntesis y ampliación}
+
+Esta sesión puede condensarse en una «cadena explicativa de curvas». Primero, la language-model loss mejora de forma suave con compute, data y parameters; segundo, la task metric, debido a la chance baseline, el exact match y los cuellos de botella de múltiples subhabilidades, puede permanecer plana durante mucho tiempo y después subir; tercero, este umbral se desplaza con la model family, la data quality, la architecture, el fine-tuning y el measurement axis; cuarto, CoT cambia la elicitation interface y permite que los modelos más grandes desplieguen cálculos compuestos mediante tokens intermedios; quinto, self-consistency agrega además las respuestas con un inference budget de múltiples trayectorias; sexto, todas las conclusiones deben informarse junto con el costo, la benchmark construction y la configuración histórica.
+
+\subsection{Una tabla de términos clave}
+
+Los siguientes términos suelen confundirse dentro de una misma oración. Solo al separarlos se puede determinar si un artículo aumentó los recursos de entrenamiento, la capacidad del modelo, la información del prompt o la búsqueda en tiempo de inferencia.
+
+\begin{longtable}{L{0.19\textwidth}L{0.32\textwidth}L{0.40\textwidth}}
+\toprule
+\textbf{Término} & \textbf{Problema que resuelve} & \textbf{Mecanismo central y relación con el curso} \\
+\midrule
+\endhead
+Scaling law & Predecir cómo cambia la loss promedio en función de los recursos & Ajusta, sobre una familia de modelos controlada, la relación suave entre compute, data, parameters y loss; es la línea base de comparación para la emergence. \\
+Emergent ability & Describir capacidades en tareas que la metric no detecta en modelos pequeños pero sí en modelos grandes & Depende de la chance/human baseline, el prompt, la metric y la model family; no equivale a haber demostrado un módulo interno discreto. \\
+Few-shot prompting & Indicar al modelo el formato de la tarea sin actualizar los pesos & Coloca exemplars en el context para que el next-token model induzca la correspondencia entre entradas y salidas. \\
+Instruction fine-tuning & Lograr que el modelo siga tareas en lenguaje natural de manera más estable & Actualiza los weights; puede inducir anticipadamente una desired behavior ya conocida en modelos más pequeños. \\
+RLHF & Lograr que las salidas se ajusten mejor a la preference humana & Usa una comparison/reward signal para actualizar el modelo; difiere de CoT, que solo cambia el context. \\
+Chain-of-thought & Proporcionar estados intermedios generables para tareas de varios pasos & Escribe una reasoning trace en los ejemplos para que el modelo despliegue la decomposition en el orden de los tokens. \\
+Perplexity & Medir la next-token prediction sobre datos held-out & $\exp(\text{cross-entropy})$; sirve como proxy válido de la calidad del modelo, pero no es una puntuación global de capacidad en tareas posteriores. \\
+Self-consistency & Reducir el riesgo de que una sola CoT se desvíe por azar & Muestrea varias reasoning paths y vota sobre la final answer; intercambia inference cost por accuracy. \\
+Temperature & Controlar la aleatoriedad del next-token sampling & Cambia el grado de suavizado del softmax de los logits y aporta path diversity a la self-consistency. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Cómo evaluar nuevas afirmaciones sobre Scaling con el marco de esta sesión}
+
+Ante una nueva gráfica ``emergent'', primero hay que pedir a los autores originales que publiquen cada checkpoint, prompt, baseline, seed y confidence interval, y luego verificar si la metric convierte una calidad continua en un umbral rígido; ante un nuevo reasoning method, hay que exigir que se informen a la vez el base model, los generated tokens, el sample count, la latency y las external tools; ante conclusiones entre distintas familias de modelos, es obligatorio preguntar si también cambiaron los data y el post-training. Solo así se puede convertir lo que «parece repentino» en un hecho de ingeniería reproducible.
+
+\begin{warningbox}{Las tres conclusiones excesivas más frecuentes}
+Primero, inferir una phase transition precisa a partir de unos cuantos checkpoints dispersos; segundo, atribuir por completo a los parámetros un cambio que en realidad combina parámetros, datos, arquitectura y post-training; tercero, tomar una CoT legible como el pensamiento interno real del modelo. Las tres van más allá de la evidencia presentada en clase y, al escribir y al evaluar, deben moderarse de forma deliberada.
+\end{warningbox}
+
+\subsection{Lecturas adicionales}
+
+Los siguientes materiales son fuentes primarias que ya eran públicas antes de la fecha de la clase y que constituyen directamente la cadena de evidencia de esta sesión. Al leerlos, se recomienda reproducir primero los axes, la baseline y el prompt de una curva, y después comparar qué tan fuerte es la formulación de los autores sobre el mecanismo.
+
+\begin{itemize}
+  \item \href{https://arxiv.org/abs/2001.08361}{Kaplan et al., Scaling Laws for Neural Language Models}: la referencia clásica de loss scaling suave.
+  \item \href{https://arxiv.org/abs/2206.07682}{Wei et al., Emergent Abilities of Large Language Models}: catálogo de emergencia de tareas y de prompting-techniques.
+  \item \href{https://arxiv.org/abs/2211.02011}{Wei, Tay, and Le, Inverse Scaling Can Become U-Shaped}: por qué una tendencia negativa local puede revertirse.
+  \item \href{https://arxiv.org/abs/2201.11903}{Wei et al., Chain-of-Thought Prompting Elicits Reasoning in Large Language Models}: el artículo principal sobre CoT.
+  \item \href{https://arxiv.org/abs/2210.09261}{Suzgun et al., Challenging BIG-Bench Tasks and Whether Chain-of-Thought Can Solve Them}: BBH, heterogeneidad de tareas y scale threshold.
+  \item \href{https://arxiv.org/abs/2210.03057}{Shi et al., Language Models are Multilingual Chain-of-Thought Reasoners}: MGSM y composicionalidad entre idiomas.
+  \item \href{https://arxiv.org/abs/2203.11171}{Wang et al., Self-Consistency Improves Chain of Thought Reasoning in Language Models}: muestreo de múltiples trayectorias y votación por mayoría.
+  \item \href{https://arxiv.org/abs/2210.11416}{Chung et al., Scaling Instruction-Finetuned Language Models}: evidencia de postentrenamiento sobre el scaling de task, model y CoT data.
+\end{itemize}
+
+En última instancia, el aprendizaje más importante de esta sesión no es memorizar algún umbral de parámetros, sino adquirir una disciplina ante las curvas: primero preguntar qué se mide, luego qué se cambia y solo al final si es posible extrapolar. El Scaling lleva al modelo a nuevas regiones alcanzables, los datos y el postentrenamiento desplazan las fronteras, y CoT y self-consistency cambian la manera en que exploramos esas regiones; una conclusión verdaderamente confiable debe explicar a la vez la capacidad, la interfaz, el costo y la incertidumbre.
+
+\subsection{Autoevaluación posterior a la clase}
+
+Después de leer esta sesión, el lector debe poder desglosar de forma independiente una nueva afirmación sobre capacidades, sin apoyarse en el lema «bigger is better». Las siguientes preguntas pueden servir como lista de verificación mínima para la lectura de artículos, el diseño de experimentos y la evaluación de productos.
+
+\begin{importantbox}{Seis preguntas de autoevaluación}
+\begin{enumerate}
+  \item ¿Por qué una mejora suave de la cross-entropy puede ocurrir al mismo tiempo que un aumento repentino de la exact-match accuracy?
+  \item ¿Qué supuestos se mezclan, respectivamente, en el número de parámetros, los FLOPs de entrenamiento, la cantidad de datos y la perplexity?
+  \item ¿Cómo se puede usar una controlled ablation para distinguir entre better data y un model-family confounder?
+  \item ¿Cuál de estos elementos cambia CoT: los weights, el context o el generated-token budget?
+  \item ¿Bajo qué estructura de correlación de errores falla la self-consistency, incluso con un sample count muy grande?
+  \item ¿Qué baselines, scale points o cost information le faltan todavía a una gráfica de emergence para sustentar decisiones de ingeniería?
+\end{enumerate}
+\end{importantbox}
+
+\end{document}

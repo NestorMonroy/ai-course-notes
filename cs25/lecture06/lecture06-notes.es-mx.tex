@@ -1,0 +1,554 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+
+\renewcommand{\notetitle}{Lecture 06: Perceiver y Perceiver IO — unificar entradas de alta dimensión y salidas estructuradas con un latent bottleneck}
+\renewcommand{\noteauthors}{Elaborado a partir de la conferencia de Drew Jaegle, los subtítulos manuales oficiales y los artículos originales de Perceiver / Perceiver IO / RAFT}
+\renewcommand{\notedate}{CS25 V1 · versión reescrita source-first de 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{2022-07-15}
+\renewcommand{\videoduration}{58:58}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=wTZ3o36lXoQ}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.96\textwidth]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\begin{document}
+\makecscover
+
+\section{Auditoría de fuentes y motivación: por qué se necesita una arquitectura de percepción general}
+
+Esta clase no trata de «hacer otro Transformer de visión», sino de un problema de interfaz más fundamental: si la entrada puede provenir de imágenes, sonido, tacto, nubes de puntos, cámaras de eventos, texto, proteínas o instrumentos científicos, ¿es necesario rediseñar a mano, para cada tipo de datos, convoluciones, tokenizer, vecindades locales y decoder especializados? El objetivo de Perceiver es reducir al mínimo esta ingeniería modalidad por modalidad: primero trata los datos como un arreglo con características y posiciones, y luego completa la codificación, el procesamiento y la decodificación con una interfaz de attention unificada.
+
+Esta reescritura toma como referencia temporal la carga oficial actual de Stanford Online `wTZ3o36lXoQ`. El video `GV8-6ZgJVRk` citado en las notas anteriores ya no está disponible; el video actual ofrece 1,399 subtítulos oficiales en inglés hechos a mano. La grabación no publica un PDF de slides independiente, por lo que se recuperaron 39 páginas didácticas completas a partir del video en 1080p; las animaciones repetidas, los saltos de página reiterados durante el Q\&A y los fotogramas intermedios de los videos de flujo óptico se fusionaron de forma deliberada, pero las explicaciones orales correspondientes se incorporaron al texto principal y al teacher-voice ledger.
+
+\lecturefigure{slide-01-why-understand-all-modalities.jpg}{Por qué hay que entender todas las modalidades de datos: los datos del mundo real van mucho más allá de las imágenes y el texto.}{Video oficial actual de Stanford Online, 00:00:58--00:01:53.}
+
+\begin{knowledgebox}{Qué es el inductive bias}
+El inductive bias (sesgo inductivo) es una suposición estructural que la arquitectura incorpora de antemano. Por ejemplo, la convolución supone que la vecindad local es importante y que los pesos se comparten bajo traslación; el tokenizer supone ciertos límites discretos de subpalabras; las redes neuronales de grafos suponen que la entrada se compone de nodos y aristas. Los sesgos pueden mejorar la eficiencia en el uso de datos, pero también restringen las formas de datos a las que se aplican.
+\end{knowledgebox}
+
+\teachervoice{La primera razón de Drew Jaegle es muy pragmática: inventar a mano sesgos para cada tipo de sensor y de datos científicos simplemente no es algo que la comunidad de investigación pueda escalar de forma sostenida. El valor de una arquitectura general consiste, ante todo, en reducir el costo de «un esfuerzo de ingeniería de investigación por cada nueva modalidad».}
+
+La segunda razón es el mantenimiento del sistema. Los enfoques multimodales tradicionales suelen construir por separado backbone, preprocesamiento y task head para video, audio y texto, y luego diseñar un módulo de fusión. Funcionan, pero a menudo solo sirven para unas pocas combinaciones fijas de entradas y son sensibles a la frecuencia de muestreo, a la forma de la cuadrícula y a la ausencia de alguna modalidad. Perceiver busca abstraer la construcción de la arquitectura para que los investigadores dediquen su esfuerzo a la tarea, los datos y el objetivo de aprendizaje.
+
+\lecturefigure{slide-02-why-unified-systems.jpg}{De varios subsistemas especializados a un único modelo unificado capaz de recibir arreglos heterogéneos.}{Video oficial actual de Stanford Online, 00:02:58--00:05:09.}
+
+\begin{importantbox}{«General» no significa «sin suposiciones»}
+Perceiver sigue suponiendo que la entrada puede representarse como un arreglo finito, que attention puede aprender las relaciones entre elementos, que la información de posición o de modalidad puede proporcionarse como característica y que hay datos suficientes para recuperar la estructura de la tarea. Lo que reduce son las \textbf{suposiciones arquitectónicas específicas de cada modalidad}, no la eliminación de todo conocimiento previo.
+\end{importantbox}
+
+\begin{warningbox}{Una interfaz unificada y un entrenamiento unificado son dos cosas distintas}
+La clase muestra la misma arquitectura aplicada por separado a varias tareas, pero la mayoría de estos experimentos se entrenaron de forma independiente. Poder reutilizar la interfaz encode/process/decode no equivale a haber entrenado un solo modelo que domine todas las modalidades a la vez.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El punto de partida de Perceiver es la expansión de modalidades y la complejidad de los sistemas. Busca una interfaz de arreglos reutilizable y menos estructura diseñada a mano; no afirma que el conocimiento del dominio, los modelos especializados o el entrenamiento multimodal conjunto hayan dejado de ser necesarios.
+\section{Ventajas y cuellos de botella del Transformer: por qué la generalidad es costosa}
+
+La sección anterior propuso una arquitectura unificada; esta sección explica por qué la investigación parte del Transformer. La attention del Transformer no impone conexiones locales, la posición suele tratarse como una característica de entrada y no como una topología de cómputo fija, y la mayor parte del cómputo consiste en multiplicaciones de matrices regulares. Estas propiedades hacen que se transfiera con más facilidad que la convolución a estructuras desconocidas; el costo es que, cuanto mayor es el raw input, más costosas resultan las comparaciones por pares de la self-attention.
+
+\lecturefigure{slide-03-improving-transformers.jpg}{El inductive bias general del Transformer y el cuello de botella por el tamaño de la entrada.}{Video oficial actual de Stanford Online, 00:05:10--00:06:01.}
+
+\begin{knowledgebox}{Glosario: las interfaces centrales de esta clase}
+\begin{tabularx}{\textwidth}{L{0.23\textwidth}X}
+\toprule
+Término & Definición precisa \\
+\midrule
+non-local & En principio, cualquier elemento de la entrada puede atender directamente a cualquier otro, sin restringirse de antemano a una vecindad fija. \\
+position as feature & Las coordenadas se codifican en las características del token, en lugar de limitar rígidamente las conexiones con kernels de convolución o aristas de un grafo. \\
+latent array & Un número fijo o relativamente pequeño de vectores aprendibles que sirve como espacio de trabajo interno para procesar entradas grandes. \\
+cross-attention & La query y las key/value provienen de arreglos distintos; aquí, el latent consulta la entrada original. \\
+output query & Consulta del decoder que especifica «qué predecir, en qué posición, en qué modalidad o para qué tarea». \\
+Fourier feature & Usa senos y cosenos de múltiples frecuencias para mapear coordenadas continuas a características de alta frecuencia aprendibles. \\
+byte-level language & Modela directamente símbolos de bajo nivel, como los bytes UTF-8, sin depender de un tokenizer de subpalabras. \\
+optical flow & Salida estructurada densa que predice, para cada píxel de fotogramas contiguos, un vector de movimiento bidimensional. \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+La attention estándar proyecta la entrada $X\in\mathbb{R}^{M\times d}$ en query, key y value:
+
+\[
+Q=XW_Q,\qquad K=XW_K,\qquad V=XW_V,
+\qquad
+\operatorname{Attn}(X)=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right)V.
+\]
+
+Aquí, $M$ es el número de elementos de la entrada; $d$ es la dimensión de la representación; $W_Q,W_K,W_V$ son las matrices de proyección; $d_k$ es la dimensión de las key. La matriz $QK^\top$ tiene forma $M\times M$, por lo que el cálculo y el almacenamiento de los puntajes de atención crecen con $M^2$.
+
+\lecturefigure{slide-04-standard-qkv-attention.jpg}{Attention QKV estándar: cada elemento de la entrada se compara con todas las key.}{Video oficial actual de Stanford Online, 00:06:02--00:08:01.}
+
+\begin{importantbox}{El costo de la self-attention según el tamaño de la entrada}
+Si se ignoran las constantes, el costo central de los puntajes en una capa de attention es de aproximadamente $\mathcal{O}(M^2d)$, y la memoria de la matriz de atención, de aproximadamente $\mathcal{O}(M^2)$. Si se pasa de imágenes de $224^2$ píxeles a video o a flujos multimodales de alta resolución, el crecimiento de $M$ supera rápidamente al aumento de profundidad del modelo.
+\end{importantbox}
+
+\subsection{Non-locality: una forma de conexión costosa pero general}
+
+La convolución presupone que los píxeles vecinos están más relacionados y puede procesar cuadrículas de manera eficiente con kernels locales. La attention, en cambio, permite que elementos distantes interactúen directamente, por lo que puede manejar conjuntos, correspondencias a larga distancia y topologías desconocidas. El ponente considera la non-locality un elemento esencial de la generalidad, no un desperdicio que haya que eliminar por completo.
+
+\lecturefigure{slide-05-why-non-locality.jpg}{La non-local attention no fija de antemano una vecindad local; la convolución, en cambio, limita las conexiones a la adyacencia de la cuadrícula.}{Video oficial actual de Stanford Online, 00:08:02--00:08:37.}
+
+\teachervoice{El juicio del docente no es que «la attention siempre supera a la convolution», sino que ambas ocupan puntos de Pareto distintos: cuando se conoce la estructura de la imagen, la convolución suele ser más rápida y requerir menos datos; ante cámaras de eventos, células, nubes de puntos o arreglos científicos de estructura desconocida, es posible que ni siquiera sepamos cuál es la vecindad de convolución correcta.}
+
+\subsection{Position as feature: dejar las coordenadas al aprendizaje en lugar de fijarlas en las conexiones}
+
+Esta sección se ocupa de la condición que acompaña a la non-locality: si la attention es por naturaleza insensible al orden de la entrada, el modelo necesita recibir la posición para reconstruir relaciones espaciales, temporales o secuenciales. Perceiver concatena la codificación de coordenadas con el contenido, de modo que la arquitectura sabe «dónde está esto», pero sin imponer «con quién puede conectarse». Esto es más útil que prescindir por completo de la posición y, a la vez, supone menos que un kernel local fijo.
+
+\lecturefigure{slide-06-why-featurize-position.jpg}{Codificar la posición como característica permite que la attention aprenda relaciones espaciales en lugar de usar reglas de conexión rígidas.}{Video oficial actual de Stanford Online, 00:08:38--00:09:29.}
+
+\begin{warningbox}{Un sesgo débil no equivale a independencia de la posición}
+Si la tarea exige una salida espacial, el modelo todavía debe distinguir coordenadas. Sin posición, distintos ordenamientos se vuelven indistinguibles; dar la posición y permitir attention global es «debilitar la estructura local», no «eliminar la estructura».
+\end{warningbox}
+
+\subsection{La tensión entre escalabilidad y generality}
+
+La clase sitúa la convnet y el Transformer en un mismo diagrama conceptual: la convnet está muy optimizada para cuadrículas y su complejidad puede ser aproximadamente lineal, pero admite un rango de entradas más estrecho; el Transformer se adapta a conjuntos generales, pero carga con una attention cuadrática. El objetivo de diseño de Perceiver es conservar la no localidad, la codificación de la posición como característica y el uso compartido de pesos, y al mismo tiempo reformular la complejidad respecto al tamaño de la entrada.
+
+\lecturefigure{slide-07-scalability-vs-generality.jpg}{El compromiso entre ConvNet y Transformer en los supuestos sobre la estructura de la entrada y en la complejidad.}{Video oficial actual de Stanford Online, 00:09:30--00:09:41.}
+
+\begin{knowledgebox}{Lectura de la figura: no es una «ruta evolutiva» de izquierda a derecha}
+Los dos extremos de la figura representan objetivos de optimización distintos. Si la tarea se limita a clasificación de imágenes y los datos son escasos, el sesgo local de la convnet puede ser preferible; si la estructura de la entrada cambia con frecuencia, la interfaz unificada de Transformer/Perceiver puede reducir el costo de desarrollo. La evaluación debe considerar a la vez la calidad, la cantidad de datos, la velocidad y la reutilización entre dominios.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La generalidad del Transformer proviene de la non-local attention, de la codificación de la posición como característica y del cómputo matricial compartido, pero la self-attention sobre el raw input tiene un costo de $M^2$. Lo que Perceiver busca resolver es precisamente «conservar la interfaz y reducir el costoso espacio de trabajo».
+\section{Perceiver: comprimir una entrada grande en un latent workspace pequeño}
+
+Esta sección entra en el núcleo de Perceiver. En lugar de aplicar self-attention repetidamente sobre todos los raw inputs, mantiene $N$ learned latents, con $N\ll M$. Una sola cross-attention permite que las latent queries lean información de la entrada grande, y la self-attention profunda posterior ocurre solo dentro del latent array pequeño.
+
+\lecturefigure{slide-08-perceiver-title.jpg}{Perceiver: amplía el Transformer mediante iterative attention, al tiempo que conserva supuestos de dominio débiles.}{Video oficial actual de Stanford Online 00:09:42--00:10:39.}
+
+\subsection{Por qué la self-attention sobre raw inputs resulta inviable}
+
+En una imagen de alta resolución, si cada píxel es un token, $M=224\times224=50{,}176$ y los attention scores ya suman unos 2,500 millones de elementos; en video, esto se multiplica además por el número de cuadros. ViT reduce $M$ mediante patching, pero el tamaño de patch y la convolución bidimensional se convierten en decisiones específicas para imágenes. Perceiver opta por conservar la entrada de grano fino y, en cambio, controla la escala del procesamiento profundo con el número de latents.
+
+\lecturefigure{slide-09-self-attention-scales-poorly.jpg}{La self-attention es muy expresiva, pero la entrada a nivel de píxel de una imagen provoca un costo cuadrático de cómputo y memoria.}{Video oficial actual de Stanford Online 00:10:40--00:16:15.}
+
+\begin{warningbox}{Condición del scaling lineal en la entrada}
+Que Perceiver sea lineal en la longitud de la entrada solo se cumple cuando el número de latents $N$ es fijo o crece muy despacio. Si, para obtener más capacidad, $N$ crece en proporción a $M$, el término $MN$ de la cross-attention y el término $N^2$ de la latent self-attention vuelven a encarecerse.
+\end{warningbox}
+
+\subsection{Cross-attention: leer $M$ inputs con $N$ queries}
+
+Sea la entrada $X\in\mathbb{R}^{M\times d_x}$ y el latent array $Z\in\mathbb{R}^{N\times d_z}$. La cross-attention genera la query a partir de los latents y la key/value a partir del input:
+
+\[
+Q=ZW_Q,\qquad K=XW_K,\qquad V=XW_V,
+\qquad
+Z'=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right)V.
+\]
+
+Aquí, $QK^\top$ tiene forma $N\times M$; $M$ es la longitud de la entrada grande y $N$ es el número, menor, de latents. El costo de la cross-attention es del orden de $\mathcal{O}(MNd)$, lineal en $M$ si $N$ es fijo; después, el costo de la latent self-attention es del orden de $\mathcal{O}(N^2d)$.
+
+\lecturefigure{slide-10-cross-attention-linear-scaling.jpg}{La cross-attention lee un input array grande con un query array pequeño, de modo que el término de escala de la entrada pasa de $M^2$ a $MN$.}{Video oficial actual de Stanford Online 00:16:16--00:18:59.}
+
+\begin{importantbox}{La triple función del latent bottleneck}
+Es a la vez un cuello de botella de cómputo, una interfaz de compresión de información y un sistema de coordenadas interno independiente de la modalidad. Sin importar el tamaño de la entrada ni la dimensión de sus características, todo se escribe primero, mediante cross-attention, en latents de ancho fijo; la profundidad del modelo se invierte principalmente en el latent processing y no en la pairwise attention sobre el raw input.
+\end{importantbox}
+
+\begin{knowledgebox}{Lectura de la figura: hay que separar los tres módulos de complejidad}
+La proyección de la entrada y la agregación de values son lineales en $M$; el attention map es $N\times M$; el latent Transformer es $N\times N$. Por eso no basta con decir «todo es lineal»: cuando los latents son muchos o hay muchos decoder outputs, los demás términos vuelven a ser el cuello de botella.
+\end{knowledgebox}
+
+\subsection{Perceiver completo: Encode, Process, Readout}
+
+El Perceiver original usa un learned latent array que hace cross-attend sobre la entrada y luego repite self-attention/MLP sobre los latents; al final completa la clasificación mediante pooling o un readout compacto. Los latents pueden verse como learned queries o como registros de trabajo compartidos; no son regiones fijas de la entrada, ni se garantiza que cada latent corresponda a un objeto interpretable.
+
+\lecturefigure{slide-11-perceiver-architecture.jpg}{Perceiver original: cross-attention sobre la entrada, latent Transformer repetido y salida compacta.}{Video oficial actual de Stanford Online 00:19:00--00:21:41.}
+
+\begin{lstlisting}[caption={Pseudocódigo conceptual de encode/process/readout en Perceiver.}]
+def perceiver(inputs, latents, repeats):
+    latents = cross_attention(query=latents, key=inputs, value=inputs)
+    for _ in range(repeats):
+        latents = latent_self_attention(latents)
+        latents = latent_mlp(latents)
+    return task_readout(latents)
+\end{lstlisting}
+
+\teachervoice{El ponente explica que los latents se inicializan aleatoriamente y se aprenden, de forma parecida a un learned recurrent state; algunos de los módulos repetidos pueden compartir pesos. La cross-attention de la figura también incluye residual y MLP; no debe dibujarse erróneamente como un $QK^\top V$ desnudo.}
+
+\begin{warningbox}{Los latents no garantizan una compresión sin pérdida}
+$N\ll M$ significa que el modelo debe comprimir la información relevante para la tarea en un workspace limitado. Si la tarea exige conservar todos los detalles, el cuello de botella puede limitar la calidad; Perceiver IO mejora la capacidad de lectura mediante task-specific output queries, pero no recupera automáticamente la información perdida durante la codificación.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Perceiver usa $N$ learned latents para leer información de $M$ entradas, con lo que traslada el procesamiento profundo de $M^2$ a $MN+N^2$. El scaling lineal en la entrada depende de que el número de latents esté acotado y de que el latent bottleneck alcance para contener la información de la tarea.
+\section{Límites del sesgo estructural: ViT, Cross-attention, Fourier e ImageNet}
+
+Con el latent bottleneck establecido, esta sección responde dos preguntas: ¿en qué se distingue Perceiver de ViT y de la cross-attention ya existente? ¿Y cómo obtiene la posición sin depender de convoluciones bidimensionales? La exposición no sostiene que toda información estructural previa sea inútil; mediante comparaciones y ablaciones busca la información de entrada «mínima pero suficiente».
+
+\subsection{Comparación con ViT: el patching ya es una suposición sobre imágenes}
+
+La sección anterior presentó el cuello de botella unificado de Perceiver; esta sección lo compara primero con el Transformer visual más cercano. ViT divide la imagen en patches bidimensionales fijos y después genera tokens mediante una convolución o una proyección lineal. Este enfoque es muy eficaz para imágenes, pero exige redefinir el patching para cada tipo de cuadrícula, nube de puntos o sensor. Perceiver puede recibir directamente píxeles o elementos de un arreglo y trata la posición como una característica adicional.
+
+\lecturefigure{slide-12-contrast-vit.jpg}{ViT reduce el número de tokens mediante un patch embedding bidimensional; Perceiver evita incorporar los patches de cuadrícula a su interfaz central.}{Video oficial actual de Stanford Online, 00:21:42--00:22:55.}
+
+\begin{knowledgebox}{Lectura de la figura: ViT y Perceiver optimizan cuellos de botella distintos}
+ViT reduce primero $M$ mediante el tamaño de patch y después sigue aplicando self-attend sobre los patch tokens; Perceiver conserva una entrada más fina y controla el workspace mediante latent queries. El primero suele ser más eficiente y está más consolidado; el segundo se traslada con mayor facilidad a arreglos sin cuadrícula o heterogéneos.
+\end{knowledgebox}
+
+\teachervoice{En la sesión de preguntas y respuestas, el docente fija una postura clara: en visión, los convolution/attention hybrids buscan un punto de Pareto preciso entre velocidad y calidad para problemas de imágenes, y eso es muy importante; el equipo de Perceiver busca un modelo tan general como sea posible que conserve un desempeño utilizable. Las dos líneas no se excluyen mutuamente.}
+
+\subsection{La cross-attention no es exclusiva de Perceiver}
+
+DETR usa object queries para decodificar bounding boxes a partir de mapas de características convolucionales; Slot Attention usa learned slots que leen las características de forma competitiva y forman representaciones centradas en objetos. La novedad de Perceiver consiste en elevar este tipo de attention asimétrica a un cuello de botella de entrada de uso general y procesarla repetidamente en el latent workspace.
+
+\lecturefigure{slide-13-cross-attention-detr.jpg}{Precedentes de cross-attention en trabajos de visión como DETR y Slot Attention.}{Video oficial actual de Stanford Online, 00:22:56--00:23:11.}
+
+\begin{importantbox}{La atribución del método debe ser precisa}
+Perceiver no inventó la cross-attention. Su aportación es una combinación: la lectura asimétrica de una entrada grande hacia un learned latent pequeño, el procesamiento profundo dentro del latent, las suposiciones débiles sobre la modalidad y, en Perceiver IO, la decodificación mediante consultas de salida.
+\end{importantbox}
+
+\subsection{Fourier positional features: representar coordenadas con funciones base de frecuencia}
+
+Para expresar la posición con detalle fino sin codificar de forma fija la conectividad local, esta sección construye, para la coordenada bidimensional $p=(x,y)$, características seno/coseno de varias frecuencias:
+
+\[
+\gamma(p)=\big[\sin(2\pi f_1x),\cos(2\pi f_1x),\sin(2\pi f_1y),\cos(2\pi f_1y),\ldots\big].
+\]
+
+Aquí, $f_k$ es un conjunto de frecuencias que va de las bajas hasta las cercanas a la de Nyquist; $x,y$ son coordenadas normalizadas; $\gamma(p)$ se concatena con el RGB u otras características de contenido. Las frecuencias bajas expresan la posición a gran escala y las altas ayudan a distinguir coordenadas finas.
+
+\lecturefigure{slide-14-fourier-position-encodings.jpg}{Fourier positional encodings bidimensionales: características de coordenadas de varias frecuencias concatenadas con el RGB.}{Explicación original, 00:26:18--00:26:55; la progressive build completa vuelve a mostrarse en el video oficial actual, 00:39:52.}
+
+\teachervoice{El docente reporta una observación concreta: con entradas de imagen, hacer \textbf{concatenate} de la Fourier position con el RGB suele funcionar mejor que proyectar primero y luego sumar. No da un mecanismo definitivo; solo conjetura que las características de contenido de una imagen no son tan dispersas como un embedding de palabras. Conviene conservar este estado de «observación confiable, explicación pendiente».}
+
+\begin{warningbox}{Las Fourier features siguen aportando estructura real}
+Aunque el modelo no tiene vecindades convolucionales, la codificación de coordenadas le indica explícitamente en qué lugar del plano bidimensional está cada píxel. Decir que «no usa en absoluto la estructura de la imagen» es inexacto; es más preciso decir que la estructura se proporciona como característica de entrada y no como un grafo de cómputo fijo.
+\end{warningbox}
+
+\subsection{Permuted ImageNet: la invariancia a permutaciones no implica que la estructura sea inútil}
+
+A continuación, un experimento contraintuitivo comprueba si las características de posición realmente sustituyen al orden fijo del arreglo. El experimento reordena al azar los píxeles de la imagen; mientras cada píxel conserve su codificación de posición correcta, Perceiver obtiene resultados top-1 en ImageNet similares. Este resultado muestra que la arquitectura no depende del orden en memoria del arreglo de entrada ni de un orden de recorrido local; no demuestra que la posición, la localidad o el sesgo convolucional carezcan de valor para la eficiencia en datos.
+
+\lecturefigure{slide-15-imagenet-permuted-classification.jpg}{ImageNet con entrada estándar y permuted: las características de posición correctas hacen que el modelo no dependa de la permutación del arreglo.}{Video oficial actual de Stanford Online, 00:29:34--00:33:47.}
+
+\begin{knowledgebox}{Lectura de la tabla: se compara el orden del arreglo, no la eliminación del espacio}
+La versión permuted sigue incluyendo la codificación de posición, por lo que el modelo puede aprender qué píxeles son vecinos en el espacio. Si también se revolvieran las etiquetas de posición, la tarea se convertiría en un problema distinto. Los resultados de la tabla respaldan la input-order robustness, no la idea de que «la estructura bidimensional no existe».
+\end{knowledgebox}
+
+\teachervoice{La advertencia importante de la sesión de preguntas y respuestas es que un modelo con sesgo débil puede necesitar más datos para recuperar la estructura por sí mismo. Con conjuntos grandes como ImageNet, la generalidad puede obtenerse mediante entrenamiento; el escenario con pocos datos sigue siendo un cuello de botella sin resolver, como reconoce explícitamente el expositor.}
+
+\subsection{Resumen de la sección}
+
+Perceiver incorpora menos suposiciones de patch/cuadrícula que ViT, pero sigue usando características de posición. La cross-attention tiene numerosos precedentes; la aportación está en la combinación de uso general. Permuted ImageNet muestra robustez frente al orden de la entrada, pero no anula la ventaja en eficiencia de datos del sesgo local.
+\section{Perceiver IO: convertir la output query en una interfaz de tareas general}
+
+El Perceiver original funciona bien con salidas compactas, como en la clasificación, pero la reconstrucción de imágenes, las secuencias de lenguaje y el optical flow requieren grandes cantidades de outputs estructurados. Perceiver IO agrega una decoder cross-attention después del latent processor: cada output query lee de los latents la información relacionada con su propia tarea, posición o modalidad.
+
+\subsection{Primero, unificar las heterogeneous inputs}
+
+Las raw features de distintas modalidades pueden diferir en dimensión y en semántica. Un token de video puede contener RGB, $(x,y,t)$ y un modality tag; un token de audio puede contener amplitud, tiempo y un modality tag. Mediante proyección, padding o concatenación, y codificación de posición y modalidad, se integran en un único input array, al que después aplica cross-attend el mismo latent set.
+
+\lecturefigure{slide-16-featurizing-multimodality.jpg}{Caracterización multimodal: contenido, posición, tiempo y modality tag forman un arreglo de entrada unificado.}{Stanford Online, video oficial actual, 00:33:50--00:40:31.}
+
+\begin{knowledgebox}{Explicación del concepto: ver los datos como una tabla}
+Cada fila es un elemento de entrada y cada columna es una característica de contenido o de metadatos. El número de filas puede variar según la modalidad y la resolución; el número de columnas se unifica mediante proyección. Esta perspectiva sirve para cualquier arreglo finito, pero no resuelve por sí sola los valores faltantes, las distintas frecuencias de muestreo, la alineación temporal ni el desequilibrio entre modalidades.
+\end{knowledgebox}
+
+\teachervoice{En la sesión de Q\&A del final, el ponente dijo directamente: Perceiver trata, en efecto, cualquier entrada como tabular data. Aquí, «tabla» se refiere a una interfaz de arreglo unificada; no equivale a los modelos tradicionales para tablas CSV pequeñas, ni implica que las columnas categóricas, los valores faltantes y la estructura causal no requieran un tratamiento específico.}
+
+\subsection{Basic Perceiver y Perceiver IO}
+
+Esta sección compara lado a lado dos interfaces de salida de un mismo latent processor. Basic Perceiver codifica una entrada grande, procesa los latents y luego produce una salida compacta con average pooling y una head de clasificación. Es adecuado para la clasificación de ImageNet, pero no puede expresar de forma natural «un vector por cada píxel» ni «una predicción de token por cada posición de byte».
+
+\lecturefigure{slide-17-basic-perceiver-architecture.jpg}{Basic Perceiver: encode scales with input, process independent of input, compact readout.}{Stanford Online, video oficial actual, 00:40:32--00:41:33.}
+
+Perceiver IO agrega un output query array $Y_q\in\mathbb{R}^{O\times d}$, que consulta los processed latents $Z$:
+
+\[
+Y=\operatorname{softmax}\!\left(\frac{(Y_qW_Q)(ZW_K)^\top}{\sqrt{d_k}}\right)(ZW_V).
+\]
+
+Aquí, $O$ es el número de elementos de salida; $Y_q$ codifica la posición, la tarea o la modalidad de la salida, y $Z$ es el latent array. El costo de la decoder cross-attention es de alrededor de $\mathcal{O}(ONd)$, de modo que la entrada puede ser muy grande, pero una salida enorme sigue implicando un costo lineal en $O$.
+
+\lecturefigure{slide-18-perceiver-io-architecture.jpg}{Perceiver IO: cross-attention de entrada, latent processing y decoder de output queries.}{Stanford Online, video oficial actual, 00:41:34--00:41:55.}
+
+\begin{importantbox}{La output query es una «pregunta», no un marcador vacío}
+La query puede contener coordenadas, modalidad, ID de tarea o etiquetas semánticas. El decoder responde: «Para esta posición o tarea de salida, ¿qué debe leerse de los latents compartidos?». Distintas queries pueden decodificar un mismo latent state en píxeles de imagen, clases, etiquetas de texto o vectores de flujo óptico.
+\end{importantbox}
+
+\subsection{Construir las queries: la posición determina la topología de salida}
+
+Para convertir la output query abstracta en una interfaz de tarea concreta, esta sección examina primero el autoencoding de imágenes: se crea una query con posición bidimensional para cada píxel objetivo. El modelo no necesita conservar el mismo número de slots en el latent workspace; basta con que, al decodificar, cada posición de salida lea el latent compartido. El orden de la salida puede recuperarse mediante las query coordinates.
+
+\lecturefigure{slide-19-constructing-output-queries.jpg}{Output queries para el autoencoding de imágenes: cada posición de píxel consulta el latent compartido.}{Stanford Online, video oficial actual, 00:42:04--00:42:59.}
+
+\begin{lstlisting}[caption={Pseudocódigo conceptual de la construcción de output queries por tarea.}]
+def build_queries(task, positions, modalities):
+    queries = []
+    for position, modality in zip(positions, modalities):
+        query = concat(
+            task_embedding(task),
+            modality_embedding(modality),
+            fourier_position(position),
+        )
+        queries.append(query)
+    return stack(queries)
+\end{lstlisting}
+
+El autoencoding multimodal puede usar queries de modality/task distintas para cada salida: video, audio, label, etcétera. La entrada y la salida pueden tener números de elementos diferentes; algunas modalidades incluso producen una sola clase, mientras que otras producen una cuadrícula de alta resolución.
+
+\lecturefigure{slide-20-multimodal-query-construction.jpg}{Query de salida multimodal: decodifica salidas de distintos tamaños según modality, task y position.}{Stanford Online, video oficial actual, 00:43:00--00:43:05.}
+
+\begin{knowledgebox}{Lectura de la figura: lo que se comparte es el latent, no todos los parámetros de las decoder heads}
+Distintas queries acceden al mismo processed latent state, pero la projection final, la loss y los canales de salida pueden variar según la tarea. Una architecture interface unificada no exige que los logits de clasificación y los píxeles RGB usen exactamente la misma head numérica.
+\end{knowledgebox}
+
+\subsection{ImageNet refinements: una arquitectura general no implica hiperparámetros fijos}
+
+La tabla de ImageNet de Perceiver IO muestra varios ajustes de entrenamiento y del modelo, como redes más profundas, clipping y cutmix/mixup. Esto recuerda que la interfaz central encode/process/decode es reutilizable, pero obtener resultados sólidos sigue requiriendo una recipe de entrenamiento para la tarea: no debe interpretarse «pocos supuestos del dominio» como «sin necesidad de ajustar hiperparámetros».
+
+\lecturefigure{slide-21-imagenet-results.jpg}{Configuración y resultados de Perceiver IO en ImageNet.}{Stanford Online, video oficial actual, 00:43:06--00:43:43.}
+
+\begin{warningbox}{La comparación de arquitecturas debe usar la misma recipe de entrenamiento}
+Si Perceiver usa un entrenamiento más largo, aumento de datos o una regularización distinta y el baseline no, los resultados no pueden atribuirse solo al latent bottleneck. El reporte debe separar architecture, optimization, augmentation y compute.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Perceiver IO decodifica un latent state compacto en cualquier salida estructurada mediante output queries. Separa la escala de la entrada, del procesamiento y de la salida, pero el decoder sigue creciendo linealmente con el output count, y las queries específicas de cada tarea y la recipe de entrenamiento siguen siendo decisiones de diseño necesarias.
+\section{Entender el lenguaje a partir de bytes: costos y beneficios de eliminar el tokenizer}
+
+La sección anterior mostró que las output queries pueden producir secuencias; esta sección aplica la interfaz unificada al lenguaje. Un Transformer habitual usa primero un tokenizer para dividir la cadena en subwords; esto acorta mucho la secuencia, pero incorpora un vocabulario, escrituras y reglas específicas de cada idioma. Gracias al latent bottleneck, Perceiver IO puede procesar una raw byte sequence más larga e intenta debilitar los supuestos del tokenizer.
+
+\lecturefigure{slide-22-language-tokenization.jpg}{Lenguaje, Transformer y tokenización: una misma oración puede dividirse en caracteres, bytes o subwords.}{Video oficial actual de Stanford Online, 00:43:44--00:45:13.}
+
+\begin{knowledgebox}{Qué es el byte-level input}
+El texto se codifica primero como bytes UTF-8; cada valor de byte está entre 0 y 255. Es un alfabeto fijo compartido por todos los idiomas y escrituras, y evita las palabras desconocidas; el costo es que un carácter puede ocupar varios bytes, y la secuencia resulta mucho más larga que con la tokenización en subwords.
+\end{knowledgebox}
+
+\subsection{Por qué eliminar el tokenizer}
+
+Esta sección examina el tokenizer como un sesgo lingüístico que puede elegirse. El vocabulario del tokenizer funciona bien en idiomas con muchos recursos, pero puede fragmentar en exceso idiomas poco frecuentes, ortografías, código, emoji o palabras nuevas. Distintos idiomas pueden requerir distintos vocabulary, y un sistema multilingüe además debe manejar diferencias de normalización y de presegmentación en palabras. Los bytes ofrecen el nivel más bajo de símbolos unificados, de modo que el modelo aprende por sí mismo las fronteras.
+
+\lecturefigure{slide-23-why-remove-tokenizers.jpg}{Dependencia del idioma del tokenizer y representación en bytes UTF-8.}{Video oficial actual de Stanford Online, 00:45:14--00:45:37.}
+
+\teachervoice{El docente no dijo que el tokenizer sea «erróneo»; enfatizó que es un inductive bias añadido de forma manual. Los bytes son más generales, pero trasladan al modelo el aprendizaje de la estructura y el costo de las secuencias largas; si vale la pena depende de la escala de datos, la cobertura de idiomas y el presupuesto de cómputo.}
+
+\begin{warningbox}{Token-free no significa cero preprocesamiento}
+La Unicode normalization, la codificación UTF-8, el padding, el masking y la byte position siguen siendo decisiones de preprocesamiento. Un byte vocabulary fijo solo elimina la subword segmentation; no elimina la normalización del texto ni la limpieza de datos.
+\end{warningbox}
+
+\subsection{Masked Language Modeling y fine-tuning en GLUE}
+
+El entrenamiento sigue el masked language modeling al estilo de BERT: se enmascara una parte de los bytes de entrada y las decoder queries predicen el objetivo en las posiciones correspondientes; después se hace fine-tuning en las tareas de GLUE añadiendo sentence/task queries. Para el conjunto enmascarado $\mathcal{M}$, el objetivo puede escribirse como:
+
+\[
+\mathcal{L}_{\text{MLM}}=-\sum_{t\in\mathcal{M}}\log p_\theta(b_t\mid b_{\setminus\mathcal{M}}).
+\]
+
+Aquí, $b_t$ es el byte real en la posición $t$; $b_{\setminus\mathcal{M}}$ es el contexto no enmascarado; $p_\theta$ es la distribución de salida del modelo; $\mathcal{M}$ son las masked positions.
+
+\lecturefigure{slide-24-masked-language-modeling.jpg}{Byte-level masked language modeling de Perceiver IO.}{Video oficial actual de Stanford Online, 00:45:38--00:45:53.}
+
+Durante el fine-tuning, la tarea puede decodificar logits de sentence, entailment, grammar o paraphrase mediante queries adicionales. El encoder/latent processor compartido recibe bytes, y la interface de salida cambia según la tarea.
+
+\lecturefigure{slide-25-glue-finetuning.jpg}{Del byte-level MLM a GLUE: distintas output queries decodifican los logits de cada tarea.}{Video oficial actual de Stanford Online, 00:45:54--00:47:17.}
+
+\begin{importantbox}{Qué aporta el latent bottleneck a los bytes}
+La byte sequence es muy larga, pero la deep self-attention se realiza solo sobre latents fijos; la cross-attention de entrada es lineal en el número de bytes. El modelo cambia un cuello de botella de cómputo por un vocabulary unificado e interioriza el aprendizaje de las fronteras de segmentación.
+\end{importantbox}
+
+\subsection{Resultados FLOP-matched y attention diagnostics}
+
+La tabla compara BERT, CANINE y Perceiver IO con distintas profundidades y números de parámetros. Con FLOPs similares, el Perceiver IO byte-level alcanza puntajes de GLUE competitivos; aumentar el tamaño del modelo sigue mejorándolos. Una lectura correcta debe considerar a la vez el tokenizer, la profundidad, los parámetros, los FLOPs y los datos de entrenamiento, en lugar de elegir un solo puntaje.
+
+\lecturefigure{slide-26-language-from-bytes-results.jpg}{Entender el lenguaje directamente a partir de bytes: comparación de parámetros, FLOPs y GLUE entre modelos tokenizados y token-free.}{Video oficial actual de Stanford Online, 00:47:18--00:47:59.}
+
+\begin{knowledgebox}{Lectura de la tabla: igualar FLOPs no equivale a igualar latencia}
+Una byte sequence larga cambia el memory access, el kernel de cross-attention y el tamaño de lote. Los mismos FLOPs teóricos pueden dar un wall-clock distinto en distinto hardware; también deben compararse la longitud de secuencia, el rendimiento, la memoria pico y la cobertura de idiomas.
+\end{knowledgebox}
+
+La visualización de attention muestra que el modelo atiende a la puntuación, las mayúsculas y minúsculas, los fragmentos de palabras y los byte patterns repetidos. Esto indica que el modelo puede descubrir estructura a partir de símbolos de bajo nivel, pero el attention weight no es una explicación causal ni demuestra que una head «entienda la gramática».
+
+\lecturefigure{slide-27-language-attention-patterns.jpg}{Diagnóstico de los attention patterns de lenguaje en el Perceiver IO byte-level.}{Video oficial actual de Stanford Online, 00:48:00--00:48:43.}
+
+\teachervoice{El ponente presenta estas figuras como una comprobación de que «el modelo efectivamente atiende a estructuras reconocibles», no como una conclusión completa de interpretabilidad. Sobre un attention map deben hacerse también pruebas de ablation, counterfactual y sensibilidad de la salida.}
+
+\begin{warningbox}{La attention visualization se presta a narrativas exageradas}
+Los patrones de color pueden sugerir hipótesis, pero por sí solos no explican cómo influye la información en la predicción final. Varias heads, la residual y el MLP actúan en conjunto; un pattern atractivo puede tener una contribución muy débil a la tarea.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El Perceiver IO byte-level cambia secuencias largas y más aprendizaje de estructura por un vocabulary unificado entre idiomas. Los resultados de MLM/GLUE demuestran que el enfoque es viable, pero no niegan de forma general las ventajas del tokenizer en eficiencia de datos y despliegue, y el attention map es solo evidencia de diagnóstico.
+\section{Optical Flow: decodificar campos de movimiento densos con Output Queries}
+
+La salida del lenguaje sigue siendo una secuencia unidimensional; el optical flow, en cambio, exige predecir un vector de movimiento bidimensional para cada píxel, por lo que es un caso sólido para evaluar el structured output scaling. El modelo recibe dos fotogramas y produce un dense vector field; los datos de entrenamiento son limitados y las anotaciones reales son costosas, por lo que la synthetic-to-real transfer y el inductive bias resultan especialmente decisivos.
+
+\subsection{Tarea y métricas}
+
+El optical flow $F(x,y)=(u(x,y),v(x,y))$ describe el desplazamiento horizontal y vertical de cada píxel del primer fotograma al segundo. El end-point error (EPE) que se usa con frecuencia es:
+
+\[
+\operatorname{EPE}=\frac{1}{HW}\sum_{x,y}\sqrt{(u-\hat u)^2+(v-\hat v)^2}.
+\]
+
+Donde $H,W$ son el alto y el ancho de la imagen; $(u,v)$ es el flow de ground truth; $(\hat u,\hat v)$ es la predicción; mientras menor sea el EPE, mejor. La rueda de color suele usar el hue para indicar la dirección y la saturación o el brillo para indicar la magnitud de la velocidad.
+
+\lecturefigure{slide-28-optical-flow-definition.jpg}{Optical flow: predecir un vector de movimiento bidimensional para cada píxel de fotogramas contiguos.}{Video oficial actual de Stanford Online 00:48:44--00:49:15.}
+
+\begin{knowledgebox}{Lectura de la figura: el color del flujo óptico no es la categoría del objeto}
+Colores similares indican direcciones y velocidades de movimiento similares, no categorías semánticas. Un color uniforme dentro de un objeto indica que el campo de movimiento es suave; los cambios bruscos en los bordes pueden corresponder a oclusiones, cambios de profundidad o movimientos independientes.
+\end{knowledgebox}
+
+\subsection{Transfer protocol: entrenar solo con AutoFlow}
+
+Esta sección fija primero el protocolo de datos y después revisa la clasificación de los modelos. La clase subraya que no existen datos reales de dense flow a gran escala. El modelo se entrena con escenas sintéticas de AutoFlow y luego se evalúa, sin fine-tune, en Sintel clean/final y en KITTI. Así se mide la transfer entre dominios renderizados y de conducción real, y no el ajuste a cada benchmark.
+
+\lecturefigure{slide-29-optical-flow-transfer-task.jpg}{Optical-flow transfer: entrenamiento con AutoFlow y evaluación en Sintel/KITTI sin fine-tuning.}{Video oficial actual de Stanford Online 00:49:16--00:50:05.}
+
+\begin{warningbox}{El EPE de distintos conjuntos de datos no se puede combinar en una sola cifra}
+Sintel clean/final usan distintos niveles de complejidad de renderizado, y KITTI proviene de escenas de conducción con restricciones de LiDAR disperso. Deben reportarse tres columnas por separado; el promedio no puede tomarse como una calidad unificada en el mundo real.
+\end{warningbox}
+
+\teachervoice{En la sesión de Q\&A se explicó el ground truth: Sintel es una película CGI abierta, por lo que la correspondencia de píxeles puede calcularse a partir del estado de la escena; KITTI estima la correspondencia con la profundidad de LiDAR y el movimiento de la cámara. Las anotaciones de dense optical flow son muy costosas, y esa es la razón por la que el synthetic training es necesario.}
+
+\subsection{Comparación con RAFT: por qué sorprende el sesgo débil}
+
+RAFT construye explícitamente un all-pairs correlation volume y actualiza el flow de forma iterativa mediante gather multiescala o local. Es decir, incorpora en la arquitectura la estructura de correspondencia del optical flow. Perceiver IO, en cambio, codifica las características de los dos fotogramas en el input array, las procesa con un latent bottleneck y luego decodifica el flow con una output query por píxel.
+
+\lecturefigure{slide-30-raft-comparison.jpg}{El correlation volume y la actualización iterativa local de RAFT: un inductive bias fuerte para optical flow.}{Video oficial actual de Stanford Online 00:50:06--00:50:31.}
+
+El ponente esperaba que Perceiver IO, por su sesgo débil, sobreajustara los synthetic data o no lograra aprender la correspondence. En la práctica, el modelo obtuvo resultados competitivos «out of the box», lo que indica que una gran cantidad de datos y la attention pueden aprender parte de la estructura de correspondencia; sin embargo, esto no significa que su velocidad o su eficiencia con pocos datos superen a las de RAFT.
+
+\lecturefigure{slide-31-perceiver-io-optical-flow.jpg}{Optical flow con Perceiver IO: entrada de dos fotogramas, latent processor y flow queries por píxel.}{Video oficial actual de Stanford Online 00:50:48--00:51:13.}
+
+\teachervoice{Lo más importante de esta diapositiva es que el experimento corrigió la expectativa previa de los autores: esperaban que un inductive bias débil produjera un sobreajuste severo, y encontraron que el modelo funcionaba directamente. Una conclusión de calidad debe formularse como «se transfiere mejor de lo esperado», y no como «los sesgos de dominio ya no hacen falta».}
+
+\begin{importantbox}{Cómo se traslada el optical flow a Perceiver IO}
+Las input rows codifican los píxeles de los dos fotogramas, su posición y el ID del fotograma; los latents reúnen la información global entre fotogramas; se crea una output query para cada píxel objetivo; el decoder produce dos canales $(\hat u,\hat v)$. El cambio de tarea se refleja sobre todo en las tags de entrada, las output queries y la loss.
+\end{importantbox}
+
+\subsection{Resultados cuantitativos y cualitativos}
+
+La tabla de resultados compara el EPE de PWCNet, RAFT y Perceiver IO en Sintel clean/final y en KITTI. Al leer la tabla hay que confirmar primero si todos los modelos se entrenaron solo con AutoFlow y si se aplicó fine-tuning sobre el benchmark; la clase indica explícitamente que aquí no se aplica fine-tune, para evitar el sobreajuste a conjuntos de prueba pequeños.
+
+\lecturefigure{slide-32-optical-flow-results.jpg}{Comparación del EPE en Sintel clean/final y KITTI tras el entrenamiento con AutoFlow.}{Video oficial actual de Stanford Online 00:51:14--00:51:37.}
+
+\begin{knowledgebox}{Lectura de la tabla: un EPE menor es mejor, pero el error promedio no basta}
+También deben revisarse los bordes de movimiento, los objetos pequeños, el movimiento rápido, las oclusiones y las regiones sin textura. Cuando dos modelos tienen un EPE parecido, la distribución de sus errores y su estabilidad pueden ser completamente distintas; las aplicaciones reales también requieren latency y confianza.
+\end{knowledgebox}
+
+El primer grupo de figuras cualitativas incluye a una persona bailando y movimientos rápidos de manos y objetos. Si el vector field en color es continuo dentro de un mismo objeto en movimiento y cambia en los bordes, el modelo captura el movimiento por regiones; los huecos resaltados o el ruido de color señalan oclusiones y fallas en los detalles.
+
+\lecturefigure{slide-33-qualitative-optical-flow-animals.jpg}{Ejemplo uno de optical flow en escenas reales: personas y movimiento local rápido.}{Video oficial actual de Stanford Online 00:51:38--00:51:49.}
+
+El segundo grupo muestra movimiento rápido a distancia y ampliaciones locales. Los objetivos pequeños ocupan pocos pixels, lo que constituye una prueba exigente para el latent bottleneck: la compresión global debe conservar la motion evidence débil y pequeña, pero decisiva para la tarea, para que la decoder query pueda reconstruirla.
+
+\lecturefigure{slide-34-qualitative-optical-flow-skater.jpg}{Ejemplo dos de optical flow en escenas reales: objetivos pequeños, larga distancia y ampliación local.}{Video oficial actual de Stanford Online 00:51:50--00:52:19.}
+
+\begin{warningbox}{Las figuras cualitativas no sustituyen al benchmark}
+Los videos públicos suelen seleccionar casos fáciles de leer, y la rueda de color puede ocultar diferencias numéricas pequeñas. Deben combinarse el EPE sobre el conjunto de prueba completo, las failure slices, la confianza y la consistencia temporal del video, en lugar de concluir a partir de unos cuantos flow maps vistosos.
+\end{warningbox}
+
+\subsection{Very large outputs y multimodal autoencoding}
+
+Perceiver IO puede construir queries para cada fotograma, cada píxel y cada canal de un video, de modo que el número de salidas puede llegar a millones. La entrada se comprime primero en unos pocos latents y luego se decodifica con un gran número de queries; esto equivale a usar el latent como representación comprimida compartida. El costo de salida sigue siendo $\mathcal{O}(ON)$, por lo que el decoder query batching y la memoria son problemas prácticos de ingeniería.
+
+\lecturefigure{slide-35-decoding-very-large-outputs.jpg}{Decodificar arreglos de salida de video muy grandes a partir de un latent state fijo.}{Video oficial actual de Stanford Online 00:52:20--00:53:05.}
+
+Si el valor máximo de la imagen reconstruida es $I_{\max}$ y el error cuadrático medio es MSE, el PSNR se define como:
+
+\[
+\operatorname{PSNR}=10\log_{10}\left(\frac{I_{\max}^2}{\operatorname{MSE}}\right).
+\]
+
+Donde un PSNR más alto indica un menor error por píxel; no corresponde por completo a la calidad perceptual. La tabla reporta a la vez el compression ratio, el PSNR de video/audio y la exactitud de clasificación, para observar cómo se degradan la reconstrucción y las tareas semánticas al reducir el número de latents.
+
+\lecturefigure{slide-36-quantitative-autoencoding.jpg}{Razón de compresión, PSNR de video/audio y top-5 accuracy del multimodal autoencoding.}{Video oficial actual de Stanford Online 00:53:06--00:56:13.}
+
+\begin{knowledgebox}{Lectura de la tabla: la razón de compresión es una prueba de esfuerzo del cuello de botella compartido}
+Reducir los latents aumenta el compression ratio, pero puede empeorar la reconstrucción de píxeles y audio; la exactitud de clasificación puede bajar más despacio, porque las tareas semánticas no necesitan conservar todos los detalles. Esto revela que la latent representation tiene necesidades de información distintas según la tarea.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El optical flow muestra que Perceiver IO puede decodificar salidas estructuradas por píxel y obtener resultados competitivos en la synthetic-to-real transfer. El EPE, el flow cualitativo, el costo de las output queries y el compression tradeoff deben interpretarse en conjunto; el éxito de un sesgo débil no implica que los modelos especializados con sesgo fuerte pierdan su valor.
+\section{Límites de la conclusión: General Fallback, no Universal Winner}
+
+Tras recorrer imágenes, bytes, multimodal autoencoding y optical flow, esta sección vuelve al ámbito de aplicación correcto. El ponente sitúa a Perceiver como un general fallback sólido para los casos en que no conocemos la estructura correcta, queremos incorporar rápidamente una nueva forma de datos o necesitamos una interfaz multimodal compartida. Si la estructura es conocida, hay pocos datos o la latency es muy estricta, un sesgo especializado todavía puede ser mejor.
+
+\lecturefigure{slide-37-general-perception-summary.jpg}{Resumen de la clase: scaling lineal en la entrada, drop-in Transformer interface, salidas multimodales y estructuradas.}{Video oficial actual de Stanford Online, 00:56:14--00:56:21.}
+
+\begin{knowledgebox}{Lectura de la figura: reescribir el resumen como oraciones condicionales}
+Perceiver es lineal respecto al input size cuando el latent count está fijo; que pueda sustituir a un Transformer se refiere a la attention-based interface, no a que toda la receta de entrenamiento permanezca igual; la unificación multimodal significa que la arquitectura puede compartirse, no que esta clase ya haya completado el entrenamiento conjunto de todas las tareas.
+\end{knowledgebox}
+
+\teachervoice{La sesión de preguntas y respuestas final establece el límite negativo más importante: el equipo todavía no domina los datos a pequeña escala (small-scale data), porque un sesgo débil necesita recuperar la estructura a partir de los datos; el entrenamiento verdaderamente conjunto de varias modalidades y tareas también sigue siendo trabajo futuro.}
+
+La diapositiva de trabajos relacionados devuelve el método a su contexto histórico: multimodal learning, efficient attention, tokenization-free language, optical flow, Transformer e iterative attention aportaron componentes. Leer estas fuentes evita considerar a Perceiver como una técnica aislada surgida de la nada.
+
+\lecturefigure{slide-38-references.jpg}{Trabajos relacionados de la clase: multimodal, efficient attention, language, optical flow e iterative attention.}{Video oficial actual de Stanford Online, 00:56:22--00:58:49.}
+
+\begin{importantbox}{Orden de decisión para elegir una arquitectura}
+Primero pregunta si la estructura de entrada y salida es conocida; después, si la cantidad de datos basta para aprender esa estructura; luego compara el domain-specific baseline, la configuración de latent/output query de Perceiver, la velocidad en hardware real y el costo de reutilización entre dominios. No saltes de la palabra «unificado» directamente a sustituir todos los modelos especializados.
+\end{importantbox}
+
+La última diapositiva presenta los dos artículos centrales, Perceiver y Perceiver IO, junto con sus coautores. No es solo una página de agradecimientos, sino también un punto de entrada para la reproducción: el diagrama de la arquitectura explica la interfaz, y los artículos originales completan los detalles de entrenamiento, los datos, las ablation y la implementación de las tareas.
+
+\lecturefigure{slide-39-thank-you-and-papers.jpg}{Los dos artículos centrales de Perceiver, sus coautores y la página de cierre de la clase.}{Video oficial actual de Stanford Online, 00:58:50--00:58:55.}
+
+\begin{warningbox}{Las dos conclusiones excesivas más comunes}
+Primero, «linear scaling» no equivale a que el proceso de extremo a extremo sea siempre lineal o más rápido; segundo, «any data as a table» no equivale a que desaparezcan la estructura de la tarea y la gobernanza de los datos. El número de latents, el número de outputs, los datos de entrenamiento, la codificación posicional y los kernels de hardware siguen determinando la utilidad práctica.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Perceiver es un punto de partida sólido en escenarios con estructura poco clara, modalidades nuevas o necesidad de una interfaz unificada; en dominios conocidos, con pocos datos o con requisitos estrictos de latencia, los sesgos especializados siguen teniendo ventaja. Su valor para la investigación consiste en convertir el generality-speed tradeoff en una latent/query interface ajustable.
+\section{Síntesis y ampliación}
+
+La idea de Perceiver puede condensarse en una sola oración: en lugar de dejar que un raw input enorme se atienda a sí mismo por pares en cada capa, se hace que un número reducido de learned latents lea la entrada, realice un cómputo profundo de forma interna y luego use task-specific output queries para decodificar la estructura requerida. Esta reorganización facilita que attention escale a píxeles, bytes, audio y video, y campos vectoriales densos, y además convierte el problema del diseño de arquitectura en cuestiones de latent capacity, position/modality features y query construction.
+
+\begin{enumerate}
+  \item \textbf{La motivación de la investigación es la escalabilidad del sistema}: el handcraft por modalidad no puede abarcar todos los sensores ni todos los datos científicos;
+  \item \textbf{La generalidad del Transformer proviene de supuestos de conectividad débiles}: non-local attention y position-as-feature se transfieren con facilidad, pero la raw self-attention es costosa;
+  \item \textbf{El latent bottleneck reescribe la complejidad}: el procesamiento de la entrada pasa de $M^2$ a $MN$, y el cómputo profundo es principalmente $N^2$;
+  \item \textbf{El scaling lineal tiene condiciones}: el número de latents es fijo, el output decoder es asumible y el cuello de botella no pierde información crítica para la tarea;
+  \item \textbf{Perceiver y ViT optimizan objetivos distintos}: ViT cambia el image patch prior por eficiencia; Perceiver cambia supuestos más débiles por una interfaz entre dominios;
+  \item \textbf{La posición no se eliminó}: la posición Fourier/learned sigue aportando la estructura real; solo deja de codificarse de forma rígida la conectividad local;
+  \item \textbf{Las output queries definen la tarea}: la posición, la modalidad y el task embedding le indican al decoder qué debe leer de los latents compartidos;
+  \item \textbf{Los bytes debilitan el supuesto del tokenizer}: el costo de un vocabulary unificado es una secuencia más larga y más aprendizaje de estructura;
+  \item \textbf{Optical flow pone a prueba la structured output}: una query por píxel decodifica un vector bidimensional, y la synthetic-to-real transfer muestra el potencial de los sesgos débiles;
+  \item \textbf{Lo cualitativo y lo cuantitativo deben usarse juntos}: EPE, PSNR, la tasa de compresión, el rendimiento y las failure slices responden, cada uno, a preguntas distintas;
+  \item \textbf{Generality y speed forman un Pareto tradeoff}: en dominios conocidos y con pocos datos, los modelos especializados como convnet/RAFT todavía pueden ser superiores;
+  \item \textbf{Las direcciones pendientes están bien definidas}: small-data learning, hierarchical cross-attention, entrenamiento multimodal conjunto y una decodificación de salida más eficiente.
+\end{enumerate}
+
+\begin{importantbox}{Tarea del curso: construir un experimento de entrada/salida unificada}
+Elija dos tipos de datos con diferencias estructurales marcadas, por ejemplo image patches y series de tiempo. Fije el número de latents y use un Perceiver processor compartido, pero diseñe por separado las position/modality features y las output queries. Compare: un baseline especializado, ViT/Transformer, Perceiver, distintos números de latents y la variante sin codificación posicional. Reporte la calidad, las curvas de datos de entrenamiento, el wall-clock, la memoria pico, el scaling según la longitud de entrada/salida y los failure cases.
+\end{importantbox}
+
+\begin{warningbox}{Autoevaluación final: seis conclusiones que no deben confundirse}
+\textbf{Sesgo débil} no equivale a \textbf{ausencia de sesgo}; \textbf{complejidad de entrada lineal} no equivale a \textbf{costo lineal de extremo a extremo}; \textbf{input permutation robustness} no equivale a \textbf{que la estructura espacial sea inútil}; \textbf{byte-level} no equivale a \textbf{cero preprocesamiento}; \textbf{attention pattern} no equivale a \textbf{explicación causal}; \textbf{interfaz de arquitectura unificada} no equivale a \textbf{que ya se haya entrenado un único modelo conjunto}.
+\end{warningbox}
+
+\subsection{Lecturas adicionales}
+
+Se sugiere leer en el orden «baseline Transformer—cuello de botella de entrada de Perceiver—interfaz de salida de Perceiver IO—contraste por dominio»:
+
+{\small
+\begin{itemize}[nosep,leftmargin=*]
+  \item \href{https://arxiv.org/abs/1706.03762}{\textbf{Attention Is All You Need}}: QKV attention y el baseline del Transformer estándar.
+  \item \href{https://arxiv.org/abs/2103.03206}{\textbf{Perceiver}}: latent bottleneck, iterative attention, ImageNet y experimentos multimodales.
+  \item \href{https://arxiv.org/abs/2107.14795}{\textbf{Perceiver IO}}: output queries, bytes, optical flow y structured outputs.
+  \item \href{https://arxiv.org/abs/2010.11929}{\textbf{Vision Transformer}}: image patching y contraste con el Transformer visual.
+  \item \href{https://arxiv.org/abs/2005.12872}{\textbf{DETR}} y \href{https://arxiv.org/abs/2006.15055}{\textbf{Slot Attention}}: antecedentes importantes de cross-attention / learned queries en visión.
+  \item \href{https://arxiv.org/abs/2006.10739}{\textbf{Fourier Features}}: fundamento teórico y experimental de la codificación de coordenadas de alta frecuencia.
+  \item \href{https://arxiv.org/abs/2103.06874}{\textbf{CANINE}} y \href{https://arxiv.org/abs/2105.13626}{\textbf{ByT5}}: la línea tokenization-free / byte-level language.
+  \item \href{https://arxiv.org/abs/2003.12039}{\textbf{RAFT}} y \href{https://arxiv.org/abs/2104.14544}{\textbf{AutoFlow}}: sesgos de arquitectura en optical-flow y datos de synthetic training.
+\end{itemize}
+}
+
+\end{document}

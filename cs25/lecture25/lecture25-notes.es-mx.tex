@@ -1,0 +1,934 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+\usepackage{multicol}
+
+\renewcommand{\notetitle}{Lecture 25: Retrieval Augmented Language Models}
+\renewcommand{\noteauthors}{Elaborado a partir de la clase de Douwe Kiela, 49 teaching states de la clase y los artículos originales}
+\renewcommand{\notedate}{CS25 V3 · versión reescrita source-first de 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{Clase: 2023-12-05; publicado: 2024-01-25}
+\renewcommand{\videoduration}{1:19:26}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=mE7IDf2SmJg}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.96\textwidth,height=0.54\textheight,keepaspectratio]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\begin{document}
+\makecscover
+
+\section{Introducción: RAG es un problema de sistemas, no «buscar y luego armar el Prompt»}
+
+La conferencia de Douwe Kiela parte de la historia de los modelos de lenguaje y va agregando, capa por capa, retrieval, reranking, fusion, joint training, active retrieval y tool use. El eje de toda la clase no es un pipeline convertido en producto, sino una pregunta de investigación: cómo entra el conocimiento externo al proceso de generación, qué componentes deben congelarse o entrenarse, cuándo se recupera la evidencia, cómo se ordena, dónde se fusiona y cómo demuestra el sistema que su salida está realmente restringida por la evidencia.
+
+\lecturefigure{slide-01-title.jpg}{Página de título de la clase Retrieval Augmented Language Models}{Video de la clase de Stanford 00:01:39}
+
+\begin{knowledgebox}{Lectura de la figura: el Augmented del título cambia los límites del modelo}
+Un language model común concentra la mayor parte de su conocimiento en sus parámetros; un retrieval-augmented language model accede, durante la inferencia o el entrenamiento, a documentos externos, índices vectoriales, motores de búsqueda u otras herramientas. Lo que se amplía no es solo la longitud de la entrada, sino la interfaz entre el modelo y una non-parametric memory que puede actualizarse.
+\end{knowledgebox}
+
+\begin{importantbox}{La pregunta común de esta clase}
+Sea $x$ la entrada, $\mathcal{D}$ el corpus externo, $R$ el recuperador y $G$ el generador; el flujo más simple es
+\[
+z_{1:k}=R(x,\mathcal{D}),\qquad
+y=G(x,z_{1:k}).
+\]
+La verdadera dificultad ocurre dentro de las dos igualdades: cómo aprende $R$ a obtener evidencia «útil para $G$», si $G$ realmente usará $z_{1:k}$ y cómo equilibra el sistema completo calidad, costo, actualización y confiabilidad.
+\end{importantbox}
+
+\subsection{Límites de la evidencia y método de lectura}
+
+Esta clase se impartió en diciembre de 2023. Las valoraciones del ponente sobre DRAGON, vector database, retrieval hardware y la estructura futura de la industria se conservan como opiniones situadas en la fecha de la clase; los mecanismos de RAG, REALM, FiD, RETRO, Atlas, RePlug y otros se explican con base en los artículos originales. El dashboard, el incident runbook, el gate dropout, el drift monitor y la gobernanza regional que aparecían en la versión anterior no tienen respaldo en la clase, por lo que se retiraron por completo.
+
+\subsection{Resumen de la sección}
+
+La línea didáctica de RAG va de «documentos externos que entran al prompt» a «recuperación, representación, fusión y generación optimizadas en conjunto». Las secciones siguientes explican primero por qué se necesita una memoria externa, luego comparan arquitecturas con la train/test taxonomy y, por último, analizan la dirección de sistematización de RAG 2.0.
+\section{¿Por qué se necesita Retrieval Augmentation?}
+
+El curso primero sitúa la retrieval dentro de la historia del language modeling, en lugar de partir del nombre de algún producto de 2023. Así se distinguen tres niveles: el autoregressive objective es antiguo, la escala aporta nuevas capacidades, el instruction tuning corrige la interfaz entre personas y máquinas, y la retrieval se ocupa de la actualización del conocimiento, la procedencia de la evidencia y una memoria controlable.
+
+\subsection{Los modelos de lenguaje no surgieron en los últimos años}
+
+La slide Age of Language Models usa una oración sencilla para ilustrar la next-token factorization: al predecir ``going'', el ``Where are we'' que la precede es el context. La página siguiente muestra un trabajo de neural language modelling de 1991 y recuerda al lector que la combinación de modelos de lenguaje y redes neuronales tiene ya décadas de historia.
+
+\lecturefigure{slide-02-age-of-language-models.jpg}{Un modelo de lenguaje descompone la probabilidad de una secuencia en probabilidades condicionales token por token}{Video de la clase de Stanford 00:02:21}
+
+\begin{importantbox}{Autoregressive factorization}
+Para una secuencia de tokens $w_{1:T}$, un modelo de lenguaje autorregresivo se escribe como
+\[
+p(w_{1:T})=\prod_{t=1}^{T}p(w_t\mid w_{<t}).
+\]
+$w_{<t}$ es el contexto anterior a la posición $t$; el modelo solo necesita estimar una y otra vez la distribución condicional del siguiente token. Los LLM tienen una cantidad enorme de parámetros y de datos de entrenamiento, pero esta descomposición probabilística en sí no es nueva.
+\end{importantbox}
+
+\lecturefigure{slide-03-elman-1991-neural-lm.jpg}{Artículo de neural language modelling de 1991 mostrado en clase}{Video de la clase de Stanford 00:02:57}
+
+\begin{knowledgebox}{Lectura de la figura: la página histórica sirve para calibrar conceptos}
+Esta página escaneada no pide memorizar una arquitectura de red antigua, sino que recuerda que el distributed lexicon, el neural sequence processing y el modelado probabilístico del lenguaje existen desde hace mucho. El avance actual proviene de la evolución conjunta de la escala, la optimización, el hardware, los datos y la interface; no se puede reducir toda esa historia a que una empresa «inventó los modelos de lenguaje».
+\end{knowledgebox}
+
+\teachervoice{Kiela bromea con que se molestaría si alguien creyera que OpenAI inventó los modelos de lenguaje. Este humor cumple una función didáctica de calibración: la autoregressive idea es antigua, y la novedad de los LLM proviene principalmente de la scale y de la pila de entrenamiento moderna.}
+
+\subsection{Next-token prediction y la «interfaz de usuario rota»}
+
+La slide Next Word Prediction representa el sistema como input--generator--output y señala que uno de los problemas de la plain sequence-to-token es la broken user interface. Antes, los usuarios tenían que construir prompts extraños para que el modelo realizara una tarea; el instruction tuning y el alignment al estilo de ChatGPT permiten expresar la intención directamente.
+
+\lecturefigure{slide-04-next-word-prediction.jpg}{Estructura simple de la plain next-word prediction y su problema de interfaz}{Video de la clase de Stanford 00:04:30}
+
+\begin{knowledgebox}{Lectura de la figura: el objective del modelo difiere del objective del usuario}
+El preentrenamiento solo exige predecir el siguiente token del corpus, pero el usuario espera que el modelo siga instrucciones, rechace solicitudes peligrosas, mantenga el formato y complete la tarea. El prompting, el instruction fine-tuning y el RLHF son interface alignment: facilitan invocar el modelo, pero no resuelven automáticamente el conocimiento desactualizado, la falta de evidencia ni los errores factuales.
+\end{knowledgebox}
+
+\teachervoice{El ponente resume la contribución clave de ChatGPT como «fix the user interface». A las personas se les da mejor decir directamente lo que quieren que adivinar qué prompt extraño desencadena una conducta; además, los instruction data son muy escasos en el corpus web ordinario.}
+
+\subsection{Una vez corregida la elicitation de salidas, persisten cinco tipos de carencias}
+
+La slide Eliciting Outputs coloca prompt, instruction tuning y alignment antes del generator, y a la derecha enumera hallucination, attribution, staleness, revisions y customization. Estos cinco puntos no son una misma tasa de error: corresponden, respectivamente, a los hechos, las fuentes, el tiempo, la capacidad de actualización y los límites de usuario/organización.
+
+\lecturefigure{slide-05-eliciting-outputs.jpg}{Carencias del modelo que persisten tras mejorar la elicitation de salidas}{Video de la clase de Stanford 00:06:09}
+
+\begin{knowledgebox}{Términos clave: los cinco problemas no deben mezclarse en una sola «exactitud»}
+\begin{tabularx}{\textwidth}{L{0.18\textwidth}>{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+Problema & Manifestación & Qué puede aportar la retrieval \\
+\midrule
+Hallucination & La salida contradice fuentes de hechos aceptables & Aporta evidencia explícita, aunque el generador aún puede ignorarla \\
+Attribution & No se puede señalar la fuente & Devuelve el ID del documento, el pasaje y la marca de tiempo \\
+Staleness & El conocimiento paramétrico está desactualizado & Reemplaza o actualiza el index sin reentrenar todo el modelo \\
+Revision & Es difícil corregir con precisión un hecho erróneo & Modifica los documentos o la política de acceso \\
+Customization & Cada organización necesita límites de conocimiento distintos & Cambia entre index privados/de dominio y sus permisos \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\begin{warningbox}{Recuperar evidencia no equivale a grounded generation}
+El retriever puede encontrar el documento correcto y aun así el generator puede citar el pasaje equivocado, mezclar memoria paramétrica o ignorar por completo la evidencia. Por ello hay que evaluar por separado, como mínimo, la retrieval quality, la evidence utilization y la final answer correctness.
+\end{warningbox}
+
+\teachervoice{El ponente subraya que, sobre todo en escenarios enterprise con strict accuracy requirements, que el modelo «make up stuff» con alta confianza, que no dé attribution y que no pueda revisarse ni personalizarse con rapidez impide su despliegue real.}
+
+\subsection{Contextualization: la memoria externa entra al generador}
+
+La Contextualization architecture añade documents, document encoder, retriever, query encoder y context. La entrada del usuario ya no va solo al generator, sino que también forma una query; el retriever busca evidencia en la colección externa de documentos y entrega los resultados al modelo junto con el prompt.
+
+\lecturefigure{slide-06-contextualization-architecture.jpg}{Arquitectura RAG básica documents--retriever--context--generator}{Video de la clase de Stanford 00:06:48}
+
+\begin{knowledgebox}{Glosario de primer uso: Retriever, Index, Embedding, Context}
+\begin{tabularx}{\textwidth}{L{0.17\textwidth}>{\raggedright\arraybackslash}X}
+\toprule
+Término & Significado \\
+\midrule
+Document chunk & Unidad recuperable que se corta de un documento; su granularidad determina la exhaustividad y el costo de contexto \\
+Embedding & Mapea una query o un chunk a un vector para poder calcular similitudes \\
+Index & Estructura de datos que permite búsquedas; puede ser un índice invertido, un índice vectorial o un índice híbrido \\
+Retriever & A partir de la query, devuelve desde el index chunks candidatos y sus puntuaciones \\
+Context & Texto de evidencia que finalmente se entrega al generator; no equivale al index completo \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\lecturefigure{slide-07-two-paradigms.jpg}{Dos pares de paradigmas: closed-book/open-book y parametric/semi-parametric}{Video de la clase de Stanford 00:07:48}
+
+\begin{importantbox}{Parametric y non-parametric memory}
+La parametric memory es el conocimiento estadístico que se forma en los pesos del modelo mediante el entrenamiento; actualizarla suele requerir continuar el entrenamiento. La non-parametric memory está formada por documentos, bases de datos, índices y cachés que pueden leerse, escribirse o reemplazarse directamente. A RAG se le suele llamar semi-parametric porque el generador tiene parámetros, mientras que la memory externa puede cambiar en tiempo de prueba.
+\end{importantbox}
+
+\subsection{Por qué un external index puede mitigar parte de los problemas}
+
+La slide Why does this solve the issues ofrece dos beneficios directos: reemplazar el index permite la customization, evita la staleness y corrige errores; el grounding puede reducir la hallucination y aportar citation y attribution. Obsérvese que la palabra es «less» y no «zero».
+
+\lecturefigure{slide-08-why-retrieval-solves-issues.jpg}{Aportes del index externo a la personalización, la actualización y el grounding}{Video de la clase de Stanford 00:08:57}
+
+\begin{knowledgebox}{Lectura de la figura: la capacidad de actualización proviene de cambiar dónde reside el estado}
+Si un hecho existe solo en los pesos, corregirlo requiere entrenar y volver a desplegar; si el hecho está en el index, la ruta de actualización se convierte en document update $\rightarrow$ re-index $\rightarrow$ la siguiente retrieval. El costo es que el sistema debe gestionar las versiones de los documentos, los permisos, el chunking y la consistencia de la recuperación.
+\end{knowledgebox}
+
+\begin{warningbox}{Una base de conocimiento externa no es automáticamente una fuente de verdad}
+El index puede contener contenido erróneo, contradictorio, desactualizado o malicioso. RAG transforma en parte la pregunta «¿el modelo recuerda mal?» en «¿en qué fuentes de datos confía el sistema y cómo las ordena y cita?»; aumenta la controlabilidad, pero convierte la gobernanza de datos y la source selection en responsabilidades explícitas.
+\end{warningbox}
+
+\teachervoice{La clase advierte que el index puede reemplazarse, los hechos pueden revisarse y las fuentes pueden citarse, pero el generator aún puede desatender el context. Lo que la aumentación por recuperación exige de verdad es una interfaz eficaz entre el retriever y el generator.}
+
+\subsection{Un solo diagrama de arquitectura genera muchas preguntas de investigación}
+
+La slide Many Questions plantea preguntas en torno al diagrama básico: cómo aprende, escala y preprocesa el sistema, cómo codificar y recuperar documentos, y cómo diseñar el prompt y verificar la respuesta. Así convierte RAG de un trick aislado en un espacio completo de diseño de sistemas y prepara la clasificación posterior por train/test, representation y fusion.
+
+\lecturefigure{slide-09-many-questions.jpg}{Preguntas de aprendizaje, escalamiento, recuperación y verificación en torno a la arquitectura RAG básica}{Video de la clase de Stanford 00:09:57}
+
+\begin{importantbox}{Los seis ejes de diseño de RAG}
+\begin{enumerate}
+  \item \textbf{Corpus}: qué documentos son accesibles y quién mantiene sus versiones y permisos;
+  \item \textbf{Chunking}: cómo dividir, solapar y conservar la jerarquía;
+  \item \textbf{Representation}: sparse, dense, late interaction o hybrid;
+  \item \textbf{Retrieval policy}: cuándo recuperar, cuántos elementos tomar y si hacerlo en varios saltos;
+  \item \textbf{Fusion}: concatenar en el prompt, cross-attention, decoder fusion o token-level memory;
+  \item \textbf{Learning/evaluation}: qué componentes reciben gradientes y cómo distinguir los errores de recuperación de los de generación.
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La retrieval augmentation aporta principalmente una memoria externa actualizable, atribuible y personalizable. No cambia el next-token objective ni garantiza automáticamente que la generación sea fiel; por eso hay que diseñar el corpus, el index, el retriever, la fusion, el generator y la evaluation como un solo sistema.
+\section{Train Time y Test Time: qué componentes se entrenan realmente}
+
+La forma más eficaz de entender los artículos sobre RAG no es memorizar los nombres de los modelos por año, sino plantear dos preguntas: qué se actualiza durante el entrenamiento y qué se ejecuta durante la prueba. Las diferencias centrales entre Frozen RAG, RePlug, RAG, REALM y Atlas pueden ubicarse en los límites de actualización de language model, query encoder, document encoder, reranker, index y prompt.
+
+\subsection{Entrenamiento e inferencia se registran por separado}
+
+En el lado izquierdo, la slide Train Time and Test Time pregunta si se actualiza el LM, el query encoder o el document encoder, si se actualiza todo a la vez y si se preentrena desde cero; en el lado derecho pregunta si el sistema es un frozen model, cómo cambia la retrieval y si distintos ejemplos usan un index distinto o el mismo.
+
+\lecturefigure{slide-10-train-test-time.jpg}{Matriz de decisiones de RAG en el entrenamiento y en la inferencia}{Video de la clase de Stanford 00:10:54}
+
+\begin{knowledgebox}{Lectura de la figura: un mismo componente puede estar congelado en el entrenamiento y seguir participando en la inferencia}
+``Frozen'' significa que los parámetros no se actualizan, no que el componente deje de ejecutarse. Un frozen retriever sigue buscando y un frozen generator sigue generando; el index también puede actualizar sus documentos sin que se entrene el encoder. Al comparar artículos hay que indicar a la vez parameter update, index refresh e inference calls.
+\end{knowledgebox}
+
+\begin{importantbox}{Separación en capas entre parámetros y estado}
+Sea el conjunto de parámetros
+\[
+\Theta=\{\theta_G,\theta_Q,\theta_D,\theta_R\},
+\]
+que representan, respectivamente, el generator, el query encoder, el document encoder y el reranker; sea $I_t$ el estado del index en el instante $t$. El entrenamiento puede actualizar un subconjunto de $\Theta$, y el despliegue puede limitarse a sustituir $I_t$. El aprendizaje de parámetros y la actualización de la base de conocimiento son dos ciclos de vida distintos.
+\end{importantbox}
+
+\subsection{Frozen RAG: una línea base sólida sin entrenamiento}
+
+La slide de Frozen RAG agrupa no training e in-context learning: se usa un retriever o una vector database ya existentes para encontrar documentos, se insertan los documentos en el prompt y después se llama a un LLM congelado. Se implementa rápido y es adecuado para black-box API, pero el retriever y el generator no están optimizados el uno para el otro.
+
+\lecturefigure{slide-11-frozen-rag.jpg}{Frozen RAG: el retriever y el LLM se acoplan de forma laxa mediante el prompt}{Video de la clase de Stanford 00:11:57}
+
+\begin{knowledgebox}{Lectura de la figura: valor de ingeniería y límites de investigación de Frozen RAG}
+Su valor está en que los módulos son reemplazables, no requiere los pesos del modelo y permite conectar documentos privados con rapidez; sus límites son que el retrieval score no necesariamente coincide con la generator utility, que el orden de los chunks y su posición en el prompt pueden no corresponder, y que el generator puede apoyarse en su memoria paramétrica por encima de la evidencia.
+\end{knowledgebox}
+
+\begin{warningbox}{Frozen no significa barato}
+Cada solicitud sigue requiriendo embedding, search, reranking, prompt tokens y generation. Si top-$k$ es demasiado grande, el costo de los token de entrada y la latency pueden superar el beneficio de la recuperación; si top-$k$ es demasiado pequeño, puede perderse evidencia clave.
+\end{warningbox}
+
+\teachervoice{Kiela llama a frozen RAG ``In-Context Learning only'' y señala repetidamente que es un punto de partida práctico muy sólido, pero también un Frankenstein system cuyos componentes se entrenaron por separado.}
+
+\subsection{Contextualization via Retrieval: qué lado entrenar primero}
+
+La siguiente architecture slide resalta con un recuadro rojo los documents, el document encoder, el retriever y el query encoder, lo que indica que primero se adapta el retrieval side a la tarea. El generator puede seguir congelado, y la señal de entrenamiento proviene de la supervisión de la recuperación, de la likelihood de la respuesta final o de un reranking objective.
+
+\lecturefigure{slide-12-contextualization-via-retrieval.jpg}{Ruta arquitectónica que primero contextualiza el retrieval side}{Video de la clase de Stanford 00:12:09}
+
+\begin{knowledgebox}{Tres tipos comunes de retriever supervision}
+\begin{enumerate}
+  \item \textbf{Direct relevance labels}: query--positive passage pairs y hard negatives;
+  \item \textbf{Answer-containing heuristic}: si el documento contiene la cadena de la respuesta; es barata pero tiene mucho ruido;
+  \item \textbf{Generator-derived signal}: qué documento aumenta la likelihood de la respuesta correcta; se acerca más a la tarea final, pero su cómputo es más costoso.
+\end{enumerate}
+\end{knowledgebox}
+
+\teachervoice{La taxonomy de la clase no es una elección binaria entre «entrenar o no entrenar», sino una revisión elemento por elemento de LM, query encoder, document encoder, reranker e index. Todos los modelos posteriores pueden ubicarse de nuevo en esta tabla.}
+
+\subsection{Resumen de la sección}
+
+Una arquitectura RAG debe reportar a la vez parameter updates, index refresh e inference behavior. Frozen RAG obtiene capacidad rápidamente con un entrenamiento mínimo; los métodos con acoplamiento más estrecho hacen que el retriever o el generator reciban la señal de la tarea final, a costa de mayor complejidad de entrenamiento, actualización del índice y costo de cómputo.
+\section{Retrieval Stack: Sparse, Dense, Late Interaction y Hybrid}
+
+El recuperador determina qué evidencia puede ver el generator. La clase avanza de la sparse retrieval tradicional al dense bi-encoder, la vector database y la late interaction de ColBERT, y cierra con SPLADE, DRAGON y la hybrid search. Las distintas representaciones no son un simple caso de «el método nuevo desplaza al anterior»: cada una equilibra de forma distinta la exact match, la semantic match, la eficiencia y la facilidad de actualización.
+
+\subsection{Sparse Retrieval: coincidencia exacta en el espacio de términos}
+
+La slide de sparse retrieval presenta TF-IDF, BM25 y DrQA. Las dimensiones del vector de un documento corresponden a términos y la mayoría vale cero; por eso se le llama sparse. Una query obtiene una puntuación alta cuando comparte términos con el document, y por ello suelen salir beneficiados los nombres de marca, los números de identificación, los nombres propios y los token de código.
+
+\lecturefigure{slide-13-sparse-retrieval.jpg}{TF-IDF, BM25 y la sparse retrieval tradicional}{Video de la clase de Stanford 00:15:03}
+
+\begin{importantbox}{La intuición central de BM25}
+Para una query $Q$ y un documento $D$, BM25 puede escribirse como
+\[
+\operatorname{BM25}(D,Q)=\sum_{q\in Q}\operatorname{IDF}(q)
+\frac{f(q,D)(k_1+1)}{f(q,D)+k_1\left(1-b+b\frac{|D|}{\operatorname{avgdl}}\right)}.
+\]
+$f(q,D)$ es la frecuencia del término, $\operatorname{IDF}$ aumenta el peso de los términos poco frecuentes y la normalización por longitud evita que los documentos largos ganen solo por tener más palabras. No comprende la semántica profunda, pero es sólido y eficiente con la exact lexical evidence.
+\end{importantbox}
+
+\teachervoice{En la sesión de Q\&A, el ponente usa Apple y pear para explicar el riesgo de la dense retrieval: cuando un nombre de marca requiere coincidencia exacta, no se quiere que la «cercanía semántica» extienda Apple, la empresa, hacia las pears, la fruta.}
+
+\subsection{Dense Retrieval: llevar la query y el passage a un espacio vectorial compartido}
+
+La slide de dense retrieval presenta ORQA y DPR. El query encoder y el passage encoder generan dense embeddings de baja dimensión, que luego se ordenan con dot product o cosine similarity. Puede recuperar passages semánticamente relacionados aunque no compartan palabras, pero que la representation sea adecuada para el generator y el domain en cuestión depende del entrenamiento.
+
+\lecturefigure{slide-14-dense-retrieval.jpg}{Dense bi-encoder retrieval de ORQA/DPR}{Video de la clase de Stanford 00:16:48}
+
+\begin{importantbox}{Dense similarity y MIPS}
+Sea $e_q\in\mathbb{R}^d$ el embedding de la query y $e_i$ el embedding del documento; las puntuaciones habituales son
+\[
+s(q,d_i)=e_q^\top e_i
+\quad\text{o}\quad
+\cos(e_q,e_i)=\frac{e_q^\top e_i}{\|e_q\|\,\|e_i\|}.
+\]
+Maximum Inner Product Search (MIPS) consiste en buscar de forma aproximada, en un index de gran escala, los vectores con mayor producto interno; bibliotecas como FAISS reducen el costo de la búsqueda exhaustiva mediante cuantización, particiones en cubetas o estructuras de grafo.
+\end{importantbox}
+
+\lecturefigure{slide-15-vector-database.jpg}{Vector database: similarity search sobre miles de millones de embeddings}{Video de la clase de Stanford 00:17:45}
+
+\begin{knowledgebox}{Lectura de la figura: una vector database almacena representaciones consultables}
+Por lo general se encarga de escribir los embeddings, construir el ANN index, filtrar por metadata, ejecutar la top-$k$ search y aplicar actualizaciones. La base de datos no decide por el modelo si un chunk es confiable ni garantiza que la semantic similarity equivalga a la task relevance; eso sigue dependiendo del encoder, el corpus y el downstream objective.
+\end{knowledgebox}
+
+\subsection{ColBERT: de la compresión en un solo vector a la late interaction a nivel de token}
+
+El bi-encoder comprime la query completa y el passage completo en un vector cada uno; es eficiente, pero puede perder coincidencias de grano fino. ColBERT conserva el contextual embedding de cada token, codifica los documentos de antemano y, al consultar, busca para cada query token el document token que mejor coincide, y luego agrega las puntuaciones.
+
+\lecturefigure{slide-16-colbert-late-interaction.jpg}{ColBERT: de la representation interaction a la late interaction}{Video de la clase de Stanford 00:17:51}
+
+\begin{importantbox}{MaxSim late interaction}
+Sean $Q_1,\ldots,Q_m$ los query token embeddings y $D_1,\ldots,D_n$ los document token embeddings; la puntuación típica de ColBERT es
+\[
+s(q,d)=\sum_{i=1}^{m}\max_{1\le j\le n} Q_i^\top D_j.
+\]
+Cada query token encuentra el passage token más relevante, por lo que la representación es más fina que la de un solo vector; el costo es un index más grande y más cómputo por consulta.
+\end{importantbox}
+
+\subsection{SPLADE, DRAGON y Hybrid Search}
+
+La slide de SOTA usa SPLADE para ilustrar la learned sparse expansion: el modelo amplía la query/doc con términos relacionados y aun así puede usar un índice invertido; DRAGON entrena un generalized dense retriever con progressive data augmentation y hard negatives. Al final, la clase destaca que en la developer practice es común fusionar los resultados sparse y dense.
+
+\lecturefigure{slide-17-retrieval-sota-splade-dragon.jpg}{Panorama de SPLADE, DRAGON y la hybrid search presentado en clase}{Video de la clase de Stanford 00:24:57}
+
+\begin{knowledgebox}{Lectura de la figura: dos caminos para que sparse se encuentre con dense}
+SPLADE vuelve a escribir la semantic expansion en un sparse vocabulary de alta dimensión; la hybrid search, en cambio, mantiene por separado BM25 y el dense retriever, y después fusiona las clasificaciones. El primero comparte una sola learned sparse representation; la segunda permite que cada sistema se actualice y filtre por su cuenta.
+\end{knowledgebox}
+
+\begin{importantbox}{Reciprocal Rank Fusion}
+Dados varios recuperadores $r\in\mathcal{R}$, la puntuación fusionada del documento $d$ puede escribirse como
+\[
+\operatorname{RRF}(d)=\sum_{r\in\mathcal{R}}\frac{1}{c+\operatorname{rank}_r(d)},
+\]
+donde $c$ es una constante de suavizado. RRF no exige que las puntuaciones originales de los distintos retriever estén en la misma escala; solo usa la posición en la clasificación, y por eso es un hybrid baseline práctico.
+\end{importantbox}
+
+\begin{lstlisting}[caption={Recuperación en dos etapas: sparse recall + dense rerank}]
+def hybrid_retrieve(query, corpus, top_k=8):
+    sparse_candidates = bm25.search(query, limit=200)
+    dense_scores = dense_encoder.score(query, sparse_candidates)
+    reranked = sort_by_score(sparse_candidates, dense_scores)
+    return reranked[:top_k]
+\end{lstlisting}
+
+\teachervoice{En ese momento, el ponente calificó a DRAGON/DragonPlus como un muy buen off-the-shelf dense retriever y observó que los desarrolladores adoptan de forma generalizada la hybrid search. Estas notas lo conservan como un juicio de la clase de 2023 y no lo presentan como una clasificación permanente válida en 2026.}
+
+\subsection{Resumen de la sección}
+
+La sparse retrieval destaca en los exact terms y en índices invertidos maduros; la dense retrieval destaca en la recuperación semántica; ColBERT cambia un index más grande por token-level interaction, y la hybrid search fusiona varias señales. La elección del retriever debe partir del tipo de query, el domain, la escala del index, la frecuencia de actualización y la generator utility.
+\section{Adaptar el retriever a un generator congelado}
+
+Contar con un retriever potente no es el final: el relevance score genérico no necesariamente equivale a la usefulness para un generator concreto. En clase se usan RePlug e in-context RALM para mostrar dos rutas intermedias: mantener congelado el generator y aprovechar su likelihood o la loss de la tarea final para entrenar el retriever/reranker.
+
+\subsection{Contextualizing the Retriever for the Generator}
+
+La diapositiva de arquitectura marca con una llama el retrieval side: el objetivo es que el query encoder y el retriever encuentren documentos «que permitan a este generator responder mejor», y no solo documentos semánticamente similares en sentido genérico. Si el generator es una black-box API al estilo de GPT-4, la interfaz de entrenamiento queda limitada por la log-probability visible y por el costo de las llamadas.
+
+\lecturefigure{slide-18-contextualizing-retriever-for-generator.jpg}{Optimizar el retrieval side para un frozen generator}{Video de la clase de Stanford 00:25:24}
+
+\begin{knowledgebox}{Tres generator access level}
+\begin{tabularx}{\textwidth}{L{0.22\textwidth}>{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+Nivel de acceso & Señal disponible & Alcance entrenable \\
+\midrule
+Text-only API & Texto final, posiblemente un evaluador & Búsqueda de caja negra, optimización de preferencias, reranker externo \\
+Log-probability API & Likelihood de la respuesta correcta; perplexity (la exponencial de la entropía cruzada; puede entenderse como el número efectivo de candidatos por token; cuanto más baja, mejor) & Generator-aware retriever al estilo RePlug \\
+Full weights & Gradientes, hidden states, attention & Joint retriever--generator training \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{RePlug: supervisar el retriever con la likelihood del modelo de lenguaje}
+
+RePlug normaliza los retrieval scores de los top-$k$ documentos y luego entrega cada documento por separado al frozen LM para observar la likelihood de la continuation correcta. El objetivo de entrenamiento acerca la retriever distribution a la generator utility distribution, por lo que no hace falta retropropagar hacia el generator.
+
+\lecturefigure{slide-19-replug.jpg}{RePlug alinea la retrieval distribution con la likelihood del frozen LM}{Video de la clase de Stanford 00:26:42}
+
+\begin{importantbox}{La distribution matching de RePlug}
+Sea la probabilidad que el retriever asigna a un documento
+\[
+p_R(d_i\mid x)=\operatorname{softmax}(s_R(x,d_i)),
+\]
+y sea $p_G(d_i\mid x,y)$ la puntuación normalizada que el frozen LM asigna al objetivo $y$ condicionado al documento $d_i$. El entrenamiento puede minimizar
+\[
+\mathcal{L}_{\text{RePlug}}=D_{\mathrm{KL}}\!\left(p_G(\cdot\mid x,y)\,\|\,p_R(\cdot\mid x)\right).
+\]
+El retriever aprende qué documento reduce la perplexity del LM, mientras los parámetros del generator permanecen sin cambios.
+\end{importantbox}
+
+\teachervoice{Kiela califica la idea de RePlug como «super simple» y aplicable a muchos generator, siempre que se pueda obtener la perplexity o la token likelihood. Lo esencial es entrenar el dense encoder, no modificar el LM de caja negra.}
+
+\subsection{In-Context RALM: recuperación de candidatos con BM25 y ordenamiento fino con un learned reranker}
+
+La slide de In-Context RALM muestra un frozen RAG más sencillo: primero se usa BM25 para encontrar candidatos y se colocan los documentos en el context; después se entrena un reranker para que los documentos mejor clasificados aumenten más la probabilidad que el LM congelado asigna a los token objetivo. El stop-gradient impide que se actualicen los parámetros del LM, y el gradiente solo llega a la rank function.
+
+\lecturefigure{slide-20-in-context-ralm.jpg}{In-Context RALM con BM25 más un trained reranker}{Video de la clase de Stanford 00:26:48}
+
+\begin{knowledgebox}{Lectura de la figura: reparto de tareas entre recall y precision}
+BM25 amplía el conjunto de candidatos a bajo costo, y el reranker aplica sobre un conjunto más pequeño un cross-encoder o un task-aware score más costosos. Así se conserva el exact lexical recall y, al mismo tiempo, el orden final se acerca al generator objective; pero si BM25 no recupera un documento clave, el reranker no puede compensarlo.
+\end{knowledgebox}
+
+\subsection{El pipeline explícito de tres etapas Retrieve--Rerank--Generate}
+
+El último diagrama de arquitectura añade un reranker verde entre el retriever y el context. Este componente adicional permite controlar de forma independiente la recall depth, la reranking depth y el final context size, pero también introduce nuevos problemas de calibration y latency.
+
+\lecturefigure{slide-21-retrieve-rerank.jpg}{Arquitectura de tres etapas documents--retriever--reranker--generator}{Video de la clase de Stanford 00:28:39}
+
+\begin{importantbox}{No confundir los tres tamaños de conjunto}
+Sea $N$ el tamaño del corpus inicial; el retriever devuelve $k_r$ candidatos y el reranker conserva $k_c$ context chunks. Por lo general,
+\[
+N\gg k_r\ge k_c.
+\]
+Un $k_r$ demasiado pequeño perjudica el recall, y uno demasiado grande aumenta el reranking cost; un $k_c$ demasiado grande aumenta el costo del prompt y el riesgo de Lost-in-the-Middle, y uno demasiado pequeño puede dejar fuera evidencia.
+\end{importantbox}
+
+\begin{warningbox}{La puntuación del reranker sigue sin ser confiabilidad factual}
+El reranker mide la query/task relevance; no determina por sí mismo si la fuente es autorizada, si está desactualizada o si fue contaminada por prompt injection. Un production corpus requiere además source policy, metadata filters y control de acceso.
+\end{warningbox}
+
+\teachervoice{En clase se describe esta etapa como un avance «slowly progressing» hacia sistemas mejor adaptados a la tarea de generación: sin tocar todavía el generator, se introducen gradients en el retrieval pipeline mediante BM25, un dense retriever o un BERT reranker.}
+
+\subsection{Resumen de la sección}
+
+Tanto RePlug como in-context RALM aprenden el retrieval side con un generator congelado. El primero alinea el retriever con la likelihood distribution del LM; el segundo combina el recall de BM25 con un learned reranker. Ambos constituyen una capa intermedia importante entre el frozen RAG y el fully joint training.
+\section{Contextualizing the Whole System: del acoplamiento débil a la optimización conjunta}
+
+La sección anterior todavía mantenía congelado el generator y solo entrenaba la retrieval side. A continuación, la clase extiende el recuadro rojo al retriever, el context y el generator, y se pregunta por qué habría que ensamblar a la fuerza componentes entrenados de forma independiente entre sí. Las diferencias entre RAG, FiD, kNN-LM, RETRO y otros métodos pueden leerse a lo largo de dos ejes: en qué momento se recupera la evidencia y en qué punto el generador fusiona la evidencia.
+
+\subsection{Contextualization of Both}
+
+La diapositiva de arquitectura coloca a la vez el query encoder, el retriever, el context y el generator dentro del recuadro rojo, lo que indica que la loss de la tarea final puede influir en más componentes. El ideal del joint training es que el retriever encuentre los documentos que el generator realmente va a usar, y que el generator aprenda a adoptar un comportamiento predecible cuando la evidencia es insuficiente o contradictoria.
+
+\lecturefigure{slide-22-contextualization-both.jpg}{Arquitectura en la que el retriever y el generator se contextualize conjuntamente}{Video de la clase de Stanford 00:30:06}
+
+\begin{knowledgebox}{Lectura de la figura: joint no significa necesariamente actualizar todos los parámetros de forma sincronizada en cada paso}
+Un document encoder de gran escala no puede volver a codificar todo el corpus inmediatamente después de cada lote; por ello, los sistemas reales suelen congelar parte de los parámetros, actualizar el index de forma asíncrona, actualizar solo la query side o entrenar de forma alternada el retriever y el generator. El joint objective describe el acoplamiento de las señales; la implementation puede ser aproximada.
+\end{knowledgebox}
+
+\teachervoice{La crítica central del ponente es esta: si el retriever, el document encoder y el generator se entrenan de forma independiente con objetivos distintos, solo están obligados a cooperar. Una mejor dirección es que los gradients o la task signal atraviesen todo el sistema en la mayor medida posible.}
+
+\subsection{Original RAG: marginalization sobre el latent document}
+
+La RAG architecture slide muestra que el query encoder obtiene los top documents del Wikipedia index, que el generator calcula la probabilidad de la salida para cada document y que después el document se marginaliza como latent variable. Frente a concatenar directamente todos los documentos, esto distingue con mayor claridad la retrieval probability de la generation probability.
+
+\lecturefigure{slide-23-rag-architecture.jpg}{Arquitectura retriever--generator de RAG de Lewis et al.}{Video de la clase de Stanford 00:30:51}
+
+\begin{knowledgebox}{Lectura de la figura: el document es una latent variable}
+El sistema no trata un retrieved document como una verdad definitiva, sino que pondera varios $z$. El retriever aporta $p_\eta(z\mid x)$ y el generator aporta $p_\theta(y\mid x,z)$; ambos determinan juntos la respuesta, y la probabilidad del retriever también puede recibir la task loss final.
+\end{knowledgebox}
+
+\subsection{RAG-Sequence y RAG-Token}
+
+La equation slide distingue dos tipos de marginalization. RAG-Sequence elige el mismo latent document para toda la salida; RAG-Token permite que cada output token obtenga apoyo de una document mixture distinta. Esta última es más flexible, pero también requiere más cómputo de recuperación y fusión, y hace más difícil explicar la procedencia de toda la salida.
+
+\lecturefigure{slide-24-rag-equations.jpg}{Descomposición probabilística de RAG-Sequence y RAG-Token}{Video de la clase de Stanford 00:31:27}
+
+\begin{importantbox}{Dos RAG likelihood}
+RAG-Sequence se aproxima como
+\[
+p(y\mid x)=\sum_{z\in\operatorname{top}k}p_\eta(z\mid x)
+\prod_{t=1}^{T}p_\theta(y_t\mid x,z,y_{<t}),
+\]
+mientras que RAG-Token coloca la suma dentro de cada token:
+\[
+p(y\mid x)=\prod_{t=1}^{T}\sum_{z\in\operatorname{top}k}
+p_\eta(z\mid x)p_\theta(y_t\mid x,z,y_{<t}).
+\]
+$\eta$ son los parámetros del retriever y $\theta$ los del generator. Ambas difieren en la granularidad con que explican la procedencia.
+\end{importantbox}
+
+\subsection{Freezing Suboptimal: la tabla y la metáfora de Frankenstein}
+
+La ablation table compara BM25, DPR y RAG, así como si el generator o el retriever están congelados. La conclusión de la clase no es que «una columna de cifras sea siempre la mejor», sino que el independent freezing suele costar desempeño en la tarea; cuanto más pueden recibir los componentes la señal de un objetivo común, más probable es que formen una colaboración eficaz. Esta sección reúne la benchmark table con la metáfora de Frankenstein que aparece después: primero se lee el experimento controlado y luego se explica el mecanismo del desajuste.
+
+\lecturefigure{slide-25-freezing-suboptimal-results.jpg}{RAG ablation: efecto de congelar el retriever o el generator}{Video de la clase de Stanford 00:31:51}
+
+\begin{knowledgebox}{Lectura de la tabla: primero las variables de control, después las puntuaciones absolutas}
+Al comparar filas hay que confirmar que el generator size, el retrieval corpus, los training data y la evaluation metric coincidan. La tabla respalda la conclusión direccional de que «congelar limita la adaptación», pero no demuestra que todo RAG jointly trained supere a todo RAG frozen; la escala de los datos y la potencia del modelo siguen pudiendo cambiar el resultado.
+\end{knowledgebox}
+
+\lecturefigure{slide-26-frankenstein-rag.jpg}{La clase usa a Frankenstein para describir el ensamblaje de componentes entrenados de forma independiente}{Video de la clase de Stanford 00:32:15}
+
+\begin{warningbox}{Tres desajustes del problema de Frankenstein}
+\begin{enumerate}
+  \item \textbf{Score mismatch}: la retriever relevance no equivale a la generator utility;
+  \item \textbf{Representation mismatch}: la granularidad de los chunks no corresponde con la attention/fusion del generator;
+  \item \textbf{Objective mismatch}: el retrieval benchmark, el language modeling y la downstream task se optimizan por separado.
+\end{enumerate}
+El valor del joint training está en reducir los desajustes, no en eliminar los errores en los datos ni los errores de razonamiento.
+\end{warningbox}
+
+\teachervoice{El ponente superpone una imagen de Frankenstein sobre la ablation table y dice explícitamente «whole point of RAG: freezing is suboptimal». La broma revela la idea de fondo: que cada componente funcione no significa que formen un sistema optimizado conjuntamente.}
+
+\subsection{FiD: fusionar las representaciones de varios passage en el decoder}
+
+Fusion-in-Decoder codifica de forma independiente cada retrieved passage junto con la question y luego hace que el decoder aplique cross-attend sobre todas las passage representations. Así se evita concatenar documentos largos directamente en la entrada del encoder y se permite que cada passage forme primero su propia representación.
+
+\lecturefigure{slide-27-fid.jpg}{Multi-passage encoding y decoder fusion en Fusion-in-Decoder}{Video de la clase de Stanford 00:33:21}
+
+\begin{knowledgebox}{Lectura de la figura: la fusion location determina la forma del cómputo}
+La early fusion concatena el texto antes del encoder: es simple, pero la longitud crece rápidamente. FiD hace que el encoder procese los passage en paralelo y que la fusión ocurra solo en el decoder, con un desempeño sólido en open-domain QA. Su mejora principal está en la evidence fusion; no entrena automáticamente el retriever.
+\end{knowledgebox}
+
+\subsection{kNN-LM: buscar hidden state similares en el datastore durante la inferencia}
+
+kNN-LM almacena en un datastore la hidden representation de cada token del corpus de entrenamiento junto con su next token. En la inferencia, usa la context representation actual para recuperar los vecinos más cercanos, obtiene una non-parametric token distribution y la interpola con la parametric LM distribution.
+
+\lecturefigure{slide-28-knn-lm.jpg}{Hidden-state datastore y predicción por vecinos más cercanos en kNN-LM}{Video de la clase de Stanford 00:33:42}
+
+\begin{importantbox}{Interpolación entre la distribución parametric y la kNN distribution}
+Si $p_{LM}(w\mid x)$ es la distribución del modelo y $p_{kNN}(w\mid x)$ es la distribución obtenida por votación de los vecinos más cercanos, entonces
+\[
+p(w\mid x)=\lambda p_{kNN}(w\mid x)+(1-\lambda)p_{LM}(w\mid x).
+\]
+$\lambda$ controla la influencia de la memory externa. El datastore puede actualizarse o cambiarse de dominio, pero consultarlo en cada token aumenta la latency y el ancho de banda de almacenamiento.
+\end{importantbox}
+
+\subsection{RETRO: hacer que el modelo dependa de una memory externa desde el preentrenamiento}
+
+RETRO divide las secuencias de entrenamiento en chunks, recupera texto vecino para cada chunk y lo inyecta en el decoder mediante chunked cross-attention. No se trata solo de una inference-time prompt augmentation, sino de que el modelo aprenda durante el preentrenamiento a aprovechar una external memory de gran escala.
+
+\lecturefigure{slide-29-retro-architecture.jpg}{Arquitectura de chunk retrieval y cross-attention de RETRO}{Video de la clase de Stanford 00:35:27}
+
+\begin{knowledgebox}{Lectura de la figura: causality y chunk boundary}
+La generación del chunk actual solo puede usar el historial permitido y los retrieved neighbors; no puede filtrar token futuros. El chunk size, el neighbor count y la retrieval latency determinan en conjunto la memory coverage y el costo de entrenamiento; por eso la segmentación de documentos pasa a formar parte de la arquitectura del modelo.
+\end{knowledgebox}
+
+\begin{importantbox}{División de la capacidad entre parámetros y datastore}
+Si el parametric model tiene una escala $P$ y el external datastore contiene $M$ token, la capacidad del sistema ya no se mide solo por $P$. La propuesta de RETRO es combinar un $P$ más pequeño con un $M$ grande para obtener un factual recall más sólido; sin embargo, cada acceso a $M$ genera costos adicionales de search y cross-attention.
+\end{importantbox}
+
+\subsection{RETRO++ y arquitecturas híbridas}
+
+La slide de RETRO++ muestra un sistema híbrido que, sobre la base de RETRO, incorpora el estilo de in-context RAG, y usa una tabla de resultados para analizar la escala de parámetros y el desempeño en la tarea. Esto muestra que el architecture space no es una clasificación binaria de frozen versus joint: la retrieval puede aparecer a la vez en el preentrenamiento y en el inference context.
+
+\lecturefigure{slide-30-retro-plus-plus.jpg}{RETRO++: combinación de retrieval en preentrenamiento e in-context retrieval}{Video de la clase de Stanford 00:37:24}
+
+\begin{knowledgebox}{Lectura de la tabla: una hybrid architecture debe reportar ambos tipos de retrieval}
+Hay que indicar por separado el datastore del preentrenamiento, el index en tiempo de prueba, si se trata del mismo corpus, si se actualiza el retriever y si el generator ya vio el mismo retrieval format. De lo contrario, decir «se usó RETRO++» no basta para reproducir el experimento ni para comparar costos.
+\end{knowledgebox}
+
+\subsection{Contextualization All the Way}
+
+La última architecture slide encierra en el recuadro rojo toda la retrieval side y el generator, como transición hacia REALM/Atlas. Representa el objetivo: no solo colocar documentos en el context, sino considerar conjuntamente la representation, el retrieval objective, la fusion y el language-model training.
+
+\lecturefigure{slide-31-contextualization-all-the-way.jpg}{De la adaptación local a la contextualization de extremo a extremo}{Video de la clase de Stanford 00:38:00}
+
+\begin{importantbox}{Cuatro preguntas para comparar arquitecturas}
+Ante cualquier modelo RAG, conviene preguntar primero:
+\begin{enumerate}
+  \item ¿La retrieval ocurre en el preentrenamiento, en el fine-tuning o en la inference?
+  \item ¿Qué parámetros se actualizan entre retriever, document encoder y generator?
+  \item ¿La evidence se fusiona en el prompt, en el encoder, en el decoder o en la token distribution?
+  \item ¿Cuándo se reconstruye el index y coinciden el corpus de entrenamiento y el de despliegue?
+\end{enumerate}
+Estas cuatro preguntas se trasladan a sistemas nuevos mejor que memorizar solo los nombres de los modelos.
+\end{importantbox}
+
+\teachervoice{El orden de la clase, de RAG, FiD y kNN-LM hasta RETRO, muestra paso a paso que la retrieval puede entrar en distintos niveles: el context de entrada, la decoder attention, la token distribution o la arquitectura de preentrenamiento.}
+
+\subsection{Resumen de la sección}
+
+El joint RAG trata los documents como latent variables y permite que la señal de la tarea final influya en la retrieval y en la generation. FiD cambia la fusion location, kNN-LM fusiona la memory en el nivel de la token distribution y RETRO usa un external datastore desde el preentrenamiento. El diseño de sistemas requiere describir a la vez el retrieval timing, el fusion point, los updated parameters y el index lifecycle.
+\section{REALM y Atlas: aproximaciones de ingeniería dentro de la visión de extremo a extremo}
+
+El fully joint training enfrenta una restricción física: en cuanto cambia el document encoder, podría ser necesario recalcular el embedding de todo el corpus. La importancia de REALM y Atlas no está solo en los resultados de los modelos, sino también en cómo usan actualizaciones asíncronas, objetivos aproximados y varias retriever losses para que un sistema a gran escala pueda entrenarse.
+
+\subsection{REALM: actualización asíncrona de la representación del conocimiento externo}
+
+La slide de REALM muestra el masked language model, el knowledge retriever y el knowledge-augmented encoder. Durante el pretraining aprende la retrieval a partir de la masked token likelihood y, al mismo tiempo, resuelve con un index refresh asíncrono el problema de que los document embeddings cambian con los parámetros.
+
+\lecturefigure{slide-32-realm.jpg}{El knowledge retriever de REALM y la actualización asíncrona del index}{Video de la clase de Stanford 00:40:30}
+
+\begin{importantbox}{La latent retrieval objective de REALM}
+Para el masked target $y$ y el input $x$, puede escribirse como
+\[
+p(y\mid x)=\sum_{z\in\operatorname{top}k}p_\eta(z\mid x)
+p_\theta(y\mid x,z).
+\]
+El retriever no tiene una passage label directa y, aun así, obtiene señal de la masked-token likelihood; el top-$k$ y el stale index hacen que el entrenamiento sea una aproximación.
+\end{importantbox}
+
+\begin{lstlisting}[caption={Esqueleto de entrenamiento con document-index refresh asíncrono}]
+for step, batch in enumerate(training_data):
+    docs = index.search(query_encoder(batch))
+    loss = retrieval_augmented_loss(batch, docs)
+    update(query_encoder, generator, loss)
+    if step % refresh_interval == 0:
+        new_vectors = document_encoder.encode(corpus_snapshot)
+        index.swap_in(new_vectors)
+\end{lstlisting}
+
+\begin{warningbox}{El stale index es una fuente de error de optimización}
+Durante el entrenamiento, el query encoder ya se actualizó, pero el index todavía proviene del document encoder anterior, de modo que la retrieval distribution queda rezagada. Un refresh demasiado frecuente es muy costoso; uno demasiado lento produce signal mismatch. La reconstrucción asíncrona es un compromiso entre freshness y throughput.
+\end{warningbox}
+
+\teachervoice{Kiela califica a REALM de ``really visionary'' y, al mismo tiempo, señala sus desventajas: el sistema es complejo, sigue siendo un encoder de estilo BERT y la actualización del index tiene que ser asíncrona. Los elogios y las limitaciones deben conservarse juntos.}
+
+\subsection{Atlas: con qué objetivos puede aprender el retriever}
+
+La primera página del Atlas Deep Dive enumera las retriever updates: FiD-style attention distillation, EMDR$^2$, likelihood distillation y leave-one-out. Todas intentan responder «qué passage contribuye al generator», pero cada una usa un proxy distinto.
+
+\lecturefigure{slide-33-atlas-retriever-objectives.jpg}{Los cuatro tipos de objetivos de entrenamiento del retriever de Atlas}{Video de la clase de Stanford 00:41:15}
+
+\begin{knowledgebox}{Términos clave: Atlas loss functions}
+\begin{tabularx}{\textwidth}{L{0.22\textwidth}>{\raggedright\arraybackslash}X}
+\toprule
+Objetivo & Señal principal \\
+\midrule
+Attention distillation & Usa la attention del FiD decoder sobre cada passage como teacher score \\
+EMDR$^2$ & Marginaliza sobre los latent documents para que la answer likelihood entrene al retriever \\
+Likelihood distillation & Compara la contribución de cada document a la sequence likelihood del objetivo \\
+Leave-one-out & Estima la contribución marginal según cuánto empeora la loss al retirar un document \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{Retriever Update Derivations}
+
+La segunda página amplía las fórmulas y los diagramas del artículo de Atlas, y subraya la combinación del retriever score con la generator likelihood. La top-$k$ selection del dense retriever no permite derivar directamente a través de la recuperación discreta, por lo que los métodos suelen definir un surrogate diferenciable sobre el conjunto de candidatos.
+
+\lecturefigure{slide-34-atlas-retriever-continued.jpg}{Fórmulas y diagrama del artículo sobre la retriever update de Atlas}{Video de la clase de Stanford 00:42:09}
+
+\begin{importantbox}{Los límites de la surrogate objective}
+Para los candidatos ya recuperados $\mathcal{Z}_k$, una forma común es
+\[
+\mathcal{L}=-\log\sum_{z\in\mathcal{Z}_k}
+p_\eta(z\mid x)p_\theta(y\mid x,z).
+\]
+El gradiente puede reordenar los documentos dentro de $\mathcal{Z}_k$, pero no puede aprender directamente documentos que nunca se recuperaron; el recall del retriever inicial sigue fijando el límite superior.
+\end{importantbox}
+
+\subsection{Loss Function Comparison}
+
+La tabla Atlas Loss Functions compara closed-book, no joint pre-training, FiD distillation, EMDR$^2$, perplexity distillation, LOO y otros métodos en 64-shot, 1024-shot y en varias tareas. Ninguna loss gana de manera uniforme en todas las columnas, lo que indica que la retriever supervision interactúa con la escala de los datos.
+
+\lecturefigure{slide-35-atlas-loss-functions.jpg}{Resultados few-shot de las distintas retriever loss de Atlas}{Video de la clase de Stanford 00:42:36}
+
+\begin{knowledgebox}{Lectura de la tabla: no sustituir el análisis del mecanismo por el promedio de una sola columna}
+Primero observe la diferencia global entre closed-book y retrieval; después compare no-joint-pretraining con cada retriever loss; al mismo tiempo, verifique si el paso de 64-shot a 1024-shot cambia el orden. La tabla sirve más para respaldar que «la retrieval y el joint training aportan valor» que para declarar que una loss es óptima para siempre.
+\end{knowledgebox}
+
+\subsection{Atlas Pretraining: entrenamiento conjunto de tareas de lenguaje y recuperación}
+
+La slide de Atlas pretraining enumera pretext tasks como prefix LM, masked LM y title-to-section generation, y compara un retriever joint con uno fixed. Muestra que el retrieval-augmented pretraining exige elegir tareas que entrenen la capacidad lingüística y que, a la vez, obliguen al modelo a aprovechar los documentos externos.
+
+\lecturefigure{slide-36-atlas-pretraining.jpg}{Las joint pretraining tasks de Atlas y su tabla de resultados}{Video de la clase de Stanford 00:43:33}
+
+\begin{knowledgebox}{Lectura de la figura: la pretext task debe impedir que el modelo tome atajos}
+Si el target puede predecirse directamente a partir del local context, el modelo podría ignorar los retrieved passages. Title-to-section, los masked spans o los knowledge-intensive objectives hacen más útil la evidence externa; sin embargo, la construcción de los datos también puede introducir answer leakage.
+\end{knowledgebox}
+
+\subsection{¿Actualizar el Query Side o el Full Retriever?}
+
+La slide de update-results compara standard fine-tuning, top-100 reranking, query-side fine-tuning y fixed retriever con 64-shot/1024-shot. En la sesión de Q\&A de la clase se precisa además que, para narrow knowledge-intensive tasks como Natural Questions o FEVER, un DPR index sólido con query-side update puede ser suficiente; un general language modeling más amplio podría requerir document-side adaptation.
+
+\lecturefigure{slide-37-atlas-retriever-update-results.jpg}{Comparación de resultados de las estrategias de actualización del retriever de Atlas}{Video de la clase de Stanford 00:44:42}
+
+\begin{knowledgebox}{Lectura de la tabla: cuándo conviene Query-only}
+Cuando la corpus representation ya se parece a la tarea, el query encoder aprende sobre todo a entrar en el index existente; si cambian el domain, la chunk semantics o la language distribution, los document embeddings fijos pueden convertirse en un cuello de botella. Al desplegar, conviene medir primero si la recall failure se debe al query o a la corpus representation.
+\end{knowledgebox}
+
+\teachervoice{En la sesión de Q\&A, el expositor no dio una respuesta de «qué lado actualizar siempre»: en tareas intensivas en conocimiento con pocos datos basta con modificar el query side; al extenderse a un general LM o a un domain nuevo, es más probable que el document encoder necesite cambiar.}
+
+\subsection{Atlas versus Closed-Book}
+
+La última scaling table compara Atlas con modelos closed-book en 5-shot, multi-task y full transfer. La retrieval permite que un modelo con menos parámetros acceda a una external memory más grande, por lo que el número de parámetros deja de ser el único indicador de la capacidad de conocimiento.
+
+\lecturefigure{slide-38-atlas-vs-closed-book.jpg}{Comparación few-shot/transfer entre Atlas y los modelos closed-book}{Video de la clase de Stanford 00:45:06}
+
+\begin{importantbox}{Reportar por separado el model size y la system capacity}
+Un sistema RAG debería reportar como mínimo los generator parameters $P_G$, los retriever parameters $P_R$, el index size $M$, las retrieval calls $C_R$ y los input tokens $T_C$. Decir solo «770M model» oculta el datastore externo y el online compute.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+REALM y Atlas muestran que el joint RAG requiere aproximaciones de ingeniería: index refresh asíncrono, surrogate sobre el conjunto de candidatos, query-only updates y varias distillation objectives. El enfoque de extremo a extremo no es un lema, sino la tarea de precisar qué signal atraviesa qué componentes y por qué, por razones de cómputo, es necesario truncarla.
+\section{Open Questions: cuándo recuperar, cómo escalar y si la evidencia se usa}
+
+Después de Atlas, la clase pasa a las preguntas abiertas, intercaladas con preguntas y respuestas de los estudiantes. Aquí el foco deja de ser «qué arquitectura es más fuerte» y pasa a la policy dinámica, el scaling, la legal-risk motivation, la posición en el context, el tool use y el instruction tuning. Muchas de estas preguntas todavía no pueden responderse con un solo benchmark.
+
+\subsection{RAG y Long Context no son del todo opuestos}
+
+Un estudiante pregunta si un context muy largo reemplazará a RAG. El ponente responde que meter todo Harry Potter en el context solo para encontrar el nombre de una lechuza es muy ineficiente; además, para escalar la attention, los métodos de contexto largo suelen introducir sparsity, lo que en esencia también equivale a seleccionar unas pocas conexiones relevantes.
+
+\begin{knowledgebox}{El problema común de Long context y retrieval}
+Ambos tienen que decidir «qué tokens vale la pena calcular». Long context coloca esa selección en el attention pattern o en la gestión de la cache; RAG la coloca en un external index. Al final, los dos enfrentan relevance, latency, position bias y evidence verification.
+\end{knowledgebox}
+
+\teachervoice{La conclusión de la clase es que, si el contexto largo llega a escalar a tamaños enormes, se parecerá cada vez más a la sparse/non-parametric retrieval, en lugar de aplicar full attention a todos los tokens sin costo.}
+
+\subsection{When to Retrieve: convertir la recuperación en una estrategia}
+
+Recuperar en cada token desperdicia compute, mientras que recuperar una sola vez al principio puede pasar por alto necesidades de conocimiento posteriores. FLARE permite que el modelo decida activamente cuándo buscar y qué buscar, según la confianza de la generación o el contenido que viene, de modo que la retrieval deja de ser un pipeline fijo y se vuelve una sequential policy.
+
+\lecturefigure{slide-39-when-to-retrieve.jpg}{FLARE y active retrieval: decidir cuándo y por qué recuperar}{Video de la clase de Stanford 00:56:36}
+
+\begin{importantbox}{El objetivo de costo de la retrieval policy}
+Sea la acción $a_t\in\{\text{retrieve},\text{continue}\}$, el costo de recuperación $c_R$ y el costo de error $c_E$; puede optimizarse
+\[
+\mathbb{E}\!\left[\sum_t c_R\mathbf{1}(a_t=\text{retrieve})
++c_E\mathbf{1}(\hat y\ne y)\right].
+\]
+La policy debe aprender a invocar la herramienta cuando el valor de la información supera el costo de recuperarla, en lugar de suponer que más retrieval calls son mejores por naturaleza.
+\end{importantbox}
+
+\subsection{How to Train at Scale}
+
+La Scale slide analiza la full async update, la query-only update, TRIME y métodos aproximados, así como el entrenamiento in-batch tras construir lotes similares con BM25. Cuanto más grande es el index, más cara resulta la full refresh del lado de los documentos; por eso el hard-negative sampling, el memory bank y el reranker se vuelven aproximaciones importantes.
+
+\lecturefigure{slide-40-training-at-scale.jpg}{Métodos in-batch y de memoria para retriever training a gran escala}{Video de la clase de Stanford 00:57:39}
+
+\begin{knowledgebox}{Lectura de la figura: qué ahorran los in-batch negatives}
+Los demás documents de un lote pueden servir como negatives, lo que evita buscar por separado una gran cantidad de ejemplos negativos para cada query; el memory bank amplía el conjunto de negativos. El riesgo son los false negatives: documentos semánticamente relevantes tratados como negativos, lo cual distorsiona la representation.
+\end{knowledgebox}
+
+\subsection{SILO: llevar la legal-risk motivation a la arquitectura}
+
+SILO propone entrenar el parametric model con datos más seguros y de licencia más clara, y luego, en tiempo de prueba, acceder a contenido más amplio desde un non-parametric datastore. La clase lo considera una dirección elegante para atender la copyright provenance y el legal risk, pero no afirma que el contenido del index quede por ello libre de responsabilidad legal.
+
+\lecturefigure{slide-41-silo-legal-risk.jpg}{SILO: aislar parte del riesgo de los datos de entrenamiento con un non-parametric datastore}{Video de la clase de Stanford 00:58:45}
+
+\begin{warningbox}{La Architecture no resuelve automáticamente los problemas legales}
+El datastore todavía debe considerar autorización, acceso, registros, eliminación, citas en la salida y datos de usuarios; además, el modelo puede reescribir el retrieved content. El valor de investigación de SILO está en separar los datos de entrenamiento del test-time knowledge, lo que facilita reemplazarlos y auditarlos; no es una conclusión legal.
+\end{warningbox}
+
+\teachervoice{El ponente relaciona SILO con las demandas de aquel momento sobre el origen de los datos de entrenamiento de los modelos, y enfatiza que el parametric model puede entrenarse con datos public-domain y luego recuperar de un index de mayor riesgo. Estas notas conservan esa motivation, pero dejan claro que no la elevan a garantía de cumplimiento normativo.}
+
+\subsection{Lost in the Middle: aunque la recuperación sea correcta, el uso puede fallar}
+
+La curva de la Lost-in-the-Middle slide muestra que el relevant document se aprovecha mejor cuando está al principio o al final del context, y que el desempeño baja cuando está en medio. Si el generator respetara por completo el ranking del retriever, el cambio de posición no tendría un efecto tan marcado; esto demuestra que la evidence placement y el attention behavior son un failure mode independiente.
+
+\lecturefigure{slide-42-lost-in-middle.jpg}{Un relevant passage en medio de un context largo tiende a ignorarse}{Video de la clase de Stanford 01:00:45}
+
+\begin{knowledgebox}{Lectura de la figura: qué indica la U-shaped curve}
+El eje horizontal es la posición del relevant document entre 20 retrieved documents; el eje vertical, el desempeño en la tarea. Valores altos al principio y al final y bajos en medio indican que el modelo tiene position bias. Esto no demuestra que los documentos intermedios nunca sirvan, sino que el reranking, el context packing y la evaluation deben considerar la posición al mismo tiempo.
+\end{knowledgebox}
+
+\begin{warningbox}{Retrieval recall y answer grounding deben medirse por capas}
+Puede registrarse si la evidence clave entra en el top-$k$, si llega al prompt final, en qué posición queda, si la respuesta la cita y si la salida es coherente con la evidence. Mirar solo el final exact match no permite ubicar si la falla está en search, en packing o en generation.
+\end{warningbox}
+
+\subsection{Toolformer: la Retrieval es un Tool Use más general}
+
+La Toolformer slide coloca la search API dentro de un conjunto de herramientas como calculator, calendar y translation. El Language model puede aprender cuándo insertar una API call, leer el valor devuelto y continuar generando; así, la retrieval es una instancia de tool augmentation.
+
+\lecturefigure{slide-43-toolformer.jpg}{Toolformer: un modelo de lenguaje aprende de forma autosupervisada a invocar herramientas externas}{Video de la clase de Stanford 01:01:57}
+
+\begin{knowledgebox}{Lectura de la figura: el cambio de interfaz de RAG a Agent}
+El RAG fijo invoca la recuperación en cada solicitud; un tool-using LM puede elegir search, calculator u otra API. El sistema incorpora action selection, argument generation, tool error handling y permission boundary, y el problema pasa de una architecture estática a la sequential decision making.
+\end{knowledgebox}
+
+\teachervoice{El ponente señala que la active web search no necesariamente consulta un index propio; de manera más general, el LM es un tool user, la retrieval es solo una de muchas herramientas y aprender de verdad la selección de acciones podría requerir RL.}
+
+\subsection{Self-RAG: Retrieve, Generate, Critique}
+
+Self-RAG hace que un único LM genere reflection tokens para decidir si recupera, evaluar la evidence relevance, generar la respuesta y hacer la critique de support/utility. Busca integrar la active retrieval y la autoevaluación en un mismo marco de entrenamiento. Esta sección retoma la selección de acciones de Toolformer y se pregunta además cómo un mismo modelo juzga la calidad de la evidencia y el grado de sustento de la respuesta.
+
+\lecturefigure{slide-44-self-rag.jpg}{El flujo de recuperación activa y reflection de Self-RAG}{Video de la clase de Stanford 01:02:15}
+
+\begin{importantbox}{La Self-reflection sigue necesitando evaluación externa}
+El Critique token es una predicción del modelo, no un oráculo de hechos. El sistema debe verificar por separado la retrieval decision, la source relevance, el claim support y la final utility; la autoevaluación del modelo puede usarse como feature, pero no sustituye a las held-out labels, la human review ni un verifier ejecutable.
+\end{importantbox}
+
+\begin{lstlisting}[caption={Ciclo de active retrieval y evidence verification}]
+state = initialize(question)
+while not state.finished and state.steps < max_steps:
+    if policy.needs_evidence(state):
+        docs = search(state.query)
+        docs = rerank_and_filter(docs, source_policy)
+        state.add_evidence(docs)
+    draft = generator.continue_answer(state)
+    verdict = verify_claims(draft, state.evidence)
+    state = revise_or_finish(state, draft, verdict)
+return state.answer
+\end{lstlisting}
+
+\subsection{Instruction Tuning the Entire RAG System}
+
+La Instruction-tuning slide compara InstructRetro con RA-DIT: antes, los datos de instrucciones entrenaban sobre todo al generator, y el retriever no necesariamente entendía la intención de la tarea, como «comparar, citar, usar solo las fuentes indicadas». El Dual instruction tuning adapta a la vez la retrieval y la generation, para que todo el sistema siga la instruction.
+
+\lecturefigure{slide-45-instruction-tuning.jpg}{InstructRetro y RA-DIT: instruction tuning del RAG system}{Video de la clase de Stanford 01:03:03}
+
+\begin{knowledgebox}{La Instruction también tiene semántica para el Retriever}
+``Give a counterargument'', ``use peer-reviewed sources'' y ``summarize this document'' requieren evidence distinta. Si el retriever solo atiende a la topic similarity, puede devolver documentos relacionados con el tema que no cumplen el task operator; una instruction-aware query representation puede reducir ese desajuste.
+\end{knowledgebox}
+
+\subsection{Advanced Frozen RAG: innovación práctica de la Developer Community}
+
+Aun sin joint training, los desarrolladores han construido el child-parent recursive retriever, la hybrid search/RRF, el zero-shot LLM reranker y HyDE. HyDE primero hace que el modelo genere un hypothetical document y luego usa su embedding para buscar documentos reales; la clase lo llama una idea interesante de «usar la hallucination para corregir la hallucination».
+
+\lecturefigure{slide-46-advanced-frozen-rag.jpg}{Recuperación jerárquica, fusión, reranking y HyDE en Advanced Frozen RAG}{Video de la clase de Stanford 01:04:30}
+
+\begin{knowledgebox}{Términos clave: cuatro advanced frozen patterns}
+\begin{tabularx}{\textwidth}{L{0.25\textwidth}>{\raggedright\arraybackslash}X}
+\toprule
+Patrón & Mecanismo \\
+\midrule
+Child-parent retrieval & Recupera con precisión mediante chunks pequeños y luego se amplía al párrafo padre para aportar el context completo \\
+Hybrid/RRF & Combina el ranking de BM25 y el dense ranking, para cubrir tanto el exact match como el semantic match \\
+LLM reranker & Hace que un LM potente compare la relevance dentro de un conjunto pequeño de candidatos; su costo es alto \\
+HyDE & Primero genera una hypothetical answer/document y luego recupera evidencia real con su embedding \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\begin{warningbox}{El hypothetical text de HyDE no es evidencia}
+Solo sirve para construir una query representation más rica; la respuesta final debe seguir citando retrieved documents reales. Si el hypothetical document se toma directamente como un hecho, la retrieval query expansion se convierte en un ciclo autoconfirmatorio.
+\end{warningbox}
+
+\teachervoice{Por un lado, el ponente critica el carácter de Frankenstein del frozen RAG; por otro, reconoce la innovación práctica del ecosistema de desarrolladores, como LlamaIndex, LangChain, Chroma y Weaviate. La dirección de investigación y el baseline de ingeniería pueden ser válidos al mismo tiempo.}
+
+\subsection{Resumen de la sección}
+
+Las Open questions se concentran en la policy y en los límites del sistema: cuándo recuperar, cómo escalar el retriever, cómo manejar la legal-risk motivation, cómo asegurar que el generator use de verdad la evidencia y cómo la retrieval se convierte en tool use. El Frozen RAG todavía cuenta con técnicas de ingeniería sólidas, pero el joint learning y la evaluation por capas determinan su techo.
+\section{Future: Evaluation, Multimodal RAG y RAG 2.0}
+
+La última parte cierra el curso con una agenda de investigación sobre sistemas: el joint pretraining desde cero sigue sin ser suficiente; la scaling law, el chunker, el encoder, la database, los synthetic data y la evaluation pueden aprenderse o rediseñarse; RAG también puede ir más allá del texto, hacia imágenes y la multimodalidad; el objetivo final es optimizar todo el cost--quality system.
+
+\subsection{Open Questions: qué capas todavía no se han optimizado}
+
+La slide de Open Questions plantea preguntas sobre el joint pretraining, las scaling laws, el reranker/chunker, las representaciones más allá del bi-encoder, la database convergence, los synthetic data y la evaluation. Muestra que la idea de que «RAG ya está resuelto» dista mucho de ser un hecho: los sistemas actuales todavía dependen en gran medida de la segmentación manual y de métricas indirectas débiles.
+
+\lecturefigure{slide-47-open-questions.jpg}{Problemas abiertos de RAG en joint training, chunking, database y evaluation}{Video de la clase de Stanford 01:07:36}
+
+\begin{knowledgebox}{Matriz por capas de la RAG Evaluation}
+\begin{tabularx}{\textwidth}{L{0.18\textwidth}>{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+Capa & Ejemplos de métricas & Punto ciego típico \\
+\midrule
+Retrieval & Recall@$k$, MRR, nDCG & la relevance label no equivale a la generator utility \\
+Packing & evidence coverage, position & ignora el duplicate y el token budget \\
+Generation & correctness, citation, faithfulness & una respuesta correcta puede provenir de la memoria paramétrica \\
+System & latency, cost, freshness, access control & el promedio oculta la latencia de cola y los errores de alto riesgo \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\teachervoice{El ponente critica que la RAG evaluation actual es débil: la downstream performance no permite ver dónde falla la retrieval, y calcular la harmonic mean de la retrieval accuracy y la LM accuracy tampoco cuenta con el respaldo de conjuntos de datos confiables.}
+
+\subsection{¿Se integrará la Vector Database en la Database convencional?}
+
+Entre las preguntas abiertas que planteó de forma oral, el ponente duda de que la vector database especializada vaya a existir de manera independiente a largo plazo: BM25 es más eficiente y el reranker puede complementar la parte semántica; las bases de datos tradicionales están incorporando capacidades de recuperación vectorial, y los proveedores de bases de datos vectoriales también están añadiendo sparse retrieval y metadata filtering. Se trata de un juicio sobre la industria de 2023; debe discutirse como una tendencia de arquitectura y no tomarse como un hecho del mercado actual.
+
+\begin{warningbox}{No conviertas las predicciones de la clase en conclusiones sobre productos}
+La implementación de las bases de datos, el hardware, los algoritmos de indexación y las capacidades de los proveedores cambian con rapidez. Las notas conservan solo la pregunta abstracta: si los sistemas futuros necesitarán gestionar de forma unificada sparse, dense, metadata, transactions y access control, sin afirmar que algún tipo de producto haya desaparecido o haya ganado.
+\end{warningbox}
+
+\subsection{Multimodal RAG}
+
+La slide de Multimodal muestra la cross-modal retrieval augmentation y un pipeline de visual question answering. Una query de texto puede recuperar imágenes, una imagen puede recuperar texto, o bien un vision pipeline genera primero una descripción estructurada y después entrega el resultado a un frozen LM.
+
+\lecturefigure{slide-48-multimodal-rag.jpg}{Cross-modal retrieval y multimodal retrieval-augmented LM}{Video de la clase de Stanford 01:08:45}
+
+\begin{knowledgebox}{Lectura de la figura: el Multimodal RAG necesita alinear tres espacios}
+El sistema debe alinear, como mínimo, la query representation, la retrieved modality representation y la generator input representation. Que dos imágenes sean similares no significa que sean pertinentes para la respuesta, y la caption también puede perder detalles visuales; por eso se necesitan un cross-modal retriever, un modality adapter y una task-level evaluation.
+\end{knowledgebox}
+
+\begin{warningbox}{Los resultados de la recuperación visual también pueden convertirse en evidencia errónea}
+Las imágenes similares pueden provenir de momentos, lugares u objetos distintos, y el OCR/caption puede equivocarse. El Multimodal grounding requiere provenance y verificación de fechas y entidades; no se debe elevar el nivel de la evidencia solo porque «hay una imagen».
+\end{warningbox}
+
+\teachervoice{Kiela considera la multimodality una extensión natural: ¿por qué RAG debería quedarse solo en el text? Cita LENS y el cross-modal work, y enfatiza que incluso un frozen LM puede adquirir capacidades visuales mediante un vision pipeline externo.}
+
+\subsection{RAG 2.0: Systems over Models}
+
+La slide final cierra con cuatro puntos: systems over models, optimize it all, trade cost and quality y zero-shot domain generalization. RAG 2.0 no es un diagrama fijo, sino una optimization stance: retriever, chunker, reranker, generator, index, data y serving no deberían separarse de manera permanente.
+
+\lecturefigure{slide-49-rag-2-0.jpg}{RAG 2.0: de los frozen components a systems-over-models}{Video de la clase de Stanford 01:10:12}
+
+\begin{importantbox}{El objetivo de sistema de Cost--Quality}
+El objetivo de despliegue puede abstraerse como
+\[
+\max_{\Theta,I,\pi}\;
+Q(\Theta,I,\pi)
+-\lambda_L L(\Theta,I,\pi)
+-\lambda_C C(\Theta,I,\pi)
+-\lambda_R R(\Theta,I,\pi),
+\]
+donde $Q$ es la calidad de la tarea, $L$ es la latency, $C$ es el compute/storage cost y $R$ es el riesgo o las salidas no confiables; $\pi$ incluye la retrieval policy. Optimizar solo la LM accuracy no basta para determinar la solución óptima del sistema.
+\end{importantbox}
+
+\teachervoice{El ponente resume RAG 2.0 como ``systems over models'' e incluso sugiere retropropagar hasta el chunker. Lo esencial no es que todos los módulos deban actualizarse al mismo tiempo, sino que cualquier frontera definida a mano debe someterse a la prueba de «si puede aprenderse y si vale la pena optimizarla».}
+
+\subsection{Closing Q\&A: Hybrid, Fine-tuning y Retrieval Hardware}
+
+La Q\&A final ofrece tres juicios prácticos. Primero, BM25 puede servir para cast a wide net y después un dense reranker acota los resultados. Segundo, la domain adaptation terminará combinando retrieval, fine-tuning y adapters, en lugar de elegir siempre una de dos opciones. Tercero, el ponente menciona la posibilidad industrial de un dedicated retrieval hardware, pero no ofrece modelos ni benchmark verificables públicamente, por lo que solo se registra como speaker speculation.
+
+\begin{knowledgebox}{Retrieval y Fine-tuning resuelven estados distintos}
+El fine-tuning modifica los parameters y es adecuado para la conducta, el formato, las representaciones del dominio y las habilidades estables; la retrieval modifica la per-request evidence y es adecuada para actualizaciones frecuentes, datos privados y attribution. RAG 2.0 puede aplicar fine-tune a todo el retrieval-augmented system en tareas de dominio y, al mismo tiempo, conservar un index actualizable.
+\end{knowledgebox}
+
+\teachervoice{El ponente afirma explícitamente que, al final, probablemente todos combinarán retrieval, end-to-end fine-tuning y adapters. La verdadera pregunta pasa a ser cómo combinarlos de forma eficiente, y no discutir cuál es la única opción posible.}
+
+\subsection{Hallucination, Generic Error y Ground Truth}
+
+El pasaje spoken-only más importante del curso aparece en los últimos cuatro minutos. Al ponente le inconforma que el campo llame hallucination a todos los errores: los errores de cálculo comunes, la mala interpretación de la pregunta y la evidence contradiction deben distinguirse; la hallucination tiene que definirse, como mínimo, respecto de alguna ground truth o de la retrieved evidence.
+
+\begin{importantbox}{Distinción entre tres tipos de fallas}
+\begin{tabularx}{\textwidth}{L{0.20\textwidth}>{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+Tipo & Criterio & Ejemplo \\
+\midrule
+Generic error & La salida no cumple con la respuesta de la tarea ni con las reglas de cálculo & Errores aritméticos, restricciones omitidas, errores de formato \\
+Unsupported claim & No hay evidence suficiente que la respalde & El index no tiene fuentes pertinentes y aun así se da una afirmación categórica \\
+Evidence contradiction & La salida entra en conflicto con la ground truth/source seleccionada & El documento dice A y la respuesta afirma no A \\
+\bottomrule
+\end{tabularx}
+\end{importantbox}
+
+\begin{warningbox}{La elección de la ground truth es en sí misma una decisión de sistema}
+El index puede admitir solo peer-reviewed papers o incluir también arXiv, documentos empresariales o la web abierta; distintas source policy producen distintos «hechos confiables». RAG hace explícita esta elección, pero una source errónea o maliciosa todavía puede volver errónea una grounded answer.
+\end{warningbox}
+
+\teachervoice{El ponente señala que un frozen GPT-4, incluso conectado a RePlug, todavía puede ignorar la evidence; si todo el conocimiento se trasladara a un index externo y el modelo se encargara solo del lenguaje y del reasoning, en teoría sería más fácil forzar el grounding, pero se trata de un límite que marca una dirección y no de una garantía ya alcanzada.}
+
+\teachervoice{Añade que la creative writing a veces necesita «hallucinate», mientras que una factual task requiere un grounding más fuerte; un sistema ideal debería tener una grounding knob. La temperature solo cambia la sampling distribution: incluso con temperatura baja el modelo puede producir errores de forma estable, por lo que no puede funcionar como grounding control.}
+
+\subsection{Resumen de la sección}
+
+El Future RAG necesita integrar evaluation, database, multimodal retrieval, chunking, instruction y serving. La conclusión final de RAG 2.0 es optimizar todo el system y especificar con claridad la source of truth, la grounding strength, el cost y el risk; la recuperación y el fine-tuning son herramientas complementarias, y la temperature no es un interruptor de factualidad.
+\section{Síntesis y ampliación}
+
+Esta clase organizó los retrieval-augmented language models en un espectro continuo: desde frozen BM25/vector search, que inserta los documentos en el prompt; pasando por RePlug/reranker, que adaptan la retrieval a un frozen LM; luego RAG, REALM, Atlas y RETRO, que hacen llegar la task signal a más componentes; hasta generalizar la retrieval como active tool use, multimodal memory y systems-over-models.
+
+\subsection{Marco unificado de comparación}
+
+Cualquier sistema RAG puede describirse con una quíntupla: corpus/index $I$, retrieval policy $\pi$, retriever parameters $\theta_R$, fusion mechanism $F$ y generator parameters $\theta_G$. Al comparar artículos o productos, deben reportarse el estado de entrenamiento, el estado de despliegue y el costo de estos cinco elementos, en lugar de limitarse a decir «se usó RAG».
+
+\begin{importantbox}{Diez conclusiones aplicables de esta clase}
+\begin{enumerate}
+  \item Evaluar por separado la hallucination, el generic error y la evidence contradiction;
+  \item Reportar a la vez retrieval recall, evidence position, utilization y final correctness;
+  \item Para una exact entity, conservar de preferencia la sparse signal; para la recuperación semántica, usar además dense/late interaction;
+  \item Frozen RAG es un baseline sólido, pero hay que registrar el score/objective mismatch;
+  \item La elección entre RePlug, reranker o joint training depende del generator access level;
+  \item Reportar qué parámetros se actualizan, cuándo se refresca el index y si el corpus cambia;
+  \item Controlar $k_r$, $k_c$ y la context position, y evitar ampliar el prompt a ciegas;
+  \item La active retrieval debe optimizar el information value y el retrieval cost;
+  \item El fine-tuning modifica la conducta y las representaciones; la retrieval modifica la per-request evidence; ambos pueden combinarse;
+  \item Source policy, provenance, permissions y evaluation forman parte de la RAG architecture.
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Qué registrar al reproducir experimentos}
+
+Como mínimo, registrar corpus snapshot, license/provenance, chunk size/overlap, embedding model, index type, retriever top-$k$, reranker, context packing, generator version, prompt, updated parameters, index refresh cadence, latency/cost y evaluation set. Sin esta información, es difícil reproducir los resultados aunque el nombre del modelo sea el mismo.
+
+\begin{warningbox}{No presentar una instantánea de la clase de 2023 como un hecho de los productos de 2026}
+Las valoraciones de esta clase sobre off-the-shelf retriever, vector database, hardware y tendencias de la industria se hicieron el 2023-12-05. Las notas conservan los mecanismos y los juicios históricos, pero no afirman con base en ellos las capacidades actuales de los productos, el panorama del mercado ni conclusiones jurídicas de 2026.
+\end{warningbox}
+
+\subsection{Lecturas adicionales}
+
+Se recomienda leer en el orden de los mecanismos: DPR/ColBERT para entender la retrieval representation; RAG/FiD para entender la evidence marginalization y la fusion; kNN-LM/RETRO para entender cómo la non-parametric memory entra en el language modeling; REALM/Atlas para entender las aproximaciones del joint training; RePlug/In-Context RALM para entender el frozen generator; FLARE/Self-RAG/Toolformer para entender la active retrieval y el tool use; SILO/Lost-in-the-Middle para entender los límites de los datos y la evidence utilization.
+
+\subsection{Resumen final}
+
+El valor de la retrieval augmentation no se reduce a «darle más texto al modelo»: consiste en separar del modelo paramétrico único el estado del conocimiento, su actualización, sus fuentes y el cómputo. Un RAG de alta calidad debe alinear retriever, context, generator y source policy, y demostrar con una evaluation por capas que la evidencia correcta se encuentra, se coloca en una posición aprovechable y el generador realmente la usa, y que la salida final cumple con la tarea y con el ground truth.
+
+\end{document}

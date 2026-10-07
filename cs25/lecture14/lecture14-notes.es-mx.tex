@@ -1,0 +1,679 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+
+\renewcommand{\notetitle}{Lecture 14: Strategic Games, Inference-Time Search y Cicero}
+\renewcommand{\noteauthors}{Elaborado a partir de la conferencia de Noam Brown, los subtítulos oficiales hechos por personas, las diapositivas recuperadas y los artículos originales}
+\renewcommand{\notedate}{CS25 V2 · versión reescrita source-first de 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{Clase: 2023-01-31; publicación: 2023-05-22}
+\renewcommand{\videoduration}{53:20}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=phWxl0nkgKk}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.94\textwidth,height=0.54\textheight,keepaspectratio]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\begin{document}
+\makecscover
+
+\section{Auditoría de fuentes y pregunta central del curso}
+
+En apariencia, esta clase va del póquer y el go hasta Diplomacy, un juego de mesa para siete jugadores; lo que en realidad recorre toda la sesión son dos problemas de sistemas. Primero, una vez terminado el entrenamiento, cuánto cómputo debe invertir un modelo en una sola decisión. Segundo, cuando una tarea requiere a la vez modelar el mundo, optimizar una estrategia y comunicarse en lenguaje natural, qué responsabilidades deben asignarse a un mismo modelo y cuáles deben separarse necesariamente. Noam Brown usa la búsqueda para mostrar que \term{el presupuesto de cómputo debe variar según el valor de la decisión}, y luego usa Cicero para mostrar que \term{la fluidez lingüística no sustituye el ciclo cerrado estratégico}.
+
+\subsection{Cómo se reconstruye esta clase}
+
+El sitio oficial del curso no ofrece un slide deck independiente para descargar, por lo que esta clase no puede tomar como fuente visual borradores anteriores ni resúmenes de segunda mano publicados en internet. Tomamos como original maestro la grabación oficial en 1080p de Stanford Online, muestreamos la región de screen-share cada dos segundos, de 1,600 cuadros seleccionamos 70 candidatos con alta exhaustividad y, tras eliminar duplicados manualmente, quedaron 42 imágenes con valor didáctico propio. Las explicaciones orales del texto provienen de los subtítulos oficiales en inglés elaborados por personas, con un total de 1,176 intervalos de tiempo; las fórmulas y los términos se cotejaron con los artículos primarios recomendados en clase.
+
+\begin{longtable}{L{0.22\textwidth}L{0.31\textwidth}L{0.37\textwidth}}
+\toprule
+Capa de evidencia & Material local & Función en los apuntes \\
+\midrule
+Grabación oficial & Video de 53:20 y 42 diapositivas recuperadas & Determina el orden de la clase, las gráficas, la arquitectura del sistema y los casos de demostración \\
+Subtítulos oficiales elaborados por personas & \texttt{lecture14.en.srt} & Recuperan la motivación, las analogías de clase, las restricciones, la sesión de Q\&A y el tono del ponente \\
+Artículos recomendados por el curso & Cicero, piKL, No-Press Diplomacy & Permiten cotejar los objetivos de los algoritmos, los límites de los experimentos y el significado de los términos \\
+Archivos locales de auditoría & manifest, coverage, teacher-voice ledger & Demuestran que cada source node tiene un destino explícito en el texto \\
+\bottomrule
+\end{longtable}
+
+\begin{warningbox}{Límite histórico}
+Esta clase reconstruye el contenido impartido hasta el 31 de enero de 2023. Los reasoning models, las test-time scaling laws o los productos de agent de propósito general posteriores no pueden proyectarse hacia atrás como hechos de la clase. Al final se incluye por separado una sección de «Ampliación a sistemas modernos», claramente separada de las afirmaciones que hizo el ponente en ese momento.
+\end{warningbox}
+
+\subsection{Cuatro preguntas que recorren toda la clase}
+
+Al leer más adelante las curvas de póquer y la arquitectura de Cicero, no conviene quedarse en el nivel de «la IA vuelve a vencer a los humanos». Vale más seguir estas preguntas: si la calidad de la decisión proviene de la base policy entrenada o de la search realizada en el momento; si el comportamiento humano es el objetivo de optimización, una distribución a priori o un modelo del entorno; si el modelo de lenguaje decide la estrategia o solo expresa una estrategia ya decidida; y cómo rechaza el sistema un mensaje gramaticalmente correcto pero que perjudicaría la recompensa futura.
+
+\begin{importantbox}{La tesis sistémica de esta clase}
+Un agente inteligente sólido no es «un modelo de lenguaje más grande con un prompt», sino un ciclo cerrado sujeto a un presupuesto: predice a los demás participantes del entorno, planifica su propia estrategia, condensa esa estrategia en un intent comunicable, genera mensajes candidatos, evalúa cómo cambiarían esos mensajes el comportamiento de los demás y vuelve a planificar.
+\end{importantbox}
+
+\subsection{Glosario: distinguir primero los conceptos afines}
+
+Esta clase alterna una y otra vez entre cuatro niveles: entrenamiento, inferencia, estrategia y lenguaje. La tabla siguiente reúne primero los términos clave, para no confundir «un modelo más grande», «una búsqueda más profunda», «más parecido a un humano» y «mejor comunicación» como si fueran la misma capacidad.
+
+\begin{longtable}{L{0.23\textwidth}L{0.30\textwidth}L{0.37\textwidth}}
+\toprule
+Término & Problema que resuelve & Mecanismo central y relación con el curso \\
+\midrule
+Base policy & Cómo producir rápidamente una distribución de acciones sin búsqueda & Se obtiene mediante entrenamiento; es la distribución a priori de candidatos para la search, no la respuesta final \\
+Inference-time search & Si la decisión actual justifica gastar más cómputo & Con los pesos fijos, despliega, evalúa y compara candidatos; el presupuesto puede variar según el valor \\
+Exploitability & Cuánto puede aprovechar una estrategia un oponente óptimo & Mide la distancia en el peor caso respecto al Nash equilibrium; es más robusta que la tasa de victorias común \\
+Human anchor policy & Cómo conservar convention de acción comprensibles para las personas & Imita datos humanos; aporta una distribución a priori de coordinación, pero también hereda las debilidades humanas \\
+Intent & Qué plan debe expresar exactamente el modelo de lenguaje & Cicero usa actions ejecutables a corto plazo como condición estructurada de generación \\
+Grounded dialogue & Cómo se vinculan los mensajes con el estado compartido del mundo & Cada mensaje debe corresponder al board, la history, el plan y las posibles consecuencias en el comportamiento \\
+Value-based filtering & Cómo rechazar mensajes fluidos pero estratégicamente dañinos & Predice el efecto del mensaje en la policy de los demás y luego evalúa el expected value del plan \\
+\bottomrule
+\end{longtable}
+
+\subsection{Resumen de la sección}
+
+Esta clase se apoya en tres capas de evidencia: la grabación oficial, los subtítulos elaborados por personas y los artículos primarios. A continuación se explica primero «por qué vale la pena gastar en search durante la inferencia» y después se aborda Diplomacy, donde la comunicación, la cooperación y la competencia coexisten.
+\section{Póker: por qué la Inference-Time Search puede superar a la escala de entrenamiento}
+
+El póker es un juego de información incompleta: los jugadores no ven las cartas del rival, y sus acciones, a su vez, revelan información. Por eso resulta especialmente adecuado para examinar una pregunta: si la estrategia obtenida en el entrenamiento ya es fuerte, ¿vale la pena resolver de nuevo cada situación en el momento? El ponente parte de la derrota en la competencia entre humanos y máquina de 2015, no para enumerar la historia, sino para mostrar que la cultura de investigación llegó a subestimar el beneficio del cómputo en tiempo de inferencia.
+
+\subsection{De la derrota de 2015 a «pensar un poco más en el momento»}
+
+La primera figura coloca en un mismo marcador la diferencia entre los jugadores humanos y la IA de entonces. En la competencia Brains vs. AI de 2015, Claudico no logró vencer a cuatro de los mejores jugadores de heads-up no-limit Texas Hold'em. El diagnóstico central no fue «todavía faltan parámetros», sino que el bot, incluso en situaciones difíciles, actuaba de inmediato, casi como si consultara una tabla; los humanos, en cambio, dedicaban más tiempo a las manos de alto riesgo.
+
+\lecturefigure{slide-01-2015-brains-ai-poker.jpg}{2015 Brains vs. AI Poker Competition: la línea base fallida antes del giro hacia la búsqueda}{Diapositiva V001 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\teachervoice{El docente enfatiza que la conducta humana que más conviene imitar no es una técnica de póker en particular, sino \textbf{asignar dinámicamente el tiempo de reflexión según la dificultad de la situación}. Las manos fáciles se juegan rápido; las que determinan el resultado de toda la partida merecen resolverse de nuevo. Esta observación reformula la pregunta de investigación: de «entrenar otra estrategia más grande» a «cuánto inference compute darle a la estrategia existente».}
+
+\subsection{Cómo leer las curvas de búsqueda mediante la exploitability}
+
+Una estrategia de póker no puede juzgarse solo por su tasa de victorias contra un rival de prueba fijo, porque una estrategia puede justamente contrarrestar a ese rival y, aun así, ser fácilmente aprovechada por otro estilo de juego dirigido contra ella. Una magnitud más robusta es la \term{exploitability}: cuánta ganancia adicional, respecto del pago de equilibrio, puede extraerle a esa estrategia un rival óptimo como máximo. Si $u_i(\pi_i,\pi_{-i})$ denota el pago esperado del jugador $i$ bajo la estrategia conjunta, el error respecto del equilibrio aproximado puede escribirse como
+\begin{equation}
+\epsilon_i(\pi)
+= \max_{\pi_i'} u_i(\pi_i',\pi_{-i}) - u_i(\pi_i,\pi_{-i}).
+\end{equation}
+Aquí $\pi_i'$ es cualquier mejor respuesta del jugador $i$ y $\pi_{-i}$ son las estrategias de los demás jugadores; cuanto menor es $\epsilon_i$, más difícil es explotar la estrategia. El eje vertical de la figura de la clase dice distance from Nash, y en el fondo debe leerse como «qué tan lejos se está todavía de una estrategia inexplotable», no como una accuracy ordinaria.
+
+\lecturefigure{slide-02-search-poker-scaling.jpg}{El scaling en póker de escala intermedia: la curva con search queda, en conjunto, muy por debajo de la de no-search}{Diapositiva V002 recuperada de la grabación oficial; las curvas citan el trabajo de Brown y Sandholm sobre resolución segura de subjuegos}
+
+\begin{knowledgebox}{Lectura de la figura: primero se compara la diferencia vertical y luego el scaling horizontal}
+El eje horizontal, buckets, es el tamaño de la base abstraction / policy, que crece de alrededor de 200 a 20,000; el eje vertical es la Nash distance en escala logarítmica, y entre más baja, mejor. La línea azul representa no hacer search; la naranja, volver a resolver el subjuego actual. Ambas líneas descienden a medida que crece el base model, pero la naranja queda muy por debajo en cada tamaño. El ponente resume el punto representativo como una reducción de la exploitability de unas siete veces: la señal realmente fuerte no es un punto aislado, sino el desplazamiento de toda la curva que produce la search.
+\end{knowledgebox}
+
+\begin{warningbox}{Lo que la curva no demuestra}
+Esta figura no demuestra que «la search siempre equivale a agrandar el modelo un número fijo de veces», y mucho menos permite extrapolar directamente la mejora de siete veces del póker a tareas de lenguaje. Solo demuestra que, en este juego de información incompleta y con este solucionador, el cómputo local en tiempo de inferencia es más eficiente que seguir ampliando una base abstraction del mismo tipo.
+\end{warningbox}
+
+\subsection{Por qué un método tan eficaz siguió ignorándose}
+
+La tercera slide no trata un detalle técnico, sino que diagnostica los incentivos de la investigación. Muchos equipos invertían sus recursos en estrategias fuera de línea reutilizables; la search exige cómputo adicional en cada paso, su desarrollo de ingeniería es complejo, y en un principio la comunidad consideró que los métodos conocidos no eran lo bastante eficaces en juegos grandes. Así, todos ampliaban una y otra vez el base model, pero rara vez medían cuánto se ganaba si «el mismo modelo calcula un poco más al momento de decidir».
+
+\lecturefigure{slide-03-why-search-overlooked.jpg}{Por qué la poker search tardó tanto en convertirse en la ruta predeterminada}{Diapositiva V003 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\teachervoice{El ponente presenta esta historia como una lección de gestión de la investigación: cuando la comunidad cree de forma generalizada que una dirección «no escala», los equipos dejan de construir infraestructura para ella, y la falta de infraestructura hace, a su vez, que los experimentos parezcan costosos. La llegada tardía de la search tiene causas algorítmicas, pero también culturales, de presupuesto de cómputo y de incentivos de publicación.}
+
+\subsection{Libratus: la resolución local llega al mano a mano de alto nivel}
+
+En 2017, Libratus venció a cuatro de los mejores jugadores de heads-up no-limit poker en una competencia entre humanos y máquina de 120,000 manos. Su aportación no consiste en enumerar por fuerza bruta el árbol de juego completo en cada turno, sino en partir de una blueprint strategy calculada fuera de línea y luego refinar la estrategia de manera segura en los subjuegos que efectivamente se alcanzan. De este modo, el sistema concentra el cómputo costoso en las ramas que realmente aparecen y que importan para el resultado.
+
+\lecturefigure{slide-04-libratus-2017.jpg}{Libratus: un sistema de póker sin límite para dos jugadores impulsado por búsqueda}{Diapositiva V004 recuperada de la grabación oficial; Brown y Sandholm, Science 2017}
+
+\begin{importantbox}{División del trabajo entre el blueprint y la search local}
+El blueprint aporta una estrategia previa viable a nivel global, de modo que el sistema no parte de cero; el subgame solving redistribuye la masa de probabilidad en torno a la situación pública observada. El primero se encarga de la cobertura; el segundo, de la precisión. Con solo el blueprint, las situaciones difíciles se tratan de forma demasiado burda; si en cada ocasión se resolviera desde cero el equilibrio global, el cómputo sería inasumible.
+\end{importantbox}
+
+\subsection{Pluribus: de dos jugadores de suma cero a la mesa de seis}
+
+El poker multijugador ya no cumple la estructura sencilla de dos jugadores y suma cero: el efecto de una acción sobre terceros, las coincidencias temporales de intereses y la no transitividad dificultan la resolución. En 2019, Pluribus derrotó a varios jugadores profesionales humanos aun con modest compute, lo que muestra que el valor de la search no existe solo en el entorno teórico más limpio. Lo que más conviene leer en la figura no es la portada de la revista, sino que se cumplen a la vez tres restricciones: «seis jugadores, tiempo real y presupuesto limitado».
+
+\lecturefigure{slide-05-pluribus-2019.jpg}{Pluribus: un sistema de búsqueda para Texas Hold'em sin límite de seis jugadores}{Diapositiva V005 recuperada de la grabación oficial; Brown y Sandholm, Science 2019}
+
+\begin{knowledgebox}{La interfaz general de search que se abstrae del póker}
+Un solucionador práctico en tiempo de inferencia necesita al menos cuatro elementos: un generador de acciones candidatas, reglas para desplegar los estados futuros, un estimador del valor de los estados o de las estrategias, y una condición explícita de parada según el presupuesto. Cada dominio sustituye el algoritmo concreto, pero la interfaz «el base model propone, el evaluator compara y el presupuesto controla la profundidad» puede trasladarse.
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Esqueleto independiente del dominio de la budgeted inference-time search},label={lst:budgeted-search}]
+def search(state, base_policy, transition, evaluator, budget):
+    frontier = [(state, 1.0, [])]
+    best = None
+    for _ in range(budget):
+        node = select_promising(frontier)
+        for action, prior in base_policy(node.state):
+            next_state = transition(node.state, action)
+            value = evaluator(next_state)
+            candidate = (value, node.path + [action])
+            best = max(best, candidate) if best else candidate
+            frontier.append(expand(node, next_state, prior, value))
+    return best[1][0]
+\end{lstlisting}
+
+Este pseudocódigo no especifica a propósito tree search, counterfactual regret minimization ni beam search. Lo que expresa es una contabilidad de recursos: al aumentar el presupuesto, el sistema puede explorar más candidatos, mirar a mayor profundidad o invocar un evaluator más preciso; si el evaluator tiene un sesgo sistemático, más search también puede amplificar ese sesgo, por lo que la cantidad de cómputo nunca es por sí sola una garantía de calidad.
+
+\subsection{Resumen de la sección}
+
+La evidencia central del póker es que una misma base policy acompañada de search local puede reducir de forma notable la explotabilidad; Libratus y Pluribus, por su parte, demuestran que este diseño funciona en tiempo real y con hardware limitado. El siguiente paso es preguntar si esta regularidad es exclusiva del póker o si puede elevarse a un principio más general de inference-time computation.
+\section{Go, Bitter Lesson y la Inference Compute general}
+
+El go ofrece un segundo punto de comparación. Es un juego de información perfecta, sin cartas ocultas, y aun así depende de search para convertir la policy/value network en acciones sólidas. El ponente se apoya en la ablation de AlphaGo Zero y en la Bitter Lesson para ampliar la «búsqueda», que deja de ser un algoritmo específico de juegos y adopta una definición más amplia: seguir invirtiendo cómputo después de recibir la entrada para mejorar la salida de esa ocasión.
+
+\subsection{AlphaGo Zero: la red no sustituye a la búsqueda}
+
+Las barras de la figura muestran la fuerza de juego de cada versión del sistema. Full AlphaGo Zero usa al mismo tiempo la red entrenada y Monte Carlo Tree Search. Al retirar MCTS, el desempeño cae drásticamente por debajo del nivel expert-human, aunque la red provenga de un self-play sólido. Esto no significa que MCTS pueda trasladarse directamente a cualquier tarea, sino que las heurísticas obtenidas en el entrenamiento y el despliegue durante la inferencia se complementan.
+
+\lecturefigure{slide-06-search-go.jpg}{Ablación de búsqueda de AlphaGo Zero: la diferencia entre el Full system y la versión no-search es marcada}{Diapositiva V006 recuperada de la grabación oficial; Silver et al., Science 2017}
+
+\begin{knowledgebox}{Lectura de la figura: la altura de la barra es la fuerza de juego, no la loss de entrenamiento}
+Esta figura compara el nivel final en partidas. La policy/value network proporciona el move prior y la leaf evaluation, y MCTS los combina en decisiones más confiables sobre cada posición. Sin búsqueda, el modelo no queda «sin saber nada», pero no logra organizar sus predicciones locales en secuencias de acciones de largo alcance lo bastante sólidas. Por eso, los parámetros del modelo y las search visits no pueden tratarse como una sola escala totalmente intercambiable.
+\end{knowledgebox}
+
+\subsection{Cómo entender la analogía de 100,000 veces de la clase}
+
+El ponente usa una regla muy aproximada para dar una intuición del orden de magnitud: si cada aumento de diez veces en cierta dimensión del base system aporta solo unos 50 Elo, mientras que search aporta unos 250 Elo, entonces para lograr la misma diferencia de Elo se necesitan cinco aumentos de diez veces, es decir,
+\begin{equation}
+R_{\text{equiv}}
+\approx 10^{\Delta E/50}
+=10^{250/50}=10^5.
+\end{equation}
+$\Delta E$ es la ganancia de Elo que se quiere sustituir, 50 es la pendiente empírica citada en clase y $R_{\text{equiv}}$ es el factor de escala aproximado. El valor de este cálculo es recordarnos que no debemos ignorar un desplazamiento grande de la curva, no afirmar que search equivale siempre a cien mil veces el cómputo de entrenamiento en cualquier tarea.
+
+\teachervoice{El docente presenta explícitamente «unas 100,000 veces» como una extrapolation útil para la discusión, no como una ley. La tesis real es esta: si solo optimizamos a lo largo del eje de base-model scaling, podemos pasar por alto un inference axis mucho más barato, pero que exige un nuevo diseño de sistemas.}
+
+\subsection{Bitter Lesson: métodos generales y cómputo escalable}
+
+La Bitter Lesson de Richard Sutton sostiene que, a largo plazo, el progreso más confiable en IA suele provenir de métodos generales capaces de aprovechar un cómputo en crecimiento constante, en particular learning y search, y no de codificar de forma rígida grandes cantidades de conocimiento humano en el sistema. La clase la cita para situar el póquer y el go en una misma línea histórica: el conocimiento del dominio sigue siendo útil, pero debe estar al servicio de un proceso de cómputo escalable, no reemplazarlo.
+
+\lecturefigure{slide-07-bitter-lesson.jpg}{The Bitter Lesson: search y learning son métodos generales que escalan con el cómputo}{Diapositiva V007 recuperada de la grabación oficial; Richard Sutton, 2019}
+
+\begin{warningbox}{«Método general» no equivale a «sin estructura del dominio»}
+Libratus, Pluribus, AlphaGo Zero y Cicero incluyen una gran cantidad de modelado del dominio. En esta clase, la Bitter Lesson sirve para elegir la dirección de optimización: dar prioridad a mecanismos capaces de aprovechar más cómputo, no afirmar que toda hand-crafted representation debe eliminarse de inmediato.
+\end{warningbox}
+
+\subsection{El siguiente objetivo: ¿es posible la general inference computation?}
+
+La octava slide lleva la pregunta directamente a los modelos de lenguaje: si el base model ya es muy grande, ¿puede seguir mejorándose cada salida con un inference compute mucho más barato que el entrenamiento? Y si una respuesta tiene un valor muy alto, ¿debería permitirse que el sistema dedique minutos, horas o incluso más tiempo? Aquí \term{search} es un término amplio que no se limita a estructuras de árbol explícitas: también puede consistir en generar, verificar y corregir repetidamente, o en recurrir a la retroalimentación del entorno.
+
+\lecturefigure{slide-08-next-goal-generality.jpg}{De la búsqueda en juegos a la inference-time computation general}{Diapositiva V008 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\begin{importantbox}{Presupuesto de inferencia sensible al valor}
+Un inference budget razonable no debería depender solo de la longitud de la entrada, sino también del costo del error, de la posibilidad de verificar el resultado y del costo de oportunidad. Recomendar una canción admite una respuesta rápida; el diseño de fármacos, el enrutamiento de chips o una negociación crucial justifican generar más candidatos y evaluarlos con mayor rigor. El objetivo del sistema es maximizar «el valor marginal que aporta el cómputo adicional», no hacer más lentas todas las solicitudes por igual.
+\end{importantbox}
+
+\teachervoice{El ponente considera chain-of-thought una forma de cómputo adicional muy general, pero todavía limitada: el modelo desarrolla el problema generando tokens intermedios, pero no necesariamente cuenta con un planificador que permita retroceder, verificar o mantener un estado a largo plazo. La pregunta abierta de la clase es si existe un planning mechanism más general y más confiable que CoT.}
+
+\subsection{Resumen de la sección}
+
+La ablación en go demuestra que una network sólida sigue necesitando search, la Bitter Lesson ofrece la explicación histórica y la generality slide orienta la agenda de investigación hacia sistemas de inferencia con presupuesto variable. A continuación, Diplomacy eleva la dificultad un nivel más: los otros «estados» del entorno son personas que hablan, cooperan y también cambian de opinión.
+\section{Por qué elegir Diplomacy}
+
+Si solo se quisiera crear otra IA de juegos sobrehumana, el go y el póquer ya ofrecen escenarios consolidados. El equipo de Cicero eligió Diplomacy porque las rutas existentes no permiten simplemente scale in: el juego combina acciones estratégicas combinatorias con la negociación en lenguaje natural entre jugadores; las recompensas son a la vez competitivas y cooperativas, y la información realmente importante suele residir en los compromisos, la confianza y las expectativas de los demás.
+
+\subsection{El propio equipo del sistema es evidencia técnica}
+
+Cicero no es producto de una sola técnica de un artículo. La slide del equipo enumera a la vez investigadores con formación en reinforcement learning, game theory, NLP, ingeniería y conversión en producto. Se conserva esta figura, aparentemente «administrativa», porque explica la arquitectura modular que viene después: cuando la tarea abarca estrategia y lenguaje, la evaluación, los datos, la planificación, la generación y el despliegue en línea deben cerrar el ciclo en conjunto.
+
+\lecturefigure{slide-09-fair-diplomacy-team.jpg}{Equipo de FAIR Diplomacy: ingeniería de sistemas que abarca game AI, RL y NLP}{Diapositiva V009 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\teachervoice{El docente se detiene aquí para agradecer al equipo uno por uno, y no solo por cortesía. Enfatiza que la dificultad de Cicero no fue encontrar una «loss mágica», sino lograr que varias líneas de investigación colaboraran de forma estable en un entorno multijugador real. En proyectos de agent complejos, este integration work es en sí mismo investigación central.}
+
+\subsection{Dos líneas históricas que por fin se cruzan}
+
+La historia de la IA de juegos avanzó de chess a Go y poker, conquistando espacios de decisión cada vez mayores; la historia de los modelos de lenguaje pasó del sequence modeling a la capacidad de generar texto coherente. La décima slide reúne varios hitos de distintos juegos, y la undécima recurre a la historia del unicornio de GPT-2 para recordar al público que, hacia 2019, la generación de lenguaje ya podía mantener coherencia local, pero «saber continuar un texto» no equivale a «saber negociar en torno a un estado del mundo compartido».
+
+\lecturefigure{slide-10-game-ai-history.jpg}{Hitos de la IA de juegos: de la búsqueda en tableros a entornos multijugador complejos}{Diapositiva V010 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+Al leer la figura, hay que comparar la dificultad que añade cada tarea, no solo los años: chess y Go son principalmente planificación con información completa; poker añade información oculta y engaño; los juegos en tiempo real añaden espacios de acción largos y observabilidad parcial; Diplomacy añade además lenguaje libre y convenciones sociales humanas. Cada paso hace más difícil expresar el «estado» como un tensor cerrado.
+
+\lecturefigure{slide-11-gpt2-unicorn.jpg}{La generación fluida de GPT-2: sigue habiendo una brecha entre el avance en capacidad lingüística y el grounded planning}{Diapositiva V011 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\begin{warningbox}{La fluidez lingüística no es un indicador de capacidad estratégica}
+El ejemplo de GPT-2 demuestra que el modelo puede generar texto de estilo coherente, pero no demuestra que el texto sea consistente con un plan ejecutable. En Diplomacy, una frase como «te apoyaré para entrar en tal lugar» debe corresponder a acciones legales, a la posición actual de las unidades, a las posibles reacciones del oponente y a las relaciones futuras; si cualquiera de estos niveles se desconecta, cuanto más natural sea el lenguaje, más fácil será que induzca a error.
+\end{warningbox}
+
+\subsection{Reglas: acciones simultáneas y negociación sin restricciones}
+
+La sección anterior explicó por qué deben cruzarse las líneas históricas de los modelos de lenguaje y de la IA de juegos; ahora es necesario aclarar primero la transición de estados del entorno, pues de lo contrario el término «grounded» que aparece más adelante quedaría como un simple eslogan. En Diplomacy, siete países se disputan los supply centers en un mapa de Europa. En cada turno hay primero comunicación privada o pública, y después todos los jugadores envían sus acciones de forma simultánea; los compromisos no son vinculantes, y los jugadores pueden atacar, apoyar, transportar o mantener sus posiciones. Como las acciones se revelan al mismo tiempo, el lenguaje no es una explicación posterior a la partida, sino una señal de control previa que modifica la distribución de las acciones conjuntas.
+
+\lecturefigure{slide-12-what-is-diplomacy.jpg}{What is Diplomacy: del nombre a las reglas y la definición de la tarea}{Diapositiva V012 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\lecturefigure{slide-13-diplomacy-rules-challenge.jpg}{Mapa de siete jugadores, acciones simultáneas, lenguaje natural y un espacio de acciones conjuntas enorme}{Diapositiva V013 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\begin{knowledgebox}{Por qué el espacio de acciones conjuntas crece tan rápido}
+Si el jugador $i$ tiene el conjunto de acciones legales $A_i(s)$, el número de acciones conjuntas en un mismo turno es $\prod_{i=1}^{7}|A_i(s)|$. Esto aún no incluye el historial de diálogo ni las intenciones ocultas. El sistema no puede enumerar sin más todas las combinaciones de mensajes y acciones; por ello debe aprender la policy de los demás jugadores y concentrar la search en regiones locales de alta probabilidad y alto valor.
+\end{knowledgebox}
+
+La decimocuarta slide coloca el mapa junto a un chat real. Para leer esta figura, primero hay que ubicar en el mapa las unidades y las zonas en disputa, luego leer la propuesta de cooperación planteada en los mensajes y, por último, preguntarse cómo ese compromiso cambiaría las órdenes que emiten ambas partes. El lenguaje solo se convierte en grounded dialogue cuando se remite al board state y a las possible orders.
+
+\lecturefigure{slide-14-diplomacy-map-dialogue.jpg}{Las entradas centrales de Diplomacy: un mismo estado del mapa y un historial de diálogo en constante cambio}{Diapositiva V014 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\subsection{Support: por qué la comunicación cambia directamente el resultado en el tablero}
+
+En Diplomacy, las unidades suelen actuar con la misma fuerza básica. Solo cuando una unidad apoya el ataque o la defensa de otra, la fuerza combinada puede lograr romper la posición. La slide 15 muestra con tres pequeños diagramas el fracaso, el éxito con support unilateral y el resultado cuando se enfrentan supports opuestos. El punto didáctico aquí es que el apoyo entre jugadores no puede realizarlo un solo jugador por su cuenta; por lo tanto, la negociación no es decorativa, sino una condición necesaria para las acciones legales de alto valor.
+
+\lecturefigure{slide-15-support-is-key.jpg}{Support is key: cómo los compromisos coordinados se traducen en ventaja de fuerza en el tablero}{Diapositiva V015 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\begin{importantbox}{La cadena causal del mensaje a la transición de estado}
+El mensaje propone una intención conjunta; el receptor evalúa su credibilidad y modifica su policy; ambas partes envían orders mutuamente compatibles; el motor de reglas resuelve el support, y solo entonces cambia el estado del mapa. Cicero debe modelar toda la cadena, no solo optimizar la siguiente frase que más se parezca a la de un humano.
+\end{importantbox}
+
+\subsection{«Destruir amistades» y la confianza que realmente valoran los expertos}
+
+La regla de support muestra que la cooperación puede cambiar el tablero de inmediato, pero aún no responde por qué los jugadores están dispuestos a cooperar. Por eso esta sección pasa al costo de la confianza en interacciones repetidas. Los medios suelen describir Diplomacy como un juego que fomenta la traición; la decimosexta slide presenta esa impresión con titulares exagerados, mientras que la decimoséptima recoge lo que dicen jugadores experimentados: la cooperación estable a largo plazo, los compromisos creíbles y la previsibilidad suelen valer más que mentir con frecuencia. La traición existe, pero consume capital de cooperación futura, y esa pérdida puede extenderse a lo largo de varios turnos.
+
+\lecturefigure{slide-16-diplomacy-headlines.jpg}{La narrativa popular: Diplomacy, llamado «el juego que destruye amistades»}{Diapositiva V016 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\lecturefigure{slide-17-trust-quote.jpg}{La perspectiva experta: en un entorno que permite la traición, la confianza es más escasa y más importante}{Diapositiva V017 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\teachervoice{El ponente advierte al público que no confunda «saber engañar» con una condición suficiente de inteligencia avanzada. Los jugadores fuertes consideran si, después de una mentira, los demás seguirán dispuestos a cooperar; en interacciones repetidas, la truthfulness suele ser un recurso con valor estratégico, y no una mera postura moral.}
+
+\subsection{Por qué es a la vez un problema multi-agent y de NLP}
+
+Las reglas y la confianza muestran en conjunto que no basta con optimizar por separado la fuerza de juego o el lenguaje. La decimoctava slide resume la tarea con dos círculos que se intersecan: reinforcement learning / planning se encarga de decidir en un espacio de acciones combinatorio, y natural language se encarga de influir en los demás jugadores y establecer la colaboración. La intersección no consiste en colocar dos modelos uno al lado del otro, sino en que el lenguaje produzca consecuencias estratégicas medibles y en que el modelo estratégico pueda juzgar qué mensajes merecen credibilidad.
+
+\lecturefigure{slide-18-why-diplomacy.jpg}{Por qué elegir Diplomacy: la intersección entre el aprendizaje de estrategias y el lenguaje natural}{Diapositiva V018 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+Desde la perspectiva multi-agent, los algoritmos puramente competitivos ignoran las ganancias comunes y las convenciones humanas, mientras que los puramente cooperativos pueden suponer que los objetivos coinciden por completo. Diplomacy se ubica en la región mixed-motive: el aliado de hoy puede ser el rival de mañana, y los jugadores deben inferir qué creen los demás, qué esperan y qué equilibrios resultan aceptables dentro de la comunidad humana.
+
+\lecturefigure{slide-19-multi-agent-perspective.jpg}{Multi-agent perspective: mezcla de cooperación, competencia, sentido común y convenciones humanas}{Diapositiva V019 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+Desde la perspectiva de NLP, los modelos existentes son buenos imitando texto, pero no necesariamente hacen grounding de las oraciones en un plan. Cicero busca un intentional dialogue: cada mensaje tiene un objetivo comunicativo claro y puede alinearse con el state actual, la planned action y las posibles reacciones del destinatario.
+
+\lecturefigure{slide-20-nlp-perspective.jpg}{NLP perspective: de la imitation a un diálogo grounded e intentional}{Diapositiva V020 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\begin{knowledgebox}{La interfaz común de ambas perspectivas: belief over policies}
+El planificador necesita un modelo probabilístico de «qué harán los demás a continuación»; el módulo de diálogo necesita saber «qué quiero que hagan los demás». Ambos pueden expresarse como una policy distribution. La función del lenguaje es modificar esa distribución, y la función de la search es elegir acciones de alto valor bajo la distribución modificada.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La dificultad de Diplomacy no está en las reglas en sí, sino en el acoplamiento entre acciones conjuntas, diálogo libre, convenciones humanas y confianza a largo plazo. Obliga al sistema a responder una pregunta más estricta que «generar la siguiente frase»: si esa frase es consistente con un plan ejecutable y si hará que el estado futuro sea mejor.
+\section{Resultados de Cicero y arquitectura de ciclo cerrado}
+
+Solo después de entender la tarea se pueden interpretar correctamente los resultados de Cicero. El sistema construyó sus modelos de lenguaje y de comportamiento a partir de unas 50,000 partidas jugadas por humanos y participó de forma anónima en 40 partidas de una liga en línea. En clase se presentaron deliberadamente, a la vez, casos cualitativos y tablas cuantitativas, porque «parecer humano» y «jugar bien» son dos evidencias distintas.
+
+\subsection{Definición del sistema: un Diplomacy agent que se comunica}
+
+La slide 21 da la definición más sencilla: Cicero combina el razonamiento estratégico con la generación de lenguaje natural para jugar en línea a alto nivel (high-level play). Aquí, «AI agent» no es solo el endpoint de un modelo, sino un sistema cíclico que recibe de forma continua el board, las orders y los messages, y a partir de ellos produce acciones y mensajes.
+
+\lecturefigure{slide-21-cicero-intro.jpg}{Cicero: un Diplomacy agent que combina strategic reasoning y grounded dialogue}{Diapositiva V021 recuperada de la grabación oficial; Bakhtin et al., Science 2022}
+
+\subsection{Evidencia cualitativa: ¿los jugadores lo trataban como un participante más?}
+
+La definición del sistema solo dice lo que Cicero pretende hacer; no demuestra que sus módulos produjeran un comportamiento creíble en una liga real. Esta sección revisa primero la evidencia cualitativa y después la contrasta con la tabla de puntuaciones de la sección siguiente. La slide 22 muestra la participación anónima y las opiniones de los jugadores. Un buen qualitative result no consiste en que «los mensajes tengan gramática correcta», sino en que los demás jugadores estén dispuestos a coordinar sus acciones con base en esos mensajes y, a lo largo de partidas largas, sigan tratando a Cicero como un participante con estrategia y con el que se puede negociar. En clase también se marcó un límite: algunas personas expresaron sospechas después de las partidas, pero no hubo una identificación sistemática.
+
+\lecturefigure{slide-22-cicero-human-qualitative.jpg}{Opiniones cualitativas sobre las partidas en línea de Cicero contra humanos}{Diapositiva V022 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\subsection{Evidencia cuantitativa: fuerte, pero sin afirmar que sea superhuman}
+
+Las opiniones cualitativas indican que el sistema no rompía la colaboración con frecuencia, pero su nivel de juego debe medirse con valores comparables. Al leer la tabla de esta sección hay que tener presentes el tamaño de la muestra, el umbral de participación y el criterio de clasificación. La slide 23 ofrece datos de auditoría más concretos: 40 partidas, 82 unique players y un promedio de 292 mensajes enviados y recibidos por partida; entre los 19 jugadores que participaron en al menos cinco partidas, Cicero obtuvo una puntuación promedio de 25.8\%, quedó en segundo lugar y se ubicó en el 10\% superior de todos los participantes. Estas cifras demuestran su competitividad en línea, pero la muestra, la composición de la liga y las reglas de puntuación siguen sin bastar para sostener una conclusión incondicional de que sea «sobrehumano».
+
+\lecturefigure{slide-23-cicero-human-results.jpg}{Resultados de Cicero en la liga en línea: puntuación promedio de 25.8\%, 40 partidas y lugar en el 10\% superior}{Diapositiva V023 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\begin{warningbox}{No presentar «no fue identificado» como haber superado la prueba de Turing}
+El experimento consistió en partidas anónimas dentro de una liga real; no fue un bot-detection study preregistrado. Los resultados indican que los mensajes no dejaron ver con frecuencia patrones evidentes de máquina, pero no demuestran que los humanos sean incapaces de identificar a la IA ni, por sí solos, que la comprensión del lenguaje alcance el nivel humano.
+\end{warningbox}
+
+\teachervoice{El docente usa deliberadamente «strong human-level» en lugar de «superhuman». Es una norma importante de rigor con la evidencia: cuando los resultados de un sistema son lo bastante emocionantes, con más razón hay que precisar el grupo de comparación, el número de partidas y las condiciones de evaluación, en lugar de reemplazar el diseño experimental con adjetivos más fuertes.}
+
+\subsection{Arquitectura de ciclo cerrado: predicción, planificación, intención, generación y filtrado}
+
+El diagrama de arquitectura, de izquierda a derecha, no representa un pipeline de una sola pasada, sino un recurrent loop que se vuelve a ejecutar cada vez que se envía o recibe un mensaje. El board state, el action history y el dialogue history entran en la action prediction; la human imitation policy se ajusta mediante piKL search; las acciones de corto plazo que resultan de la planificación forman los intents; el dialogue model genera mensajes candidatos, y un filtro descarta los candidatos sin sentido (nonsense), contradictorios o perjudiciales desde el punto de vista estratégico.
+
+\lecturefigure{slide-24-cicero-architecture.jpg}{Ciclo cerrado completo de Cicero: del estado y el diálogo a la predicción de acciones, la planificación, las intenciones y el filtrado de mensajes}{Diapositiva V024 recuperada de la grabación oficial; Bakhtin et al., Science 2022}
+
+Si $s$ es el board state, $h$ es el action history y $d$ es el dialogue history, la predicción conjunta de las acciones de los siete jugadores en el siguiente turno puede escribirse como
+\begin{equation}
+p(a_1,\ldots,a_7\mid s,h,d).
+\end{equation}
+Aquí, $a_i$ suele ser una combinación de las orders de varias unidades de un mismo jugador. La predicción no es el objetivo final: proporciona a la search un modelo de las estrategias de los demás y también determina qué mensajes pueden cambiar realmente la acción conjunta.
+
+\begin{importantbox}{Modular no significa que los módulos sean independientes entre sí}
+El modelo estratégico y el modelo de lenguaje tienen funciones separadas, pero están estrechamente acoplados mediante el intent y la predicted response. Si el sistema fuera completamente de extremo a extremo, el modelo de lenguaje tendría que encargarse a la vez del modelado del mundo, la elección de estrategia y la expresión superficial, lo que sería difícil de controlar; si los componentes estuvieran completamente separados, el lenguaje no podría modificar el plan. El diseño de Cicero intercambia intenciones estructuradas y distribuciones de comportamiento en la interfaz intermedia.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Los resultados en línea de Cicero muestran que el sistema funciona de manera estable en una liga humana con una alta densidad de mensajes, pero en clase no se exageró hasta presentarlo como incondicionalmente sobrehumano. El aspecto central de la arquitectura es el ciclo cerrado: el lenguaje no es un envoltorio final, sino una acción que cambia la policy de los demás jugadores y que luego se reincorpora a la planificación.
+\section{Contribución 1: Intent-Conditioned Controllable Dialogue}
+
+Si se deja que el modelo de lenguaje continúe libremente a partir del estado completo, tiene que decidir a la vez «qué debe hacer» y «cómo debe decirlo», y además puede filtrar planes privados o inventar acciones ilegales. Cicero primero deja que el módulo estratégico decida la intención de corto plazo y después permite que el modelo de lenguaje se concentre en expresar esa intención como un mensaje natural y oportuno.
+
+\subsection{Por qué se necesita una intent explícita}
+
+El primer punto de la slide con el panorama de las contribuciones es el controllable dialogue: el modelo no solo hace condition on el game state y el dialogue history, sino también condition on las intended actions. Esta interfaz separa la «corrección estratégica» y la «realización lingüística» en dos capas que pueden evaluarse por separado.
+
+\lecturefigure{slide-25-main-contribution-dialogue.jpg}{Main contribution: controlar la generación de diálogo con intended actions}{Diapositiva V025 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\begin{knowledgebox}{Aquí la intent no es un estado mental abstracto}
+La intent de Cicero consiste principalmente en acciones ejecutables de corto plazo, por ejemplo, hacia dónde se prepara una unidad para moverse, apoyar o defender en este turno o en el siguiente. Está más estructurada que una oración en lenguaje natural, lo que facilita verificar que sea coherente con el board state; pero también es más estrecha que un objetivo estratégico de largo plazo, una limitación a la que se volverá más adelante.
+\end{knowledgebox}
+
+\subsection{Cómo construir etiquetas de intent a partir de diálogos humanos}
+
+Los registros humanos no tienen anotado manualmente «el plan detrás de esta frase». El sistema primero entrena un intent model que, a partir del state, el history y el diálogo, predice las actions del hablante y del receptor al final del turno; después usa las orders reales para generar automáticamente etiquetas de intención de corto plazo para los mensajes históricos. Para reducir el riesgo de tomar mentiras como objetivo de entrenamiento, el proceso filtra los turns con alta probabilidad de no ser veraces.
+
+\lecturefigure{slide-26-intent-model-training.jpg}{Intent model training: inferir, a partir del diálogo y las acciones finales, el plan correspondiente a cada mensaje}{Diapositiva V026 recuperada de la grabación oficial; Bakhtin et al., Science 2022}
+
+\lecturefigure{slide-27-intent-annotation.jpg}{Intent annotation: agregar automáticamente a los mensajes humanos las intenciones de acción del speaker y del recipient}{Diapositiva V027 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\teachervoice{El docente aclara en particular que las etiquetas de entrenamiento provienen de turns relativamente confiables, en lugar de suponer que todos los mensajes humanos son veraces. Esta decisión sacrifica parte de la diversidad lingüística, pero vuelve más claro el problema de controllability: primero se aprende a expresar de forma estable el plan real y después se aborda el engaño, que es más complejo.}
+
+\subsection{Cómo se usa la intent durante la inferencia}
+
+Durante la ejecución en línea, el planner primero propone las acciones que Cicero quiere que tomen él mismo y su interlocutor; el intent model las organiza como condiciones; luego el dialogue model, junto con el state y el history, genera varios mensajes candidatos. Así, el modelo de lenguaje no tiene que reinventar el objetivo entre una enorme cantidad de estrategias posibles, sino que resuelve un problema de generación condicional más controlable.
+
+\lecturefigure{slide-28-dialogue-inference.jpg}{Dialogue inference: el resultado de la planeación se convierte primero en intent y luego restringe los mensajes candidatos}{Diapositiva V028 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+Si $m$ es el mensaje por enviar, y $z_s$ y $z_r$ representan, respectivamente, las intenciones de acción de corto plazo del speaker y del recipient, puede escribirse
+\begin{equation}
+p(m\mid s,h,d,z_s,z_r).
+\end{equation}
+A diferencia de modelar solo $p(m\mid d)$, esta distribución condicional exige de forma explícita que el mensaje sea coherente a la vez con la situación del tablero, el historial y el plan. No garantiza que el contenido generado sea veraz o eficaz, pero ofrece un punto de apoyo estructurado para las verificaciones de coherencia.
+
+El ejemplo de mapa de la slide 29 muestra la intent y el message lado a lado. Al leer la figura, primero hay que observar las flechas de acción y después cómo el lenguaje convierte las acciones en solicitudes o compromisos: un mismo conjunto de orders admite redacciones distintas, pero si un mensaje pide un apoyo que contradice las flechas, debe clasificarse como plan-inconsistent.
+
+\lecturefigure{slide-29-intent-conditioned-dialogue.jpg}{Intent-conditioned dialogue: de las intenciones de acción en el mapa a solicitudes en lenguaje natural}{Diapositiva V029 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\subsection{Resultados: por qué mejoran a la vez la controlabilidad y la calidad}
+
+La slide 30 compara tres entradas: el language model puro, el que agrega game-state grounding y el que además agrega intent grounding. Las cuatro columnas son coherencia con el state, coherencia con el plan, proporción de mensajes high-quality según evaluación humana y perplexity. El Cicero completo alcanza 87.30\%, 92.86\%, 37.30\% y 7.70, y supera en las cuatro métricas a las dos configuraciones anteriores.
+
+\lecturefigure{slide-30-intent-quality-results.jpg}{El intent grounding mejora a la vez la state consistency, la plan consistency, la calidad y la perplexity}{Diapositiva V030 recuperada de la grabación oficial; Bakhtin et al., Science 2022}
+
+\begin{knowledgebox}{Primera explicación de la perplexity}
+La perplexity es la exponencial de la cross-entropy a nivel de token: $\mathrm{PPL}=\exp(H)$. Intuitivamente, indica cuántas «opciones equivalentes» enfrenta el modelo en cada paso; un valor más bajo suele indicar que la asignación de probabilidad sobre el held-out human dialogue está más concentrada. Pero la perplexity no es un beneficio estratégico: debe interpretarse junto con la coherencia, la calidad según evaluación humana y los resultados reales de las partidas.
+\end{knowledgebox}
+
+\begin{importantbox}{Por qué agregar restricciones mejora el lenguaje}
+El intent conditioning acota el problema de generación: el modelo no necesita inventar una estrategia mientras organiza el lenguaje, sino solo elegir una expresión adecuada para un objetivo dado. Por eso, la restricción no es solo una barrera de seguridad, sino también una forma de descomposición de la tarea que reduce el nonsense y permite que el modelo de lenguaje aproveche mejor su capacidad limitada.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+El intent-conditioned dialogue separa la decisión estratégica de su realización lingüística superficial. La anotación automática proporciona la señal de entrenamiento, la intent estructurada proporciona la interfaz de control y la tabla de resultados muestra que esta descomposición no solo aumenta la plan consistency, sino que también mejora la calidad general del lenguaje.
+\section{Contribución dos: Dialogue-Aware Search y piKL}
+
+Además del lenguaje controlable, hace falta un planner capaz de convivir con humanos. El self-play puro puede buscar un alto rendimiento, pero puede converger a convenciones que ningún humano ha visto; la imitation pura resulta fácil de entender, pero solo copia los errores del humano promedio y puede ser manipulada con un único mensaje inductor. piKL coloca estos dos extremos dentro de un mismo objetivo de optimización.
+
+\subsection{De la lista de contribuciones al problema de planificación}
+
+La slide 31 resalta la segunda contribución: el planner debe considerar a la vez el dialogue y el human behavior. No puede tratar los mensajes como texto irrelevante, porque un compromiso creíble cambia las acciones de los demás; tampoco puede obedecer los mensajes de forma incondicional, porque un oponente puede proponer un plan desfavorable para Cicero.
+
+\lecturefigure{slide-31-main-contribution-planning.jpg}{Main contribution: planning orientado al diálogo y al comportamiento humano}{Diapositiva V031 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\subsection{Fallas complementarias de search e imitation}
+
+En el lado izquierdo de la slide 32, la pure search / RL persigue el return, pero no está sujeta a las convenciones humanas; en el lado derecho, la imitation se ciñe a los datos, pero hereda acciones débiles y aprende las correlaciones del lenguaje como correlaciones superficiales. En el centro, piKL funciona como un «pepinillo» que une ambos extremos: toma la human policy como anchor y luego permite que la search se aparte de ella guiada por el valor.
+
+\lecturefigure{slide-32-dialogue-aware-search-rl.jpg}{Dialogue-aware search: buscar una estrategia utilizable entre la optimización pura y la imitación pura}{Diapositiva V032 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\begin{warningbox}{Cómo falla cada uno de los dos extremos}
+Una policy de self-play pura puede adoptar convention que solo entienden sus propias copias, lo que impide coordinarse con humanos; una policy de imitation pura, en cambio, puede reproducir fielmente el comportamiento subóptimo de los humanos y reaccionar en exceso a mensajes como «cédeme tu territorio clave». Un agent capaz de comunicarse debe resultar predecible para los humanos y, al mismo tiempo, conservar la capacidad de rechazar malas sugerencias.
+\end{warningbox}
+
+\subsection{piKL: un equilibrio explícito entre el valor y el prior humano}
+
+Sea $\pi_H(a\mid s,h,d)$ la anchor policy aprendida de datos humanos y $Q^{\pi}(s,a)$ el valor de la acción bajo search; el objetivo intuitivo de piKL para un solo estado puede escribirse como
+\begin{equation}
+\pi^*
+=\arg\max_{\pi}
+\left[
+\mathbb{E}_{a\sim\pi}Q^{\pi}(s,a)
+-\lambda D_{\mathrm{KL}}\!\left(\pi(\cdot\mid s)\,\|\,\pi_H(\cdot\mid s)\right)
+\right].
+\end{equation}
+$\lambda$ controla el costo de apartarse del comportamiento humano. Si $\lambda$ es demasiado pequeño, la estrategia puede ser fuerte pero extraña; si es demasiado grande, el sistema se acerca a la imitation original y difícilmente corrige las acciones subóptimas presentes en los datos. No trata la human-likeness como objetivo final, sino que usa las convention humanas como prior de planificación y como modelo de lo que esperan los demás.
+
+\lecturefigure{slide-33-pikl.jpg}{piKL: KL-regularized search anclada en la human imitation policy}{Diapositiva V033 recuperada de la grabación oficial; Jacob et al., ICML 2022}
+
+\begin{knowledgebox}{Lectura de la figura: el lugar de tres tipos de modelo dentro del mismo ciclo}
+A la izquierda de la figura, la human policy proporciona el anchor; en el centro, la search / RL calcula la mejora de valor; a la derecha, la retroalimentación del entorno actualiza el estado. La regularización KL no es un simple post-processing, sino que limita de forma continua la deriva de la distribución en cada actualización de la estrategia. Los resultados deben evaluar a la vez la exploitability / return y la human predictability; no basta con reportar solo uno de los dos lados.
+\end{knowledgebox}
+
+\teachervoice{El ponente señala que una KL penalty de este tipo no es novedosa; lo que distingue a Cicero es que usa la anchor policy al mismo tiempo como modelo de «qué haría un humano» y de «qué cree un humano que harán los demás». Aquí aparece un matiz de common knowledge / theory-of-mind: el valor de una acción depende de que los demás la consideren una convention razonable.}
+
+\subsection{Cómo cambia realmente el diálogo la estrategia}
+
+La slide 34 muestra en secuencia los cambios de estrategia tras tres tipos de diálogo. En el primero, el mensaje indica que el aliado se retirará de cierta dirección, por lo que Cicero regresa a defender; el segundo expresa desconfianza, lo que lo lleva a reducir las acciones que dependen de esa cooperación; el tercero propone algo desfavorable para Cicero, y el value model impide que el sistema lo siga ciegamente. Lo esencial no es que «cada mensaje cambie la acción», sino que solo los mensajes creíbles y con consecuencias estratégicas deben modificar la distribución de probabilidad.
+
+\lecturefigure{slide-34-strategic-response-sequence.jpg}{Strategic response sequence: cómo las señales del diálogo cambian, o no, la policy de acción}{Diapositiva V034 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\begin{importantbox}{Dialogue-aware no equivale a instruction-following}
+Los mensajes del oponente son una observation con fines estratégicos, no instrucciones del sistema. El planner debe tratarlos como evidencia para actualizar su belief y luego decidir con su propia value function si responde a ellos. Esta distinción permite que Cicero coopere y que también rechace la manipulation.
+\end{importantbox}
+
+\subsection{Modeling Human Policies}
+
+La sección anterior mostró que la policy se desplaza con el diálogo creíble; para lograr esa actualización, el sistema primero debe convertir el texto en predicciones de comportamiento. Esta sección explica cómo el planner consume el lenguaje, y no solo cómo lo genera. La slide 35 alimenta a BART con el historial en lenguaje natural para predecir las orders humanas. Esto ilustra una interfaz que a menudo se pasa por alto: el modelo de lenguaje no solo sirve para generar mensajes, sino también para convertir el diálogo en predicciones probabilísticas del comportamiento de los demás jugadores. Después, la distribución predicha entra en la search, lo que forma una ruta con capacidad de auditoría que va del dialogue a la action.
+
+\lecturefigure{slide-35-model-human-policies.jpg}{Modeling human policies: predecir la distribución de acciones humanas a partir del diálogo y del estado}{Diapositiva V035 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\teachervoice{El docente muestra con varios ejemplos que Cicero no cambia su plan solo porque el otro «lo dijo». La policy se mueve de forma notable únicamente cuando el mensaje, la situación, el historial y los intereses del otro jugador respaldan en conjunto cierto comportamiento; el value estimate, por su parte, se encarga de bloquear las incitaciones que podrían aprovecharse fácilmente del imitation model.}
+
+\subsection{Resumen de la sección}
+
+Mediante la regularización KL, piKL combina la fuerza estratégica de la search con la capacidad de coordinación que dan las convenciones humanas. La esencia de la planificación con conciencia del diálogo tampoco es obedecer al lenguaje, sino convertirlo en una distribución de las acciones de los demás y, después, actualizar la propia estrategia bajo restricciones de valor.
+\section{Contribuciones tres y cuatro: Self-Play RL y Value-Based Filtering}
+
+La sección anterior describe una sola ronda de planning; Cicero también necesita mejorar el modelo de políticas durante el entrenamiento y hacer una última revisión a nivel de comportamiento antes de enviar un mensaje. El self-play RL lleva a la policy más allá del nivel promedio de la imitation; el value-based filtering, por su parte, incorpora a la selección de candidatos la pregunta «¿cómo hará actuar esta frase a los demás?».
+
+\subsection{Self-play RL: superar la imitación sin separarse de los humanos}
+
+La slide 36 resalta la tercera contribución. El equipo no sustituye directamente el human model por un unconstrained self-play, sino que sigue usando piKL, de modo que el RL mejore en valor sin perder capacidad de explicar la distribución de las políticas humanas. La conclusión que se presentó en clase es que este enfoque también modela el comportamiento humano mejor que la imitation sola.
+
+\lecturefigure{slide-36-main-contribution-selfplay.jpg}{Main contribution: mejorar la política con self-play RL regularizado con piKL}{Diapositiva V036 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\begin{knowledgebox}{Diferencia entre el RL en entrenamiento y la search en inferencia}
+El self-play RL actualiza los parámetros para que la base policy mejore en muchas situaciones futuras; la inference-time search no necesariamente modifica los pesos, sino que invierte cómputo adicional de forma temporal en la situación actual. Cicero necesita ambas: el entrenamiento proporciona un prior utilizable y la inferencia lo refina según el diálogo y la situación concretos.
+\end{knowledgebox}
+
+\subsection{Por qué el filtrado del lenguaje debe considerar el strategic value}
+
+La cuarta contribución parte de los candidatos ya generados. Los filtros habituales de toxicity, repetición y reglas solo detectan problemas superficiales; Cicero también se enfrenta a mensajes gramaticalmente impecables que arruinan su propia estrategia. Por ejemplo, el candidato absurdo que mostró el ponente amenaza con «sacarte del tablero» y, al mismo tiempo, le pide a la otra parte un «croissant». Las fallas más sutiles consisten en revelar sin querer un plan de ataque o en inducir a la otra parte a tomar acciones que perjudican al propio jugador.
+
+\lecturefigure{slide-37-main-contribution-filtering.jpg}{Main contribution: filtrar los mensajes candidatos por estrategia y coherencia}{Diapositiva V037 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\subsection{La prueba causal del value-based filtering}
+
+Sea $m$ el mensaje candidato, $a_{-i}$ las acciones futuras del receptor y $a_i$ las acciones planeadas de Cicero. El sistema puede usar el modelo de comportamiento para predecir la política de la otra parte antes y después del envío del mensaje, y comparar el valor del plan:
+\begin{equation}
+V(m)
+=\mathbb{E}_{a_{-i}\sim p(\cdot\mid s,h,d,m)}
+\left[Q_i(s,a_i,a_{-i})\right].
+\end{equation}
+Si $V(m)$ es claramente menor que el valor de no enviar nada o de enviar un mensaje de referencia, el candidato debe rechazarse. Lo que se evalúa aquí no es el sentimiento de la frase, sino el efecto causal que tiene sobre la ganancia futura al modificar el comportamiento de los demás.
+
+\lecturefigure{slide-38-value-filtering.jpg}{Value-based filtering: predecir el efecto del mensaje sobre las acciones de los demás y la ganancia del plan}{Diapositiva V038 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\begin{knowledgebox}{Lectura de la figura: entradas y salidas del filtro}
+A la izquierda está la generación de candidatos; en el centro, el action predictor simula la policy del receptor después de leer el candidato; a la derecha, el evaluator estima el valor del plan original de Cicero ante esa respuesta. Un candidato puede pasar las revisiones de gramática y seguridad y, aun así, descartarse en esta capa porque reduce el expected value. Por eso el filtrado es una counterfactual evaluation ligera y no una lista negra de palabras clave.
+\end{knowledgebox}
+
+\begin{warningbox}{Los errores del evaluator se convierten en un punto ciego sistemático}
+Si el action predictor subestima el enojo, la represalia o la memoria de largo plazo de las personas, $V(m)$ quedará sobrestimado. El filtro solo es tan bueno como el modelo interno del mundo; no puede compensar de la nada las consecuencias sociales que el modelo no representa. Ese es justamente el origen de las limitaciones de truthfulness que se tratan más adelante.
+\end{warningbox}
+
+\begin{lstlisting}[caption={Cicero-style strategic dialogue closed loop},label={lst:cicero-loop}]
+while game_is_active(state):
+    human_anchor = predict_human_policies(state, history, dialogue)
+    policy = pikl_search(state, human_anchor, value_model)
+    own_plan, expected_others = choose_joint_intents(policy)
+
+    candidates = dialogue_model.generate(
+        state=state,
+        history=history,
+        dialogue=dialogue,
+        own_intent=own_plan,
+        recipient_intent=expected_others,
+    )
+    candidates = filter_nonsense_and_inconsistency(candidates)
+    message = max(candidates, key=predicted_strategic_value)
+    send(message)
+    state, history, dialogue = observe_next_event()
+\end{lstlisting}
+
+Lo más importante de este pseudocódigo es la última línea: después de observar un mensaje nuevo o un estado nuevo, el sistema vuelve a predecir y a planear. Si el mensaje de salida se toma como el final del pipeline, se pierde la definición de agent; un verdadero agente debe hacer que los resultados de la comunicación regresen a la belief y a la policy.
+
+\subsection{Resumen de la sección}
+
+El self-play RL mejora la base policy a largo plazo, piKL conserva la capacidad de coordinarse con humanos y el value-based filtering revisa, antes de cada envío, las consecuencias estratégicas del lenguaje. Las tres muestran en conjunto que los candidatos en lenguaje natural deben pasar por un modelo de comportamiento y una función de valor, en lugar de ir directamente del decoder al entorno.
+\section{Diálogos reales, limitaciones y direcciones futuras}
+
+El último grupo de slides devuelve los módulos abstractos al diálogo. Los casos muestran cómo Cicero persuade a los jugadores con alternativas ejecutables sobre el mapa; la slide de limitaciones enumera de forma explícita los problemas aún no resueltos de la representación de intent, la truthfulness y el domain-specific planning. Comprender estas limitaciones evita interpretar el éxito modular como inteligencia social general.
+
+\subsection{El caso de Austria: el lenguaje debe apuntar a una colaboración válida}
+
+Ya se explicaron por separado intent, planner y filter; ahora hay que verificar si operan juntos en un diálogo real. En esta sección los mensajes no se evalúan por su estilo, sino con tres criterios: «válido según las reglas, aceptable en intereses, con alternativa si falla». La slide 39 muestra a Cicero jugando como Austria e interactuando con otros jugadores; el mapa señala con círculos la zona en disputa y el diálogo de la derecha vincula unidades, posiciones y acciones propuestas. Al leer la figura también hay que comprobar si Cicero conserva un plan alternativo en caso de que el otro jugador no coopere.
+
+\lecturefigure{slide-39-dialogue-austria.jpg}{Cicero as Austria: negociación basada en la situación del tablero y en acciones}{Diapositiva V039 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+Este tipo de mensaje es superior a un genérico «aliémonos» porque reduce la ambigüedad de la coordinación. El otro jugador puede juzgar el beneficio a partir de orders concretas, y Cicero puede comparar en la siguiente ronda lo prometido con las acciones reales y así actualizar su confianza.
+
+\subsection{Francia y Tunis: persuasión estratégica, no una continuación de texto elegante}
+
+El diálogo sobre Tunis de la slide 40 muestra con mayor claridad la persuasion. Cicero no se limita a pedirle a Turkey que ceda, sino que propone acciones alternativas con las que Turkey obtiene otros beneficios y, al mismo tiempo, deja libre Tunis para France. La calidad del mensaje proviene de reconstruir el espacio de acciones conjuntas: solo ofreciendo al otro una propuesta aceptable se puede cambiar su policy.
+
+\lecturefigure{slide-40-dialogue-france.jpg}{Cicero as France: propuesta alternativa en torno a Tunis que atiende también los intereses del otro jugador}{Diapositiva V040 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\teachervoice{El docente llama a este ejemplo grounded strategic persuasion: el lenguaje no es «muy persuasivo» por sí mismo, sino que detrás existe realmente una combinación de acciones que tiene sentido para el beneficio a corto plazo de ambas partes. Sin planner, el decoder genera con facilidad propuestas que suenan cooperativas pero que en la práctica no son ejecutables.}
+
+\subsection{Cuatro tipos de limitaciones}
+
+La limitations slide reúne los límites del sistema. Primero, intent representa sobre todo actions a corto plazo y difícilmente expresa objetivos de largo plazo, tono o estrategias de relación; segundo, el dialogue model y el strategy model están separados, y el primero no asume un world model completo; tercero, el value model no lee el dialogue, por lo que no puede estimar la pérdida de confianza a largo plazo que causa mentir; cuarto, el planning sigue siendo Diplomacy-specific y no es el mecanismo de razonamiento general que el ponente espera.
+
+\lecturefigure{slide-41-limitations.jpg}{Limitaciones y direcciones futuras de Cicero: intent, modelo del mundo, confianza y planificación general}{Diapositiva V041 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\begin{longtable}{L{0.22\textwidth}L{0.31\textwidth}L{0.37\textwidth}}
+\toprule
+Limitación & Diseño actual & Consecuencia directa \\
+\midrule
+Intent demasiado estrecho & Las orders a corto plazo son la interfaz principal & Difícil expresar una alliance de largo plazo, el estilo de comunicación y compromisos de varios pasos \\
+Modelo del mundo separado & El planner se encarga del estado y del valor; el LM, de la expresión & Mejora la controlabilidad, pero los errores entre módulos pueden acumularse \\
+Value model dialogue-blind & No modela directamente el discurso ni las relaciones de largo plazo & No puede asignar un precio fiable a «perder la confianza» \\
+Planificador específico del dominio & Aprovecha las reglas de Diplomacy y su representación de acciones & No se transfiere directamente a tareas de mundo abierto \\
+Modalidad textual limitada & Solo procesa text-based communication & Difícil cubrir voz, visión, presión de tiempo y señales no verbales \\
+\bottomrule
+\end{longtable}
+
+\subsection{La truthfulness es una restricción de ingeniería, no una prueba moral}
+
+Como el value model no ve las consecuencias a largo plazo del dialogue, puede considerar muy valiosa una mentira eficaz a corto plazo sin poder calcular la pérdida de que, en el futuro, ningún jugador vuelva a confiar en Cicero. Por eso el equipo hizo que el dialogue model partiera de truthful intents y filtró los turn de entrenamiento sospechosos de no ser veraces. Se trata de un diseño de seguridad que reduce el action space frente al punto ciego del modelo.
+
+\begin{warningbox}{No concluir a partir de Cicero que «la verdad siempre es óptima»}
+La evidencia de la clase solo respalda lo siguiente: con la representación y el evaluator actuales, el sistema no es capaz de evaluar de forma fiable el engaño a largo plazo, por lo que la truthfulness es la opción de ingeniería más robusta. No demuestra que ninguna situación de Diplomacy requiera deception, ni que el modelo tenga una intención moral estable.
+\end{warningbox}
+
+\teachervoice{El ponente dice con toda franqueza que una de las razones de la truthful intention es precisamente que el value model no entiende el trust damage a largo plazo. Esta explicación es más precisa que «hicimos que el modelo fuera una persona honesta», y además muestra una vía habitual en la seguridad de sistemas: cuando el evaluator no sabe evaluar cierto tipo de riesgo, primero se restringe el espacio de generación.}
+
+\subsection{Del juego hacia la general planning}
+
+La closing slide repasa los resultados de Cicero y ofrece acceso al artículo, al código y al modelo. Más importante es la sesión de Q\&A: el ponente no espera buscar otro «juego de mesa más difícil» para repetir el mismo camino, sino que la investigación pueda incidir en la planning general de los foundation model; la entrada y salida de texto fue la opción viable en ese momento, pero no es la interfaz completa de un agente inteligente multimodal definitivo.
+
+\lecturefigure{slide-42-thanks-results.jpg}{Cierre: resultados de Cicero, artículo, código y agenda de investigación abierta}{Diapositiva V042 recuperada de la grabación oficial; Stanford CS25 Lecture 14}
+
+\teachervoice{En la sesión final de preguntas, el ponente dijo que le interesa más la general planning que hacer fine-tune de un solucionador distinto para cada tarea nueva. El CoT impresiona porque es general entre tareas, pero su capacidad de planificación sigue siendo limitada; la conclusión de la clase es que deberían existir métodos en tiempo de inferencia más potentes y más generales.}
+
+\begin{importantbox}{Preguntas abiertas que deja esta clase}
+¿Es posible que un mismo foundation model aprenda, en tareas distintas, cuándo expandir, qué expandir, cómo verificar y cuándo detenerse, y que alinee de forma fiable con el mundo exterior los estados intermedios que produce la search? Esto es más exigente que «generar más token», y también más general que escribir a mano un solucionador para cada juego.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Los casos de diálogo demuestran que el lenguaje de Cicero se apoya en estrategias ejecutables; las limitaciones muestran que no resuelve el intent de largo plazo, el modelado de la confianza ni la planning general. La tendencia del sistema a la honestidad proviene sobre todo de una restricción de ingeniería impuesta por los límites de capacidad del evaluator, no de que el razonamiento social general ya esté resuelto.
+\section{Ampliación a sistemas modernos: leer la arquitectura de un agent a partir de Cicero}
+
+Esta sección es una interpretación de ingeniería hecha en 2026 y no forma parte de los hechos de la clase de 2023. No presenta productos posteriores como argumentos del ponente. Traduce las interfaces que Cicero ya mostró a un lenguaje más general de diseño de agents.
+
+\subsection{Separar «qué decir» de «qué hacer»}
+
+Los agents modernos suelen mantener a la vez un private plan, tool actions y una user-facing response. La experiencia de Cicero muestra que entregar el plan interno completo a un modelo de lenguaje para que lo exprese libremente produce filtraciones de información, contradicciones y problemas por falta de capacidad de auditoría. Es mejor formar primero un action intent estructurado y dejar que una communication layer restringida decida qué información se comunica al exterior.
+
+\begin{knowledgebox}{Interfaz transferible de cinco capas}
+\begin{enumerate}
+  \item \textbf{State estimator}: convierte el entorno, el historial y la retroalimentación en la belief actual;
+  \item \textbf{Policy prior}: propone candidatos comunes, de bajo costo y compatibles con las convenciones humanas;
+  \item \textbf{Planner / search}: asigna inference compute adicional según el valor de la tarea;
+  \item \textbf{Intent interface}: comprime las decisiones internas en una estructura verificable;
+  \item \textbf{Communication evaluator}: predice cómo cambiará la salida el entorno y el comportamiento de los demás.
+\end{enumerate}
+\end{knowledgebox}
+
+\subsection{Estructura común de la prompt injection y los mensajes estratégicos}
+
+Los mensajes de los oponentes en Diplomacy no son instrucciones confiables del sistema. Son una observation del entorno que persigue un objetivo propio. Esto se parece al límite de seguridad que enfrenta un agent que usa herramientas ante páginas web, correos o documentos de terceros que no son confiables: el contenido puede actualizar la belief, pero no debe obtener el control de forma automática. El enfoque de Cicero, «predecir el comportamiento del otro y luego juzgarlo con su propio value», ofrece un paradigma más robusto que el instruction-following directo.
+
+\begin{warningbox}{Los límites de la analogía}
+Diplomacy tiene reglas cerradas, acciones que pueden simularse y una puntuación explícita. Los agents de mundo abierto suelen carecer de un transition model y de una reward confiables. Por ello no basta con copiar piKL o el value filter. Lo que debe heredarse es su idea de auditoría: distinguir los datos de las instrucciones, registrar el intent de forma explícita y hacer que las salidas de alto riesgo pasen por una evaluación independiente.
+\end{warningbox}
+
+\subsection{Gestión de costos: no toda solicitud amerita search}
+
+El cómputo en tiempo de inferencia debe tener una política de presupuesto. Un sistema práctico necesita estimar el valor del problema, la dificultad de verificación, el costo de un fallo y la latency restante. Con eso decide el número de candidatos, la profundidad de búsqueda, las tool calls y la intensidad del evaluator. Sin una condición de parada, el agent convierte «pensar más» en un bucle infinito. Si toda solicitud se resuelve con una sola greedy decode fija, se renuncia a la asignación dinámica de recursos, que es lo más valioso de search.
+
+\begin{importantbox}{El problema del presupuesto en ingeniería}
+Cada rollout o llamada al evaluator adicional debe poder responder cuatro preguntas: qué tipo de error reduce, si existe una señal de verificación independiente, cuándo el beneficio marginal se vuelve negativo y si la correlación entre errores puede invalidar la votación por mayoría. La inference compute solo es capacidad del sistema, y no un aumento de la factura, cuando entra en un proceso de decisión medible.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+El legado más valioso de Cicero para los agents modernos no es un modelo concreto, sino los contratos entre módulos. El lenguaje que no es confiable entra primero en la belief y no controla las acciones de forma directa. El planning produce un intent estructurado. El lenguaje dirigido al exterior se somete, antes de enviarse, a una evaluación de sus consecuencias en el comportamiento. El presupuesto de cómputo varía según el valor de la tarea.
+\section{Síntesis y ampliación}
+
+\subsection{Una tabla que recoge toda la sesión}
+
+Esta sesión parte de poker search y culmina en un agent completo para Diplomacy. La tabla siguiente reúne, para cada módulo, el problema que resuelve, su mecanismo principal y sus modos de falla, para que pueda reutilizarse al leer después artículos sobre sistemas multiagente o sobre reasoning.
+
+\begin{longtable}{L{0.20\textwidth}L{0.30\textwidth}L{0.40\textwidth}}
+\toprule
+Módulo & Problema que resuelve & Mecanismo y riesgos principales \\
+\midrule
+Base policy & Proponer rápidamente candidatos razonables & Amplia cobertura, pero puede ser tosca en situaciones críticas; no sustituye a search \\
+Inference-time search & Mejorar la decisión actual con cómputo adicional & Expansión, evaluación y selección; puede amplificar un evaluator erróneo \\
+Human anchor policy & Mantener convention comprensibles para las personas & La imitation aporta un prior; también hereda las debilidades del humano promedio \\
+piKL & Equilibrar valor y human-likeness & Una KL penalty limita la deriva de la política; $\lambda$ determina el compromiso \\
+Intent model & Convertir el plan en una condición controlable de generación & Las action de corto plazo son claras y verificables; los objetivos de largo plazo se expresan de forma insuficiente \\
+Dialogue model & Lograr grounded communication & Genera candidatos condicionados por state, history e intent \\
+Action predictor & Predecir el comportamiento de los demás tras recibir un mensaje & Conecta lenguaje y estrategia; puede fallar con personas fuera de la distribución \\
+Value filter & Rechazar mensajes estratégicamente dañinos & Compara counterfactual expected value; ignora las consecuencias no modeladas \\
+Closed loop & Hacer que el resultado de la comunicación vuelva a la siguiente planeación & Reestima la belief tras cada evento; aumentan la complejidad y la latencia \\
+\bottomrule
+\end{longtable}
+
+\subsection{Conclusiones finales}
+
+Primero, la escala de entrenamiento y el cómputo en inferencia son dos ejes de capacidad distintos. Poker y Go muestran que un base model fuerte puede seguir lejos del desempeño alcanzable si carece de search. Segundo, lo esencial de un agent de lenguaje no es la generación, sino el ciclo causal cerrado entre lenguaje, belief y action. Tercero, los datos humanos son a la vez un prior de comportamiento y el vehículo de las convention sociales, pero no sustituyen la optimización del valor. Cuarto, si un sistema no puede evaluar cierto tipo de riesgo de largo plazo, debe reconocer honestamente ese punto ciego y restringir el action space, en lugar de encubrir la ausencia de evaluator con una salida fluida.
+
+\begin{importantbox}{La idea que más vale conservar}
+Dedicar más cómputo a las decisiones correctas, confiar el modelado del mundo, la selección de estrategia y la expresión lingüística a módulos con contratos claros, y hacer que las consecuencias de la salida regresen a la siguiente ronda de planeación: este es el principio de diseño común que recorre esta sesión, de poker search a Cicero.
+\end{importantbox}
+
+\subsection{Lecturas adicionales}
+
+Todos los materiales siguientes se publicaron antes de la fecha de la clase y forman directamente la cadena de evidencia de esta sesión. Se recomienda leer primero el artículo del sistema Cicero, después el artículo de piKL para entender el planner y, por último, revisar la tradición de search de poker y AlphaGo.
+
+\begin{itemize}
+  \item \href{https://www.science.org/doi/full/10.1126/science.ade9097}{Bakhtin et al., Human-level play in the game of Diplomacy by combining language models with strategic reasoning}: arquitectura del sistema Cicero, resultados en línea, diálogo y limitaciones.
+  \item \href{https://proceedings.mlr.press/v162/jacob22a.html}{Jacob et al., Modeling Strong and Human-Like Gameplay with KL-Regularized Search}: objetivo formal de piKL y human-policy modeling.
+  \item \href{https://proceedings.neurips.cc/paper/2021/hash/95f2b84de5660ddf45c8a34933a2e66f-Abstract.html}{Anthony et al., Learning to Play Diplomacy with No Human Supervision}: No-Press Diplomacy, juego contra sí mismo y el problema de los equilibrios múltiples.
+  \item \href{https://www.science.org/doi/10.1126/science.aao1733}{Brown and Sandholm, Superhuman AI for heads-up no-limit poker}: Libratus y la resolución segura de subjuegos.
+  \item \href{https://www.science.org/doi/10.1126/science.aay2400}{Brown and Sandholm, Superhuman AI for multiplayer poker}: Pluribus y el póquer multijugador.
+  \item \href{https://www.science.org/doi/10.1126/science.aar6404}{Silver et al., Mastering the game of Go without human knowledge}: AlphaGo Zero y la search ablation.
+  \item \href{http://www.incompleteideas.net/IncIdeas/BitterLesson.html}{Richard Sutton, The Bitter Lesson}: argumento histórico a favor de learning y search escalables.
+\end{itemize}
+
+\subsection{Autoevaluación posterior a la clase}
+
+\begin{importantbox}{Ocho preguntas de autoevaluación}
+\begin{enumerate}
+  \item ¿En qué se diferencia la exploitability de la tasa de victorias contra un oponente fijo?
+  \item ¿Por qué la slide 2 no demuestra que search siempre equivalga a un múltiplo fijo de base-model scaling?
+  \item ¿Por qué la regla de support de Diplomacy hace que el lenguaje intervenga directamente en la transición de estados?
+  \item ¿Por qué el intent conditioning puede mejorar a la vez la controllability y la perplexity?
+  \item ¿Cómo falla cada uno de los enfoques puros, self-play e imitation?
+  \item ¿Qué ocurre en piKL cuando $\lambda$ es demasiado grande o demasiado pequeña?
+  \item ¿Por qué un value-based filter sigue sin poder evaluar de forma confiable el costo de mentir a largo plazo?
+  \item Para trasladar la arquitectura de Cicero a un agent de mundo abierto, ¿qué transition, reward y límites de permisos faltan todavía?
+\end{enumerate}
+\end{importantbox}
+
+\end{document}

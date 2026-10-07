@@ -1,0 +1,643 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+
+\renewcommand{\notetitle}{Lecture 04: Decision Transformer — el aprendizaje por refuerzo fuera de línea replanteado como modelado de secuencias condicionado}
+\renewcommand{\noteauthors}{Elaborado a partir de la conferencia de Aditya Grover, los subtítulos manuales oficiales y los artículos originales de Decision Transformer / CQL / D4RL}
+\renewcommand{\notedate}{CS25 V1 · Versión reescrita source-first de 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{2022-07-13}
+\renewcommand{\videoduration}{1:20:42}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=w4Bw8WYL8Ps}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.96\textwidth]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\begin{document}
+\makecscover
+
+\section{Auditoría de fuentes: lo que esta sesión busca cambiar en realidad es la formulación del problema de RL}
+
+Esta sesión no presenta una sustitución arquitectónica local del tipo «usar el Transformer como policy network», sino una reformulación más fundamental: escribir las trayectorias de un conjunto de datos fijo como secuencias de tokens, expresar el retorno esperado como condición y, después, usar un Transformer causal para predecir las acciones. El valor de este enfoque no está solo en la estructura del modelo, sino también en que desplaza el objetivo de entrenamiento de las inestables actualizaciones de programación dinámica hacia la conocida pérdida del aprendizaje supervisado; en correspondencia, también hereda las limitaciones de los modelos de secuencias en cuanto al soporte de los datos, la context length y la extrapolación condicional.
+
+\subsection{Fuentes, límites temporales y conflicto de fechas}
+
+Estos apuntes toman como evidencia principal el video oficial de Stanford Online, los subtítulos oficiales en inglés elaborados manualmente, las 24 slides didácticas recuperadas del video, el artículo original de Decision Transformer y su código oficial. La página del curso Stanford CS25 V1 sitúa esta sesión el 11 de octubre de 2021, y el artículo pertenece a NeurIPS 2021; sin embargo, la portada que aparece en el video dice ``October 11, 2022'', y la fecha de publicación del video es el 13 de julio de 2022. Las tres fuentes se contradicen entre sí, por lo que este texto toma el calendario del curso y el registro de publicación del artículo como anclas históricas, al tiempo que conserva de forma explícita la anomalía de fecha que aparece en pantalla, sin «corregir los hechos» de la fuente de manera automática.
+
+\lecturefigure{slide-01-title.jpg}{Portada de la conferencia: Decision Transformer formula el reinforcement learning como sequence modeling.}{Video oficial de Stanford Online, 00:06; la fecha en pantalla entra en conflicto con la página del curso y con la fecha de publicación; véase la auditoría de fuentes.}
+
+\begin{warningbox}{Un conflicto entre fuentes no desaparece con conjeturas}
+Cuando la página del curso, los metadatos del video y el texto de las slides se contradicen, lo correcto es registrar el conflicto, explicar qué ancla temporal se adopta y limitar las conclusiones técnicas a la parte que no depende de dicho conflicto. Lo que puede confirmarse aquí es que el artículo central es un trabajo de NeurIPS 2021 y que el video público lo publicó Stanford Online; no es posible afirmar el año real de grabación solo a partir de la portada.
+\end{warningbox}
+
+\subsection{Las tres preguntas centrales de esta sesión}
+
+Al leer el texto completo conviene seguir tres preguntas de manera constante. Primera: ¿por qué el entrenamiento y el escalamiento del RL tradicional suelen ser más frágiles que los del language modeling? Segunda: ¿cómo convierte el return-to-go la pregunta «qué tan alto quiero que sea el retorno» en una condición de control que puede darse como entrada? Tercera: en los experimentos, ¿qué mejoras provienen del modelado de secuencias en sí y cuáles siguen dependiendo de la cobertura y la selección de los datos fuera de línea y del diseño de los benchmarks? En conjunto, estas tres preguntas determinan si Decision Transformer es un avance conceptual, una herramienta de ingeniería o un lema generalizado en exceso.
+
+\begin{importantbox}{Objetivos de aprendizaje de esta sesión}
+Al terminar esta sesión, el lector debería poder:
+\begin{enumerate}
+  \item escribir el MDP, el return-to-go y la token sequence de Decision Transformer;
+  \item explicar la causal mask, el timestep embedding, la context length y el non-Markov conditioning;
+  \item calcular a mano, del entrenamiento al rollout, una actualización del target return;
+  \item distinguir entre requested return, realized return, logged-data support y extrapolación;
+  \item explicar los experimentos de percent behavior cloning, CQL, sparse reward, credit assignment y critic;
+  \item explicar por qué el éxito del offline RL no permite concluir directamente que el online RL ya esté resuelto.
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Las fuentes históricas de esta sesión presentan un conflicto de fechas visible, pero la línea técnica principal es clara: con el Decision Transformer de NeurIPS 2021 como núcleo, se discute cómo reformular el offline RL como conditional sequence modeling. Cada resultado posterior debe examinarse a la vez en cuanto al mecanismo del modelo, el soporte de los datos y la forma de evaluación.
+\section{De sequential data a sequential decision making}
+
+Antes de entrar en las fórmulas de RL, conviene entender por qué el ponente empieza hablando de lenguaje, visión, proteínas y generación de código. La experiencia común de estos campos no es que «el Transformer lo puede todo», sino que el modelado de secuencias supervisado o autosupervisado a gran escala suele tener una loss relativamente suave, técnicas de regularización maduras e infraestructura de entrenamiento reutilizable. Lo que el ponente quiere trasladar realmente a los problemas de decisión es esa interfaz de entrenamiento y esa ruta de escalamiento.
+
+\subsection{La abstracción común detrás del éxito del Transformer}
+
+El lenguaje, los patch de imagen, los residuos de proteínas y los token de código parecen distintos, pero todos pueden representarse como secuencias y aprender distribuciones condicionales mediante masked prediction o autoregressive prediction. Al leer la siguiente slide, no compare primero el número de parámetros de cada modelo; observe antes cómo convierten los objetos de cada dominio en token y cómo los modelan con la misma clase de next-token machinery.
+
+\lecturefigure{slide-02-transformers-for-sequential-data.jpg}{El Transformer ya se ha usado con muchos tipos de sequential data, como lenguaje, visión, proteínas y código.}{Video oficial de Stanford Online, 01:40.}
+
+\begin{knowledgebox}{Lectura de la figura: lo común no es la modalidad de entrada, sino la interfaz de entrenamiento}
+GPT-3, ViT, AlphaFold y los modelos de código de la figura no comparten la misma semántica de entrada, pero todos codifican objetos complejos como representaciones componibles y aprenden relaciones condicionales mediante optimización por gradiente con lotes grandes. Con este conjunto de ejemplos, el ponente plantea una pregunta de ingeniería: si las trayectorias de decisión también pueden convertirse en secuencias, ¿se pueden reutilizar objetivos de entrenamiento, optimizadores y scaling recipe más estables? Se trata de una hipótesis de investigación, no de un teorema que se derive automáticamente de estos casos de éxito.
+\end{knowledgebox}
+
+\subsection{Por qué importa escalar de forma estable}
+
+La ventaja de los modelos a gran escala no es solo que tengan «más parámetros». Lo decisivo es si, al aumentar los datos y el presupuesto de cómputo, el comportamiento del entrenamiento es predecible, si las fallas pueden localizarse, si la regularización es madura y si la loss puede bajar de forma estable sin necesidad de un bootstrap complejo. La dificultad de RL muchas veces no es la falta de capacidad expresiva, sino que el objetivo, la distribución de los datos y los cambios en la policy están acoplados entre sí, de modo que el sistema de entrenamiento persigue continuamente la nueva distribución que él mismo genera.
+
+\lecturefigure{slide-03-scalable-models-stable-training.jpg}{Las curvas de entrenamiento de los sequence model a gran escala suelen ser más suaves y, en términos de ingeniería, más fáciles de escalar.}{Video oficial de Stanford Online, 02:20; la slide cita a Kaplan et al. 2020.}
+
+\teachervoice{El ponente enfatiza que las stable training dynamics son importantes para el practitioner: basta con tener más datos y más cómputo para ampliar el modelo paso a paso y observar una mejora relativamente suave de la loss. Una de las motivaciones de Decision Transformer es llevar esa «capacidad de entrenamiento» al decision making, y no solo buscar un nuevo módulo de red.}
+
+\begin{warningbox}{Una loss estable no equivale a una calidad de decisión estable}
+Que la pérdida supervisada baje solo indica que el modelo ajusta mejor la distribución condicional de acciones dentro de la distribución de entrenamiento. El retorno en el entorno real depende además de la distribución de estados que produce el rollout, de la acumulación de errores, de si el retorno objetivo es alcanzable y de la aleatoriedad del entorno. Más adelante habrá que medir por separado el realized environmental return; la loss de entrenamiento no puede sustituir a la policy evaluation.
+\end{warningbox}
+
+\subsection{De la percepción a la acción}
+
+Los modelos de percepción producen etiquetas, texto o representaciones; la salida de un modelo de decisión modifica el entorno y determina qué se verá en el siguiente paso. Este ciclo cerrado hace que el sequential decision making tenga, a diferencia de la predicción estática, distribution shift y credit assignment. Cuando el ponente señala el robot con «un cilindro cargado de conocimiento visual y lingüístico», no quiere decir que al robot solo le falte un Transformer, sino subrayar que el perception knowledge debe convertirse finalmente en una action sequence.
+
+\lecturefigure{slide-04-sequential-data-to-sequential-decision.jpg}{La pregunta de investigación pasa de sequential data a sequential decision making.}{Video oficial de Stanford Online, 03:10.}
+
+\begin{importantbox}{El giro central}
+El modelado estático de secuencias aprende $p(x_t\mid x_{<t})$; el modelado de secuencias de decisión necesita aprender
+\[
+p(a_t\mid \text{goal},s_{\le t},a_{<t},r_{<t}),
+\]
+donde la acción $a_t$ modifica el estado futuro $s_{t+1}$. Por eso, que «la tokenización sea similar» no elimina los riesgos del closed-loop control; solo ofrece una interfaz unificada de aproximación de funciones y de entrenamiento.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+El punto de partida de Decision Transformer es trasladar un paradigma de entrenamiento: convertir las trayectorias de RL en secuencias con la esperanza de reutilizar los objetivos estables y la capacidad de escalamiento del sequence modeling. Sin embargo, la decisión tiene retroalimentación en ciclo cerrado; el éxito en dominios estáticos no basta para demostrar que el método funciona, y es necesario pasar al MDP, a los datos fuera de línea y a la evaluación con rollout reales.
+\section{Aprendizaje por refuerzo y offline RL: de dónde vienen los datos}
+
+Esta sección presenta los antecedentes de RL mínimos, pero completos. El lector necesita distinguir entre state, action, reward, return, policy y dataset support. Si estos conceptos se confunden, en lo que sigue es fácil tomar el return-to-go por un futuro conocido o suponer que el offline RL elimina por completo el problema de la exploración.
+
+\subsection{MDP, policy y cumulative return}
+
+Un Markov decision process (MDP) estándar puede escribirse como $\mathcal{M}=(\mathcal{S},\mathcal{A},P,r,\gamma)$. En el estado $s_t\in\mathcal{S}$, la policy $\pi(a_t\mid s_t)$ elige la acción $a_t\in\mathcal{A}$; el entorno transita según el transition kernel $P(s_{t+1}\mid s_t,a_t)$ y produce la reward $r_t$. El objetivo del aprendizaje es maximizar el retorno descontado esperado:
+\[
+J(\pi)=\mathbb{E}_{\tau\sim\pi}\left[\sum_{t=1}^{T}\gamma^{t-1}r_t\right],
+\qquad 0<\gamma\le 1.
+\]
+Aquí $\tau=(s_1,a_1,r_1,\ldots,s_T,a_T,r_T)$ es la trajectory; $\gamma$ es el discount factor, que sirve para reducir el peso de las recompensas lejanas o para garantizar que la suma en horizonte infinito sea estable.
+
+\lecturefigure{slide-05-background-reinforcement-learning.jpg}{Ciclo cerrado de RL: el agent elige una action según el state y el environment devuelve la reward y el siguiente estado.}{Video oficial de Stanford Online, 04:00.}
+
+\begin{knowledgebox}{Términos clave: las cantidades que más se confunden en RL}
+\begin{tabularx}{\textwidth}{L{2.8cm} X X}
+\toprule
+Término & Problema que resuelve & Relación con esta clase \\
+\midrule
+reward $r_t$ & Retroalimentación escalar obtenida en el paso actual & Después del rollout se usa para actualizar el return-to-go restante \\
+return $G_t$ & Reward futura acumulada a partir del instante $t$ & En los datos de entrenamiento puede recalcularse a partir de la trayectoria completa \\
+policy $\pi$ & Cómo elegir una action dada la información disponible & Decision Transformer implementa la policy de forma implícita mediante action prediction \\
+value / critic & Estima el valor a largo plazo de un estado o de una acción & El método original no depende de un critic para entrenar al actor, pero más adelante se muestra que puede cambiarse a un critic target \\
+credit assignment & Determinar cuánta responsabilidad tienen las acciones tempranas en los resultados lejanos & Key-to-Door lo pone a prueba con una reward dispersa entre etapas \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{El conjunto de datos fijo del offline RL}
+
+El RL en línea puede interactuar con el entorno de forma continua durante el entrenamiento; el offline RL (aprendizaje por refuerzo fuera de línea) solo usa un conjunto de datos fijo recolectado de antemano
+\[
+\mathcal{D}=\{\tau^{(i)}\}_{i=1}^{N},
+\]
+cuyas trayectorias pueden provenir de una policy aleatoria, de una policy entrenada a medias, de una policy experta o de una mezcla de varias policies. Los datos fijos reducen el costo y el riesgo de la interacción en robots reales, en sistemas médicos o industriales, pero plantean un problema más agudo: durante el rollout, el modelo puede visitar regiones state-action que el conjunto de datos casi no cubre.
+
+\lecturefigure{slide-06-background-offline-rl.jpg}{El offline RL solo usa logged interactions registradas de antemano y no realiza nuevos trial-and-error.}{Video oficial de Stanford Online, 05:20.}
+
+\begin{importantbox}{Dataset support (soporte del conjunto de datos)}
+Si el conjunto de datos casi no tiene muestras de la acción $a$ cerca de cierto estado $s$, es difícil estimar con confiabilidad el resultado de ejecutar esa acción. El modelo puede producir una action sintácticamente razonable, pero la aproximación de funciones no crea por sí sola evidencia contrafactual. Lo esencial del offline RL no es que baste con «tener un conjunto de datos grande», sino que los datos cubran la distribución de comportamientos y estados que se necesita en el despliegue.
+\end{importantbox}
+
+\begin{warningbox}{Los dos niveles de la distribution shift}
+El primer nivel es que los datos de entrenamiento los genera la behavior policy $\mu$, mientras que en el despliegue se usa la learned policy $\pi$; el segundo nivel es que un pequeño error en una acción empuja al agent hacia un estado nuevo, y las predicciones siguientes operan sobre entradas cada vez menos conocidas. Decision Transformer evita el Bellman backup explícito, pero no hace que estos dos niveles de desplazamiento de distribución desaparezcan por sí solos.
+\end{warningbox}
+
+\subsection{Por qué el expositor dice que el RL «no escala»}
+
+Hacia 2021, los grandes language models ya alcanzaban de decenas a cientos de miles de millones de parámetros, mientras que las RL policies habituales solían ser mucho más pequeñas y su entrenamiento mostraba fluctuaciones más marcadas. La diapositiva atribuye la diferencia a la inestabilidad del RL objective; este juicio debe entenderse como la motivación de la clase: el bootstrap target, el on-policy distribution change, la exploration y la reward scale aumentan la dificultad de la optimización. No quiere decir que el número de parámetros por sí mismo mida la inteligencia de una policy.
+
+\lecturefigure{slide-07-motivating-challenge-rl-does-not-scale.jpg}{Motivación de la clase: los grandes modelos de lenguaje de la época eran mucho mayores que las RL policies habituales, y su entrenamiento era más estable.}{Video oficial de Stanford Online, 07:00.}
+
+\begin{knowledgebox}{Lectura de la figura: primero comparar la interfaz de entrenamiento, después el número de parámetros}
+El texto de la izquierda compara la model scale y la curva de la derecha compara la training stability. El argumento que realmente respalda a Decision Transformer es este: si la action prediction puede usar MSE o cross-entropy estándar, entonces pueden reutilizarse las herramientas de optimización y regularización del aprendizaje supervisado. La figura no demuestra que «cuanto mayor es el modelo, mejor es el control», ni controla el entorno, la cantidad de datos, el action space ni el presupuesto de evaluación; por lo tanto, la diferencia en parámetros no puede interpretarse como una relación causal única.
+\end{knowledgebox}
+
+\teachervoice{El docente enfatiza que, en los offline benchmarks, los datos suelen provenir del replay buffer de un agent de RL en línea, por ejemplo, las interacciones guardadas cuando el entrenamiento alcanzó un nivel intermedio. La interfaz del algoritmo puede ser agnostic respecto al origen de los datos, pero las conclusiones experimentales no pueden ignorar la collection policy: la calidad y la cobertura de los datos influyen directamente en lo que el modelo puede aprender.}
+
+\subsection{Resumen de la sección}
+
+El objetivo del RL es maximizar el retorno acumulado en el entorno real; el offline RL, en cambio, aprende una policy a partir de logged trajectories fijas. Los datos fijos eliminan las interacciones nuevas durante el entrenamiento, pero agravan los problemas de dataset support y de distribution shift. Lo que Decision Transformer cambia a continuación es la formulación del entrenamiento, no estas restricciones estadísticas.
+\section{Decision Transformer: cómo una trayectoria se convierte en una token sequence}
+
+Con un offline dataset, la trayectoria completa ya tiene registrada la reward futura en el momento del entrenamiento; por eso se puede calcular hacia atrás el return-to-go de cada instante e intercalarlo con el state y la action. Lo esencial es entender lo siguiente: durante el entrenamiento, el return-to-go proviene de trayectorias ya completadas; durante el despliegue, el usuario o el sistema fija un objetivo, que después se va descontando conforme llega la reward real.
+
+\subsection{El return-to-go es una condición de objetivo, no «ver el futuro»}
+
+En tareas de horizonte finito, el return-to-go sin descuento se define como
+\[
+\widehat{R}_t=\sum_{t'=t}^{T}r_{t'}.
+\]
+Si se requiere descuento, puede usarse
+\[
+\widehat{R}^{(\gamma)}_t=\sum_{t'=t}^{T}\gamma^{t'-t}r_{t'}.
+\]
+El símbolo $t$ denota el timestep actual, $T$ el final del episode, $r_{t'}$ la reward real del paso futuro $t'$ y $\gamma$ el discount factor. En la fase de entrenamiento, esta cantidad puede calcularse a partir de los registros; en la fase de inferencia solo se puede especificar un desired return y actualizar el objetivo restante según la reward ya obtenida.
+
+\begin{importantbox}{Diferencia entre el return-to-go y la reward inmediata}
+La reward inmediata $r_t$ responde «qué acaba de ocurrir»; el return-to-go $\widehat{R}_t$ responde «cuánto retorno total obtendrá todavía esta trayectoria desde ahora hasta el final». Decision Transformer usa este último como condición, de modo que un mismo modelo puede generar distintas distribuciones de acciones según el retorno objetivo.
+\end{importantbox}
+
+\subsection{Tres tipos de token y el causal Transformer}
+
+Una trayectoria de longitud $T$ se ordena como
+\[
+\tau=(\widehat{R}_1,s_1,a_1,\widehat{R}_2,s_2,a_2,\ldots,\widehat{R}_T,s_T,a_T).
+\]
+Cada timestep aporta tres tokens: return, state y action. Cada uno pasa primero por su propio embedding, se suma después a un timestep embedding común y el resultado entra en el causal Transformer. El modelo produce $\widehat{a}_t$ en la posición de la action; la causal mask garantiza que la predicción solo use información actual y anterior.
+
+\lecturefigure{slide-08-decision-transformer-architecture.jpg}{Arquitectura de Decision Transformer: return, state y action entran intercalados y el causal Transformer decodifica la acción en la posición de la action.}{Video oficial de Stanford Online, 12:56; corresponde a Chen et al. 2021.}
+
+\begin{knowledgebox}{Lectura de la figura: seguir la información en una action prediction}
+Empiece por $\widehat{R}_t,s_t,a_t$ en la parte inferior. Los bloques azules, verdes y naranjas representan los embeddings de distintos token types; el causal Transformer, situado encima de las posiciones, agrega un historial de longitud $K$; en la parte superior, el linear decoder predice la acción solo sobre los hidden states necesarios. En la figura, $a_t$ ya aparece como token del historial en posiciones posteriores, pero al predecir el $a_t$ actual el modelo no puede verlo a sí mismo; esto lo garantizan el desfase de la entrada y la causal mask.
+\end{knowledgebox}
+
+\begin{warningbox}{No tome el target return como una garantía}
+Introducir $\widehat{R}_1=100$ solo expresa «se desea generar acciones coherentes con trayectorias de alto retorno»; no significa que el entorno vaya a devolver 100 al final. El modelo puede carecer de datos correspondientes, enfrentar transitions aleatorias o acumular errores en lazo cerrado. El requested return y el realized return deben registrarse por separado.
+\end{warningbox}
+
+\subsection{Perspectiva probabilística del conditional sequence modeling}
+
+Desde el punto de vista de la aproximación de funciones, el modelo aprende
+\[
+p_{\theta}(a_t\mid \widehat{R}_{\le t},s_{\le t},a_{<t}).
+\]
+El parámetro $\theta$ representa todos los parámetros entrenables del Transformer y del embedding/decoder. Frente a una Markov policy que solo observa el state actual, esta distribución condicional conserva el historial de forma explícita; frente a la behavior cloning convencional, además toma el desired return como condición, lo que permite distinguir comportamientos de distinta calidad en torno a un mismo estado.
+
+\begin{knowledgebox}{Términos clave: cuatro conceptos centrales de esta sección}
+\begin{tabularx}{\textwidth}{L{3.0cm} X X}
+\toprule
+Término & Mecanismo & Malentendido frecuente \\
+\midrule
+causal mask & Impide que una posición acceda a tokens futuros & No equivale a que el modelo solo vea el state actual \\
+timestep embedding & Marca la posición temporal dentro de la trayectoria & Resuelve un problema distinto del token-type embedding \\
+context length $K$ & Ventana de historial que se conserva en cada predicción & Más larga no es necesariamente mejor; aumenta el cómputo y la necesidad de datos \\
+conditional generation & Usa el retorno objetivo para elegir la distribución de comportamiento & No es una prueba de alcanzabilidad ni un task identifier universal \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Decision Transformer intercala return, state y action en una causal sequence y aprende a predecir la action condicionada al historial y al retorno objetivo. El return-to-go se calcula hacia atrás a partir de los registros durante el entrenamiento y, durante el despliegue, es una condición de objetivo que se puede actualizar; ofrece una interfaz de control, pero no garantiza que el objetivo sea alcanzable.
+\section{Forward pass: embedding, historia y condicionamiento no Markov}
+
+El diagrama de la arquitectura puede dar la impresión equivocada de que «basta con encadenar tres tipos de token». En realidad, cómo se combinan los embedding, qué hidden state se usan para decodificar, qué contiene la context window y si se permite que la historia influya en la acción de un mismo state son decisiones que cambian la función aprendida. Esta sección reconstruye, a partir de las slide y del Q\&A de la clase, un forward pass implementable.
+
+\subsection{Entrada, salida y context window}
+
+La entrada del modelo es una ventana local de la trayectoria con a lo sumo $K$ timestep; si se cuenta por token, contiene como máximo alrededor de $3K$ token de return/state/action. La salida es la secuencia de predicciones en las posiciones de action correspondientes:
+\[
+(\widehat{a}_1,\widehat{a}_2,\ldots,\widehat{a}_T)
+=f_{\theta}(\widehat{R}_{1:T},s_{1:T},a_{1:T-1}).
+\]
+Aquí el lado derecho no incluye la action actual verdadera $a_T$; de lo contrario se produciría label leakage. En el entrenamiento, la implementación suele evitar la fuga mediante un shift o seleccionando hidden positions específicas.
+
+\lecturefigure{slide-09-forward-pass.jpg}{Forward pass: entra la secuencia de return/state/action, sale la action predicha y la attention se calcula sobre un context de longitud $K$.}{Video oficial de Stanford Online, 14:56.}
+
+\begin{importantbox}{Costo computacional de la context length}
+En la self-attention estándar, el costo en tiempo y en matrices intermedias respecto del número de token es aproximadamente $O((3K)^2)$. Aumentar $K$ aporta una historia más larga, pero incrementa la memoria de GPU, la latencia y la dificultad de optimización. La ablation con $K=1$ que se presenta más adelante verifica si la historia contribuye realmente al desempeño, en lugar de tomar un modelo más grande como la respuesta.
+\end{importantbox}
+
+\subsection{Sumar embedding no equivale a concatenation}
+
+Sean el state embedding, el token-type embedding y el timestep embedding $e_s(s_t)$, $e_{\mathrm{type}}$ y $e_t(t)$, respectivamente; una implementación posible es
+\[
+x_t^{(s)}=e_s(s_t)+e_{\mathrm{type}=s}+e_t(t).
+\]
+La suma exige que todos los vectores tengan la misma dimensión y equivale a una traslación dentro del mismo espacio de representación; la concatenation, en cambio, amplía la dimensión y deja que las capas posteriores aprendan cómo combinar. Ambas pueden expresar la información, pero difieren en número de parámetros, estructura geométrica e inductive bias.
+
+\teachervoice{En el Q\&A de la clase se preguntó específicamente «¿suma o concatenación?». El ponente respondió que son dos decisiones distintas de codificación de la función; la implementación original usa addition y se observó que resultaba más adecuada. Las notas advierten: no hay que interpretar la suma de embedding como una pérdida de identidad, pues el token type y el timestep siguen entrando en la representación mediante vectores aprendibles.}
+
+\subsection{El forward pass a nivel de código}
+
+Las fórmulas anteriores muestran qué vectores se suman para formar un token, pero todavía no responden cómo se intercalan en la implementación las tres series temporales, cómo se garantiza que la action actual no se filtre ni qué hidden position debe leer el decoder. La slide original completa ese flujo de datos con un fragmento de código. El pseudocódigo equivalente que sigue desarrolla, en orden, embedding, stacking, causal attention y action head; solo expresa el mecanismo, no se ata a la API de ningún repository concreto y tampoco oculta el padding ni la selección de posiciones, los dos pasos donde es más fácil equivocarse.
+
+\lecturefigure{slide-10-forward-pass-code.jpg}{Fragmento de código del forward pass de Decision Transformer mostrado en la clase.}{Video oficial de Stanford Online, 17:24.}
+
+\begin{lstlisting}[caption={Pseudocódigo mínimo del forward pass de Decision Transformer},label={lst:dt-forward}]
+def forward(returns_to_go, states, actions, timesteps, mask):
+    time_emb = embed_time(timesteps)
+    return_emb = embed_return(returns_to_go) + time_emb
+    state_emb = embed_state(states) + time_emb
+    action_emb = embed_action(actions) + time_emb
+
+    tokens = interleave(return_emb, state_emb, action_emb)
+    hidden = causal_transformer(tokens, attention_mask=mask)
+
+    state_hidden = hidden[:, state_token_positions]
+    action_pred = action_head(state_hidden)
+    return action_pred
+\end{lstlisting}
+
+En el código, \texttt{interleave} intercala los token en el orden $(R,s,a)$; \texttt{state\_token\_positions} indica que el hidden state se toma en la posición donde ya se vieron el return y el state actuales, pero todavía no la action actual. Una implementación real también debe manejar distintas formas de state/action, padding mask, head continuo o discreto y sequence truncation.
+
+\subsection{Por qué lo no Markov es una decisión deliberada}
+
+La Markov property supone que el state actual ya contiene toda la información necesaria para predecir el futuro, de modo que la policy óptima puede depender solo de $s_t$. Sin embargo, muchas observaciones son en realidad una observation $o_t$ que solo ve una parte del estado oculto; la historia $o_{<t},a_{<t}$ ayuda a inferir la información oculta. Decision Transformer conserva explícitamente la history, lo que permite que «la misma observación, con distinta procedencia» corresponda a actions distintas.
+
+\begin{knowledgebox}{Partial observability (observabilidad parcial)}
+Si el estado real del entorno es $z_t$ y el modelo solo puede ver $o_t=g(z_t)$, entonces distintos $z_t$ pueden corresponder a la misma $o_t$. La trayectoria histórica puede servir como aproximación del belief-state: el modelo infiere el estado oculto actual a partir de las observaciones y acciones previas. En ese caso, el non-Markov conditioning no viola la teoría, sino que completa la información cuando la observation es insuficiente.
+\end{knowledgebox}
+
+\teachervoice{Un estudiante preguntó: si un mismo state recibe distintos embedding de tiempo en distintos timestep, ¿no se rompe la propiedad de Markov? El ponente respondió con claridad: «sí, aquí es deliberadamente no Markov», porque la action prediction y la partial observability pueden requerir la historia. Si la tarea es de verdad completamente Markov, la context ablation debería ayudar a determinar si la historia es solo redundante.}
+
+\begin{warningbox}{La history también puede memorizar correlaciones erróneas}
+Un context más largo puede recuperar el estado oculto, pero también puede hacer que el modelo dependa de patrones fortuitos del proceso de recolección de datos, como el ritmo de cierta behavior policy, la longitud de los episode o posiciones temporales específicas. Es necesario verificar, con pruebas entre policy distintas, entre estados iniciales distintos y con context ablation, que lo que aporta la historia sea información transferible y no una huella de los registros.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Lo esencial del forward pass no es solo el bloque Transformer, sino el intercalado de token, la combinación de embedding, el label shift, la context mask y el action head. La non-Markov history puede ser una ventaja en tareas parcialmente observables, pero una historia más larga también aumenta el costo computacional y el riesgo de spurious correlation.
+\section{Objetivo de entrenamiento y rollout: del aprendizaje supervisado al control en lazo cerrado}
+
+El rasgo de ingeniería más atractivo de Decision Transformer es que durante el entrenamiento usa una action prediction loss estándar. Se puede entrenar gracias a un objetivo supervisado conocido, pero el despliegue sigue siendo un rollout en lazo cerrado: el modelo emite una acción, el entorno produce un nuevo estado y una reward, y el sistema actualiza el objetivo restante y vuelve a invocar el modelo. Esta sección separa estrictamente el entrenamiento de la inferencia.
+
+\subsection{Loss para acciones continuous y discrete}
+
+El objetivo de entrenamiento depende de la forma estadística del action space, pero ambos casos comparten el mismo principio: tomar directamente la logged action como label supervisada, en lugar de construir primero un value target. El control continuo suele hacer regresión sobre un vector de números reales, mientras que el control discreto predice una distribución de probabilidad sobre las action categories. Al leer las fórmulas conviene revisar al mismo tiempo la action normalization, la mask de timesteps válidos y el modo de reduction, porque estos detalles de implementación cambian el peso que cada episode tiene en el gradiente. Para una continuous action puede usarse el error cuadrático medio:
+\[
+\mathcal{L}_{\mathrm{MSE}}(\theta)
+=\frac{1}{T}\sum_{t=1}^{T}\lVert a_t-\widehat{a}_t\rVert_2^2.
+\]
+Para una discrete action puede usarse cross-entropy:
+\[
+\mathcal{L}_{\mathrm{CE}}(\theta)
+=-\frac{1}{T}\sum_{t=1}^{T}\log p_{\theta}(a_t\mid \widehat{R}_{\le t},s_{\le t},a_{<t}).
+\]
+$a_t$ es la action real del conjunto de datos, $\widehat{a}_t$ o $p_{\theta}$ es la salida del modelo y $T$ es la longitud efectiva de la secuencia. Las posiciones de padding deben excluirse mediante una mask; de lo contrario, los episodes cortos quedan contaminados por tokens artificiales.
+
+\lecturefigure{slide-11-loss-function.jpg}{Objetivo de entrenamiento: la continuous action usa MSE y la discrete action usa cross-entropy.}{Video oficial de Stanford Online, 23:40.}
+
+\begin{knowledgebox}{Lectura de la figura: el verdadero argumento es «No dynamic programming»}
+La conclusión en negritas al pie de la slide importa más que las dos fórmulas. El RL tradicional value-based suele usar un Bellman target, y ese target depende a su vez de otro valor estimado o de una slowly updated network; Decision Transformer ajusta directamente las action labels del registro, de modo que su interfaz de entrenamiento se parece más a supervised learning. El costo es que el modelo no realiza policy improvement de forma automática: la mejora tiene que venir del return conditioning, de la combinación de datos y de la generalization del modelo.
+\end{knowledgebox}
+
+\teachervoice{El docente enfatiza que el valor de MSE y de cross-entropy está en que son «estables y fáciles de regularizar», no en que sean más prodigiosas que una RL loss. Reformular un problema complejo como aprendizaje supervisado permite reutilizar infraestructura madura, pero también deja el éxito o el fracaso más en manos de la calidad de los datos y del diseño del condicionamiento.}
+
+\subsection{Cómo se actualiza el return-to-go durante la inferencia}
+
+Sea $R_{\mathrm{target}}$ el objetivo inicial. En el instante $t$, el modelo muestrea o emite la acción $a_t$ a partir del contexto actual; el entorno devuelve la reward $r_t$ y el nuevo estado $s_{t+1}$. En el caso sin descuento se actualiza:
+\[
+\widehat{R}_{t+1}=\widehat{R}_t-r_t.
+\]
+Si se usa un return con descuento, hay que mantener la misma definición que en el entrenamiento, en lugar de copiar sin más la resta. En cada paso también hay que agregar los nuevos tokens al contexto y conservar solo los $K$ timesteps más recientes.
+
+\lecturefigure{slide-12-rollouts.jpg}{El rollout se parece a la autoregressive generation: se fija un retorno objetivo, se genera una acción, se agrega el nuevo estado y se actualiza el retorno restante.}{Video oficial de Stanford Online, 24:58.}
+
+\begin{lstlisting}[caption={Rollout autoregressive con return-to-go sin descuento},label={lst:dt-rollout}]
+target_return = desired_return
+state = env.reset()
+returns, states, actions, timesteps = [target_return], [state], [], [0]
+
+while not done:
+    action = model(returns, states, actions, timesteps)[-1]
+    next_state, reward, done, info = env.step(action)
+
+    actions.append(action)
+    states.append(next_state)
+    returns.append(returns[-1] - reward)
+    timesteps.append(timesteps[-1] + 1)
+
+    returns, states, actions, timesteps = keep_last_k_steps(
+        returns, states, actions, timesteps, K
+    )
+\end{lstlisting}
+
+\subsection{Un ejemplo numérico}
+
+Supongamos que el retorno objetivo es 10. Si las rewards reales de los tres primeros pasos son $2,0,3$, el remaining return que recibe el modelo es, en orden, $10,8,8,5$. Si el segundo paso no da reward, el objetivo no disminuye por sí solo; si algún paso obtiene una reward mayor de lo esperado, el objetivo restante se acerca a cero más rápido. Este proceso hace que el modelo sepa en todo momento «cuánto falta», pero supone que en los datos de entrenamiento haya suficientes combinaciones de objetivos restantes y estados similares.
+
+\begin{importantbox}{Los cuatro invariantes del rollout}
+\begin{enumerate}
+  \item El entrenamiento y la inferencia deben usar la misma definición de return y la misma reward scale;
+  \item la action actual no puede filtrarse a la posición de entrada que la predice;
+  \item lo que se actualiza es el objetivo restante después de la reward realmente obtenida, no la reward que predice el propio modelo;
+  \item la context truncation debe alinearse por timesteps completos; no se pueden partir las ternas $(R,s,a)$.
+\end{enumerate}
+\end{importantbox}
+
+\begin{warningbox}{La exposure bias sigue presente}
+Durante el entrenamiento, el modelo ve las actions históricas reales del registro; durante el rollout, ve sus propias actions históricas. Un error pequeño cambia el state futuro y provoca una desviación respecto de la distribución de entrenamiento. Que el objetivo supervisado de Decision Transformer sea estable no significa que la closed-loop error accumulation esté resuelta.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+En la fase de entrenamiento se ajusta directamente la action, lo que evita el Bellman backup explícito; en la fase de inferencia se interactúa con el entorno mediante un autoregressive loop y se actualizan de forma continua el remaining return y el context. El aprendizaje supervisado simplifica la optimización, pero no elimina el desplazamiento de distribución ni la acumulación de errores durante el rollout.
+\section{RL as probabilistic inference: una interpretación útil, no una demostración universal}
+
+A continuación, el ponente sitúa Decision Transformer dentro de la perspectiva de «control as inference»: interpreta una reward alta como una mayor optimality probability de la trayectoria y luego selecciona las acciones mediante inferencia condicional. Esta perspectiva ayuda a entender el return conditioning, pero no sustituye la cobertura de los datos fuera de línea, la identificación causal ni la evaluación en el entorno real.
+
+\subsection{La intuición de la optimality variable}
+
+Se introduce una optimality variable binaria $\mathcal{O}_t$ y se define a partir de la reward
+\[
+p(\mathcal{O}_t=1\mid s_t,a_t)\propto \exp\left(\frac{r(s_t,a_t)}{\alpha}\right),
+\]
+donde $\alpha>0$ es la temperature. Los pares state-action con reward alta tienen más probabilidad de considerarse optimal. La distribución posterior de la trayectoria completa condicionada a ``optimal'' puede escribirse como la combinación de la prior dynamics y la reward weighting; el policy learning puede entenderse como una aproximación de esa distribución posterior.
+
+\lecturefigure{slide-13-rl-as-probabilistic-inference.jpg}{RL as probabilistic inference: las optimality variables convierten la reward en un problema de inferencia condicional.}{Video oficial de Stanford Online, 30:00; la figura de la derecha cita a Levine 2018.}
+
+\begin{knowledgebox}{Lectura de la figura: la conexión entre Decision Transformer y la inference view}
+A la izquierda sigue estando la token sequence $(R,s,a)$; a la derecha, el probabilistic graphical model conecta la optimality variable de cada paso con el state/action. La conexión que plantea la clase es la siguiente: el return-to-go puede verse como una condición comprimida sobre la optimality futura, y el Transformer aprende la action distribution dada esa condición. No ejecuta con exactitud la inferencia del modelo gráfico, sino que aproxima con datos supervisados la distribución condicional correspondiente.
+\end{knowledgebox}
+
+\subsection{Qué explica esta perspectiva}
+
+Explica por qué «condicionar a un retorno alto» puede inclinar la elección hacia acciones de mayor calidad, y también por qué el behavior prior es importante: si cierta acción nunca aparece en los registros, a la posterior approximation le resulta difícil respaldarla de forma confiable. Además, sugiere la relación entre la temperature, la reward scale y la entropy regularization, lo que ayuda a conectar con el maximum-entropy RL.
+
+\subsection{Qué no demuestra esta perspectiva}
+
+La interpretación probabilística no demuestra por sí sola que el return objetivo sea alcanzable, ni que el modelo condicional extrapole correctamente fuera del dataset support; mucho menos demuestra que el Transformer ya realice planning causal. Lo que el modelo aprende es la estructura de correlaciones en la observational trajectory distribution; la dinámica del entorno y la action consequence todavía tienen que estar reflejadas en los datos.
+
+\begin{warningbox}{Un patrón de trayectorias correlacionado no es una garantía contrafactual}
+Si las trayectorias con return alto siempre van acompañadas de cierto rasgo visual sin efecto causal, el modelo puede tomarlo como una señal para actuar. Solo con intervention, aleatoriedad del entorno, datos de distintas policies o una counterfactual evaluation específica es posible distinguir con más certeza la verdadera action consequence de las correlaciones presentes en los registros.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+RL-as-inference ofrece una intuición unificada para el return conditioning: las trayectorias con reward alta reciben una optimality weight mayor y la policy aproxima la distribución posterior condicional. Sin embargo, esta interpretación sigue sujeta al behavior prior y al soporte de los datos, y no sustituye la verificación empírica en lazo cerrado.
+\section{Línea principal de los experimentos: del puntaje global a mecanismos falsables}
+
+La parte experimental no es una tabla de posiciones de «DT ganó», sino una serie de pruebas que se van haciendo más estrictas: primero se comparan los resultados globales de offline RL; después se prueba si la target return es controlable, si el método solo selecciona trayectorias de puntaje alto, si la history es necesaria, si hay degradación con sparse reward, cómo se comporta el credit de largo plazo y si el mismo modelo puede funcionar como critic. Cada figura responde una pregunta distinta.
+
+\subsection{Alcance experimental y protocolo de evaluación}
+
+El trabajo original usa entornos como Atari, OpenAI Gym / MuJoCo y Key-to-Door, y compara con baselines como model-free offline RL y behavior cloning. Cada benchmark define de manera distinta la cantidad de datos, la reward scale y el normalized score; por ello, la comparación debe hacerse dentro del mismo conjunto de datos y del mismo protocolo, y no se pueden tomar directamente los valores de tablas distintas como un porcentaje unificado.
+
+\lecturefigure{slide-14-experiments-divider.jpg}{La clase pasa del mecanismo del método a los experiments: cada figura siguiente pone a prueba una hipótesis concreta.}{Video oficial de Stanford Online, 32:24.}
+
+\begin{knowledgebox}{La intuición del normalized score}
+D4RL suele transformar la raw return en
+\[
+\mathrm{score}_{\mathrm{norm}}
+=100\times\frac{R_{\mathrm{policy}}-R_{\mathrm{random}}}
+{R_{\mathrm{expert}}-R_{\mathrm{random}}}.
+\]
+$R_{\mathrm{policy}}$ es el retorno real en el entorno de la policy evaluada; $R_{\mathrm{random}}$ y $R_{\mathrm{expert}}$ son puntos de referencia. Este valor facilita la comparación dentro de una misma tarea, pero no necesariamente cae de forma estricta en $[0,100]$ ni es un «porcentaje de tarea completada».
+\end{knowledgebox}
+
+\subsection{Resultados globales de offline RL}
+
+El primer grupo de figuras compara Decision Transformer, los métodos de tipo TD-learning y behavior cloning. Al leer la figura conviene revisar primero tres cosas: a qué environment/data regime corresponde cada grupo de barras, si los baselines usan el mismo offline dataset y si las diferencias son consistentes entre tareas. La conclusión de la clase es que DT es competitivo en varios benchmarks, no que domine de forma absoluta en todas las configuraciones.
+
+\lecturefigure{slide-15-offline-rl-summary-results.jpg}{Offline RL summary: comparación de Decision Transformer con TD learning y behavior cloning en varios grupos de tareas.}{Video oficial de Stanford Online, 33:24; los valores concretos son los de las tablas del artículo original.}
+
+\begin{knowledgebox}{Lectura de la figura: la gráfica de barras respalda «competitive», no «universally superior»}
+La altura relativa de los tres grupos de tareas indica que DT puede alcanzar el nivel de baselines fuertes sin entrenar explícitamente una value function. El número de tareas de la figura es limitado, los datos provienen de un collection process predeterminado y los distintos métodos pueden ser sensibles a los hyperparameters y a la architecture. Por ello, la conclusión sólida es «sequence modeling es una offline-RL formulation viable», y no «la programación dinámica ya no sirve».
+\end{knowledgebox}
+
+\teachervoice{En la discusión de clase se preguntó si los baselines incluyen recurrence y con qué policy se recolectaron los datos. El expositor reconoce que algunos detalles de implementación deben verificarse y subraya que el replay buffer suele provenir del proceso de entrenamiento de un agent en línea. Experiencia práctica: cuando los resultados dependen del data regime, la source policy y la cantidad de datos deben reportarse junto con la estructura del modelo.}
+
+\subsection{¿El return conditioning es realmente controlable?}
+
+Si el modelo recibe como entrada una desired return, la verificación más directa es fijar distintos targets en el eje horizontal y medir en el eje vertical la achieved return real. El oracle ideal es la diagonal $y=x$; la mejor trayectoria del logged dataset ofrece otra cota superior de referencia. Cuanto más se acerque la curva a la diagonal, más consistentes son la condición de objetivo y la calidad real del comportamiento.
+
+\lecturefigure{slide-16-evaluating-return-conditioning.jpg}{Return conditioning: el eje horizontal es la requested return; el eje vertical, la return obtenida realmente en el rollout.}{Video oficial de Stanford Online, 38:12.}
+
+\begin{knowledgebox}{Lectura de la figura: primero hay que distinguir las tres «cotas superiores»}
+La diagonal verde representa el control perfecto: se obtiene exactamente lo que se pide; la línea naranja representa la mejor trayectoria de los datos fuera de línea, no el óptimo teórico del entorno; la curva del modelo representa el rollout real. En algunos entornos, el modelo muestra indicios de mejora por encima del retorno máximo de los datos de entrenamiento, pero con targets más altos termina por saturarse. La saturación es más segura que una caída catastrófica, pero aun así muestra que el target token no es una perilla de ganancia ilimitada.
+\end{knowledgebox}
+
+\begin{warningbox}{La occasional extrapolation no es una garantía OOD}
+En entornos como Seaquest se ha observado que la achieved return supera la logged best trajectory; esto puede deberse a la combinación de comportamientos locales ya existentes, a la aleatoriedad o a la generalización de la función. El expositor afirma explícitamente que esta tendencia no es consistente. En ingeniería deben reportarse el target sweep, los intervalos de confianza, la tasa de fallos y la distancia respecto del soporte de los datos; no basta con mostrar el mejor intento.
+\end{warningbox}
+
+\teachervoice{Un estudiante pregunta: ¿qué pasa si se introduce un target absurdamente grande (por ejemplo, 10,000)? El expositor responde que el desempeño suele saturarse a partir de cierto umbral, en lugar de mejorar sin límite, y que tampoco se ha observado de manera general un colapso repentino. Esta explicación oral es más precisa que las palabras «generación controlable».}
+
+\subsection{«Multitask» requiere acotar su significado}
+
+Cambiar la target return permite que un mismo modelo genere comportamientos distintos, como «quedarse quieto de forma conservadora», «moverse de forma moderada» o «buscar un puntaje alto», por lo que puede considerarse una forma de behavior selection. Pero esto no equivale automáticamente a generalización entre tareas: la return es un escalar unidimensional y puede no distinguir objetivos, restricciones o tareas semánticas diferentes. Un multitask agent más general necesita además un goal state, una language instruction, un task ID u otras condiciones.
+
+\begin{warningbox}{El return conditioning no es una task specification completa}
+Dos tareas pueden tener la misma return scale y exigir comportamientos totalmente distintos; una misma return también puede corresponder a varias estrategias. Usar la return como task cue funciona en entornos específicos, pero no prueba por sí solo que el modelo haya aprendido una identidad abstracta de tarea.
+\end{warningbox}
+
+\subsection{¿Es solo behavior cloning de trayectorias de puntaje alto?}
+
+Percent behavior cloning (percent BC) primero ordena las trayectorias por trajectory return, conserva el $q\%$ superior y luego entrena un behavior cloning ordinario:
+\[
+\mathcal{D}_{q}=\{\tau\in\mathcal{D}:R(\tau)\ge Q_{1-q}(R)\},
+\qquad
+\min_{\theta}\;\mathbb{E}_{(s,a)\sim\mathcal{D}_q}[-\log\pi_{\theta}(a\mid s)].
+\]
+$Q_{1-q}(R)$ es el umbral de cuantil de la return. Este baseline es fuerte porque también retira de la señal de supervisión las trayectorias de baja calidad; la diferencia es que DT conserva todos los datos y usa la condición de return para distinguir la calidad.
+
+\lecturefigure{slide-17-comparison-with-behavior-cloning.jpg}{Comparación con percent behavior cloning: es muy fuerte en los regímenes de datos medio y alto; en el regime de pocos datos, la ventaja de DT es más evidente.}{Video oficial de Stanford Online, 47:34.}
+
+\begin{knowledgebox}{Lectura de la figura: por qué importa un baseline sencillo}
+La tabla compara primero DT con BC usando distintas proporciones de filtrado. Con cantidades de datos medias y altas, percent BC puede acercarse a DT, lo que indica que parte de la ganancia sí proviene de «concentrarse en el comportamiento de alto retorno»; en el regime de pocos datos de Atari, filtrar en exceso deja todavía menos datos, y la ventaja de DT, que aprovecha todas las trayectorias y la condición de return, es más evidente. Un baseline sencillo y fuerte evita atribuir erróneamente a una arquitectura compleja un efecto de selección de datos.
+\end{knowledgebox}
+
+\teachervoice{El expositor afirma que percent BC es un baseline fuerte que todo trabajo futuro de offline RL debería incluir. El docente enfatiza que esto no debilita a Decision Transformer, sino que precisa mejor su aportación: cuando hay datos suficientes, filtrar trayectorias de alta calidad ya es muy fuerte; cuando los datos escasean, condicionar sobre todos los datos tiene más valor.}
+
+\subsection{¿La context length es realmente útil?}
+
+Si se fija la context length en $K=1$, el modelo depende casi exclusivamente de la return y el state actuales; si el context completo es claramente mejor, significa que la historia sí aporta action-relevant information. Este ablation pone a prueba directamente el diseño «intencionalmente non-Markov» descrito antes, en lugar de limitarse a comparar redes más grandes y más pequeñas.
+
+\lecturefigure{slide-18-effect-of-context-length.jpg}{Context-length ablation: la historia completa obtiene mejores resultados que $K=1$ en varias tareas.}{Video oficial de Stanford Online, 53:06.}
+
+\begin{knowledgebox}{Lectura de la figura: la diferencia de desempeño puede tener tres orígenes}
+La ventana de historia puede recuperar una partial observation, identificar la behavior phase o, simplemente, aportar el episode time. Para confirmar el mecanismo real habría que comparar además: una time feature explícita, un recurrent baseline, una historia barajada al azar, curvas con distintos $K$ y la generalización entre episodios. La slide original respalda que «la historia es útil», pero todavía no permite determinar de manera única qué tipo de información de la historia es la más importante.
+\end{knowledgebox}
+
+\subsection{Sparse reward: credit assignment no es lo mismo que exploration}
+
+El experimento de recompensa dispersa solo entrega la cumulative reward al final de la trajectory. Durante el entrenamiento, la return-to-go de cada posición puede recalcularse a partir del registro completo, de modo que los tokens tempranos siguen recibiendo la información condicional de «si esta trayectoria terminó en éxito o en fracaso». Los métodos tradicionales per-transition, si no tienen un backup o una representation adecuados, pueden tener más dificultad para propagar resultados lejanos.
+
+\lecturefigure{slide-19-sparse-reward-environments.jpg}{Experimento de sparse reward: la reward acumulada solo se entrega al final de la trayectoria; DT mantiene su desempeño, mientras que CQL cae notablemente.}{Video oficial de Stanford Online, 55:12.}
+
+\begin{warningbox}{Este experimento no demuestra que la exploración en línea esté resuelta}
+El offline dataset ya contiene trajectories exitosas y fallidas, y el modelo puede ver el resultado completo durante el entrenamiento; en cambio, un cold start en línea puede no tener ni una sola trayectoria exitosa. La return-to-go ayuda a propagar el resultado futuro como condición hacia las acciones tempranas, pero no puede descubrir automáticamente la recompensa si no hay datos de éxito. Credit assignment y exploration son problemas relacionados, pero distintos.
+\end{warningbox}
+
+\teachervoice{La discusión de clase ofreció una buena intuición: en el offline training, cada paso se reconecta con la trayectoria correcta mediante la action real del registro, de modo que el modelo no avanza «a ciegas» tras unas acciones aleatorias tempranas, como le ocurre a un agent en línea. El expositor coincide en que, al pasar realmente a un entorno en línea, los detalles de exploración y exploitation deben rediseñarse.}
+
+\subsection{Key-to-Door: credit de largo plazo entre fases}
+
+La tabla de sparse reward solo muestra que, al eliminar las rewards intermedias, el desempeño no colapsa de forma evidente; aun así, podrían estar actuando episodios cortos o pistas locales. Key-to-Door separa deliberadamente la acción temprana que determina el éxito de la reward final: el agent debe primero tomar la llave, luego atravesar una habitación vacía sin información de la tarea y solo al final ve la puerta; únicamente obtiene la binary reward si tiene la llave y logra abrir la puerta. Este diseño de tres fases separa las acciones causalmente relevantes de un largo distractor interval, y pone a prueba específicamente si el modelo puede relacionar el éxito final con la toma de la llave ocurrida mucho antes.
+
+\lecturefigure{slide-20-long-term-credit-assignment.jpg}{Key-to-Door: las tres fases (tomar la llave, la habitación vacía y abrir la puerta) ponen a prueba el credit assignment de largo plazo.}{Video oficial de Stanford Online, 1:00:04.}
+
+\begin{knowledgebox}{Lectura de la figura: el trajectory count también es una variable independiente}
+La tabla compara distintas cantidades de trajectories exitosas. DT y percent BC superan a varios baselines en esta tarea, pero cuando el registro contiene muy pocos comportamientos exitosos, cualquier método carece de evidencia. El resultado respalda que «el sequence context puede conservar información entre fases», pero no demuestra que el modelo pueda inventar la estrategia de tomar la llave sin ningún ejemplo de éxito.
+\end{knowledgebox}
+
+\subsection{¿Puede el mismo modelo convertirse en critic?}
+
+Si se cambia el target de salida de la action a la return o a la reward probability, el causal Transformer puede interpretarse como un critic. Tras observar la historia, el modelo estima la probabilidad de éxito futuro: si no ha tomado la llave, la probabilidad baja; después de tomarla, se mantiene por un tiempo; al acercarse finalmente a la puerta, sube o baja según la acción.
+
+\lecturefigure{slide-21-decision-transformers-as-critics.jpg}{Decision Transformer como critic: actualiza la future reward probability a lo largo de las tres fases de Key-to-Door.}{Video oficial de Stanford Online, 1:03:02.}
+
+\begin{knowledgebox}{Lectura de la figura: los cambios de la curva corresponden a información reversible e irreversible}
+En cuanto termina la phase 1 sin que el agent haya tomado la llave, el éxito futuro es prácticamente inalcanzable, y la línea azul debe bajar y mantenerse baja; tras tomar la llave, la habitación vacía de la phase 2 no decide de inmediato el éxito o el fracaso, por lo que las trayectorias candidatas siguen cercanas entre sí; la bifurcación definitiva ocurre en la phase 3, según se llegue o no a la puerta. Esto indica que el hidden state del modelo conserva eventos de largo plazo y puede usarlos para una value-like prediction.
+\end{knowledgebox}
+
+\begin{warningbox}{Un «impressive critic» todavía no es un algoritmo actor-critic completo}
+Este experimento muestra que el target es intercambiable y que hay capacidad de predicción de largo plazo, pero no aporta automáticamente policy improvement, pessimism, uncertainty calibration ni off-policy correction. Para integrarlo en un sistema actor-critic, aún hay que definir el target, el bootstrap, el data support y la estrategia de estabilización.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La cadena experimental demuestra paso a paso que: DT es una offline-RL formulation competitiva; la return condition y la achieved return guardan una controlabilidad relativa; percent BC es un baseline fuerte con el que es obligatorio comparar; la history sí es útil en algunas tareas; el sequence context puede manejar credit disperso y de largo plazo, y la misma arquitectura puede convertirse en critic. Todas las conclusiones dependen del data regime, y ninguna resuelve directamente la online exploration.
+\section{Limitaciones, criterio de ingeniería y direcciones futuras}
+
+El summary y el future work del final de la clase son mesurados. La contribución es una perspectiva nueva, sencilla, estable y extensible. No anuncian que la language modeling haya reemplazado al RL. Esta sección convierte las limitaciones más importantes del Q\&A de la clase en puntos de verificación aplicables.
+
+\subsection{Síntesis de la clase: por qué el método merece atención}
+
+El valor de Decision Transformer tiene tres fuentes. Primera: usa conditional sequence modeling para unificar return, state y action. Segunda: entrena con un objetivo supervisado estable, sin depender explícitamente de una value function ni de policy gradient. Tercera: obtiene resultados competitivos en varios tipos de offline benchmark, y los experimentos de context, sparse reward y critic muestran el papel de la sequence history.
+
+\lecturefigure{slide-22-summary.jpg}{Síntesis de la conferencia original: sencillo, estable, fácil de entrenar y con buen desempeño en varios tipos de configuraciones de RL.}{Video oficial de Stanford Online, 1:08:56.}
+
+\begin{importantbox}{Principio de proporcionalidad de la evidencia}
+Se puede afirmar que Decision Transformer demuestra que el sequence modeling es una offline-RL formulation viable y sólida. No se puede afirmar que demuestre que todo el RL deba reemplazarse por next-token prediction, ni que basta con agrandar el Transformer para resolver exploration, safety y distribution shift.
+\end{importantbox}
+
+\subsection{El Online RL no se obtiene con solo agregar ruido}
+
+En el offline setting, los datos de entrenamiento ya existen. El online RL tiene que recopilar datos mientras mejora la policy. En el Q\&A de la clase se preguntó si se podía adoptar directamente epsilon-greedy o Boltzmann sampling. El ponente respondió que la evidencia preliminar indica que la exploration recipe del RL tradicional no se puede trasladar tal cual. Tanto el exploration/exploitation balance como la forma en que las trayectorias erróneas entran al context requieren un diseño nuevo.
+
+\begin{warningbox}{Tres problemas adicionales al pasar al modo en línea}
+\begin{enumerate}
+  \item \textbf{Cold start}: si no hay trajectory de alto retorno, el target conditioning no tiene una conducta correspondiente;
+  \item \textbf{Non-stationary dataset}: las actualizaciones de la policy cambian continuamente la distribución de los datos;
+  \item \textbf{Sequence contamination}: el historial de baja calidad que generan las acciones de exploración afecta las predicciones posteriores y no puede tratarse simplemente como iid augmentation.
+\end{enumerate}
+\end{warningbox}
+
+\teachervoice{Nota del apunte: el ponente no afirmó que epsilon-greedy esté destinado a fallar. Dijo que «devil lies in the detail»: las técnicas existentes de RL en línea no son directamente transferable. La pregunta de investigación correcta es cómo diseñar la recopilación de datos, el condicionamiento por objetivo y el sequence replay, no solo ajustar una sampling temperature.}
+
+\subsection{Discount factor y context limitado}
+
+Los experimentos originales usan principalmente el finite-horizon return con $\gamma=1$, pero Decision Transformer es compatible con el discounting. Basta con usar $\widehat{R}^{(\gamma)}_t$ de forma consistente en el preprocesamiento de datos y en el rollout. Sin embargo, el discounting resuelve el peso de las reward lejanas y no equivale a memoria. Aunque $\gamma$ sea razonable, un $K$ limitado puede impedir que el modelo vea los eventos tempranos necesarios para completar la tarea.
+
+\begin{importantbox}{Discount y context responden a preguntas distintas}
+$\gamma$ determina el peso numérico de las reward lejanas; $K$ determina cuánta información histórica puede consultar el modelo. Un $\gamma$ menor no recupera una observation clave que se truncó, y un $K$ mayor tampoco sustituye una definición estable del return de horizonte infinito.
+\end{importantbox}
+
+\subsection{Relación con CQL, pessimism y el hybrid objective}
+
+CQL (Conservative Q-Learning) contrarresta la offline overestimation reduciendo el valor estimado de las action que están fuera de los datos. En el Q\&A de la clase se preguntó si se podía agregar pessimism o un Q-learning objective a Decision Transformer. La respuesta es que en principio sí. Sin embargo, la pregunta científica del trabajo original era precisamente hasta dónde se puede llegar con un sequence objective sencillo, sin esos componentes tradicionales.
+
+\begin{knowledgebox}{Tres direcciones hybrid}
+\begin{enumerate}
+  \item \textbf{Sequence actor + pessimistic critic}: DT genera acciones candidatas y un value model conservador las filtra;
+  \item \textbf{Return model + uncertainty}: se modelan conjuntamente la alcanzabilidad del desired return y la confianza en él;
+  \item \textbf{Online sequence replay}: los datos de contexto se mantienen y se actualizan continuamente según trajectory quality, novelty y safety.
+\end{enumerate}
+Estas direcciones aumentan la complejidad del algoritmo y obligan a volver a verificar la estabilidad y la contribución causal.
+\end{knowledgebox}
+
+\subsection{Trabajo futuro: multimodal, multitask, multi-agent}
+
+La future-work slide del ponente trata el modelado de secuencias como una interfaz unificada. La multimodality permite que el modelo procese al mismo tiempo experience en línea y fuera de línea, imágenes y texto. El multitask requiere task-conditioned goal más ricos o lenguaje. El multi-agent incorpora a la secuencia conjunta las acciones y la observation de los otros agent. Cada dirección amplía el token space y, con él, los problemas de credit, coordination y safety.
+
+\lecturefigure{slide-23-future-work.jpg}{Direcciones futuras: multimodality, multitask y multi-agent sequential decision making.}{Video oficial de Stanford Online, 1:10:46.}
+
+\begin{knowledgebox}{Lectura de la figura: una interfaz de secuencia unificada no implica una dificultad unificada}
+Convertir todas las modalidades en tokens puede unificar la pila de software, pero no unifica por sí solo la reward semantics, la action latency, la agent identity ni las restricciones de seguridad. Un multimodal model necesita sincronización temporal; un multitask model necesita evitar la confusión de objetivos; un multi-agent model, además, debe manejar oponentes no estacionarios y la credit assignment conjunta.
+\end{knowledgebox}
+
+\subsection{Recursos de la conferencia original}
+
+La slide original indica la página del proyecto, el artículo y el código, y cada uno cumple una función distinta. La página del proyecto ofrece visualizaciones y una explicación breve. El artículo define el método y los experimentos. El código muestra los detalles del preprocesamiento de datos, el sequence sampling, la return scale y la evaluación. Para reproducir los resultados hay que verificar contra el código y la configuración original de los datos, no reescribir a partir del diagrama de arquitectura.
+
+\lecturefigure{slide-24-useful-links.jpg}{Página del proyecto, artículo y código de Decision Transformer citados en la conferencia original.}{Video oficial de Stanford Online, 1:11:30.}
+
+\begin{importantbox}{Lista de verificación para la reproducción}
+\begin{enumerate}
+  \item Verificar la reward normalization, la return scale y la elección del target-return;
+  \item registrar la dataset collection policy, la trajectory length y la proporción de éxitos;
+  \item alinear la context length, el sequence sampling y la padding mask;
+  \item reportar a la vez la loss de entrenamiento, el realized return, el target sweep y la varianza entre varias semillas aleatorias;
+  \item comparar al menos BC, percent BC, un value-based offline baseline y una context ablation.
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Los límites de Decision Transformer importan tanto como sus contribuciones. Ofrece un offline sequence objective estable y unificado. Aun así, la online exploration, las conductas que exceden el soporte de los datos, el context limitado, el discounting y la conservative policy improvement todavía deben resolverse por separado.
+\section{Síntesis y ampliación}
+
+Esta clase reformuló el offline RL con una pregunta mínima: si una trayectoria completa ya es una secuencia, ¿por qué no aprender directamente «cuál es la siguiente acción, condicionada al retorno objetivo y al historial»? Esta pregunta trae consigo un método claro y también un conjunto de supuestos que deben examinarse con honestidad.
+
+\begin{enumerate}
+  \item \textbf{La formulación del problema es la innovación principal}: se plantea el RL como conditional sequence modeling, en lugar de solo sustituir el policy backbone;
+  \item \textbf{El return-to-go es un token de control}: durante el entrenamiento se calcula hacia atrás a partir del registro completo; durante la inferencia funciona como condición de desired behavior;
+  \item \textbf{El objetivo supervisado mejora la entrenabilidad}: MSE/CE evita el Bellman backup explícito, pero no realiza policy improvement de forma automática;
+  \item \textbf{El history es una decisión de diseño deliberada}: el context permite manejar partial observability y eventos de largo plazo, pero también puede memorizar los sesgos de los datos;
+  \item \textbf{El rollout es el examen final}: el requested return, la loss de entrenamiento y el realized environmental return deben distinguirse;
+  \item \textbf{Un baseline simple y sólido es indispensable}: percent BC revela la contribución de la selección de datos y la del modelado condicional por separado;
+  \item \textbf{Sparse reward no equivale a exploration}: los registros offline pueden propagar información sobre éxitos futuros, pero el cold start en línea sigue siendo difícil;
+  \item \textbf{Los experimentos con critic muestran la flexibilidad de la interfaz}: un mismo causal model puede predecir la action o el return, pero eso no constituye automáticamente un actor-critic completo;
+  \item \textbf{La extrapolación es una observación, no una garantía}: los target extremos se saturan, y superar ocasionalmente el logged best requiere verificación repetida;
+  \item \textbf{Lo más probable es que el futuro sea hybrid}: el sequence model puede combinarse con pessimism, uncertainty y online data collection, pero hay que volver a auditar la causalidad y la estabilidad.
+\end{enumerate}
+
+\begin{importantbox}{Tarea del curso: diseñar un conjunto de experimentos que distinga el «modelado condicional» de la «selección de datos»}
+Elige un benchmark de offline RL, fija el mismo encoder, el mismo parameter count y el mismo presupuesto de entrenamiento, y compara: BC ordinario, percent BC, Decision Transformer, DT con $K=1$ y DT con conservative critic. Para cada modelo, reporta la curva de cantidad de datos, el target-return sweep, el realized return, la OOD action rate, cinco semillas aleatorias y las trayectorias fallidas. Por último, responde: ¿la mejora proviene del return condition, del history, de más datos útiles o del critic filtering?
+\end{importantbox}
+
+\begin{warningbox}{Autoevaluación final: cinco conclusiones que no deben confundirse}
+\textbf{Estabilidad en el entrenamiento} no equivale a \textbf{estabilidad en lazo cerrado}; \textbf{controlabilidad mediante la condición} no equivale a \textbf{alcanzabilidad del objetivo}; \textbf{correlación de largo plazo} no equivale a \textbf{credit causal}; \textbf{éxito offline} no equivale a \textbf{éxito en la exploración en línea}; \textbf{una interfaz de tokens unificada} no equivale a \textbf{que todas las tareas compartan la misma dificultad}.
+\end{warningbox}
+
+\subsection{Lecturas adicionales}
+
+Este conjunto de materiales avanza por capas, desde el método original, el modelado de trayectorias y el offline RL conservador hasta los conjuntos de datos y la probabilistic inference; se recomienda leerlo en el siguiente orden:
+
+{\small
+\begin{itemize}[nosep,leftmargin=*]
+  \item \href{https://arxiv.org/abs/2106.01345}{\textbf{Decision Transformer}}: definición del método, benchmark, ablation y experimento Key-to-Door.
+  \item \href{https://sites.google.com/berkeley.edu/decision-transformer}{\textbf{Project Page}} y \href{https://github.com/kzl/decision-transformer}{\textbf{Official Code}}: visualizaciones, procesamiento de datos e implementación del rollout.
+  \item \href{https://arxiv.org/abs/2106.02039}{\textbf{Trajectory Transformer}}: plantea de manera más completa dynamics, reward y action como un problema de generación de trayectorias.
+  \item \href{https://arxiv.org/abs/2006.04779}{\textbf{Conservative Q-Learning}}: otra vía para pessimism y distributional support en offline RL.
+  \item \href{https://arxiv.org/abs/2004.07219}{\textbf{D4RL}}: offline-RL dataset y normalized evaluation protocol.
+  \item \href{https://arxiv.org/abs/1805.00909}{\textbf{RL and Control as Probabilistic Inference}}: optimality variable, maximum entropy y la perspectiva de inference.
+\end{itemize}
+}
+
+\end{document}

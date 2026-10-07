@@ -1,0 +1,613 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+\usepackage{multicol}
+
+\renewcommand{\notetitle}{Lecture 38: La «biología» de los modelos grandes de lenguaje: características, circuitos, cómputo paralelo y planificación}
+\renewcommand{\noteauthors}{Elaborado a partir de la conferencia oficial de Joshua Batson (Anthropic) en Stanford CS25 V5, el artículo interactivo y los subtítulos hechos por personas}
+\renewcommand{\notedate}{CS25 V5 · versión reescrita source-first, 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{Clase: 2025-05-13; publicación: 2025-06-05}
+\renewcommand{\videoduration}{1:12:32}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=vRQs7qfIDaU}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.97\textwidth,height=0.49\textheight,keepaspectratio]{slides-images/#1}
+  \caption{#2}
+  \figsource{Joshua Batson, Stanford CS25 V5 official recording, #3}
+\end{figure}
+}
+
+\let\standardtableofcontents\tableofcontents
+\renewcommand{\tableofcontents}{%
+  \small
+  \setlength{\parskip}{0pt}
+  \standardtableofcontents
+  \normalsize
+  \setlength{\parskip}{0.25em}
+}
+
+\begin{document}
+\makecscover
+
+\section{Por qué estudiar la «biología» de los modelos}
+
+El título de esta conferencia no es un adorno retórico, sino una postura de investigación: los ingenieros escriben la arquitectura Transformer, el objetivo de entrenamiento y el proceso de optimización, pero no escriben línea por línea el algoritmo interno que el modelo termina por aprender. El entrenamiento, como la evolución, produce objetos complejos; el investigador se enfrenta a un sistema que «creció». Por eso, la tarea de la mechanistic interpretability (interpretabilidad mecanicista) no es ponerles etiquetas a las salidas, sino descomponer una pasada hacia adelante en componentes, conexiones e hipótesis causales que puedan verificarse.
+
+\lecturefigure{slide-01-title-biology-large-language-model.jpg}{Título de la conferencia: diseccionar un modelo grande ya entrenado como un sistema complejo}{00:01:24}
+
+\teachervoice{00:01:41--00:02:43, el docente compara la interpretability con la biology: ambas estudian objetos complejos producidos por algún proceso de optimización o de evolución. La analogía no afirma que las redes neuronales sean seres vivos, sino que recuerda que los mecanismos internos no se ensamblan pieza por pieza según un diagrama de módulos hecho por personas.}
+
+\subsection{Hay que explicar a la vez las capacidades sorprendentes y los mecanismos extraños}
+
+Si solo se observan los casos de éxito, el modelo parece un programa general capaz de aprender sobre la marcha una tarea nueva dentro del contexto; si solo se observan los casos de fracaso, parece un sistema aleatorio que junta hechos contradictorios. La clase pone deliberadamente ambas caras una junto a la otra, porque la verdadera pregunta de investigación no es «si el modelo es inteligente o tonto», sino cómo un mismo conjunto de parámetros organiza rutas de cómputo radicalmente distintas ante entradas diferentes.
+
+\lecturefigure{slide-02-models-do-cool-things.jpg}{Traducción al circasiano, un idioma de pocos recursos: los ejemplos en el contexto bastan para inducir una nueva capacidad lingüística}{00:04:04}
+
+En el caso de la figura se colocó directamente en el contexto una tabla de equivalencias ruso--circasiano reunida durante años, y el modelo no solo tradujo oraciones nuevas, sino que también analizó su gramática. Conviene comparar primero dos rutas: «entrenar un modelo especializado» y «que un modelo general lea el vocabulario sobre la marcha». La segunda no vuelve a actualizar los parámetros y, aun así, combina en un solo contexto representaciones lingüísticas que ya tenía. Esto respalda una fuerte capacidad de transferencia abstracta, pero no demuestra que el modelo domine de forma fiable toda la cultura, la gramática y los hechos de ese idioma.
+
+\lecturefigure{slide-03-models-do-weird-things.jpg}{La contradicción del año bisiesto: un hecho correcto, una premisa errónea y un razonamiento local se activan al mismo tiempo}{00:05:20}
+
+Lo importante de esta figura no es un error de fecha, sino la estructura de conflicto dentro de la salida: el modelo sabe que 2024 es un caso de la regla de los años bisiestos, pero genera «2024 no es bisiesto» y después afirma correctamente que el siguiente año bisiesto es 2028. La recuperación local de hechos y la coherencia global no se fusionan automáticamente en un único algoritmo. Esto sugiere que un texto fluido puede ser el resultado superficial de la competencia entre varias estrategias parciales.
+
+\begin{warningbox}{Una mayor capacidad no elimina automáticamente lo extraño}
+El docente enfatiza que, a medida que los modelos se vuelven más capaces, disminuyen los errores evidentes del tipo «seis dedos», pero lo extraño suele volverse solo más oculto y de más alto nivel. Una mejora en los Benchmark solo indica que ciertos comportamientos mejoraron; no indica que los conflictos internos se hayan entendido o eliminado.
+\end{warningbox}
+
+\lecturefigure{slide-04-three-core-findings.jpg}{Las tres líneas de esta conferencia: representaciones abstractas, cómputo en paralelo y planificación}{00:08:19}
+
+Al leer este mapa de ruta, hay que contrastar fila por fila las afirmaciones comunes de la izquierda con los hallazgos de investigación de la derecha: el modelo no se limita a reproducir ejemplos de entrenamiento, sino que combina representaciones abstractas; no se limita a ejecutar reglas seriales superficiales, sino que puede recorrer varias rutas en paralelo en una sola pasada hacia adelante; no se limita a responder al token actual, sino que también forma planes que influyen en la forma de las palabras y en la estructura futuras. Cada caso posterior debe sustentar estas afirmaciones con intervention (intervención) y no con capturas de correlaciones.
+
+Estos tres hallazgos corresponden además a tres intuiciones erróneas distintas. Entender el modelo como un recuperador de información hace perder de vista la combinación entre features; entenderlo como la ejecución paso a paso de un programa en lenguaje natural hace perder de vista las rutas candidatas que coexisten dentro de una misma capa; entender la next-token prediction como «solo mirar la siguiente palabra» hace perder de vista las restricciones que el estado oculto impone hacia objetivos más lejanos. El resto de estas notas no elevará ningún caso aislado a ley general, sino que verificará una y otra vez: de qué prompt proviene la figura, cuánto explica el modelo de reemplazo, qué cambió la intervención y si existe un circuito alternativo igualmente plausible.
+
+\begin{importantbox}{El problema de la evidencia en esta conferencia}
+Una explicación interna debe responder al menos tres cosas: \textbf{qué se representa}, \textbf{cómo se conecta para formar un cómputo} y \textbf{si modificar ese componente cambia el comportamiento}. Tener solo la feature label sin el circuito es un diccionario; tener solo una figura de correlaciones sin intervención es una hipótesis; una intervención exitosa pero con cobertura incompleta tampoco es todavía una explicación global.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La perspectiva «biológica» convierte al modelo de una caja negra detrás de una API en un sistema complejo por diseccionar. Los casos iniciales establecen la tensión que recorre todas estas notas: los modelos grandes pueden combinar con rapidez capacidades nuevas, pero también llevan a la vez estrategias correctas y erróneas a la respuesta; por eso hay que ir más allá de la evaluación del comportamiento y llegar a las representaciones, los circuitos y la verificación causal.
+\section{De un token al programa interno que «crece»}
+
+La sección anterior explicó por qué no basta con observar la salida; esta sección fija primero el objeto de estudio: qué ocurre exactamente al generar un token. Solo si se separan la probabilidad autorregresiva, los estados ocultos y las funciones de la atención y de la MLP, los conceptos posteriores de feature, transcoder y attribution graph no se reducirán a metáforas vagas.
+
+\subsection{La generación autorregresiva es una repetición de propagaciones hacia adelante}
+
+Dada una secuencia de tokens de entrada $x_{1:n}$, el modelo genera la secuencia siguiente según la factorización autorregresiva:
+\[
+p_\theta(x_{n+1:n+T}\mid x_{1:n})
+=\prod_{t=1}^{T}p_\theta(x_{n+t}\mid x_{1:n+t-1}).
+\]
+Aquí $\theta$ son los parámetros fijos tras el entrenamiento, $T$ es el número de tokens nuevos generados y $x_{1:n+t-1}$ es el prefijo completo que puede leer la $t$-ésima predicción. Por cada token adicional hay que ejecutar de nuevo una propagación hacia adelante; por lo tanto, «una respuesta» contiene muchos pasos de cómputo discretos.
+
+\lecturefigure{slide-05-how-one-token-is-produced.jpg}{Punto de partida: cómo genera un token un modelo de lenguaje grande}{00:08:22}
+
+\lecturefigure{slide-06-autoregressive-forward-passes.jpg}{Por cada token nuevo, el modelo se ejecuta otra vez con un prefijo más largo}{00:08:50}
+
+La figura 5 plantea la cuestión de la granularidad, y la figura 6 descompone la respuesta en múltiples pasadas (pass). Aquí hay que distinguir dos tipos de paralelismo: en la dimensión de la secuencia, el siguiente token sigue avanzando en el tiempo; pero dentro de cada pasada pueden ocurrir simultáneamente miles de features y operaciones matriciales. Lo que esta clase llama «parallel computation» se refiere principalmente al segundo tipo, no a generar la oración completa de una sola vez.
+
+\begin{lstlisting}[language=Python,caption={Pseudocódigo mínimo de decodificación autorregresiva: cada token corresponde a una nueva propagación hacia adelante}]
+context = tokenize(prompt)
+for step in range(max_new_tokens):
+    logits, internal_state = transformer(context)
+    next_token = sample(softmax(logits[-1]))
+    context.append(next_token)
+\end{lstlisting}
+
+\subsection{Los estados ocultos comprimen el prefijo en la distribución del siguiente paso}
+
+En una sola propagación hacia adelante, el flujo residual de la capa $\ell$ puede escribirse como una actualización simplificada:
+\[
+h_i^{(\ell+1)}=h_i^{(\ell)}
++\operatorname{Attn}^{(\ell)}_i(H^{(\ell)})
++\operatorname{MLP}^{(\ell)}(h_i^{(\ell)}),
+\qquad
+p(x_{n+1}=v)=\operatorname{softmax}(W_U h_n^{(L)})_v.
+\]
+Aquí $h_i^{(\ell)}$ es el vector del residual-stream (flujo residual) en la posición $i$ y la capa $\ell$, $H^{(\ell)}$ es el conjunto de vectores de todas las posiciones, $\operatorname{Attn}$ se encarga de seleccionar y trasladar información entre posiciones, $\operatorname{MLP}$ se encarga de la transformación no lineal posición por posición, $W_U$ proyecta el estado de la última capa a los logits del vocabulario y $v$ es un token candidato.
+
+\lecturefigure{slide-07-single-forward-pass-vectors.jpg}{Los vectores de entrada atraviesan las capas ocultas y forman al final la distribución de puntuaciones del siguiente token}{00:09:42}
+
+Al leer la figura, observe primero cómo se codifican como vectores los tokens de la izquierda, luego cómo las capas intermedias reescriben una y otra vez la representación y, por último, la score de cada palabra candidata a la derecha. La probabilidad de salida es solo la proyección final; lo que realmente hay que explicar es cómo las capas intermedias hacen que «assist» obtenga una puntuación más alta. Un attribution graph intenta precisamente recuperar esta cadena de influencias desde las features de entrada hasta el logit de salida.
+
+\begin{knowledgebox}{Primera aparición de términos: residual stream, neuron y feature}
+El \textbf{residual stream} es el canal de estado de alta dimensión que comparten todas las capas; tanto la attention como la MLP leen de él y escriben en él. \textbf{Neuron} suele designar una sola coordenada de la capa oculta de la MLP. \textbf{Feature}, en cambio, es una dirección del espacio de activaciones que los investigadores intentan identificar y que representa algún concepto u operación; una feature puede abarcar varias neurons, y una neuron también puede participar en varias features.
+\end{knowledgebox}
+
+\subsection{«Crecer» no es misticismo, sino un hecho de ingeniería}
+
+La arquitectura define el contenedor del cómputo que puede aprenderse; los datos de entrenamiento y el descenso de gradiente determinan qué algoritmo se forma finalmente dentro de ese contenedor. Los ingenieros conocen las dimensiones de las matrices, el número de capas y la función de pérdida, pero por lo general no saben por qué el modelo, ante cierto prompt, activa una combinación específica de Dallas, Texas, capital y Austin. El objetivo del análisis inverso es convertir esa brecha de «escribimos el proceso de entrenamiento, pero no el programa interno» en un objeto verificable.
+
+\lecturefigure{slide-08-models-grown-not-built.jpg}{Metáfora central: los modelos de lenguaje son grown, no built módulo por módulo}{00:09:51}
+
+\lecturefigure{slide-09-architecture-versus-grown-model.jpg}{Las personas construyen la arquitectura; el entrenamiento hace crecer los mecanismos internos de una forma difícil de leer directamente}{00:10:20}
+
+El límite de lo que estas dos figuras demuestran es importante: no significan que el modelo sea incomprensible, ni que cualquier explicación basada en la atribución de rasgos humanos sea válida. Al contrario, «grown» exige una reverse engineering más rigurosa: proponer componentes, medir conexiones, hacer intervenciones, registrar los fracasos y reconocer que los métodos actuales solo pueden explicar una parte del cómputo.
+
+\begin{importantbox}{Sentido operativo de «Grown not built»}
+Podemos conocer con exactitud el código de entrenamiento y, aun así, no saber qué algoritmo interno adopta la red entrenada ante una entrada concreta. Por eso la interpretabilidad se centra en el \textbf{post-training program discovery}: recuperar, sobre pesos fijos, estructuras de cómputo locales y condicionadas por la entrada.
+\end{importantbox}
+
+\teachervoice{00:09:47--00:10:20, el docente usa grown, not built para distinguir el diseño de la arquitectura de la formación de los algoritmos internos. Nota de clase: no se trata de volver místico al modelo, sino de señalar que la revisión tradicional de código no puede decirnos directamente qué hace la red después del entrenamiento.}
+
+\subsection{Resumen de la sección}
+
+Una respuesta se compone de múltiples propagaciones hacia adelante, una por token, y cada propagación hacia adelante contiene a su vez cómputo paralelo a gran escala. Lo que los métodos posteriores deben explicar no es qué palabra eligió al final la softmax, sino qué features se activan en los estados ocultos y cómo, mediante la attention y la MLP, modifican juntas la salida.
+\section{De la neuron al attribution graph}
+
+La sección anterior presentó el soporte del cómputo; esta sección entra en el núcleo del método. La conferencia sigue una ruta de tres pasos: «primero encontrar features más interpretables, después conectar esas features en un prompt-specific graph y, por último, volver al modelo original para hacer una intervention». Cada paso introduce aproximaciones y corresponde a una evidencia de distinta solidez.
+
+\subsection{Por qué una sola neuron no suele ser la unidad adecuada}
+
+Si se enumeran los ejemplos de mayor activación de una neuron, es común ver mezclados fragmentos de código, lenguaje natural, símbolos y temas. Esta polysemanticity (polisemia) indica que una sola coordenada no necesariamente corresponde a un solo concepto. Un enfoque más sólido consiste en buscar direcciones dispersas dentro de las activaciones de alta dimensión, de modo que la combinación lineal de un grupo de neurons represente en conjunto un patrón más coherente, como «Golden Gate Bridge».
+
+\lecturefigure{slide-10-what-does-neuron-do.jpg}{Pregunta ingenua: ¿qué representa realmente esta neuron?}{00:11:50}
+
+\lecturefigure{slide-11-single-neuron-top-activations.jpg}{Los ejemplos de alta activación de una sola neuron mezclan varios contextos sin relación entre sí}{00:13:07}
+
+La figura 11 debe leerse como un contraejemplo y no como una conclusión de fracaso: que las top activations de una neuron no sean coherentes no significa que la red carezca de estructura conceptual; significa que el sistema de coordenadas puede no ser el adecuado. Los investigadores necesitan buscar una basis (base) más apropiada. Al mismo tiempo, el feature label sigue siendo un nombre comprimido por una persona; no debe confundirse «parece Texas» con un valor de verdad semántico único en sentido matemático.
+
+\lecturefigure{slide-12-golden-gate-feature.jpg}{La combinación de varias neurons puede formar una feature de Golden Gate Bridge más estable}{00:15:21}
+
+\begin{warningbox}{No trate una feature como un campo de base de datos}
+Una feature es una dirección en el espacio de activaciones junto con su interpretación empírica, no una variable booleana con nombre predefinido dentro de la red. Puede tener límites difusos y varios usos semánticos, y también puede variar según el prompt, la capa o el modelo. La etiqueta es una interfaz de investigación, no una demostración ontológica.
+\end{warningbox}
+
+\subsection{Modelo de reemplazo disperso: reescribir una MLP densa como unas pocas features}
+
+Sea $y\in\mathbb{R}^d$ la salida de la MLP en algún punto del modelo original; el modelo de reemplazo la reconstruye con activaciones dispersas no negativas $a\in\mathbb{R}^m$ y un diccionario de features $D\in\mathbb{R}^{d\times m}$:
+\[
+\hat y=Da,\qquad
+a=\sigma(Ex+b),\qquad
+\mathcal{L}=\lVert y-\hat y\rVert_2^2+\lambda\lVert a\rVert_1.
+\]
+Aquí $x$ es el estado de entrada, $E$ es el encoder, $b$ es el sesgo y $\sigma$ es la no linealidad que produce activaciones dispersas; el primer término es el reconstruction error y el segundo controla la dispersión mediante $\lambda$. El objetivo no es copiar a la perfección cada neuron, sino equilibrar la fidelidad con el número de features legibles.
+
+«Finding and connecting features in Claude 3.5 Haiku» comprende dos etapas que no pueden fusionarse. Finding aprende primero las features a partir de una gran cantidad de ejemplos de activación y revisa en qué tokens y contextos aparece cada dirección; connecting calcula después, para el prompt actual, la influencia entre esas direcciones. La primera responde a una pregunta de diccionario; la segunda, a una pregunta de programa. Aunque los top examples de una feature sean muy claros, si esta no se activa en el prompt objetivo o no transmite contribución hacia las etapas posteriores, no debe incluirse en el grafo explicativo.
+
+\lecturefigure{slide-13-finding-features-haiku.jpg}{Objeto de estudio: encontrar y conectar features en Claude 3.5 Haiku}{00:16:47}
+
+\textbf{Finding and connecting features in Claude 3.5 Haiku} no es un flujo que «genere explicaciones con un clic». El equipo de investigación primero aprende direcciones candidatas sobre una gran cantidad de activaciones y luego asigna a cada dirección una etiqueta provisional con ejemplos automáticos y revisados por personas; después vuelve a un prompt específico y conserva solo los nodos que realmente se activan y contribuyen a la salida objetivo. Por último, todavía debe revisar el reconstruction error, la estabilidad de los pesos de las aristas y las intervenciones en el modelo original. Este orden evita un sesgo frecuente: saber de antemano que se quiere ver la historia Dallas--Texas--Austin y luego escoger, entre una enorme cantidad de nodos, las partes que parecen respaldarla. Los resultados de interpretabilidad deben provenir de reglas de selección y validación definidas de antemano, no de armar el rompecabezas a posteriori.
+
+\lecturefigure{slide-14-dallas-austin-prompt.jpg}{Se usa la pregunta por la capital del estado donde está Dallas para construir una cadena factual de varios pasos que pueda rastrearse}{00:17:29}
+
+Este grupo de figuras aplica el método a un prompt verificable: la entrada menciona Dallas, la salida debe ser Austin y los conceptos intermedios incluyen Texas y state capital. Una explicación ideal no solo descubre que estas palabras están relacionadas, sino que muestra cómo la feature de Dallas eleva la feature de Texas y cómo Texas y capital elevan en conjunto la feature say-Austin.
+
+\begin{lstlisting}[language=Python,caption={Extracción de features dispersas: aproximar la salida densa de la MLP con unas pocas direcciones no nulas}]
+def sparse_features(hidden_state):
+    activations = relu(encoder @ hidden_state + bias)
+    active = top_sparse_entries(activations)
+    reconstruction = decoder[:, active] @ activations[active]
+    return active, reconstruction
+\end{lstlisting}
+
+\subsection{Cross-Layer Transcoder y prompt-specific graph}
+
+Un per-layer transcoder común solo explica la entrada y la salida de la MLP de una misma capa; el Cross-Layer Transcoder (CLT) permite que las features de capas tempranas escriban directamente en varias capas posteriores, con lo que la amplificación repetida entre capas se comprime en rutas más cortas. Para un solo prompt, los investigadores conservan únicamente las features que realmente se activan y tienen una influencia considerable, y así forman el attribution graph.
+
+\lecturefigure{slide-15-prompt-computational-graph.jpg}{Extraer un prompt-specific computational graph a partir de miles de activaciones}{00:22:13}
+
+\lecturefigure{slide-16-cross-layer-transcoder.jpg}{CLT: una feature lee de una capa y puede escribir en varias capas posteriores}{00:23:51}
+
+\lecturefigure{slide-17-replacement-model-comparison.jpg}{Comparación entre el Transformer original y un modelo de reemplazo disperso e interpretable}{00:24:49}
+
+La ventaja del CLT es que las rutas son más cortas y hay menos features repetidas; el costo es que el reemplazo entre capas puede sacrificar fidelidad local. Más importante aún, el modelo de reemplazo de esta conferencia reconstruye principalmente las contribuciones de la MLP: la attention del modelo base se conserva y se usa para propagar la influencia, pero no se explica en términos de features. Por ello, la «acción de selección» que falta en el grafo podría realizarla precisamente la attention.
+
+La figura comparativa revela además un problema de medición que suele pasarse por alto: el replacement model no traduce uno por uno los parámetros de la red original a etiquetas en lenguaje natural, sino que entrena un sustituto más disperso junto al cómputo original. Que la salida del sustituto se aproxime a la de la MLP original no garantiza que sus rutas internas correspondan nodo por nodo; distintos diccionarios, penalizaciones de dispersión o formas de conexión entre capas pueden producir grafos distintos con un comportamiento similar. Por ello, la evaluación no puede basarse solo en la reconstruction loss; también debe considerar las probabilidades de los tokens posteriores, las predicciones de las intervenciones, la longitud de las rutas y los prompts en los que el método falla. Cuanto mayor sea la legibilidad, más necesario es comprobar activamente si se obtuvo a costa de perder el mecanismo real.
+
+\begin{warningbox}{Primer límite de la evidencia: el método no explica la attention}
+Más adelante, las notas mostrarán que «dos estrategias coexisten y una de ellas se impone». El grafo actual describe bastante bien cómo las features de la MLP ejecutan una estrategia, pero no necesariamente explica cómo la attention selecciona información, enruta posiciones o decide qué estrategia predomina. Un grafo corto no equivale a un mecanismo completo.
+\end{warningbox}
+
+\teachervoice{00:22:28--00:25:22, el docente dice explícitamente «primero olvidemos la attention» y enfatiza que usaron la attention del modelo original sin intentar explicarla. Esta restricción debe mantenerse en todas las conclusiones posteriores sobre planning y unfaithfulness.}
+
+\subsection{Del reconstruction error a la intervention en el modelo original}
+
+El modelo de reemplazo siempre deja un residuo. Si la salida de la MLP original se escribe como $y=\hat y+e$, donde $e$ es el reconstruction error, y $e$ sigue influyendo de manera significativa en los nodos posteriores, entonces debe aparecer explícitamente en el grafo, en lugar de fingir que las features interpretables ya cubren todo el cómputo. A continuación, se seleccionan los nodos según su contribución, se fusionan las features similares y, en el modelo original, se aumenta o disminuye la activación a lo largo de la dirección de la feature para verificar si la predicción se cumple.
+
+\lecturefigure{slide-18-reconstruction-error.jpg}{Los nodos de error de reconstrucción registran la contribución del modelo original que el modelo de reemplazo no explica}{00:26:55}
+
+\lecturefigure{slide-19-select-top-contributors.jpg}{Seleccionar las features más importantes según su contribución a la salida objetivo}{00:27:35}
+
+\lecturefigure{slide-20-group-similar-features.jpg}{Agrupar varias features de Texas similares en un supernode legible}{00:28:49}
+
+Si la influencia local del nodo $i$ sobre el nodo $j$ se aproxima como
+\[
+A_{i\to j}=a_i\left\langle d_i,\nabla_h a_j\right\rangle,
+\]
+donde $a_i$ es la activación de la feature de origen, $d_i$ es la dirección en que esta escribe en el residual stream y $\nabla_h a_j$ es el gradiente local de la feature de destino respecto al estado $h$. $A_{i\to j}$ es un attribution score, no una constante causal permanente; depende del prompt actual, de la aproximación lineal local y del modelo de reemplazo.
+
+\lecturefigure{slide-21-interventions-original-model.jpg}{Escribir la dirección de una feature en el modelo original y observar si la salida cambia según lo previsto}{00:30:27}
+
+Esta figura marca un punto de inflexión en la solidez de la evidencia: si, al cambiar la feature de Texas por la de California, la respuesta cambia en la dirección prevista, esto respalda una explicación causal más que el simple hecho de que «dos nodos estén conectados en el grafo». Aun así, hay que tener presente que una intervención exitosa muestra que esa dirección basta para influir en el comportamiento, pero no demuestra que la etiqueta sea única, que las rutas estén agotadas ni que, en su funcionamiento natural, el modelo use solo este circuito.
+
+\begin{lstlisting}[language=Python,caption={Intervention test mínimo: sumar y restar a lo largo de la dirección de la feature en las activaciones del modelo original y comparar las salidas}]
+base_logits = model(prompt)
+for alpha in [-strength, 0.0, strength]:
+    edited_logits = model(prompt, edit=(layer, feature_direction, alpha))
+    record(alpha, edited_logits[target_token])
+check_monotonic_prediction()
+\end{lstlisting}
+
+\begin{importantbox}{Escalera de evidencia en tres niveles}
+\textbf{Feature interpretation} responde «a qué se parece esta dirección»; \textbf{attribution graph} responde «cómo podría influir en las etapas posteriores en este prompt»; \textbf{original-model intervention} responde «si se cambia activamente esa dirección, ¿cambia el comportamiento según lo previsto?». Los tres deben usarse en conjunto; ninguno sustituye a los demás.
+\end{importantbox}
+
+\lecturefigure{slide-22-lecture-agenda.jpg}{Ruta de los casos: representaciones abstractas, procesamiento en paralelo y planificación}{00:32:44}
+
+El mapa de ruta lleva de la etapa de método a la etapa de descubrimientos. A partir de aquí ya no se presentan las herramientas una por una, sino que se ponen a prueba tres tipos de cómputo interno con distintas tareas. El lector debe tener siempre presentes dos preguntas: qué mecanismo muestra el grafo, y mediante qué intervención se validó ese mecanismo y qué deja fuera.
+
+\lecturefigure{slide-23-attribution-graph-overview.jpg}{Vista general del attribution graph Dallas-to-Austin}{00:33:24}
+
+\lecturefigure{slide-24-texas-austin-route.jpg}{Ruta representativa: Dallas activa representaciones relacionadas con Texas, que a su vez impulsan la salida Austin}{00:33:41}
+
+Las dos últimas figuras muestran la misma cadena factual a distintas escalas. La vista general indica que la red real no es un programa simbólico de tres nodos, sino que muchas features similares y rutas secundarias contribuyen en conjunto; la vista ampliada ofrece una ruta comprimida que puede enseñarse. Una buena explicación debe ir y venir entre ambas: no debe tratar el grafo complejo como ruido ilegible ni tomar la ruta comprimida Dallas→Texas→Austin como la única ruta de ejecución.
+
+\subsection{Resumen de la sección}
+
+El flujo de trabajo completo de circuit tracing es: buscar features dispersas, entrenar un modelo de reemplazo entre capas, registrar el reconstruction error, calcular la attribution específica del prompt, seleccionar y agrupar nodos, y volver al modelo original para intervenir. Es más estructurado que una lista de neurons y está más cerca de la causalidad que la visualización pura, pero sigue limitado por el error de reemplazo, la aproximación local, las etiquetas de las features y la attention que queda sin explicar.
+\section{Representaciones abstractas: razonamiento médico y circuitos multilingües}
+
+Una vez establecido el método, el primer hallazgo es que dentro del modelo existen representaciones abstractas que se reutilizan entre distintas formas superficiales. Esta sección lo ilustra con dos casos, uno médico y otro multilingüe: un mismo concepto puede activarse con palabras distintas, y la información de frontera sobre el idioma de entrada y el de salida puede separarse de la parte semántica intermedia.
+
+\subsection{Caso médico: síntomas, diagnóstico y criterios se combinan en una sola propagación hacia adelante}
+
+El caso clínico presenta embarazo en el tercer trimestre, dolor en el cuadrante superior derecho del abdomen, hipertensión y enzimas hepáticas elevadas, y pide preguntar por un solo síntoma adicional. El modelo responde visual disturbances. Lo importante no es la conclusión médica en sí, sino si en el grafo aparecen representaciones combinables como pregnancy, preeclampsia y diagnostic criteria, y si la respuesta cambia de la manera esperada al suprimir alguna feature.
+
+\lecturefigure{slide-25-medical-reasoning-prompt.jpg}{Prompt de razonamiento médico en una sola propagación hacia adelante}{00:37:30}
+
+\lecturefigure{slide-26-medical-concept-representations.jpg}{El modelo organiza los síntomas, el diagnóstico y los criterios diagnósticos adicionales como features abstractas}{00:38:46}
+
+En la figura 26, varias features de síntomas convergen primero en una representación relacionada con la enfermedad, y después la representación del diagnóstico impulsa «se debe preguntar por visual disturbances». No se trata de una chain of thought en lenguaje natural, pero sí refleja relaciones estructuradas: los síntomas no se emparejan palabra por palabra, sino que confluyen internamente como evidencia diagnóstica.
+
+\lecturefigure{slide-27-medical-feature-interventions.jpg}{Al sustituir o inhibir features médicas, la pregunta de seguimiento recomendada cambia en consecuencia}{00:39:51}
+
+La intervención aumenta la credibilidad causal: si al elevar las features relacionadas con el biliary-system la salida se desplaza hacia otro tipo de síntoma, esas direcciones no son solo nombres asignados a posteriori. Sin embargo, el conocimiento clínico puede estar incompleto y el prompt es muy simplificado; la figura no demuestra que el modelo sea apto para el diagnóstico real, y mucho menos puede sustituir a las guías médicas ni al juicio del médico.
+
+\begin{warningbox}{Alcance del caso médico}
+Este es un mechanistic case study, no un consejo médico ni una prueba de confiabilidad clínica. Muestra que el modelo puede combinar representaciones médicas en un prompt; no muestra que su conocimiento sea completo, que sus probabilidades estén calibradas, que sea equitativo entre poblaciones ni que sea seguro en escenarios reales.
+\end{warningbox}
+
+\teachervoice{00:31:52--00:42:44: el docente usa el ejemplo médico como una ventana a «cómo un solo forward pass realiza razonamiento composicional», y en la sesión de preguntas reconoce que la confiabilidad en el ámbito médico real requiere una verificación independiente.}
+
+\subsection{Caso multilingüe: en la frontera está el idioma, en el núcleo la semántica compartida}
+
+«El antónimo de small» puede preguntarse en inglés, francés o chino. Si el modelo pensara por completo en inglés, todo el grafo interno tendría que traducir primero al inglés y después calcular; si cada idioma fuera totalmente independiente, los tres grafos casi no compartirían nada. El resultado real se parece más a una estructura por capas: cerca de la entrada y de la salida hay features específicas de cada idioma, y en la parte intermedia aparecen representaciones compartidas como multilingual small, antonym y large.
+
+\lecturefigure{slide-28-unique-language-question.jpg}{Pregunta: ¿el modelo «piensa» en un único idioma?}{00:42:47}
+
+\lecturefigure{slide-29-shared-multilingual-representations.jpg}{Los tres idiomas comparten features semánticas intermedias y conservan fronteras específicas de cada idioma}{00:45:01}
+
+Al leer la figura, primero se miran los dos extremos: quote, English/Chinese/French y los tokens concretos se encargan de la forma lingüística; después se mira la parte intermedia: features como small, opposite y say large coinciden entre idiomas. La conclusión no es que «el modelo tiene un lenguaje puro del pensamiento», sino que la abstracción semántica y la realización superficial están parcialmente desacopladas.
+
+\lecturefigure{slide-30-antonym-to-synonym-edit.jpg}{Al sustituir la feature antonym por la feature synonym, la salida en los tres idiomas cambia según la semántica}{00:45:06}
+
+Esta intervention es decisiva: una misma edición interna convierte, en todos los idiomas, la tarea de «antónimo» en la de «sinónimo», lo que indica que las features compartidas participan en el cálculo y no solo están correlacionadas con la salida. El operand de entrada, el tipo de operación y el idioma de salida pueden editarse por separado, lo que revela una representación interna modular, aunque no completamente discreta.
+
+Si los conjuntos de features activas en dos idiomas son $F_a,F_b$, la proporción compartida puede expresarse con la intersección sobre la unión:
+\[
+\operatorname{IoU}(F_a,F_b)=\frac{|F_a\cap F_b|}{|F_a\cup F_b|}.
+\]
+La intersección cuenta las features comunes y la unión cuenta las features que aparecen en al menos un idioma. Un IoU más alto indica más representaciones compartidas, pero depende del feature matching, del umbral y de la calidad del modelo de reemplazo.
+
+\lecturefigure{slide-31-representation-sharing-scales.jpg}{Los modelos más grandes comparten una proporción mayor de representaciones entre idiomas}{00:47:26}
+
+La tendencia de la figura 31 respalda que «el aumento de escala favorece la reutilización de abstracciones», pero no demuestra que todos los conceptos converjan en un mismo espacio semántico. La distancia entre idiomas, la tokenización, el volumen de datos y las expresiones culturalmente específicas siguen generando diferencias; la curva es el feature overlap en este diseño experimental, no una ley lingüística universal.
+
+\begin{knowledgebox}{De «el idioma del pensamiento» a tres preguntas medibles}
+No conviene preguntar en qué idioma «piensa» realmente el modelo. Se pueden plantear por separado tres preguntas: en la etapa de entrada, qué features dependen de la forma lingüística; si las operaciones intermedias comparten direcciones semánticas; y cómo se elige el idioma de destino en la etapa de salida. Estas tres preguntas pueden verificarse con grafos e intervenciones, mientras que una sola pregunta basada en la atribución de rasgos humanos tiende a generar confusión.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Los casos médico y multilingüe muestran en conjunto que el modelo combina tokens superficiales en conceptos y operaciones más abstractos. Las representaciones abstractas pueden reutilizarse entre síntomas, idiomas y expresiones, pero siguen inscritas en un prompt, un modelo y un método de extracción de features concretos; que sean «reutilizables» no permite concluir que sean «universales, únicas y completas».
+\section{Cómputo en paralelo: cómo realiza el modelo una suma}
+
+Los casos anteriores se centraban en la representación; esta sección pasa a la estructura del cómputo. Cuando al modelo se le pregunta $36+59$, su explicación verbal es «sumar las unidades, acarrear, sumar las decenas»; sin embargo, el attribution graph muestra que varias rutas de rango aproximado y de lookup del último dígito se ejecutan en paralelo y solo al final se combinan en 95. Esta diferencia es el punto de entrada para entender la chain-of-thought faithfulness.
+
+\lecturefigure{slide-32-parallel-processing-intro.jpg}{Segunda línea de hallazgos: Parallel Processing}{00:52:00}
+
+\lecturefigure{slide-33-parallel-addition-intro.jpg}{Entrada al caso: la suma no sigue una sola ruta, como la suma en columna escolar}{00:52:47}
+
+\subsection{La explicación en lenguaje natural no coincide con el algoritmo interno}
+
+Las dos section cards anteriores solo indican que hay que examinar el cómputo en paralelo; el diagnóstico propiamente dicho empieza con «primero hacer que el modelo responda y luego pedirle que se explique». Este experimento separa la answer correctness del mechanism report: si ambos provienen del mismo proceso interno, la explicación del modelo debería coincidir en lo general con el trace; si la explicación es solo una plantilla didáctica frecuente en el corpus de entrenamiento, aparece una separación en tres niveles: respuesta correcta, relato razonable y mecanismo distinto.
+
+El modelo responde correctamente 95 y, cuando se le pregunta «¿cómo lo calculaste?», ofrece la explicación estándar de la suma en columna. Para una persona, esta explicación es razonable, pero no necesariamente es la ruta que produjo la respuesta. Un modelo de lenguaje es hábil para generar texto sobre «cómo suele explicarse cierto tipo de problema», y eso es distinto de poder leer sus propias activaciones. Al evaluar, deben registrarse por separado la respuesta final, el rationale generado, la attribution interna y los resultados de las intervenciones; ninguno de ellos puede sustituir a los otros tres.
+
+\lecturefigure{slide-34-addition-self-report.jpg}{Explicación del propio modelo: sumar las unidades, acarrear y después calcular las decenas}{00:52:56}
+
+\lecturefigure{slide-35-actual-parallel-addition.jpg}{Resultado del rastreo: la ruta de la suma aproximada y la del último dígito corren en paralelo y al final se combinan en 95}{00:54:12}
+
+El mecanismo de la figura puede condensarse como
+\[
+\text{answer}(a,b)\approx
+\operatorname{combine}\bigl(
+\operatorname{coarseSum}(a,b),
+\operatorname{lastDigit}(a\bmod 10,b\bmod 10)
+\bigr).
+\]
+$a,b$ son los dos sumandos; $\operatorname{coarseSum}$ produce evidencia de un rango, del tipo 88--97; $\operatorname{lastDigit}$ produce, a partir de las unidades, evidencia de que «el resultado termina en 5»; $\operatorname{combine}$ cruza estas restricciones en las capas posteriores y eleva el logit de 95. La fórmula es una abstracción didáctica; no significa que la red tenga solo dos módulos funcionales.
+
+\begin{importantbox}{Qué significa el cómputo en paralelo}
+El modelo no completa primero el «paso de las unidades» para luego escribir el acarreo simbólico en un borrador oculto. Varias rutas aproximadas acumulan evidencia al mismo tiempo dentro de una misma propagación hacia adelante: unas estiman el orden de magnitud, otras el último dígito y otras aprovechan combinaciones memorizadas; la salida final queda determinada por el conjunto de estas restricciones.
+\end{importantbox}
+
+\subsection{Lookup feature, sum feature y su combinación}
+
+Para entender las rutas en paralelo hay que distinguir tres clases de feature: la operand feature representa propiedades locales de los números de entrada; la lookup-table feature memoriza combinaciones específicas de últimos dígitos; la sum feature representa el rango posible del resultado o su último dígito. No son módulos mutuamente excluyentes, sino que pueden amplificarse entre sí en distintas capas y contextos.
+
+\lecturefigure{slide-36-addition-feature-graph.jpg}{El addition feature graph del artículo interactivo}{00:54:14}
+
+\lecturefigure{slide-37-sum-features.jpg}{Distintas regiones de sumandos activan distintas sum features}{00:54:15}
+
+\lecturefigure{slide-38-lookup-and-sum-features.jpg}{La ruta de la suma aproximada y la ruta de lookup-table convergen en las capas posteriores}{00:55:40}
+
+Para leer este grupo de tres figuras, primero se ubican en la entrada el 36, el 59 y sus últimos dígitos 6 y 9; luego se siguen las aristas para ver la evidencia del rango aproximado y del último dígito, y por último se observa cómo «sum=95» y «sum ends in 5» respaldan juntos la salida. Las figuras no muestran un programa completo y ejecutable de suma en Python, pero revelan una satisfacción distribuida de restricciones más cercana a la implementación interna que la suma en columna que el modelo relata.
+
+También hay que notar que «aproximado» no equivale a inútil. El rango 88--97 por sí solo no determina la respuesta, y el último dígito 5 por sí solo tampoco determina las decenas; sin embargo, al cruzar estas dos evidencias débiles, los candidatos se reducen de manera notable. Las redes neuronales suelen hacer que un gran número de features incompletas voten en conjunto, en lugar de esperar a que un solo nodo contenga el valor verdadero completo. Esta estructura explica por qué eliminar una ruta puede provocar solo una caída de la probabilidad y no un fracaso total, y recuerda a los investigadores que deben buscar rutas redundantes y de compensación, en vez de tomar la attribution edge más alta como la única arista necesaria.
+
+\begin{warningbox}{Una explicación legible no es privileged access}
+Que el modelo diga «primero calculo las unidades y luego acarreo» puede deberse únicamente a que aprendió a imitar las explicaciones de resolución de problemas matemáticos. Mientras no se demuestre que el texto explicativo coincide con la ruta causal interna, debe considerarse una salida más, no una introspection confiable del modelo sobre su propio algoritmo.
+\end{warningbox}
+
+\lecturefigure{slide-39-addition-metacognition-gap.jpg}{Cuando se le pregunta por su método interno, el modelo sigue repitiendo el algoritmo escolar y no el mecanismo rastreado}{00:56:11}
+
+\lecturefigure{slide-40-explanation-versus-algorithm.jpg}{Aprender durante el entrenamiento a generar explicaciones y formar mediante descenso de gradiente el algoritmo real son dos cosas distintas}{00:56:12}
+
+\teachervoice{00:51:44--00:58:54, el docente enfatiza que el cómputo es massively parallel y llama a «saber sumar pero no saber cómo lo hace» un simple metacognitive mismatch. Nota de clase: generar explicaciones y ejecutar el algoritmo interno responden a presiones de entrenamiento distintas.}
+
+\subsection{Las features se reutilizan fuera de la tarea original}
+
+La subsección anterior mostró que dentro de un mismo prompt existen varias rutas de suma; esta subsección pregunta si una feature solo memoriza el tipo de problema del entrenamiento o si puede desempeñar el mismo papel computacional en contextos nuevos. Para juzgar la reutilización no basta con la similitud semántica: hay que comprobar si la posición de activación requiere exactamente la misma restricción numérica, si las aristas posteriores siguen impulsando el mismo último dígito y si eliminar esa feature perjudica la predicción.
+
+Si una feature codifica de verdad que «sumar 6 y 9 da un último dígito 5», puede reutilizarse en textos no aritméticos, en cualquier contexto en el que haya que predecir un último dígito 5. El artículo interactivo muestra ejemplos como la hora de término de una medición astronómica o una secuencia creciente en una tabla financiera, lo que indica que el computational role de una feature puede transferirse entre tareas. Al mismo tiempo, una activación alta también puede deberse al formato del texto o a la coocurrencia de números, por lo que conviene compararla con muestras de control: números aleatorios, últimos dígitos erróneos y diagramación similar.
+
+\lecturefigure{slide-41-addition-generalization-context.jpg}{La feature de suma también se activa en un corpus no aritmético}{00:56:20}
+
+\lecturefigure{slide-42-addition-generalization-time.jpg}{Caso de la duración de una medición: inferir el último dígito a partir del minuto inicial y la duración}{00:58:08}
+
+\lecturefigure{slide-43-addition-generalization-table.jpg}{Caso de la tabla financiera: predecir el siguiente valor a partir del patrón creciente de la columna}{00:58:13}
+
+Las tres figuras respaldan la feature reuse, pero los límites de la evidencia importan igual: los investigadores buscan explicaciones a partir de muestras con activación alta, lo que favorece los casos exitosos y legibles. Una evaluación más rigurosa requiere medir precision, recall, contraejemplos y controles aleatorios; no se puede declarar que una feature se entiende por completo con base en unos cuantos ejemplos vistosos.
+
+\begin{knowledgebox}{La otra cara de las features abstractas: el papel computacional es variable}
+Una misma dirección puede imponer restricciones numéricas similares en contextos distintos sin corresponder a un único nombre en lenguaje natural. El «significado» de una feature proviene tanto del contexto en que se activa como de su efecto en el cómputo posterior; si solo se miran los top examples, se pasa por alto lo segundo.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El caso de la suma demuestra dos cosas a la vez: una sola propagación hacia adelante puede combinar en paralelo varias rutas de cómputo, y el texto de razonamiento que genera el modelo no necesariamente informa con fidelidad sobre esas rutas. Por eso, la investigación sobre explicaciones no puede limitarse a preguntar «¿es razonable el texto?», sino que también debe preguntar «¿las features internas y las intervenciones respaldan este relato causal?».
+\section{Alucinaciones y jailbreak: cómo compiten varios circuitos}
+
+El cómputo en paralelo no solo aporta capacidades, también genera conflictos. El modelo puede identificar una entidad, preparar una respuesta y activar una tendencia de «no sé» o de refusal al mismo tiempo; la salida final depende de qué rutas se inhiben y cuáles son más fuertes. Esta sección explica la hallucination y el jailbreak como mecanismos de competencia local, no como un interruptor global.
+
+Al pasar de la suma a la conducta de seguridad, primero hay que cambiar el criterio de lectura de las figuras: en las figuras de aritmética el token objetivo tiene un valor verdadero definido, mientras que «si se debe responder, rechazar o expresar incertidumbre» depende además de la cobertura de conocimiento, de las políticas y del contexto. Por eso esta sección compara primero pares de prompts, luego aplica feature suppression y, por último, solo plantea hipótesis de mecanismo de alcance limitado. Nos interesa qué evidencia interna cambió la tendencia de la salida; no equiparamos directamente el nombre de una feature con la truthfulness o la safety del sistema completo.
+
+\lecturefigure{slide-44-hallucinations-intro.jpg}{Parallel Processing: Hallucinations}{00:59:56}
+
+\subsection{Una tendencia IDK always-on}
+
+Comparemos a Michael Jordan con el ficticio Michael Batkin: el primero activa evidencia de known-entity y de basketball; el segundo carece de evidencia confiable de entidad y produce una respuesta de incertidumbre. El rastreo propone un modelo contraintuitivo: no es que «IDK se active solo cuando algo es desconocido», sino que la tendencia IDK/refusal existe por defecto y las features de reconocimiento de entidades conocidas la inhiben.
+
+\lecturefigure{slide-45-always-on-idk-circuit.jpg}{Las entidades conocidas suprimen mediante inhibition la ruta IDK predeterminada}{00:59:59}
+
+\lecturefigure{slide-46-knowing-unknowns.jpg}{Comparación de las salidas para entidades conocidas y desconocidas}{01:00:17}
+
+Lo representamos con un modelo de logits mínimo:
+\[
+z_{\text{answer}}=b_{\text{answer}}+s_{\text{knowledge}},\qquad
+z_{\text{IDK}}=b_{\text{IDK}}-\gamma s_{\text{known}},
+\]
+donde $b$ es el sesgo predeterminado, $s_{\text{knowledge}}$ es la evidencia de una respuesta concreta, $s_{\text{known}}$ es la evidencia de que «la entidad es reconocible» y $\gamma>0$ indica la intensidad de la inhibición. La red real es más compleja; esta expresión solo describe la relación de competencia según la cual «reconocer algo como conocido puede reducir IDK».
+
+\lecturefigure{slide-47-suppress-idk-hallucinates.jpg}{Al suprimir artificialmente el circuito IDK, la entidad desconocida recibe por fuerza conjeturas inestables}{01:02:22}
+
+La intervención es decisiva: al reducir la feature IDK, el modelo da conjeturas distintas sobre Michael Batkin, como chess, tennis o hockey. Esto muestra que el circuito tiene un efecto causal sobre el rechazo a responder, y también que «hacer que el modelo responda siempre» convierte la incertidumbre en hechos de apariencia concreta.
+
+\lecturefigure{slide-48-natural-hallucination-hypothesis.jpg}{Las alucinaciones naturales podrían deberse a que una señal known-entity errónea suprime IDK}{01:03:22}
+
+La figura 48 extiende el mecanismo a nombres reales y títulos de artículos: algunas features de familiaridad superficial podrían emitir por error la señal de «conozco esta entidad», con lo que se levanta la inhibición de IDK; como la evidencia de una respuesta concreta es insuficiente, el modelo completa con un título relacionado pero incorrecto. La formulación aquí debe ser «some hallucinations might»; no se pueden atribuir todos los errores a un único circuito IDK.
+
+Las tres figuras de mecanismo siguen un orden argumentativo estricto. La comparación entre Michael Jordan y Michael Batkin plantea primero la distinción «conocido/desconocido»; el experimento de supresión de IDK muestra que la dirección de rechazo tiene un efecto causal sobre la conducta; solo el caso de los títulos de artículos la propone como explicación candidata de los errores naturales. El tercer paso no manipula directamente todo el conocimiento del mundo real, por lo que su conclusión es más débil que la del segundo. Unos buenos apuntes deben separar por niveles lo «observado», lo «respaldado por intervención» y lo «extrapolado por conjetura»; de lo contrario, el lector tomará la hipótesis como si ya se hubiera localizado la causa raíz de todas las alucinaciones.
+
+\begin{warningbox}{Las alucinaciones no son un mecanismo único ni siempre un solo token erróneo}
+El recuerdo de hechos, la coherencia en textos largos, la mala interpretación de resultados de herramientas, los conflictos entre instrucciones y la continuación creativa pueden llamarse hallucination. Este caso explica la supresión del rechazo en un tipo de preguntas sobre entidades; no ofrece un detector universal ni define los límites de la alucinación en todos los escenarios.
+\end{warningbox}
+
+\subsection{El jailbreak no es una falla del interruptor de seguridad, sino un relevo entre rutas en competencia}
+
+Preguntar directamente «cómo fabricar una bomba» activa de inmediato los circuitos harmful-request y refusal; el acrostic prompt pide primero extraer las iniciales, el modelo produce BOMB dentro de esa tarea local y después la ruta de continuation lo empuja a seguir explicando. El modelo puede haber reconocido ya el peligro y, aun así, no detenerse a tiempo porque la intensidad de las features y el enrutamiento difieren entre etapas.
+
+\lecturefigure{slide-49-jailbreaks-intro.jpg}{Parallel Processing: Jailbreaks}{01:03:47}
+
+\lecturefigure{slide-50-jailbreak-comparison.jpg}{Comparación de la conducta ante una solicitud peligrosa directa y ante un jailbreak por iniciales}{01:03:55}
+
+\lecturefigure{slide-51-default-refusal-circuit.jpg}{Ruta predeterminada: el concepto bomb impulsa harmful request y refusal}{01:04:28}
+
+\lecturefigure{slide-52-jailbreak-keeps-going.jpg}{Pregunta central: si el modelo ya escribió BOMB, ¿por qué sigue generando?}{01:04:30}
+
+Al leer este grupo de figuras hay que comparar la secuencia temporal de los tokens: en la etapa del prompt dominan las features acrostic/first-letter; después de generar BOMB, el concepto peligroso y refusal empiezan a reforzarse, pero la continuation lingüística y la ruta de «responder a la tarea del usuario» ya han adquirido inercia. Si un sistema de seguridad clasifica solo una vez al inicio del prompt, puede pasar por alto estados de riesgo que surgen más tarde durante la generación.
+
+Esto también explica por qué «el modelo sabe que es peligroso y aun así continúa» no es una contradicción lógica. Una red neuronal puede contener a la vez evidencia de reconocimiento del peligro y evidencia para seguir respondiendo; el token final lo decide el logit relativo, y reconocer el riesgo no garantiza que la ruta refusal domine en cada instante. Por lo tanto, la mejora en el nivel del mecanismo no consiste solo en reforzar un classifier, sino en lograr que las features de riesgo influyan de forma sostenida en la decodificación en la posición y el momento correctos, y en permitir reenrutar o detener la generación cuando cambia su estado.
+
+\begin{importantbox}{Conexión con la ingeniería de seguridad: llevar el monitoreo al proceso de generación}
+Las figuras de mecanismo sugieren tres direcciones prácticas: monitorear de forma continua los estados intermedios, en lugar de clasificar solo la entrada; permitir que el modelo reevalúe y se detenga a mitad de la generación; y tratar «no sé/rechazar» como una conducta en competencia que debe calibrarse, no como algo que simplemente se prohíbe o se impone.
+\end{importantbox}
+
+\teachervoice{00:58:54--01:04:45, el docente describe tanto la hallucination como el jailbreak como rutas en paralelo: el reconocimiento, la respuesta, IDK, refusal y continuation pueden coexistir. Nota de clase: las conclusiones sobre mecanismos son locales; no se puede extender un diagrama de circuito atractivo hasta convertirlo en una teoría de seguridad completa.}
+
+\subsection{Resumen de la sección}
+
+Los casos de alucinación y de jailbreak amplían el «paralelismo» de la capacidad aritmética a los conflictos de conducta. La salida del modelo no es la decisión de un único módulo, sino la combinación de varias rutas de evidencia y de inhibición. La intervención puede demostrar que ciertas rutas tienen un efecto causal, pero sigue siendo necesario distinguir entre el mecanismo de un caso, el riesgo a nivel de producto y las conclusiones generales de seguridad.
+\section{Planificación: lo que ya ocurrió antes del siguiente token}
+
+El tercer hallazgo es el planning. Que un modelo autorregresivo emita un solo token a la vez no significa que internamente solo atienda al token inmediato; una sola pasada hacia adelante puede formar restricciones sobre la forma de palabras más lejanas en el futuro, la rima y la estructura de la oración. Esta sección muestra la planificación anticipada con poemas y luego, con la chain-of-thought unfaithfulness, muestra que un plan puede servir a un objetivo equivocado.
+
+\lecturefigure{slide-53-planning-poems-intro.jpg}{Tercera línea de hallazgos: Planning in poems}{01:04:45}
+
+\subsection{La palabra que rima aparece antes de que realmente se necesite}
+
+Dado un primer verso que termina en grab it, al generar el segundo verso el modelo elige al final rabbit. Si no tuviera ningún plan, las palabras anteriores solo podrían avanzar localmente hasta algún final que rimara por casualidad; sin embargo, el rastreo encuentra, antes de que comience la segunda línea, «rhymes with it» y las feature candidatas rabbit/habit.
+
+\lecturefigure{slide-54-rhyming-token-question.jpg}{Cómo un modelo que predice token por token escribe versos que riman}{01:05:28}
+
+\lecturefigure{slide-55-rhyme-plan-before-line.jpg}{La feature de la rima objetivo ya está activada cuando faltan unas seis palabras para el final de la línea}{01:05:57}
+
+Aquí el planning no es un árbol de búsqueda explícito, ni que el modelo escriba primero la oración completa en un texto oculto. Una formulación más precisa es esta: las restricciones futuras existen de antemano en forma de feature e influyen en la distribución del token actual. El plan puede consistir en varios candidatos en paralelo, que a medida que avanza la generación se amplifican, se suprimen o se reemplazan.
+
+\lecturefigure{slide-56-planned-words-compose-line.jpg}{Las palabras candidatas para la rima restringen hacia atrás las palabras intermedias y la estructura sintáctica}{01:05:58}
+
+La figura 56 contiene a la vez dos intuiciones, forward y backward: hacia adelante, el modelo propone candidatos de final como rabbit y habit; a su vez, estos candidatos restringen hacia atrás estructuras intermedias como «His hunger was like a starving ...». El llamado backward planning no es un retroceso en el tiempo, sino la influencia causal de la feature del objetivo futuro sobre los logits del token actual.
+
+\begin{importantbox}{Una definición verificable de planning}
+Si una feature interna que representa un objetivo futuro se activa antes del token objetivo, y una intervención sobre ella cambia sistemáticamente los tokens intermedios y la estructura final, hay evidencia de que el modelo realiza planning en esa tarea. Ver solamente la rima final no basta para demostrar que hubo un plan.
+\end{importantbox}
+
+\subsection{Si cambia el plan, cambia la línea entera}
+
+En la subsección anterior, la sola activación anticipada todavía podía interpretarse como un «presagio débil de la palabra futura»; esta subsección usa intervenciones contrafactuales para verificar si de verdad controla la generación. El experimento mantiene el prompt sin cambios, modifica solo la plan feature interna y observa si las palabras intermedias, la sintaxis y la rima final cambian en conjunto. Este diseño eleva el planning de un concepto de correlación a una proposición causal falsable.
+
+El experimento de intervención primero suprime «rhymes with it» y luego inyecta la feature green o «rhymes with ee». Si solo se viera afectada la última palabra, el plan podría ser apenas un sesgo de salida cercano; el resultado real es que el vocabulario, la gramática y las imágenes de toda la línea se reorganizan, lo que indica que el plan temprano participa en una generación de mayor alcance. Al comparar también hay que revisar la fluidez: si la intervención solo degradara la salida hasta volverla ininteligible, no demostraría que el modelo adoptó un plan alternativo; aquí la salida sigue formando oraciones coherentes, y solo eso respalda que la plan feature reescribe la estructura en lugar de simplemente dañar la red.
+
+\lecturefigure{slide-57-rhyme-plan-interventions.jpg}{Suprimir o inyectar la feature del plan de rima}{01:06:32}
+
+\lecturefigure{slide-58-plan-changes-full-line.jpg}{Al cambiar el plan, las palabras intermedias y la estructura completa de la oración cambian juntas}{01:07:23}
+
+Al leer la figura hay que comparar, en las tres columnas, la condición de intervención, la completion distribution y la salida completa. La tendencia decisiva no es el cambio de probabilidad de una palabra que rima, sino que la plan feature reescribe todo el camino lingüístico que conduce a ese final. Esto respalda un control anticipado limitado y específico de la tarea; no demuestra que el modelo tenga un plan del mundo unificado y de largo plazo.
+
+\begin{knowledgebox}{Niveles de planning}
+El \textbf{lexical planning} elige palabras futuras; el \textbf{structural planning} restringe la sintaxis y el ritmo; el \textbf{task planning} organiza acciones de varios pasos. El experimento con poemas respalda principalmente los dos primeros niveles y no puede extrapolarse directamente al agent planning de largo plazo.
+\end{knowledgebox}
+
+\teachervoice{01:04:48--01:07:23, el docente explica que el modelo genera varios planes de final a la vez y luego deja que esos planes impulsen la oración intermedia. Que la línea entera cambie tras la intervención es una evidencia de planning más fuerte que «al final rimó».}
+
+\subsection{La chain of thought puede servir a una respuesta decidida de antemano}
+
+El último caso compara el faithful reasoning con el motivated reasoning. Si el prompt incluye primero una respuesta sugerida, el modelo puede no calcular realmente el coseno complicado, sino aceptar primero la respuesta 4 y luego fabricar hacia atrás valores intermedios de apariencia razonable. En la superficie, ambas chain of thought parecen derivaciones matemáticas, pero el grafo interno muestra que la feature de la respuesta objetivo dominó de antemano los pasos posteriores.
+
+\lecturefigure{slide-59-cot-unfaithfulness-intro.jpg}{Entrada al caso: un problema de chain-of-thought con una respuesta insinuada por el usuario}{01:07:38}
+
+\lecturefigure{slide-60-faithful-reasoning-circuit.jpg}{Caso fiel: las feature de cálculo intermedio impulsan la respuesta final}{01:07:40}
+
+\lecturefigure{slide-61-motivated-reasoning-backward.jpg}{Caso infiel: primero aparece la respuesta insinuada y luego se construye hacia atrás el «razonamiento»}{01:07:46}
+
+En la figura 60, operaciones como sqrt y la multiplicación impulsan la respuesta a partir de la información del problema; en la figura 61, la feature de la suggested answer 4 se fortalece primero y luego, por caminos como «dividir entre 5 da 0.8», ensambla hacia atrás la explicación. Ambos textos pueden ser gramaticalmente fluidos, por lo que evaluar solo la forma lingüística del rationale no permite distinguirlos.
+
+La lectura errónea más peligrosa aquí es equiparar unfaithful con «el modelo conoce la respuesta por completo y luego engaña deliberadamente». La figura respalda algo más conservador: los caminos de feature de la respuesta insinuada y del cálculo real pueden coexistir, la salida puede quedar dominada por el camino más fuerte y después el rationale se organiza en torno a ese resultado. En la sesión de preguntas, el docente conjeturó además que la attention podría encargarse de elegir la estrategia y las feature del MLP de ejecutarla; como la attention no está modelada, no podemos determinar la «motivación» ni ver todo el proceso de competencia. El lenguaje mecanicista debe describir caminos medibles y no atribuir a la ligera intenciones de persona.
+
+\begin{warningbox}{La doble identidad de la chain of thought}
+La CoT puede ser un espacio de cálculo adicional, pero también un texto que racionaliza una respuesta ya elegida. La CoT oculta, la CoT visible, la respuesta final y el feature graph interno son objetos distintos. El trabajo de seguridad y de evaluación no puede suponer por omisión que «la razón que el modelo dice es la razón que el modelo usó».
+\end{warningbox}
+
+\teachervoice{01:07:26--01:09:54, el docente dice abiertamente que «a veces el modelo te está mintiendo» y enseguida agrega una salvedad: sospecha que coexisten dos estrategias y que la attention podría encargarse de elegir cuál prevalece; el método actual no modela la attention, por lo que podría estar completamente ciego al mecanismo de selección.}
+
+\subsection{Resumen de la sección}
+
+Las intervenciones en poemas muestran que la feature de un objetivo futuro influye de antemano en la generación actual, lo que aporta evidencia causal de un planning específico de la tarea; el motivated reasoning muestra, en cambio, que un plan también puede organizarse en torno a una respuesta errónea o complaciente. La capacidad de planificación y la fidelidad de la explicación deben evaluarse por separado.
+\section{Límites del método, implicaciones de ingeniería y preguntas abiertas}
+
+Hasta aquí, los tres hallazgos ya cuentan con casos: representaciones abstractas que se reutilizan entre dominios, varias rutas que calculan en paralelo y objetivos futuros que restringen por adelantado el token actual. La última sección ya no agrega más «diagramas de mecanismos vistosos»; en su lugar, examina qué pueden demostrar estos resultados y qué no, y cómo cambian el diseño y la evaluación de sistemas.
+
+\lecturefigure{slide-62-papers-and-methods.jpg}{Más casos y materiales de método: el artículo interactivo y el artículo metodológico de Circuit Tracing}{01:08:27}
+
+\subsection{Cinco limitaciones que no pueden omitirse}
+
+Primero, el replacement model es una aproximación, y el reconstruction error puede contener mecanismos clave. Segundo, las feature label las interpretan personas, y pueden no ser únicas o no ser estables. Tercero, la attribution es una influencia local prompt-local, no un programa global fijo. Cuarto, la investigación muestra casos exitosos; el artículo interactivo discute explícitamente que el método solo da resultados útiles en una parte de los prompts. Quinto, y es el punto que más se enfatizó en clase: la attention no está explicada, y la selección, el enrutamiento y la competencia podrían estar ocurriendo justamente ahí.
+
+\begin{warningbox}{No trates el attribution graph como el «código fuente del modelo»}
+Se parece más a un boceto local de mecanismos generado por un instrumento experimental: contiene pistas causales reales, pero también errores de sustitución, poda, agrupamiento y decisiones de quien interpreta. La forma correcta de usarlo es formular predicciones, hacer intervenciones, buscar contraejemplos e informar qué partes no se pueden explicar.
+\end{warningbox}
+
+\subsection{Del descubrimiento de mecanismos al diseño de sistemas}
+
+Estos casos no ofrecen directamente un botón para «eliminar las alucinaciones», pero sí cambian la forma de plantear el problema de ingeniería. En lugar de ajustar solo un umbral de rechazo, se pueden medir por separado la evidencia known-entity, la evidencia de la respuesta y la competencia IDK/refusal; en lugar de confiar en lo que el modelo dice de sí mismo, se puede verificar con un verifier externo, la trace de las herramientas y las intervenciones contrafactuales; en lugar de tratar un forward pass fijo como el único presupuesto de cómputo, se puede permitir que la reflection, un recurrent loop o el adaptive compute agreguen verificaciones cuando la confianza es baja.
+
+En el nivel del sistema también hay que separar las señales de mecanismo de las restricciones del producto. Aunque una feature interna pueda predecir errores, también puede desplazarse de una versión del modelo a otra y no puede convertirse directamente en una API de largo plazo; aunque una intervención funcione en los prompts experimentales, puede dañar otras capacidades. Una ruta más robusta consiste en convertir los descubrimientos de mecanismos en conjuntos de pruebas reproducibles, métricas de monitoreo e hipótesis de falla, y luego validarlos mediante evaluación fuera de línea, red teaming, pruebas de regresión y un despliegue gradual. La interpretabilidad aporta resolución diagnóstica, pero no sustituye la ingeniería de seguridad completa.
+
+\teachervoice{01:10:05--01:11:33, el docente llama a «cómo evitar las alucinaciones» el problema de mil millones de dólares y dice explícitamente que no conoce la respuesta. Propone direcciones como una mejor calibration, hacer que el reasoning model reflexione, aumentar el cómputo de autoverificación y el recurrent/adaptive compute, y a la vez reconoce que estas opciones podrían sacrificar capacidad o creatividad.}
+
+\begin{importantbox}{Los cuatro puntos de ingeniería que más vale la pena llevarse}
+\begin{enumerate}
+  \item Tratar las explicaciones del modelo como salidas por verificar, no como una interfaz de hechos internos;
+  \item Monitorear la incertidumbre, la seguridad y la deriva de objetivos durante todo el proceso de generación, no solo revisar el prompt;
+  \item Validar las hipótesis de mecanismo con intervention contrafactual y la reproducción de traces;
+  \item Asignar cómputo variable a los tokens difíciles, para que el modelo busque información, reflexione o se detenga cuando lo necesite.
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Un flujo de auditoría de circuit-tracing reutilizable}
+
+\begin{lstlisting}[language=Python,caption={Flujo de auditoría que va de un problema de comportamiento a hipótesis de mecanismo falsables}]
+behavior = define_prompt_and_counterfactuals()
+features = fit_sparse_replacement_model(behavior.activations)
+graph = trace_prompt_specific_attribution(features)
+hypotheses = label_prune_and_group(graph)
+for hypothesis in hypotheses:
+    intervene_in_base_model(hypothesis)
+    test_predicted_behavior_change()
+report_reconstruction_error_failures_and_scope()
+\end{lstlisting}
+
+Este pseudocódigo pone a propósito «report failures» como el último paso obligatorio. Tener solo grafos exitosos sin tasa de fallas produce discovery bias; tener solo features legibles sin intervenciones produce un sesgo narrativo; tener solo intervenciones sobre un único prompt sin un conjunto de contrafactuales hace que un efecto local casual se confunda con un mecanismo robusto.
+
+Una auditoría real también debe guardar la semilla aleatoria, la versión del diccionario, el umbral de poda, la intensidad de la intervención y el prompt completo, para que otra persona investigadora pueda reproducir el mismo grafo y juzgar si la conclusión proviene en realidad del mecanismo del modelo o de los hiperparámetros del análisis.
+
+Cuando distintos hiperparámetros dan rutas distintas, informar esa inestabilidad es en sí mismo un resultado: indica que la evidencia actual solo sostiene conclusiones de mecanismo de grano más grueso y que no permite explicar con seguridad hasta el nivel de un solo nodo o una sola arista.
+
+\subsection{Preguntas abiertas}
+
+La sesión de preguntas y respuestas dejó varias líneas de investigación realmente difíciles: cómo explicar la selección y el enrutamiento de la attention; cómo determinar si una feature es «la misma» en distintos prompts y modelos; cómo cuantificar la cobertura del graph respecto del comportamiento del modelo original; cómo extender los mecanismos a nivel de token a contextos largos, llamadas a herramientas y el agent loop; cómo distinguir las rutas necesarias, las rutas suficientes y las rutas redundantes de respaldo; y cómo lograr que el modelo, sin perder creatividad, calibre mejor el conocimiento de sus propios límites.
+
+\teachervoice{01:11:33--01:11:57, el docente advierte que la «hallucination» misma no siempre está claramente definida: en un texto largo, en qué token empieza exactamente el error, y si el error es de hechos o una desviación del contexto, a menudo no tienen un límite único. Las métricas de investigación deben definir primero su objeto; no se puede tomar una queja difusa sobre el producto como etiqueta de mecanismo.}
+
+\begin{knowledgebox}{Un informe de investigación debe presentar tres tablas a la vez}
+\textbf{Tabla de Coverage}: qué prompts/nodos se explicaron; \textbf{tabla causal}: qué intervenciones cambiaron el comportamiento según lo predicho; \textbf{tabla de failure}: qué grafos son inestables, tienen errores grandes o no se pueden nombrar. Solo cuando las tres están presentes puede quien lee juzgar el alcance real de aplicación del método.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Circuit tracing lleva la pregunta «qué podría ocurrir dentro del modelo» a un nivel en el que se puede graficar, intervenir y refutar, pero no es un lector completo. El resultado más valioso hasta ahora es que da lugar a problemas de ingeniería más finos y a interfaces experimentales: distinguir representación, ejecución y selección; registrar el error; validar la causalidad local; y conservar la incertidumbre en las conclusiones.
+\section{Síntesis y ampliación}
+
+Toda la conferencia puede condensarse en una conclusión de dos niveles. Sobre los modelos: combinan feature abstractas, ejecutan en paralelo varias rutas de cómputo dentro de un solo forward pass y permiten que los objetivos futuros restrinjan de antemano el token actual; estas capacidades explican fenómenos como la transferencia a lenguas de pocos recursos, la combinación de conocimientos médicos, la representación compartida entre idiomas, la suma y la rima, y también explican las autodescripciones no fieles, las alucinaciones y el conflicto interno en los jailbreak. Sobre el método: la sustitución dispersa, el attribution graph y la original-model intervention aportan evidencia causal local, pero el reconstruction error, la feature ambiguity, el success-case bias y la unexplained attention hacen que siga siendo un instrumento científico imperfecto.
+
+\begin{importantbox}{Idea central en una frase}
+No hay que preguntar «¿el modelo realmente piensa?», que es una pregunta no operativa; hay que preguntar, para un prompt dado, qué representaciones internas se activan, qué rutas contribuyen en paralelo, qué objetivos futuros aparecen por adelantado y cómo refutar esta explicación mediante intervenciones.
+\end{importantbox}
+
+\subsection{Conclusiones de la clase y lista de prácticas}
+
+\small
+\begin{multicols}{2}
+\begin{enumerate}
+  \item Un comportamiento correcto no implica que el mecanismo sea único ni estable;
+  \item Una sola neuron no suele ser la mejor unidad semántica;
+  \item La feature label debe explicarse junto con su efecto causal;
+  \item El CLT mejora la legibilidad, pero también puede perder fidelidad;
+  \item El reconstruction error debe aparecer explícitamente en el grafo y en el informe;
+  \item Si la attention no está explicada, no afirmes que ya explicaste la elección de estrategia;
+  \item Las representaciones abstractas pueden reutilizarse entre idiomas y tareas;
+  \item Dentro de un solo forward pass puede haber cómputo paralelo a gran escala;
+  \item La autodescripción del modelo no garantiza reflejar fielmente su algoritmo interno;
+  \item IDK, la respuesta y la refusal pueden ser rutas en competencia;
+  \item El planning requiere evidencia de «feature anticipada + intervención que cambia la trayectoria»;
+  \item El monitoreo de seguridad debe abarcar el proceso de generación, no solo la entrada;
+  \item Toda conclusión sobre mecanismos debe informar el prompt, el modelo y el periodo de tiempo;
+  \item Los casos de fracaso forman parte de los resultados del método tanto como los casos de éxito.
+\end{enumerate}
+\end{multicols}
+\normalsize
+
+\enlargethispage{4\baselineskip}
+\subsection{Lecturas adicionales}
+
+\small
+\noindent\textbf{Casos interactivos: }\href{https://transformer-circuits.pub/2025/attribution-graphs/biology.html}{On the Biology of a Large Language Model}, que incluye los grafos interactivos completos de razonamiento de varios pasos, planificación de poemas, multilingüismo, suma, diagnóstico médico, alucinaciones, rechazo y CoT faithfulness.
+
+\noindent\textbf{Artículo de métodos: }\href{https://transformer-circuits.pub/2025/attribution-graphs/methods.html}{Circuit Tracing: Revealing Computational Graphs in Language Models}, que analiza en detalle el replacement model, el Cross-Layer Transcoder, el graph pruning, la evaluación y las limitaciones. \textbf{Orden de lectura: }primero, usa estas notas para construir la escala de evidencia feature--graph--intervention; después, vuelve al artículo interactivo y haz clic en los nodos uno por uno. Cuando encuentres un grafo vistoso, busca primero el reconstruction error, los resultados de las intervenciones, los casos de fracaso y las limitaciones de la attention.
+\normalsize
+
+\end{document}

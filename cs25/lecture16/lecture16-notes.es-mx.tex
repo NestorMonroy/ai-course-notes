@@ -1,0 +1,704 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+
+\renewcommand{\notetitle}{Lecture 16: Neurosymbolic Commonsense Reasoning}
+\renewcommand{\noteauthors}{Elaborada a partir de la conferencia de Yejin Choi, los subtítulos oficiales hechos por personas, las diapositivas recuperadas y los artículos indicados}
+\renewcommand{\notedate}{CS25 V2 · versión reescrita source-first de 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{Clase: 2023-02-14; publicación: 2023-05-24}
+\renewcommand{\videoduration}{1:15:05}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=sTQaJyrI-zg}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.94\textwidth,height=0.52\textheight,keepaspectratio]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\let\standardtableofcontents\tableofcontents
+\renewcommand{\tableofcontents}{%
+  \begingroup
+  \small
+  \setlength{\parskip}{0pt}
+  \standardtableofcontents
+  \endgroup
+}
+
+\begin{document}
+\makecscover
+
+\section{Auditoría de fuentes y pregunta central del curso}
+
+La pregunta central de esta clase no es «si importa el número de parámetros», sino: cuando un modelo de lenguaje ya genera respuestas con fluidez, ¿qué mecanismos adicionales hacen falta para convertirlo en un razonador, un modelo de conocimiento o un componente de juicio ético más confiable? Yejin Choi responde con tres trabajos de investigación: Maieutic Prompting, Symbolic Knowledge Distillation y Delphi. Los tres dependen de modelos de lenguaje grandes, pero todos añaden fuera del modelo estructura, datos, un critic o restricciones. Por eso no pueden reducirse a la frase «un modelo pequeño vence a uno grande».
+
+\subsection{Cómo se reconstruyó esta clase}
+
+El sitio oficial del curso publica la grabación y los tres artículos asignados, pero no un slide deck independiente. Esta clase toma como fuente visual principal la grabación oficial de Stanford Online en 1080p: un muestreo cada dos segundos produjo 2,253 fotogramas, la herramienta de fotogramas estables generó 207 candidatos de alta exhaustividad y una depuración manual de duplicados dejó 56 estados didácticos independientes. Todas las imágenes finales se extrajeron del cuadro completo de 1920x1080. Después del minuto 52:40, la sesión de preguntas vuelve muchas veces a diapositivas anteriores, así que las imágenes repetidas no se insertan de nuevo; las explicaciones orales se conservan mediante los subtítulos oficiales \texttt{en-US} hechos por personas.
+
+\begin{longtable}{@{}L{0.18\textwidth}L{0.27\textwidth}L{0.43\textwidth}@{}}
+\toprule
+Nivel de evidencia & Material local & Función en los apuntes \\
+\midrule
+Grabación oficial & Video de 1:15:05 y 56 teaching states & Determina el orden de la clase, las diapositivas de fórmulas, las tablas de resultados, las demostraciones públicas, las respuestas a la controversia y la arquitectura hybrid \\
+Subtítulos oficiales hechos por personas & \texttt{lecture16.en.srt} y timed transcript & Recuperan las motivaciones de la expositora, los caveats de las comparaciones, los sesgos de los datos, el costo de los sistemas y la Q\&A \\
+Artículos asignados & Maieutic, Symbolic KD, Delphi & Verifican algoritmos, fórmulas, alcance experimental, composición de los datos y limitaciones \\
+Artículos de contexto & COMET, COMET-ATOMIC 2020 & Explican la relación entre el symbolic graph y el neural knowledge model \\
+Archivos de auditoría & manifest, coverage, ledger, blueprint & Demuestran que cada nodo visual y de teacher voice tiene un destino didáctico explícito \\
+\bottomrule
+\end{longtable}
+
+\begin{warningbox}{Límite histórico: 14 de febrero de 2023}
+Esta clase trata los sistemas y debates de cuando ChatGPT llevaba apenas unos meses disponible al público. Los reasoning models, los métodos de post-training y los productos de machine ethics posteriores no pueden proyectarse hacia atrás como evidencia de la clase. En particular, Delphi hybrid seguía siendo un work in progress en el momento de la clase y no debe describirse como un sistema maduro ya desplegado.
+\end{warningbox}
+
+\subsection{David y Goliat: el título no es un manifiesto contra el Scaling}
+
+La diapositiva del título compara los modelos enormes con Goliat y los sistemas más pequeños pero estructurados con David. Al leer esta figura hay que conservar los matices: la expositora reconoce que los modelos grandes son superiores en muchas tareas; lo que rechaza es concluir que «el sentido común ya está resuelto» a partir de unos pocos ejemplos fluidos. Lo que busca esta clase es otra vía de mejora: evaluation más realista, task mejor focalizadas, datos de mayor calidad y algoritmos capaces de verificar la salida de un modelo de lenguaje.
+
+\lecturefigure{slide-01-title-david-vs-goliath.jpg}{David vs. Goliath: el arte de los rankings en la era de los modelos de lenguaje enormes}{Diapositiva V001 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+La siguiente slide toma de «El arte de la guerra» (孙子兵法) una división del método de investigación en tres pasos: primero conocer la distribución de los fallos, después elegir el campo de batalla que realmente discrimina y por último diseñar armas nuevas. No es un adorno literario, sino la evidence discipline de toda la clase: si el benchmark solo recompensa un dataset artifact, ni la puntuación más alta demuestra que el modelo domina la underlying task.
+
+\lecturefigure{slide-02-art-of-war-lessons.jpg}{Know your enemy, choose your battles, innovate your weapons}{Diapositiva V002 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+\teachervoice{La expositora usa con ironía la expresión «existential crisis» para describir el impacto de ChatGPT, pero enseguida replantea el problema como una hasty generalization: responder bien una vez una pregunta de Winograd no equivale a tener un sentido común físico estable. Lo que repite una y otra vez no es que «la escala no sirve», sino «smaller can be better» y «knowledge is power».}
+
+\subsection{Glosario: distinguir primero los términos afines}
+
+Más adelante aparecerán con frecuencia language model, knowledge model, commonsense graph, critic, descriptive morality y normative ethics. Si no se distinguen antes sus objetos, es fácil confundir «generar una frase razonable», «poseer conocimiento reutilizable» y «emitir un juicio ético» como si fueran la misma capacidad. La tabla siguiente da las definiciones de trabajo que usa esta clase.
+
+\begin{longtable}{@{}L{0.19\textwidth}L{0.27\textwidth}L{0.42\textwidth}@{}}
+\toprule
+Término & Problema que resuelve & Mecanismo central y relación con el curso \\
+\midrule
+Language model & Cómo se distribuye el siguiente token & Aprende $p(x_t\mid x_{<t})$ a partir de estadísticas del texto; la fluidez puede estar relacionada con el conocimiento del mundo, pero no equivale a él \\
+Knowledge model & Qué se puede inferir de una entidad, un evento o una relación & Conserva conocimiento reutilizable mediante typed relations, interfaces de recuperación u objetivos de generación especializados \\
+Commonsense & Conocimiento práctico y razonamiento ampliamente compartidos en situaciones cotidianas & Abarca lo físico, lo social, lo causal, las intenciones y las reacciones; no es idéntico en todas las culturas \\
+Symbolic graph & Cómo representar de forma explícita nodos y relaciones & ATOMIC usa nodos de eventos y relation types para formar una estructura de conocimiento verificable \\
+Critic & Qué contenido generado por la máquina debe conservarse & Aprende a discriminar la calidad y filtra las teacher samples; el propio critic también se equivoca \\
+Descriptive ethics & Cómo suelen juzgar las personas & Delphi predice sampled human judgments; no pretende dar la respuesta correcta definitiva \\
+Normative ethics & Cómo deberían juzgar las personas & Requiere principios, argumentación y participación institucional; no puede derivarse automáticamente de las etiquetas mayoritarias \\
+Reflective equilibrium & Cómo conciliar las intuiciones sobre casos con los principios abstractos & Corrige de forma iterativa entre el bottom-up judgment y el top-down constraint \\
+Adversarial test & Si el sistema se mantiene estable ante entradas anómalas, compuestas o construidas deliberadamente & Sirve para exponer la brecha entre dataset success y task understanding \\
+\bottomrule
+\end{longtable}
+
+\subsection{Cuatro preguntas que atraviesan toda la clase}
+
+Al leer los tres sistemas que siguen, conviene plantear de manera constante cuatro preguntas. Primera: ¿el base LM aporta fluent generation, latent knowledge o calibrated truth? Segunda: ¿qué estructura coloca el sistema fuera del modelo: logic, knowledge graph, critic o moral principle? Tercera: ¿los resultados miden realmente accuracy, consistency, human plausibility o deployment safety? Cuarta: ¿los fallos pueden localizarse y corregirse, o solo se obtiene otra puntuación global no interpretable?
+
+\begin{importantbox}{La Recipe común de esta clase}
+Primero, el modelo grande genera candidatos; después, una estructura explícita o un modelo especializado reduce el espacio de candidatos; por último, el resultado se usa para entrenar un sistema más pequeño y especializado. Maieutic restringe las explanations con logic, Symbolic KD restringe el knowledge corpus con un critic y Delphi / hybrid restringe el judgment con commonsense data y moral constraints.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La auditoría de fuentes muestra que esta clase trata sobre la división de funciones en un sistema y los límites de la evidencia. David-versus-Goliath no niega la escala; exige colocar el modelo de lenguaje dentro de un pipeline verificable. Cada sección posterior debe explicar de dónde provienen los candidatos, quién impone las restricciones, qué demuestran las métricas y qué no demuestran.
+\section{Maieutic Prompting: de la generación de explicaciones a la consistencia global}
+
+La primera investigación parte de una ilusión común: el modelo puede dar una explicación, así que parece que «sabe» la respuesta. Sin embargo, el mismo modelo puede negar en la siguiente oración la razón que acaba de dar. Maieutic Prompting no confía directamente en la primera chain, sino que explora de forma recursiva explicaciones a favor y en contra, y después usa logic para elegir la asignación con mayor consistencia interna.
+
+\subsection{Los Language Models solo son Sometimes Amazing}
+
+El primer ejemplo le pide a GPT-3 que explique si, partiendo de la costa oeste de Estados Unidos y avanzando siempre hacia el oeste, se puede llegar finalmente a la costa este. El modelo da una explicación correcta basada en que la Tierra es redonda. Este acierto muestra que los modelos de lenguaje pueden combinar conocimiento implícito, pero no nos dice si el modelo es estable en preguntas cercanas. Al leer la figura, «responder bien» debe entenderse como un sample, no como una medición completa de los límites del conocimiento del modelo.
+
+\lecturefigure{slide-03-language-models-sometimes-amazing.jpg}{Los modelos de lenguaje a veces generan explicaciones de sentido común coherentes y correctas}{Diapositiva V003 recuperada del video oficial; Stanford CS25 Lecture 16}
+
+La siguiente diapositiva pone lado a lado preguntas true/false del mismo tipo. En ejemplos como «¿las mariposas tienen tres alas?», el modelo primero dice que tienen cuatro alas y después emite un juicio de verdadero o falso que contradice su propia explicación. Lo importante no es que cierto hecho de sentido común sea difícil, sino que entre las salidas falta un consistency contract: cada generación se comporta como una compleción local de texto, sin la obligación de mantener un belief state compartido.
+
+\lecturefigure{slide-04-language-models-reasoning-failures.jpg}{Las preguntas cercanas exponen la contradicción entre la explanation y la final answer}{Diapositiva V004 recuperada del video oficial; Stanford CS25 Lecture 16}
+
+\begin{warningbox}{Una explicación no equivale automáticamente a Faithful Reasoning}
+La explanation que da un modelo de lenguaje puede ser solo texto generado junto con la respuesta. Aunque la explicación sea gramaticalmente correcta, puede contradecir otras explicaciones, citar hechos erróneos o invertirse cuando se reformula el prompt. Lo que Maieutic mejora en primer lugar es la consistencia lógica interna, no la verificación completa de la verdad sobre el mundo.
+\end{warningbox}
+
+\teachervoice{El ponente compara los modelos de lenguaje con «lemons» y luego dice que, si solo se eligen los ejemplos exitosos, parecen «cherries». Esta broma nos recuerda que la demo selection es en sí misma un evaluation bias. La verdadera pregunta no es si se puede encontrar una respuesta vistosa, sino si los errores tienen una estructura predecible.}
+
+\subsection{Construcción recursiva del Explanation Tree}
+
+El método Maieutic pide al modelo que genere explicaciones tanto para la proposición original $q$ como para su negación $\neg q$, y sigue preguntando por qué cada explicación se cumple o no. Lo que se obtiene no es una sola chain-of-thought, sino un argument graph local. Al leer la figura, primero hay que ubicar el nodo raíz y después comparar las ramas a favor, en contra y en conflicto mutuo; a mayor profundidad de búsqueda, hay más candidatos, pero también crecen el cómputo y el ruido.
+
+\lecturefigure{slide-05-maieutic-logic-tree-example.jpg}{Maieutic tree: despliegue simultáneo de la proposición, su negación y las explicaciones recursivas}{Diapositiva V005 recuperada del video oficial; Jung et al., 2022}
+
+La siguiente slide muestra la abductive generation: dada una conclusión, el modelo propone razones que podrían hacerla verdadera o falsa. Este paso aprovecha la amplitud generativa del LM y no exige que el modelo se comprometa de inmediato con una única respuesta. El sistema primero despliega el espacio del lenguaje en candidate explanation nodes y, en una etapa posterior, determina qué combinaciones pueden sostenerse a la vez.
+
+\lecturefigure{slide-06-maieutic-abductive-generation.jpg}{Abductive generation: generación de explicaciones verificables para la proposición y su negación}{Diapositiva V006 recuperada del video oficial; Jung et al., 2022}
+
+Sea $v_i$ un nodo de proposición y la asignación booleana $z_i\in\{0,1\}$ indique si el sistema la acepta al final. Si la explanation $e_j$ respalda la claim $c_j$, puede escribirse como una restricción de implicación
+\begin{equation}
+z_{e_j}\Rightarrow z_{c_j},
+\end{equation}
+mientras que la proposición y su negación explícita deben cumplir
+\begin{equation}
+z_q+z_{\neg q}=1.
+\end{equation}
+Aquí $z_q$ no es una probabilidad, sino una elección lógica tras la resolución global; la probabilidad solo se usa para ponderar las restricciones.
+
+\begin{lstlisting}[caption={Pseudocódigo de explicación recursiva y consistencia global en Maieutic Prompting}]
+def maieutic_reason(question, depth, language_model):
+    graph = expand_both(question, negate(question), depth, language_model)
+    clauses = []
+    for explanation, claim, confidence in graph.edges:
+        clauses.append(weighted_implication(explanation, claim, confidence))
+    clauses.append(exactly_one(question, negate(question)))
+    assignment = weighted_maxsat(clauses)
+    return assignment[question], graph, assignment
+\end{lstlisting}
+
+\subsection{De la Local Confidence a Weighted MaxSAT}
+
+El árbol recursivo aún puede contener ramas en conflicto mutuo, por lo que se necesita un global inference step. Weighted MaxSAT (máxima satisfacibilidad ponderada) busca, dentro de un conjunto de clauses booleanas, la asignación que maximiza el peso total satisfecho. No pretende que todas las oraciones se cumplan, sino que, cuando el conflicto es inevitable, conserva el conjunto más confiable y más compatible.
+
+\lecturefigure{slide-07-maieutic-inference-objective.jpg}{Maieutic inference: conversión del explanation graph en una optimización lógica ponderada}{Diapositiva V007 recuperada del video oficial; Jung et al., 2022}
+
+Si la $j$-ésima clause es $C_j(z)$ y su peso de confianza es $w_j$, el objetivo de resolución puede escribirse como
+\begin{equation}
+z^*=\arg\max_{z\in\{0,1\}^{|V|}}
+\sum_j w_j\,\mathbf{1}\!\left[C_j(z)=\mathrm{true}\right].
+\end{equation}
+Una práctica común convierte la confianza del modelo $p_j$ en log-odds, $w_j=\log\frac{p_j}{1-p_j}$. $V$ es el conjunto de nodos del explanation graph y $\mathbf{1}[\cdot]$ es la función indicadora. La optimización garantiza consistencia relativa dadas las clauses; si todos los candidatos se basan en un sentido común erróneo, MaxSAT aún puede elegir mal de manera estable.
+
+\begin{knowledgebox}{De qué se encarga lo Neural y de qué lo Symbolic}
+El LM se encarga de la generación abierta y cubre las explicaciones que el modelo podría conocer; el symbolic solver se encarga de mantener las restricciones entre ramas. El primero resuelve el recall; el segundo mejora la consistency. Si solo se usa el solver, no hay conocimiento candidato; si solo se usa el LM, no hay consistencia global.
+\end{knowledgebox}
+
+\subsection{Resultados: al leer la gráfica de barras hay que fijarse en el Dataset y también en la Task}
+
+La slide de resultados compara benchmarks true/false como CSQA 2.0, CREAK y Com2Sense. Maieutic supera a direct prompting y a varios baselines de self-consistency en varios conjuntos de datos, lo que indica que la explicación recursiva combinada con restricciones globales puede convertir el latent knowledge en respuestas de forma más estable. Al leer la figura, primero hay que comparar las diferencias entre métodos dentro de un mismo conjunto de datos y después observar el absolute level de cada conjunto; el muestreo y la difficulty de distintos benchmarks no permiten una comparación horizontal directa.
+
+\lecturefigure{slide-08-maieutic-results.jpg}{Resultados de Maieutic Prompting en varios conjuntos de datos de juicios de verdadero o falso de sentido común}{Diapositiva V008 recuperada del video oficial; Jung et al., 2022}
+
+\begin{warningbox}{Lo que esta figura no demuestra}
+No demuestra que las explicaciones generadas sean faithful, ni que el modelo tenga un modelo completo del mundo; solo demuestra que, con estas tareas y esta configuración del prompt, buscar más explicaciones y añadir consistencia lógica mejora el juicio final. Para el despliegue también hay que considerar la latency, el token cost, el solver cost y la adversarial robustness.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Maieutic Prompting transforma una respuesta única en candidate generation más global consistency. Conserva la capacidad generativa del LM y, a la vez, reconoce que las salidas locales pueden entrar en conflicto. La conclusión didáctica más importante es esta: la estructura lógica puede mejorar la forma en que el modelo usa el conocimiento que ya tiene, pero no puede suplir de la nada el conocimiento del mundo que falta o que es erróneo.
+\section{Por qué el Leaderboard Success no equivale a Commonsense}
+
+La mejora de Maieutic todavía ocurre dentro del benchmark, por lo que el ponente vuelve a examinar el benchmark mismo como siguiente paso. Si el conjunto de datos contiene un artifact fijo, el modelo puede aprender «cómo obtener puntaje» sin aprender la capacidad objetivo; esta es la diferencia entre dataset solving y task solving.
+
+\subsection{Una puntuación alta y la fragilidad pueden coexistir}
+
+La slide coloca los resultados de alta puntuación en object recognition, question answering y captioning junto a los fallos adversarial u out-of-domain. La comparación horizontal no busca negar el avance, sino señalar que la distribución de evaluación suele ser más estrecha que el uso real. La conclusión inferior, «solo se resuelve el dataset, no la underlying task», exige que los investigadores reporten perturbation, domain shift y failure category, y no solo el leaderboard rank.
+
+\lecturefigure{slide-09-brittle-leaderboards-dataset-task.jpg}{Superhuman leaderboard performance y adversarial brittleness coexisten}{Diapositiva V009 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+\teachervoice{Aquí se concreta el «choose your battles» del ponente: si el benchmark no puede distinguir entre surface pattern y conceptual understanding, seguir acumulando puntaje solo significa ganar en el campo de batalla equivocado. El diseño de nuevas task forma parte de la investigación algorítmica.}
+
+\subsection{Lo que falta entre Human y AI no son más oraciones}
+
+El diagrama de puente coloca a la izquierda la vida cotidiana, el lenguaje y la experiencia social de las personas, y a la derecha las salidas variadas pero inestables de la máquina. El gap del centro apunta al practical knowledge: saber que la puerta del refrigerador normalmente debe estar cerrada, saber por qué una frase resulta ofensiva en una relación determinada, saber qué consecuencias físicas puede tener una acción. Lo que el modelo necesita no son solo más text tokens, sino conocimiento situacional componible y verificable.
+
+\lecturefigure{slide-10-commonsense-gap.jpg}{Commonsense gap: del lenguaje superficial a la comprensión del mundo cotidiano}{Diapositiva V010 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+\subsection{La Operational Definition adoptada en esta clase}
+
+La slide de definición restringe el commonsense a practical knowledge and reasoning, centrado en everyday situations and events, y normalmente compartido por la mayoría de las personas. Las tres restricciones importan: no es la totalidad del conocimiento enciclopédico, no es solo un conjunto de fact y tampoco es absolutamente uniforme entre culturas. Al leer la figura, «commonly shared» debe entenderse como un alcance empírico, no como una verdad moral ni una universal law.
+
+\lecturefigure{slide-11-definition-of-commonsense.jpg}{La definición de sentido común de esta clase: conocimiento y razonamiento cotidianos, prácticos y ampliamente compartidos}{Diapositiva V011 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+La siguiente slide distingue además su utilidad para las personas y para las máquinas. Para las personas, el sentido común sostiene la convivencia y la seguridad; para la AI, el sentido común ayuda a comprender las necesidades del usuario, las consecuencias de las acciones y las condiciones implícitas. El ejemplo de la puerta del refrigerador muestra que la misma frase, «mantener la puerta abierta», puede ser razonable o peligrosa según la situación; por ello, el sentido común no es un phrase lookup fijo, sino una context-conditioned inference.
+
+\lecturefigure{slide-12-human-ai-commonsense-importance.jpg}{Por qué el sentido común importa tanto para la coordinación humana como para que la AI comprenda las acciones}{Diapositiva V012 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+\begin{importantbox}{Tres niveles: Dataset, Task y Capability}
+El dataset es una muestra finita; la task es el mapeo que se espera que el sistema realice; la capability es una capacidad estable que se reutiliza entre distribuciones. Una puntuación alta en el conjunto de prueba, como máximo, demuestra directamente dataset-level performance. Para afirmar una commonsense capability se necesitan además reformulaciones diversas, variaciones composicionales, contrafácticos, pruebas entre dominios y failure analysis.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+El primer problema de la investigación sobre sentido común es definir el objeto de evaluación. Las tablas de clasificación no son inútiles, pero deben acompañarse de adversarial y out-of-domain evidence. El valor de ATOMIC, COMET y Delphi, que se presentan a continuación, consiste precisamente en convertir «el modelo quizá lo sabe implícitamente» en datos, relaciones e interfaces de tarea más explícitos.
+\section{ATOMIC y COMET: un Language Model no es un Knowledge Model}
+
+Esta sección pasa de la evaluación a la representación. Un modelo de lenguaje general optimiza la continuación de texto, mientras que un commonsense system a menudo necesita responder typed questions: cuál es la causa de un evento, qué quieren los participantes, qué ocurrirá después. ATOMIC define el espacio de preguntas con symbolic relations, y COMET amplía las respuestas mediante neural generation.
+
+\subsection{División del trabajo entre el Symbolic Graph y el Neural Model}
+
+La slide coloca ATOMIC y COMET lado a lado: el primero es un symbolic commonsense knowledge graph escrito por personas mediante crowdsourcing; el segundo se entrena sobre esos relation-conditioned triples y se convierte en un neural commonsense model. No compiten entre sí: el graph aporta el schema y la supervisión, y el model aporta la generalización y la generación.
+
+\lecturefigure{slide-13-language-models-not-knowledge-models.jpg}{Un language model y un knowledge model tienen objetivos distintos}{Diapositiva V013 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+La página siguiente incorpora COMET-ATOMIC 2020 y destaca el ciclo entre el machine-readable graph y el generative model: primero las personas definen la relation ontology y el seed knowledge; después el modelo aprende $p(t\mid h,r)$ y genera tail inferences para eventos nuevos. Aquí $h$ es el head event, $r$ es el tipo de relación y $t$ es la commonsense conclusion generada.
+
+\lecturefigure{slide-14-atomic-comet-human-symbolic-neural.jpg}{La relación symbolic-neural entre ATOMIC, COMET y COMET-ATOMIC 2020}{Diapositiva V014 recuperada de la grabación oficial; Hwang et al., 2021}
+
+Formalmente, el objetivo de entrenamiento de COMET puede escribirse como
+\begin{equation}
+\mathcal{L}_{\mathrm{COMET}}(\theta)
+=-\mathbb{E}_{(h,r,t)\sim\mathcal{D}}
+\log p_{\theta}(t\mid h,r).
+\end{equation}
+$\mathcal{D}$ son los datos de tripletas de conocimiento; $h$ y $r$ delimitan de manera explícita qué tipo de inferencia debe generarse. Frente a una unrestricted continuation, esta interface se parece más a «consultar un modelo de conocimiento».
+
+\subsection{Los Relation Types son el sistema de coordenadas del conocimiento}
+
+El grafo completo de ATOMIC despliega relation types como social interaction, physical entity y event-centered. Al leer la figura no conviene memorizar nodo por nodo, sino observar la semántica de los colores y de las aristas: un mismo evento puede conectarse con agent intent, agent reaction, other reaction, precondition y effect. El relation type convierte las «inferencias posibles» en una tarea descomponible y permite que el evaluator revise cada capacidad por separado.
+
+\lecturefigure{slide-15-atomic2020-full-graph.jpg}{ATOMIC 2020: grafo de conocimiento con nodos de eventos y 23 tipos de relaciones de sentido común}{Diapositiva V015 recuperada de la grabación oficial; Hwang et al., 2021}
+
+\begin{knowledgebox}{Por qué importa la Typed Relation}
+Si solo se deja que el modelo continúe el texto libremente, lo «razonable» puede ir en un sinnúmero de direcciones. Al especificar \texttt{xIntent}, \texttt{xEffect}, \texttt{oReact} o una physical relation, la recolección de datos, el entrenamiento y el análisis de errores obtienen coordenadas. El costo es que la propia ontology determina lo que el sistema puede expresar: las relaciones que no se modelan no aparecen por sí solas.
+\end{knowledgebox}
+
+\subsection{Los límites de la comparación entre COMET, GPT-3 y GPT-2}
+
+La slide comparativa presenta la human-judged commonsense quality: COMET-BART, GPT-3 few-shot y GPT-2 zero-shot tienen configuraciones distintas. Lo primero que debe leerse son las etiquetas de método, no qué número es mayor; COMET utiliza datos y supervisión específicos, GPT-3 depende de few-shot prompting y GPT-2 es más pequeño y zero-shot. El resultado respalda que «un modelo de conocimiento especializado puede ser más pequeño y más útil», pero no permite concluir una relación causal atribuible solo a la architecture.
+
+\lecturefigure{slide-16-comet-vs-gpt3-gpt2.jpg}{Comparación human-judged commonsense entre COMET y los modelos de lenguaje generales}{Diapositiva V016 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+\teachervoice{La ponente aclara por iniciativa propia que no se trata de una apple-to-apple comparison. Reconoce que el scale jump de GPT-2 a GPT-3 es interesante, pero también señala que GPT-3 resulta demasiado grande para muchos ingenieros e investigadores. El énfasis de la clase está en la system utility: un modelo más pequeño, consultable y que pueda integrarse en sistemas posteriores puede tener más valor.}
+
+\subsection{El valor de reutilizar un Knowledge Backbone}
+
+La última página coloca COMET / ATOMIC en el centro y lo conecta con persona-aware conversation, figurative language, storytelling, fantasy games e interactive learning. Lo que muestra no es que todas las aplicaciones estén «resueltas», sino que una relation interface unificada reduce el costo de construir una y otra vez componentes de sentido común. El desempeño de las aplicaciones sigue limitado por la coverage, la quality y el cultural scope.
+
+\lecturefigure{slide-17-commonsense-backbone-applications.jpg}{ATOMIC / COMET como commonsense backbone de varias tareas posteriores}{Diapositiva V017 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+\subsection{Resumen de la sección}
+
+ATOMIC formula los problemas de sentido común como typed symbolic queries, y COMET condensa la supervisión del grafo en un generative model. La diferencia entre un modelo de lenguaje y un modelo de conocimiento no está en si usa Transformer, sino en el objetivo de entrenamiento, la interfaz y la forma de validación. La siguiente sección plantea otra pregunta: si escribir grafos de conocimiento a mano es demasiado lento, ¿puede un modelo grande producir el corpus y luego usarse un critic para destilarlo en un modelo más pequeño?
+\section{Symbolic Knowledge Distillation}
+
+El crowdsourcing manual aporta esquemas y conocimiento semilla de alta calidad, pero difícilmente cubre la cola larga. Pedirle directamente a GPT-3 que genere en gran cantidad, en cambio, produce un volumen enorme de ruido. Symbolic Knowledge Distillation combina estos dos hechos en un pipeline: el general LM se encarga de la escala, el critic de la selección, el symbolic corpus de ofrecer una capa intermedia con capacidad de auditoría y el student model de un uso de bajo costo.
+
+\subsection{Por qué Smaller and Better no es una Distillation ordinaria}
+
+La slide que plantea el problema pregunta con un embudo: ¿es posible hacer más pequeño a GPT-3 y, al mismo tiempo, mejor que el teacher? La knowledge distillation ordinaria suele hacer que el student se aproxime a la teacher distribution, por lo que la reducción de capacidad tiende a venir acompañada de una reducción de calidad. Aquí el avance no consiste en copiar con más precisión todo el teacher, sino en destilar un solo aspecto (el causal commonsense) y descartar las muestras de baja calidad del teacher.
+
+\lecturefigure{slide-18-symbolic-distillation-smaller-better-question.jpg}{El objetivo contraintuitivo de Symbolic KD: un student más pequeño y también mejor}{Diapositiva recuperada del video oficial V018; West et al., 2022}
+
+El pipeline completo envía las GPT-3 samples al critic; tras el filtrado se forma un knowledge graph de alta calidad de unos 6.5M, con el que después se entrena el student commonsense model. El circuito amarillo de la figura significa que los datos pueden guardarse, revisarse y reutilizarse; el conocimiento no existe solo como neural weights. Ese es el sentido central del término «symbolic», y no que el proceso de generación se realice por completo con reglas escritas a mano.
+
+\lecturefigure{slide-19-symbolic-kd-pipeline.jpg}{Symbolic Knowledge Distillation: teacher, critic, knowledge graph y student}{Diapositiva recuperada del video oficial V019; West et al., 2022}
+
+\begin{importantbox}{Los tres recursos deben contabilizarse por separado}
+El teacher compute determina el costo de generar candidatos; las critic labels determinan la calidad del filtrado; el student training determina el costo de despliegue. Informar solo la cantidad de parámetros del student oculta las llamadas previas al teacher y la critic supervision humana. Que el sistema sea más barato suele significar que la inference repetida es más barata, no que todo el proceso de producción de conocimiento tenga costo cero.
+\end{importantbox}
+
+\subsection{De la Distribution Matching a las Symbolic Samples}
+
+La destilación clásica hace que la student distribution $P_S$ coincida con la del teacher $P_T$:
+\begin{equation}
+H(P_T,P_S)=-\sum_{y\in\mathcal{Y}}P_T(y)\log P_S(y).
+\end{equation}
+En las tareas de clasificación, $\mathcal{Y}$ es enumerable; el espacio de oraciones, en cambio, es exponencialmente grande. Symbolic KD aproxima la esperanza con teacher samples y, al mismo tiempo, organiza los sampled strings como tripletas de conocimiento; así, cada sample es a la vez una aproximación para la optimización y un corpus publicable.
+
+\lecturefigure{slide-20-knowledge-distillation-formula-symbolic-output.jpg}{Sequence-level distillation: aproximación por muestreo y el symbolic corpus como subproducto}{Diapositiva recuperada del video oficial V020; West et al., 2022}
+
+Si $y^{(k)}\sim P_T(\cdot\mid x)$, puede usarse la aproximación de Monte Carlo
+\begin{equation}
+H(P_T,P_S)\approx -\frac{1}{K}\sum_{k=1}^{K}
+\log P_S\!\left(y^{(k)}\mid x\right).
+\end{equation}
+$K$ es la cantidad de teacher samples por query. Depender solo del muestreo hereda fielmente el ruido del teacher, por lo que también se necesita el critic score $c_\phi(x,y)$.
+
+\subsection{Loose Teacher y Critical Teacher}
+
+La comparison slide distingue entre loose teacher y critical teacher. El loose teacher conserva más GPT-3 generations: mayor escala, pero más ruido; el critical teacher conserva solo el subset que aprueba el critic: menos datos, pero más precisos. La comparación central no es «con o sin GPT-3», sino «si las teacher samples pasaron o no por el filtro de un modelo de calidad independiente».
+
+\lecturefigure{slide-21-loose-critical-teacher-comparison.jpg}{Loose teacher y critical teacher: el intercambio entre cantidad y calidad}{Diapositiva recuperada del video oficial V021; West et al., 2022}
+
+El corpus filtrado puede escribirse como
+\begin{equation}
+\mathcal{D}_{\tau}=\{(x,y):y\sim P_T(\cdot\mid x),\ c_{\phi}(x,y)\ge\tau\},
+\end{equation}
+donde $\tau$ es el umbral de aceptación. Elevar $\tau$ suele reducir la cantidad de datos y aumentar la precision, pero puede perder conocimiento poco frecuente aunque correcto. El critic se entrena con unas 10,000 moderate-size human labels; no es un truth oracle, sino un quality gate explícito y medible.
+
+\begin{lstlisting}[caption={Flujo de datos y entrenamiento de Symbolic Knowledge Distillation}]
+def symbolic_distill(queries, teacher, critic, threshold):
+    accepted = []
+    for query in queries:
+        for candidate in teacher.sample(query, many=True):
+            if critic.score(query, candidate) >= threshold:
+                accepted.append(to_typed_triple(query, candidate))
+    knowledge_graph = deduplicate_and_validate(accepted)
+    student = train_commonsense_model(knowledge_graph)
+    return knowledge_graph, student
+\end{lstlisting}
+
+\subsection{Resultados: por qué el Student puede superar al Teacher}
+
+El lado izquierdo de la slide de resultados compara human-authored, GPT-3 loose teacher y critical teacher; el lado derecho compara los students correspondientes. Al leer la figura, primero observe la proporción verde de good knowledge y después las student bars. Aunque el critical teacher tiene menos datos, permite que el student alcance una human-judged accuracy más alta, lo que indica que el filtering cambió la distribución de entrenamiento, en lugar de simplemente comprimir el comportamiento del teacher.
+
+\lecturefigure{slide-22-critic-student-results.jpg}{El critical teacher produce conocimiento de mayor calidad y un student más fuerte}{Diapositiva recuperada del video oficial V022; West et al., 2022}
+
+La página siguiente compara el ATOMIC 2020 human-authored con el ATOMIC10x machine-authored en cuatro ejes: accuracy, scale, value y diversity. Las barras verdes son en general más altas, lo que respalda la ganancia de escala y calidad de la destilación automática en los tipos de relación especificados. La acotación de la parte inferior es muy importante: el experimento se centra en siete tipos de causal commonsense relation y no puede extrapolarse a «el conocimiento generado por máquinas es mejor que el humano en todos los dominios».
+
+\lecturefigure{slide-23-atomic10x-human-vs-machine.jpg}{Comparación de accuracy, scale, value y diversity entre ATOMIC10x y el ATOMIC manual}{Diapositiva recuperada del video oficial V023; West et al., 2022}
+
+\begin{warningbox}{El Critic convierte los sesgos en Corpus Policy}
+Las etiquetas de entrenamiento, el umbral y la definición de ejemplos negativos del critic determinan qué conocimiento se conserva. Si el critic prefiere expresiones comunes, la cultura dominante u oraciones cortas, el filtered corpus perderá sistemáticamente los puntos de vista minoritarios. La symbolic layer con capacidad de auditoría facilita detectar el problema, pero no hace que desaparezca por sí solo.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Lo central de Symbolic KD no es el lema genérico de «el modelo grande enseña al modelo pequeño», sino un diseño de recursos en cuatro etapas: teacher generation, critic filtering, symbolic corpus y student deployment. Que el student supere al teacher se debe a la especialización en la tarea y a la selección de datos, no a que la cantidad de parámetros cree por sí misma conocimiento adicional.
+\section{Delphi: qué objeto ético predice realmente la máquina}
+
+La tercera investigación extiende el commonsense a las morally salient situations. Aquí el riesgo aumenta de forma notable: presentar el juicio descriptivo de la mayoría como «moral correcta» reviste el dataset bias de autoridad. Por ello, primero hay que definir el prediction target y solo después hablar de accuracy.
+
+\subsection{La Machine Ethics no es un problema del futuro}
+
+La title slide del paper de Delphi define el sistema como un experiment. La slide siguiente afirma que el despliegue a gran escala de los modelos de lenguaje neuronales exige machine ethics, y cita una advertencia del tipo «la primera ley de la robótica es solo un hombre de paja»: los sistemas reales no se enfrentan a una tabla de reglas morales unificada y enumerable, sino que toman continuamente decisiones implícitas en el filtrado de contenido, la clasificación, las recomendaciones y la interacción.
+
+\lecturefigure{slide-24-delphi-paper.jpg}{Can Machines Learn Morality? The Delphi Experiment}{Diapositiva V024 recuperada del video oficial; Jiang et al., 2021}
+
+\lecturefigure{slide-25-machine-ethics-deployment.jpg}{Los neural systems desplegados ampliamente convierten la machine ethics en una restricción real}{Diapositiva V025 recuperada del video oficial; Stanford CS25 Lecture 16}
+
+\teachervoice{La ponente no estudia machine ethics porque Delphi sea perfecto. Su argumento es justamente el contrario: los sistemas actuales ya toman decisiones con consecuencias éticas; si los investigadores se retiran con el pretexto de que «la moral es demasiado difícil», las reglas predeterminadas y los sesgos existentes seguirán operando.}
+
+\subsection{Las tres Query Interface de Ask Delphi}
+
+La slide de la demo pública muestra la entrada free-form, la respuesta del sistema y un disclaimer visible. La interfaz advierte «research prototype, still work in progress»; esto forma parte de la definición del sistema, no es una nota legal al pie. Le indica al usuario que la salida proviene de una predicción del modelo y que no puede ser el único fundamento de acciones reales, castigos o resoluciones.
+
+\lecturefigure{slide-26-ask-delphi-demo-disclaimer.jpg}{Demo de Ask Delphi y aviso de exención de responsabilidad del prototipo de investigación}{Diapositiva V026 recuperada del video oficial; Stanford CS25 Lecture 16}
+
+La página siguiente coloca lado a lado free-form QA, relative QA y yes/no QA. Free-form evalúa una sola situación, relative compara dos conductas y yes/no responde a un juicio específico. La forma de la tarea cambia el label space y también la superficie de ataque: el relative mode se presta con facilidad a construir comparaciones absurdas entre dos males, y en clase se explicó que esa función se retiró a las pocas horas de hacerse pública.
+
+\lecturefigure{slide-27-delphi-freeform-relative-yesno.jpg}{Interfaces de juicio free-form, relative y yes/no de Delphi}{Diapositiva V027 recuperada del video oficial; Jiang et al., 2021}
+
+\begin{importantbox}{Descriptive Prediction, no Normative Proof}
+Lo que Delphi aprende es «cómo suele evaluar la gente, dentro de las poblaciones y situaciones que cubren los datos de entrenamiento», lo que puede escribirse como $p(y\mid s,q)$. Esto no deriva $y$ de axiomas éticos, ni garantiza que la minority view, los principios de justicia o los contextos culturales nuevos queden bien representados.
+\end{importantbox}
+
+\subsection{Por qué las Compositional Situations son más difíciles}
+
+La slide de composición parte de «cortar el pasto» y va añadiendo tiempo, lugar, relaciones y condiciones de excepción. Una acción aislada suele tener una evaluación por defecto, pero un context modifier puede invertir el judgment. Al leer la figura, conviene comparar cómo cambia una misma action bajo distintas clause; un sistema que solo memoriza palabras clave pasará por alto condiciones decisivas como «a medianoche», «en horario de trabajo del amigo» o «en una emergencia».
+
+\lecturefigure{slide-28-delphi-compositional-situations.jpg}{Prueba de robustez de Delphi ante situaciones compuestas y modificadores de contexto}{Diapositiva V028 recuperada del video oficial; Jiang et al., 2021}
+
+El par siguiente contrasta conventional scientific knowledge con common life know-how. El modelo sabe que «mezclar cloro con amoniaco es peligroso», pero puede juzgar mal un consejo cotidiano sobre la lactose intolerance. Este contraste muestra que los hechos enciclopédicos, los hechos médicos y las everyday norm provienen de distribuciones de datos distintas; una sola puntuación global oculta las diferencias entre tipos de capacidad.
+
+\lecturefigure{slide-29-conventional-vs-common-life-knowledge.jpg}{Diferencia entre conventional scientific knowledge y common life know-how}{Diapositiva V029 recuperada del video oficial; Stanford CS25 Lecture 16}
+
+\subsection{Evaluation: primero la Task Family, después la puntuación global}
+
+La figura de resultados compara GPT-3 zero-shot, few-shot y 30-shot con Delphi en free-form, yes/no y relative QA. Delphi obtiene valores más altos en las tareas mostradas en clase, pero estos resultados dependen de datos de entrenamiento especializados y de la label definition. Al leer la figura, no debe tratarse la comparación entre un supervised specialist y un generic few-shot model como una architecture-only comparison; la conclusión más razonable es que los targeted moral data cambian de manera notable el judgment behavior.
+
+\lecturefigure{slide-30-delphi-results-vs-gpt3.jpg}{Resultados por tarea de Delphi frente a los prompting baselines de GPT-3}{Diapositiva V030 recuperada del video oficial; Jiang et al., 2021}
+
+Si la situation es $s$, el query format es $q$ y el judgment label es $y$, el objetivo de entrenamiento puede escribirse como
+\begin{equation}
+\mathcal{L}_{\mathrm{Delphi}}(\theta)
+=-\mathbb{E}_{(s,q,y)\sim\mathcal{D}_{\mathrm{norm}}}
+\log p_{\theta}(y\mid s,q).
+\end{equation}
+$\mathcal{D}_{\mathrm{norm}}$ es el conjunto de datos de juicios normativos; esta fórmula muestra directamente que lo que aprende el modelo depende de a quién se muestrea, de cómo se formulan las preguntas y de cómo se combinan las etiquetas.
+
+\subsection{Resumen de la sección}
+
+La task definition de Delphi es el juicio ético descriptivo. Con datos especializados es más estable que el generic prompting, pero la evaluation no puede elevar la accuracy a moral correctness. La siguiente sección debe examinar los datos y el backbone para entender de dónde provienen estos judgment.
+\section{COMMONSENSE NORM BANK y Delphi Architecture}
+
+El «parámetro» más importante de un modelo de juicio ético quizá no sea el hidden size, sino la dataset composition. Esta sección separa el artículo, los crowd judgments, las rules of thumb y el backbone UNICORN, y explica cómo las capacidades y los sesgos de Delphi entran al sistema a lo largo de la cadena de suministro de datos.
+
+\subsection{Norm Bank es la confluencia de varios regímenes de datos}
+
+La source slide enumera conjuntos de datos como Social Chemistry, ETHICS, Moral Stories y Scruples, que confluyen en COMMONSENSE NORM BANK. A la derecha se indica que hay alrededor de 1.7M people's ethical judgments on everyday situations. Esta cifra expresa annotation volume; no significa 1.7M culturas independientes ni grupos equilibrados. Además, los distintos conjuntos de datos no comparten el mismo propósito de recolección ni el mismo label schema.
+
+\lecturefigure{slide-31-commonsense-norm-bank-sources.jpg}{Fuentes de varios conjuntos de datos de COMMONSENSE NORM BANK y 1.7M juicios}{Diapositiva V031 recuperada de la grabación oficial; Jiang et al., 2021}
+
+\begin{knowledgebox}{Dataset Aggregation no es neutralización de valores}
+Combinar datos amplía la coverage, pero no elimina por sí solo el sampling bias. Si varias fuentes se inclinan hacia el inglés, hacia usuarios de internet de Estados Unidos o hacia cierto contexto político, sumar cantidades solo estima con más precisión esa distribución. Una auditoría de alta calidad debe informar las fuentes, el periodo, los atributos demográficos, las label en conflicto y la abstention policy.
+\end{knowledgebox}
+
+\subsection{Recitar principios no equivale a saber aplicarlos}
+
+La GPT-3 morality slide contrasta lo declarative con lo imperative. El modelo puede decir «arrojar al vecino a una licuadora está mal», pero da respuestas inestables cuando el enunciado se reformula como orden o se coloca en un contexto complejo. El callout azul enfatiza que teaching AI with principles es importante y que, al mismo tiempo, plantea problemas de dual-use y de robustness. Al leer la figura, el failure debe ubicarse en la principle application, en lugar de afirmar simplemente que el modelo «no conoce ese principio».
+
+\lecturefigure{slide-32-gpt3-morality-declarative-imperative.jpg}{GPT-3 puede repetir principios morales, pero quizá no logre aplicarlos de forma estable}{Diapositiva V032 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+\subsection{Cómo las Rules of Thumb conectan Situation y Judgment}
+
+La diapositiva de reglas presenta primero una situation; después, el annotator escribe una rule of thumb y marca attributes como legality, social norm y moral foundation. La slide completa indica alrededor de 300,000 rules of thumb, 104k real-life situations y 12 structured attributes. Los atributos estructurados ayudan al modelo a distinguir razones distintas, como «ilegal», «descortés» o «dañino», pero también convierten la annotation ontology en el límite de sus capacidades.
+
+\lecturefigure{slide-33-rules-of-thumb-300k.jpg}{Rules of Thumb: conexión entre situaciones reales, razones del juicio y atributos estructurales}{Diapositiva V033 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+\subsection{UNICORN Backbone y la combinación de varias capacidades}
+
+La slide de arquitectura suma el norm bank y el UNICORN commonsense model para obtener Delphi. Este signo de más no es una suma matemática, sino un pipeline de preentrenamiento / fine-tuning: UNICORN aporta una representación unificada de commonsense QA y el norm bank aporta morally salient supervision. El sistema debe manejar al mismo tiempo language understanding, commonsense inference y norm classification.
+
+\lecturefigure{slide-34-delphi-unicorn-architecture.jpg}{COMMONSENSE NORM BANK + UNICORN forman Delphi}{Diapositiva V034 recuperada de la grabación oficial; Jiang et al., 2021}
+
+La siguiente diapositiva responde directamente «Why Delphi is built on top of Unicorn?»: el moral reasoning requiere que language, commonsense y norms funcionen a la vez. Los ejemplos de la derecha reúnen situaciones como pedir una hamburguesa o dar consejos médicos, para mostrar que el juicio ético no es una label head independiente, sino que depende de hechos del mundo y de las consecuencias de las acciones.
+
+\lecturefigure{slide-35-why-unicorn.jpg}{Por qué el moral reasoning requiere language, commonsense y norms}{Diapositiva V035 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+\begin{warningbox}{El Backbone no puede corregir la Label Semantics}
+Un encoder más potente puede mejorar la generalization dentro de la distribución, pero no determina «si el voto mayoritario es justo», «cómo se expresan culturas en conflicto» ni «cuándo debe el modelo negarse a responder». Estas cuestiones corresponden a data governance, task design y deployment policy; la representation capacity no las resuelve por sí sola.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El comportamiento de Delphi proviene de tres capas: norm data de múltiples fuentes, rules of thumb estructuradas y un commonsense backbone. Una vez que se entiende esta cadena, ni las puntuaciones altas ni los sesgos del sistema resultan misteriosos. La siguiente sección aborda la adversarial pressure posterior a la publicación abierta y examina si el desempeño dentro del dataset resiste a usuarios reales.
+\section{Adversarial Pressure, Bias y Non-Authority}
+
+Los usuarios reales no se ciñen a la definición de la tarea como lo haría un benchmark annotator. En cuanto se publica una demo, los usuarios buscan los límites, plantean comparaciones entre dos males, sustituyen términos de identidad y combinan a propósito situaciones poco comunes. Esta sección trata estos ataques como evidence, no como un episodio de PR.
+
+\subsection{Exposed Socket: también hay que explicar por qué un ejemplo es correcto}
+
+La página de noticias describe el reto de la moneda en el enchufe que Alexa le propuso a una niña; a la derecha, Delphi juzga que «dejar que un niño toque un enchufe expuesto es peligroso». Este ejemplo muestra que el sistema puede relacionar el lenguaje natural con consecuencias físicas, pero es solo un caso de éxito. Una evaluation real necesita reformular el agente de la acción, el tiempo, la negación y el hypothetical context, y comprobar si el modelo conserva el danger concept.
+
+\lecturefigure{slide-36-alexa-socket-delphi.jpg}{El incidente del enchufe expuesto de Alexa y el juicio de peligro de Delphi}{Diapositiva V036 recuperada del video oficial; Stanford CS25 Lecture 16}
+
+\subsection{Horas después del lanzamiento, los usuarios reescriben la definición de la tarea}
+
+La backlash slide registra los cambios tras la publicación del 15 de octubre: el relative comparison mode se retiró en cuestión de horas, en un fin de semana se recibieron unos 25,000 adversarial examples y después las consultas reales llegaron a varios millones. Al leer la figura, estas cifras deben entenderse como attack-surface evidence; no equivalen a un conjunto de prueba uniforme, pero revelan un espacio de combinaciones que un benchmark difícilmente puede enumerar de antemano.
+
+\lecturefigure{slide-37-delphi-backlash-scale.jpg}{Retiro rápido de Delphi tras su lanzamiento, 25k adversarial examples y tráfico real}{Diapositiva V037 recuperada del video oficial; Stanford CS25 Lecture 16}
+
+La siguiente página muestra cómo investigadores y público construyen a propósito oraciones anómalas para «torturar» al modelo. Este tipo de ejemplos suele carecer de contexto realista, pero es muy eficaz para exponer lexical shortcuts. Al evaluar no hay que elegir entre «la pregunta es absurda, así que el fallo no cuenta» y «un solo fallo vuelve inútil todo el sistema»; lo adecuado es construir una failure taxonomy: negation, role reversal, rare composition, identity substitution y nonsensical premise.
+
+\lecturefigure{slide-38-adversarial-twitter-example.jpg}{Contrived adversarial prompt en redes sociales}{Diapositiva V038 recuperada del video oficial; Stanford CS25 Lecture 16}
+
+\subsection{La Public Critique no es ruido que se pueda ignorar}
+
+El artículo de \emph{The New York Times} «Can a Machine Learn Morality?», con su ilustración de un dragón, llevó la controversia al ámbito público. La página siguiente enumera las concerned voices y vuelve al título del artículo académico. Juntas, ambas páginas muestran que quienes evalúan la machine ethics no son solo los ML reviewers, sino también especialistas en ética, periodistas, los grupos afectados por el modelo y los usuarios comunes; la documentación del sistema debe permitir que todas estas personas vean el objetivo de entrenamiento y sus limitaciones.
+
+\lecturefigure{slide-39-can-machine-learn-morality-nyt.jpg}{La pregunta de los medios: ¿puede una máquina aprender moral?}{Diapositiva V039 recuperada del video oficial; Stanford CS25 Lecture 16}
+
+\lecturefigure{slide-40-concerned-voices.jpg}{Preocupaciones públicas sobre Delphi y reflexión de los investigadores}{Diapositiva V040 recuperada del video oficial; Stanford CS25 Lecture 16}
+
+\subsection{Delphi no es una Moral Authority}
+
+La non-authority slide lo dice explícitamente: el equipo de investigación no respalda el uso de IA para dar moral advice, y Delphi no sustituirá a los human judges en los tribunales; la cita de abajo explica que el objetivo del proyecto es entender cómo los imperfect humans emiten juicios éticos, no convertir a la máquina en la autoridad moral última. Este límite debe incorporarse a toda licencia de uso posterior y a la UI, no quedarse solo en la discussion del artículo.
+
+\lecturefigure{slide-41-no-ai-moral-authority.jpg}{Límite explícito: Delphi no da moral advice ni sustituye a los jueces humanos}{Diapositiva V041 recuperada del video oficial; Stanford CS25 Lecture 16}
+
+\begin{importantbox}{La Capability Claim y la Authority Claim deben separarse}
+Que un modelo pueda predecir una parte de los juicios humanos es una capability claim; que el modelo deba decidir con base en ello castigos, tratamientos médicos, contrataciones o resultados judiciales es una authority claim. Aunque la primera sea cierta, de ella no se deduce automáticamente la segunda. La autoridad requiere un diseño de instituciones, responsabilidad, apelación y auditoría.
+\end{importantbox}
+
+\subsection{«No investigar» también tiene una Normative Consequence}
+
+La página siguiente reconoce primero que los moral models son demasiado difíciles y que su precisión es limitada, y luego señala que los sistemas de IA actuales ya toman decisiones éticas implícitas. El callout final propone invertir en investigación y formar normas sociales human-centered, unbiased y robust. Al leer la figura hay que considerar los riesgos de ambos lados: desplegar un imperfect moral model causa daño, pero no investigar en absoluto también puede dejar en los sistemas reglas predeterminadas que nadie ha auditado.
+
+\lecturefigure{slide-42-ethics-investment-needed.jpg}{Que sea difícil no significa que se pueda ignorar: los sistemas actuales ya toman decisiones con consecuencias éticas}{Diapositiva V042 recuperada del video oficial; Stanford CS25 Lecture 16}
+
+«Delphi will empower powerful people and harm marginalized people» es la preocupación de la postura contraria; el build posterior señala que los sistemas existentes ya pueden reinforce unjust status quo. Lo importante no es cuál de las burbujas gana, sino que la evaluación del despliegue debe comparar la intervention con la baseline: ¿cuál es el daño incremental que causa el nuevo sistema y a quién está dañando el proceso actual?
+
+\lecturefigure{slide-43-reinforce-status-quo.jpg}{Comparación en ambos sentidos entre intervention risk y status-quo risk}{Diapositiva V043 recuperada del video oficial; Stanford CS25 Lecture 16}
+
+\subsection{La Bias Acknowledgement debe concretarse en Data y Use}
+
+La bias slide indica explícitamente que el norm bank refleja las ideologies de la annotation data de 2020--2021, que los judgments los aportaron crowdworkers de Estados Unidos y se inclinan hacia Western-centric viewpoints, y que adaptar Delphi a otras culturas o moral frameworks es una línea abierta. El titular de la izquierda, «Delphi leans left», recuerda que la inclinación política también se mide y se difunde.
+
+\lecturefigure{slide-44-delphi-bias-acknowledgement.jpg}{Declaración de sesgos de datos, políticos y culturales de Delphi}{Diapositiva V044 recuperada del video oficial; Stanford CS25 Lecture 16}
+
+\teachervoice{La ponente no trata la bias acknowledgement como una declaración que exime de culpa. Afirma que Delphi efectivamente es left-leaning y Western-centric, y luego orienta la discusión hacia una participación más amplia y el intercambio de datos. Reconocer el sesgo es el punto de partida de la auditoría, no una licencia para desplegar.}
+
+\subsection{Resumen de la sección}
+
+La demo pública llevó a Delphi de un benchmark estático a un entorno adversarial, político e institucional. El límite más importante de la clase es la non-authority: predecir juicios descriptivos no otorga poder de decisión. Una evaluación confiable debe registrar a la vez los fallos del modelo, los ataques de los usuarios, los grupos de los que provienen los datos y la status-quo baseline.
+\section{De la Blocklist al Neurosymbolic Hybrid}
+
+El último grupo de slides no se limita a enumerar follow-up papers: responde a la pregunta de si «un imperfect judgment model puede funcionar como componente de un sistema». Su valor práctico depende de dónde se coloque Delphi, de si se le puede aplicar override, de cómo se expresen la identity y la cultural variation, y de cómo los top-down principles restringen las bottom-up predictions.
+
+\subsection{Por qué no basta una Keyword Blocklist}
+
+La slide del Alexa Prize primero celebra al equipo ganador y después repasa la práctica de seguridad de 2017: usar un conjunto de sensitive keywords para impedir que el sistema hablara de sexo, homosexualidad, raza y otros temas. Una blocklist es fácil de implementar, pero reduce un context complejo a una lista de palabras; a la vez deja pasar expresiones dañinas que no contienen las palabras clave y bloquea por error conversaciones normales, de búsqueda de ayuda o con fines educativos.
+
+\lecturefigure{slide-45-alexa-prize-sensitive-keywords.jpg}{La sensitive-keyword blocklist del Alexa Prize y sus limitaciones}{Diapositiva V045 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+\teachervoice{La ponente llama a la blocklist el status quo de aquel momento y pregunta si en 2021 todavía no hay otra opción. No sostiene que Delphi pueda sustituir directamente una safety policy, sino que el sistema necesita, como mínimo, entender «por qué las mismas palabras significan cosas distintas en situaciones distintas».}
+
+\subsection{Identity-Specific Judgment: más context, también más riesgo}
+
+La slide sobre identity compara los juicios sobre una misma relación o conducta cuando se describe con distinto gender / sexuality. Introducir la identity puede corregir un modelo que aplica el mismo criterio a todos los casos, pero también puede amplificar un stereotype. Al leer la figura conviene revisar si el model usa realmente el context relevante o si toma el identity token como shortcut; la evaluación requiere counterfactual pairs y un error analysis a nivel de grupo.
+
+\lecturefigure{slide-46-identity-specific-moral-judgments.jpg}{¿Puede Delphi emitir identity-specific moral judgments?}{Diapositiva V046 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+\subsection{Controllable Generation y Social Norm Alignment}
+
+La parte izquierda de la follow-up slide muestra la controllable text generation: dados una persona, una norm o una constraint, se guía al sistema para que genere historias o diálogos más apropiados; el texto de la derecha señala explícitamente que los dialogue systems actuales pueden dar la razón ciegamente a contenido ofensivo, y que el objetivo es que el agent aprenda la human moral preference. Cuanto más potente es la función, más necesario es informar de quién proviene esa preference.
+
+\lecturefigure{slide-47-controllable-generation-bias.jpg}{Delphi como componente de commonsense / norm para la controllable generation}{Diapositiva V047 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+La siguiente página muestra la alineación de social norms y values en interactive narratives, y cita investigación sobre agents en videojuegos. El flujo de la figura conecta el narrative state, el value model y la action choice. Respalda el papel de sistema según el cual «un judgment model puede servir como reward / filter», pero no garantiza que un long-horizon agent no eluda las restricciones mediante proxy optimization.
+
+\lecturefigure{slide-48-align-social-norms-interactive-narratives.jpg}{Alineación de social norms y values en narrativas interactivas}{Diapositiva V048 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+\subsection{Agenda de investigación: Ethically, Socially, Culturally Aware}
+
+La hoja de ruta coloca en un mismo camino tres requisitos, ethically-informed, socially-aware y culturally-inclusive, y fija como next priority la interpretabilidad y la dynamic customization de los diverse viewpoints. Las tres palabras no son redundantes: lo ético se ocupa del harm y de los principle; lo social, de las relaciones y las instituciones; lo cultural, de las diferencias de distribución y de quién queda representado.
+
+\lecturefigure{slide-49-ethical-social-cultural-ai.jpg}{La siguiente etapa de la machine ethics: interpretable, dinámica y culturalmente plural}{Diapositiva V049 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+\subsection{Delphi Hybrid: por qué volver a lo Neurosymbolic}
+
+La hybrid title slide anuncia un «Demonstrative Neuro-symbolic Hybrid Moral Reasoning System». Si se vuelve a la estructura de toda la clase, el neural component aporta language y commonsense generation, y el symbolic / principle component aporta top-down constraints. No se trata de imponer reglas sobre la salida del modelo, sino de intentar que las intuiciones sobre casos y los principios se validen entre sí.
+
+\lecturefigure{slide-50-hybrid-moral-reasoning.jpg}{Delphi Hybrid: un neuro-symbolic moral reasoning system demostrativo}{Diapositiva V050 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+La slide de Delphi failures del sistema original expone dos tipos de defectos: lack of commonsense knowledge y falta de interpretabilidad. En un ejemplo, el modelo emite un juicio erróneo sobre «genocide if it creates jobs», lo que muestra que la surface association puede imponerse sobre los principios; la falta de explanation, a su vez, dificulta localizar el error. El objetivo del hybrid es añadir a la vez una knowledge path y una constraint path.
+
+\lecturefigure{slide-51-original-delphi-failures.jpg}{Las lagunas de sentido común y la falta de interpretabilidad del Delphi original}{Diapositiva V051 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+\subsection{El marco teórico Bottom-Up y Top-Down}
+
+La slide teórica cita el reflective equilibrium de John Rawls: los bottom-up human judgments aportan intuiciones sobre casos, las top-down constraints aportan principios, y ambos extremos deben corregirse mutuamente una y otra vez. El Delphi original se sitúa principalmente del lado bottom-up; la pregunta del hybrid es cómo codificar los moral principle como symbolic constraints que puedan intervenir en la inference.
+
+\lecturefigure{slide-52-theoretical-framework.jpg}{Reflective equilibrium: bottom-up intuition y top-down constraints}{Diapositiva V052 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+La página siguiente propone como candidatos top-down la common morality de Bernard Gert y sus diez moral rules, por ejemplo: no matar, no engañar, cumplir las promesas. La tabla de reglas parece clara, pero sigue requiriendo context, exception y conflict resolution. El valor didáctico de la figura está en ofrecer un principle vocabulary que pueda auditarse de forma explícita, no en afirmar que diez reglas resuelven mecánicamente todos los problemas éticos.
+
+\lecturefigure{slide-53-top-down-common-morality.jpg}{Top-down moral principles: la common morality y sus diez reglas}{Diapositiva V053 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+\subsection{Hybrid Architecture y resolución de restricciones}
+
+La slide de arquitectura detallada encadena la entrada de la situation, la rule retrieval, la commonsense generation, el Maieutic graph y el final judgment. Al leer la figura hay que seguir el flujo de datos de izquierda a derecha: primero se generan candidate reasons, luego se recuperan o activan los principios, después se usa la estructura de grafo para detectar contradiction y, al final, se emiten el judgment y su rationale. Un error en cualquier módulo se propaga, por lo que el sistema necesita module-level evaluation.
+
+\lecturefigure{slide-54-hybrid-architecture-detail.jpg}{El pipeline de retrieval, generation, graph y judgment de Delphi Hybrid}{Diapositiva V054 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+La hybrid inference puede expresarse con un objetivo simplificado:
+\begin{equation}
+z^*=\arg\max_z
+\left[
+\sum_i \alpha_i s_i^{\mathrm{neural}}(z)
++\sum_j \beta_j\mathbf{1}[C_j(z)]
+\right],
+\end{equation}
+donde $s_i^{\mathrm{neural}}$ es la puntuación de evidencia del commonsense / norm model, $C_j$ son las top-down moral constraints, y $\alpha_i$ y $\beta_j$ controlan el peso de cada tipo de evidencia. La fórmula es solo una abstracción didáctica; un sistema real también debe manejar conflictos entre reglas, fallas de recuperación y la uncertain abstention.
+
+\begin{lstlisting}[caption={Ciclo modular del Neuro-symbolic moral reasoning}]
+def hybrid_judgment(situation):
+    candidate_reasons = commonsense_model.generate(situation)
+    principles = retrieve_moral_rules(situation, candidate_reasons)
+    graph = build_argument_graph(situation, candidate_reasons, principles)
+    judgment, rationale = constrained_inference(graph)
+    if low_confidence(judgment) or unresolved_conflict(graph):
+        return abstain_with_audit_trace(graph)
+    return judgment, rationale
+\end{lstlisting}
+
+\subsection{Resultados y limitaciones del Hybrid}
+
+La página «Where does the original Delphi fail?» vuelve a marcar sobre el sistema original las carencias que atienden el Maieutic graph y la architecture, para mostrar que cada mejora corresponde a una failure conocida y no a módulos añadidos al azar. Exige que el evaluator mida por separado la commonsense retrieval, la principle coverage, la graph consistency y el final judgment, para evitar que una puntuación global oculte el pipeline bottleneck.
+
+\lecturefigure{slide-55-where-delphi-fails.jpg}{Correspondencia entre los módulos del hybrid y los failure modes del Delphi original}{Diapositiva V055 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+Las últimas adversarial result bars comparan el desempeño de Delphi y Delphi-hybrid en las queries overall, certain y ambiguous. En la presentación de clase, el hybrid obtiene resultados más altos, y al lado se indica que combina keywords con interpretable hybrid moral reasoning. Al leer la figura hay que tener en cuenta que el test set sigue siendo limitado: la mejora no demuestra que las top-down rules cubran un mundo abierto, ni permite ignorar la inference latency adicional.
+
+\lecturefigure{slide-56-adversarial-results-hybrid.jpg}{Resultados de Delphi-hybrid en adversarial open-ended moral queries}{Diapositiva V056 recuperada de la grabación oficial; Stanford CS25 Lecture 16}
+
+\begin{warningbox}{El Hybrid no es «neuronal + simbólico = seguridad automática»}
+La modularidad facilita la revisión, pero también multiplica las interfaces donde puede haber errores. El retriever puede elegir la regla equivocada, el generator puede inventar razones y el solver puede llegar a una respuesta coherente a partir de clauses erróneas. El beneficio de seguridad proviene de que el sistema sea observable, descomponible, capaz de abstenerse y sujeto a revisión humana, no de la etiqueta de la architecture.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+De la keyword blocklist al hybrid, el sistema incorpora progresivamente context, identity, norm y principle. Un componente ético más potente debe acompañarse de mayor capacidad de auditoría: registrar el origen de los datos, mostrar la rationale provenance, permitir la abstention, admitir el override y mantener la authority dentro de las instituciones y de la cadena de responsabilidad humana.
+\section{Q\&A: costos, funciones objetivo y pluralidad de valores}
+
+Las slides preparadas terminan alrededor de 52:40; las preguntas posteriores vuelven una y otra vez a gráficas anteriores, pero añaden las restricciones más importantes de la clase. Esta sección conserva solo la nueva spoken evidence y no repite las figuras.
+
+\subsection{Descriptive Morality y Prescription se separan de nuevo}
+
+Un estudiante pregunta si Delphi toma los juicios existentes como la moral que debe seguirse. La ponente responde que el objetivo de la investigación es, ante todo, modelar descriptive judgments, y reconoce que estos contienen bias; un normative endorsement requiere principios adicionales y procedimientos sociales. También describe ChatGPT como un generation model más potente, no como un knowledge model ya terminado.
+
+\teachervoice{La aclaración central del Q\&A es esta: poder predecir «qué diría la gente» no equivale a saber «qué debe hacerse». Aunque la prediction accuracy sea alta, el sistema aún debe mostrar de qué grupos provienen los datos, cómo se distribuyen los desacuerdos y en qué condiciones se abstiene de responder.}
+
+\subsection{Culture, Dataset y Distribution of Opinions}
+
+Los datos morales provienen de distintas épocas, países, plataformas y annotation instructions. La ponente señala que Delphi tiene un Western bias y menciona también que los distintos moral datasets difieren en escala y cobertura. Un objetivo más razonable no es emitir una respuesta única para todas las cuestiones en disputa, sino distinguir entre unacceptable harm y legitimate disagreement, y representar la opinion distribution.
+
+\begin{knowledgebox}{Representación del Pluralism en aprendizaje automático}
+Una classification de etiqueta única reduce el desacuerdo a un voto mayoritario. Una salida más completa puede incluir label distribution, condiciones por grupo, confidence, rationale clusters y un contested flag. Esto sigue sin resolver los conflictos normativos, pero al menos no oculta el disagreement bajo una apariencia de certeza.
+\end{knowledgebox}
+
+\subsection{Complexity: Maieutic e Hybrid son lentos}
+
+La explanation expansion recursiva llama al LM muchas veces, el weighted MaxSAT debe resolverse sobre un grafo y el hybrid añade además retrieval y principle checking. La ponente admite abiertamente que tanto Maieutic prompting como Delphi hybrid son lentos. Por ello, la validación del sistema debe reportar token calls, tree width/depth, solver time y end-to-end latency, y no solo accuracy.
+
+\subsection{La comparación entre COMET y GPT-3 no es una Architecture Ablation}
+
+El Q\&A confirma de nuevo que COMET usa supervisión específica de ATOMIC, que GPT-3 usa un few-shot prompt y que el critical teacher pasa además por critic filtering. Los resultados pueden respaldar que «la especialización en la tarea y la calidad de los datos tienen valor», pero no permiten estimar por separado la contribución causal del parameter count, del pretraining corpus o de la architecture.
+
+\subsection{Por qué los humanos también necesitan un Critic}
+
+La ponente explica el critic a partir del proceso de aprendizaje: los humanos no creen para siempre lo primero que se les ocurre, sino que forman un internal critic mediante retroalimentación, reflexión y corrección social. Esta analogía aporta intuición de diseño, pero la distribución de entrenamiento del critic de una máquina aún debe auditarse de forma explícita; no adquiere credibilidad por el solo hecho de «parecerse a un humano».
+
+\subsection{La Refusal no sustituye a la Context Understanding}
+
+Un estudiante pregunta si el sistema debería evitar por completo las moral / ethical questions. La ponente considera que el moral advice directo puede restringirse, pero que el sistema aún debe reconocer contextos de acoso, peligro, odio o petición de ayuda; de lo contrario, depender solo de la abstención impide que los componentes de seguridad detecten el harmful context real. En ingeniería, esto exige separar la answer policy del understanding model.
+
+\begin{importantbox}{La Abstention también es una capacidad que debe entrenarse y evaluarse}
+Una buena abstención no consiste en detenerse al encontrar una palabra clave, sino en poder expresar la incertidumbre, reconocer el alto riesgo, ofrecer alternativas seguras, registrar la causa que la activó y escalar a una persona las preguntas que requieren un juicio autorizado. La abstention debe reportar dos tipos de error: false refusal y unsafe answer.
+\end{importantbox}
+
+\subsection{Next-Token, Preference y Knowledge son objetivos distintos}
+
+Al final del Q\&A se vuelve a la tesis más profunda de esta clase: la next-token prediction aprende la continuación del lenguaje, el RLHF / preference tuning aprende las preferencias humanas y el knowledge model aprende relaciones del mundo e inferencias consultables. Los tres comparten representaciones y se refuerzan entre sí, pero no son el mismo objective. El commonsense puede emerge a partir de un LM, pero emerge no equivale a estable, calibrable ni con capacidad de auditoría.
+
+\teachervoice{La ponente afirma que el espacio del adversarial commonsense es prácticamente infinito; ante una combinación absurda que escuchan por primera vez, los humanos pueden juzgarla gracias a su conceptual understanding, mientras que el Transformer tiende más a predecir qué palabra sigue. Esta es la razón última por la que sostiene que «un language model no equivale a un knowledge model».}
+
+\subsection{Las Humanities no son un External Reviewer, sino codiseñadoras}
+
+La última pregunta, sobre value pluralism, extiende la responsabilidad a las humanities at large. Qué diferencias constituyen un desacuerdo aceptable y qué daños deben rechazarse no puede decidirlo solo la comunidad de AI researchers. La ponente usa el derecho como analogía: las normas son un artifact humano formado por negociación social; los modelos pueden ayudar a representarlas y verificarlas, pero la legitimidad proviene de la participación institucional.
+
+\subsection{Resumen de la sección}
+
+El Q\&A vuelve a situar las propuestas técnicas de la prepared talk en el contexto de los recursos, los objetivos y la gobernanza. Maieutic / hybrid tienen un costo computacional considerable; la specialist and generalist comparison tiene factores de confusión; abstenerse no equivale a comprender; y la pluralidad de valores requiere representaciones distribucionales y participación institucional interdisciplinaria.
+\section{Síntesis y ampliación}
+
+\subsection{Una tabla para recapitular los tres sistemas}
+
+La siguiente tabla compara las tres investigaciones según la fuente de candidatos, las restricciones externas, los artifacts intermedios y el principal failure mode. Esto resulta más útil que recordar los nombres de los artículos, porque cualquier sistema posterior que busque «hacer más confiables los modelos grandes» puede auditarse con el mismo conjunto de preguntas.
+
+\begin{longtable}{@{}L{0.13\textwidth}L{0.16\textwidth}L{0.19\textwidth}L{0.18\textwidth}L{0.19\textwidth}@{}}
+\toprule
+Sistema & Fuente de candidatos & Restricciones externas & Artifact auditable & Principales modos de falla \\
+\midrule
+Maieutic & Explanations a favor y en contra generadas por el LM & Clauses lógicas, Weighted MaxSAT & Explanation graph, assignment & Errores en el conocimiento candidato, costo de búsqueda, explicaciones no faithful \\
+Symbolic KD & Knowledge generations de GPT-3 & RoBERTa critic, threshold, relation schema & Filtered graph, student corpus & Critic bias, pérdida de conocimiento poco frecuente, teacher cost \\
+Delphi & Norm data y commonsense backbone & Task label, data policy, avisos de exención de responsabilidad & Judgment, dataset provenance & Sesgo cultural, adversarial prompt, authority misuse \\
+Delphi Hybrid & Reasons, retrieved rules, norm scores & Top-down principles, graph consistency & Argument graph, audit trace & Rule conflict, retrieval error, latency \\
+\bottomrule
+\end{longtable}
+
+\subsection{Conclusiones finales}
+
+Primero, la fluidez lingüística, la calidad del conocimiento, la consistencia lógica y el juicio ético deben validarse por separado. Segundo, el valor de una capa intermedia estructurada no se limita a mejorar la accuracy: también hace visibles los datos, las razones, las restricciones y las fallas. Tercero, «smaller and better» suele provenir de la especialización en la tarea, del filtrado y del diseño de interfaces, no de la reducción de parámetros en sí. Cuarto, el mayor riesgo de la machine ethics no es una respuesta errónea aislada, sino hacer pasar una prediction por authority. Quinto, el pluralismo de valores y la responsabilidad institucional no pueden sustituirse por una aggregate label.
+
+\begin{importantbox}{La idea más importante para llevarse}
+Un modelo de lenguaje grande puede ser un potente generador de conocimiento candidato y de razones candidatas, pero un sistema confiable debe responder además: quién filtra, con base en qué restricciones, qué evidencia se conserva, cómo se rechaza responder y quién tiene la decisión final.
+\end{importantbox}
+
+\subsection{Lecturas adicionales}
+
+Se recomienda leer en el orden de dependencia de la clase. Primero, Maieutic Prompting, para entender el explanation graph y la consistency; después, Symbolic Knowledge Distillation, para entender cómo el critic convierte la salida de un modelo grande en un corpus; por último, Delphi, con atención especial a las secciones de data, limitations, social justice y counterarguments, en lugar de ver solo la tabla de resultados principales.
+
+\begin{itemize}
+  \item Jung et al., \href{https://arxiv.org/abs/2205.11822}{Maieutic Prompting: Logically Consistent Reasoning with Recursive Explanations}.
+  \item West et al., \href{https://arxiv.org/abs/2110.07178}{Symbolic Knowledge Distillation: from General Language Models to Commonsense Models}.
+  \item Jiang et al., \href{https://arxiv.org/abs/2110.07574}{Can Machines Learn Morality? The Delphi Experiment}.
+  \item Bosselut et al., \href{https://aclanthology.org/P19-1470/}{COMET: Commonsense Transformers for Automatic Knowledge Graph Construction}.
+  \item Hwang et al., \href{https://arxiv.org/abs/2010.05953}{COMET-ATOMIC 2020}.
+\end{itemize}
+
+\subsection{Autoevaluación posterior a la clase}
+
+\begin{importantbox}{Doce preguntas de verificación}
+\begin{enumerate}
+  \item ¿Por qué responder correctamente un problema Winograd no demuestra que el commonsense esté resuelto?
+  \item ¿Por qué el Maieutic tree despliega al mismo tiempo la proposición y su negación?
+  \item ¿Por qué Weighted MaxSAT mejora la consistency, pero no puede garantizar la truth?
+  \item ¿En qué se diferencian dataset solving, task solving y capability?
+  \item ¿Cómo cambian los relation types de ATOMIC la recolección de datos y la evaluación?
+  \item ¿Por qué la comparación entre COMET y GPT-3 no es apple-to-apple?
+  \item En Symbolic KD, ¿qué costo de recursos asume cada uno: teacher, critic, corpus y student?
+  \item ¿Por qué un critical teacher puede hacer que el student supere al loose teacher?
+  \item ¿Qué diferencia hay entre el descriptive judgment de Delphi y la normative ethics?
+  \item ¿Por qué la escala de COMMONSENSE NORM BANK no demuestra neutralidad cultural?
+  \item ¿Qué interfaces auditables agrega el neuro-symbolic hybrid y qué puntos de falla agrega también?
+  \item ¿Por qué el value pluralism requiere la participación de las humanities y de las instituciones, y no solo modelos más grandes?
+\end{enumerate}
+\end{importantbox}
+
+\end{document}

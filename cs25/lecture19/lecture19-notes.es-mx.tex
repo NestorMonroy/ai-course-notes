@@ -1,0 +1,631 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+
+\renewcommand{\notetitle}{Lecture 19: Low-level Embodied Intelligence with Foundation Models}
+\renewcommand{\noteauthors}{Elaborado a partir de la conferencia de Fei Xia, los subtítulos oficiales hechos por personas, las diapositivas recuperadas y los artículos de PaLM-E / RT-2 / Language-to-Rewards}
+\renewcommand{\notedate}{CS25 V3 · versión reescrita en 2026 con enfoque source-first}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{Clase: 2023-10-10; publicación: 2023-12-08}
+\renewcommand{\videoduration}{1:18:13}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=fz8wf9hN20c}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.94\textwidth,height=0.54\textheight,keepaspectratio]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\let\standardtableofcontents\tableofcontents
+\renewcommand{\tableofcontents}{%
+  \begingroup
+  \small
+  \setlength{\parskip}{0pt}
+  \standardtableofcontents
+  \endgroup
+}
+
+\begin{document}
+\makecscover
+
+\section{Auditoría de fuentes: dos interfaces para conectar el lenguaje con los robots}
+
+Esta clase no trata en términos generales de «conectar robots a modelos grandes», sino de una systems question más concreta: si la semántica de alto nivel del lenguaje y de la visión ya es muy sólida, ¿cómo se conecta de manera fiable con acciones de bajo nivel continuas, en tiempo real y sujetas a restricciones físicas? Fei Xia responde con dos rutas. La primera es la \textbf{ruta de integración de modelos}, representada por PaLM-E, RT-2 y RT-X: reunir perception, language reasoning y action prediction en un solo modelo que puede entrenarse de forma conjunta. La segunda es la \textbf{ruta de interfaz por capas}, representada por Language to Rewards: hacer que el LLM genere un reward program y que después Model Predictive Control (MPC, control predictivo basado en modelo) u otro optimizador ejecute el control de bajo nivel.
+
+\subsection{Límites oficiales de la clase y problemas de la versión anterior}
+
+Esta reescritura toma la grabación oficial de Stanford Online \texttt{fz8wf9hN20c} como única fuente del orden de la clase; la clase se impartió el 10 de octubre de 2023. La grabación incluye subtítulos \texttt{en-US} hechos por personas, y los 55 estados didácticos completos se recuperaron página por página del video en 1080p. La versión anterior no tenía enlace al video, solo una figura en el cuerpo del texto, y reducía PaLM-E, RT-2, reward generation y los problemas de seguridad a una lista de nombres de productos; no mostraba la estructura en dos partes de la lecture, las dos causas de fondo (datos e interfaz), el mecanismo de los action token ni la cadena de evidencia del co-fine-tuning, y tampoco conservaba las condiciones restrictivas expresadas en la sesión de preguntas y respuestas. Por eso esta vez se reconstruyó desde cero en lugar de ampliarla parcialmente.
+
+\begin{longtable}{@{}L{0.18\textwidth}L{0.31\textwidth}L{0.39\textwidth}@{}}
+\toprule
+Capa de evidencia & Material local & Función en los apuntes \\
+\midrule
+Grabación oficial & 1:18:13, 55 estados didácticos finales & Determina el orden de las slide, las demo, los gráficos, las fórmulas y los límites de Q\&A \\
+Subtítulos oficiales hechos por personas & 1,597 caption, timed transcript & Recupera motivaciones, advertencias, decisiones de diseño, seguridad y direcciones futuras \\
+Primary sources & PaLM-E, RT-1, RT-2, RT-X, Language Table, Language to Rewards & Verifica la estructura de los modelos, los objetivos de entrenamiento, los benchmark y la terminología \\
+Auditoría visual & 55 capturas a ancho completo y selection TSV & De cada slide del mismo video se conserva solo un estado representativo; la reproducción cuadro por cuadro no se cuenta como páginas distintas \\
+\bottomrule
+\end{longtable}
+
+\begin{warningbox}{Límites temporales y límites de la evidencia}
+Este texto reconstruye la clase del 2023-10-10 y no proyecta modelos robóticos posteriores como si fueran hechos de la clase. Una demo en video muestra que cierto sistema completó una tarea en una configuración específica, no que maneje de forma fiable el mundo abierto; una mejora en un benchmark indica un mejor desempeño respecto a la línea base, no que se posea sentido común físico de nivel humano; el «positive transfer» indica que el entrenamiento conjunto aporta beneficios con una mezcla de tareas dada, y tampoco significa que la transferencia funcione con todos los robots, tareas y entornos.
+\end{warningbox}
+
+\subsection{Ruta de lectura de las figuras: de las fallas físicas a la elección de interfaz}
+
+La portada coloca Foundation Models en el centro de Low-level Embodied Intelligence, pero el hilo conductor real no es que «cuanto más grande el modelo, mejor». Al leer las figuras conviene seguir de forma continua cinco elementos: qué aporta la \textbf{observation}, qué aprendió el \textbf{model}, qué representación produce la \textbf{interface}, cómo convierte el \textbf{controller} esa representación en acciones y en qué distribución es válida la \textbf{evidence}. Todas las arquitecturas y resultados posteriores pueden volver a examinarse con esta lista de verificación de cinco casillas.
+
+\lecturefigure{slide-01-title-low-level-embodied.jpg}{Lecture 19: Foundation Models e inteligencia corporizada de bajo nivel}{Diapositiva recuperada de la grabación oficial V001; 00:01:18}
+
+\begin{importantbox}{Tesis central de esta clase}
+Los modelos de lenguaje no sustituyen directamente al sistema robótico, sino que cambian \textbf{la fuente del conocimiento semántico} y \textbf{la forma de expresar la interfaz de la tarea} dentro del sistema. El control de bajo nivel sigue teniendo que enfrentar la frecuencia de las acciones, la dinámica, el contacto, las restricciones, la latencia, los límites del hardware y la capa de seguridad; el verdadero problema de ingeniería es conectar el foundation-model prior con estos componentes físicos, no ignorarlos.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Esta sección estableció los límites de la clase y las coordenadas de lectura. A continuación se explica primero por qué el mundo físico es difícil, luego se presenta la ruta de integración de modelos PaLM-E/RT-2/RT-X, después se pasa a Language to Rewards y, por último, se usa la Q\&A para comparar los beneficios, los modos de falla y las soluciones híbridas de ambas interfaces.
+\section{Por qué la Embodied Intelligence es más difícil que conversar}
+
+En el mundo virtual, un error suele manifestarse como un texto equivocado; en el mundo físico, un error puede alterar objetos, dañar el hardware e incluso lastimar a personas. Por eso la inteligencia corporizada no solo necesita reconocer «qué es esto», sino también predecir «qué ocurrirá después de que yo haga esta acción». Esto amplía el problema de la comprensión semántica estática a la toma de decisiones en lazo cerrado y al modelado de consecuencias.
+
+\subsection{Los casos de falla revelan una carencia de world model}
+
+Esta sección parte de dos casos de falla para determinar qué capacidades deberán aportar los modelos posteriores. El ponente muestra un ejemplo en el que un robot, al colocar una lata de refresco de cola en el fregadero, abre por accidente la llave del agua, y otro en el que un brazo robótico, al retraerse, voltea un recipiente. Estos errores no son un simple object detection failure; es posible que el robot haya visto la lata, el fregadero y el brazo robótico, pero no modeló lo suficiente el efecto de la secuencia de acciones sobre el líquido, la gravedad, las colisiones y su propia postura.
+
+\lecturefigure{slide-02-why-embodied-intelligence.jpg}{La complejidad del mundo real y el objetivo de la ambient intelligence}{Diapositiva V002 recuperada de la grabación oficial; 00:04:06}
+
+Esta carencia puede expresarse con una ecuación mínima de transición de estados:
+$$
+s_{t+1}=f(s_t,a_t,\xi_t),\qquad o_t=h(s_t)+\epsilon_t.
+$$
+Aquí $s_t$ es el estado real del entorno en el instante $t$, $a_t$ es la acción del robot, $f$ es la transición de estados afectada por la dinámica y el contacto, y $\xi_t$ representa las perturbaciones no modeladas; $o_t$ es la observation del sensor, $h$ es la función de observación y $\epsilon_t$ es el ruido de medición. El robot solo ve $o_t$, pero debe inferir el estado oculto $s_t$ y predecir las consecuencias de sus acciones.
+
+\begin{knowledgebox}{First use: world model}
+\term{World model (modelo del mundo)} es una representación interna de la relación entre el estado del entorno, las acciones y los resultados futuros. Puede ser un modelo dinámico explícito, una latent transition implícita o un predictor de video, y también puede estar codificado en parte dentro de la policy. Su valor no consiste en replicar el mundo entero, sino en sustentar la predicción, la planeación y la detección de errores relevantes para la tarea.
+\end{knowledgebox}
+
+\teachervoice{Fei Xia usa la conducta inesperada de «el robot coloca la lata en el fregadero, pero abre la llave del agua» para recordar a los estudiantes que el mundo real produce consecuencias de las acciones que quienes entrenan el modelo no previeron. Este ejemplo no es un blooper simpático: muestra que, si la policy carece de un consequence model, incluso un error aleatorio puede llevar a un estado peligroso.}
+
+\subsection{Gibson: la inteligencia surge del lazo cerrado entre el agent y el entorno}
+
+Las fallas anteriores conducen de forma natural a la ecological view de James J. Gibson. En lugar de preguntar solo qué almacena el modelo internamente, conviene preguntar en qué entorno se coloca al agent, qué acciones puede ejecutar y qué retroalimentación recibirá. Los niños aprenden la gravedad, la fricción, el soporte, el alcance y los usos de los objetos mediante años de interacción corporal; si un robot no tiene una experiencia equivalente, difícilmente adquirirá el mismo sentido común con solo unas cuantas teleoperation trajectory.
+
+\lecturefigure{slide-03-gibson-ecological-perception.jpg}{La percepción ecológica de Gibson: comprender el entorno en el que se encuentra la head}{Diapositiva V003 recuperada de la grabación oficial; 00:05:18}
+
+\begin{knowledgebox}{First use: affordance}
+\term{Affordance (posibilidad de acción)} describe lo que el entorno permite hacer a un agent determinado; por ejemplo, una manija «se puede sujetar», una superficie plana «permite colocar cosas», un botón «se puede presionar». No es una propiedad puramente visual del objeto, sino que depende de la morfología del robot, de su espacio de acciones y de la tarea. Un mismo vaso ofrece affordance distintas a una pinza de dos dedos, a una mano humana y a una base móvil.
+\end{knowledgebox}
+
+\subsection{La simulation amplifica la experiencia, pero no sustituye al mundo real}
+
+Una de las implementaciones de ingeniería del playpen seguro es la simulation. El ponente repasa cómo, en trabajos como iGibson, construyó escenas interiores a gran escala, renderizó la observation y dejó que el agent aprendiera en entornos interactivos. Las ventajas de la simulation son que es repetible, paralelizable, que permite acceder al estado oculto y generar label automáticamente; su riesgo es que existe una gap con el mundo real en lo visual, en la dinámica, en el contacto y en la distribución de tareas.
+
+\lecturefigure{slide-04-simulation-digital-twin-perception.jpg}{La simulation proporciona a la vez rendered observation, physics y semantic labels}{Diapositiva V004 recuperada de la grabación oficial; 00:06:36}
+
+\lecturefigure{slide-05-large-realistic-scenes.jpg}{Realistic scenes a gran escala: de los recursos geométricos a los entornos interactivos}{Diapositiva V005 recuperada de la grabación oficial; 00:07:24}
+
+\begin{warningbox}{La simulation no equivale automáticamente a un world model}
+El simulador contiene la dinámica y la distribución de recursos que escribieron sus desarrolladores; que un agent tenga éxito en el simulador puede deberse solo a que aprovechó un shortcut en las texturas, las colisiones o el mecanismo de reset. Al leer un simulation result hay que distinguir si el entorno cubre la variación real, si el ruido de los sensores es razonable, si el modelo de contacto es confiable y si la policy se validó de forma independiente en un robot real.
+\end{warningbox}
+
+\subsection{Las tareas de horizonte largo exponen los cuellos de botella de datos y de composicionalidad}
+
+La sujeción en un solo paso puede aprenderse con una gran cantidad de datos repetidos, pero las tareas domésticas de horizonte largo exigen mantener el estado a lo largo de múltiples room, object, failure recovery y subgoal. La household demo de la figura no pretende demostrar que el robot doméstico ya está resuelto, sino mostrar que el pipeline tradicional de imitation learning se encarece rápidamente en escala de escenas, número de interacciones y combinación de tareas.
+
+\lecturefigure{slide-06-long-horizon-home-tasks.jpg}{Tareas domésticas de horizonte largo: cadenas de acciones, cambios de estado y recuperación ante fallas}{Diapositiva V006 recuperada de la grabación oficial; 00:08:15}
+
+\lecturefigure{slide-07-internet-ai-vs-embodied-ai.jpg}{Internet AI y Embodied AI: comparten módulos semánticos, pero difieren en el lazo cerrado de acción}{Diapositiva V007 recuperada de la grabación oficial; 00:09:12}
+
+\lecturefigure{slide-08-simulation-to-foundation-models.jpg}{De 50k episodes / 1.25M interactions hacia los Foundation Models}{Diapositiva V008 recuperada de la grabación oficial; 00:11:15}
+
+\teachervoice{El ponente describe su paso de la large-scale simulation a los foundation models como un cambio de línea de investigación: solo ampliar escenas e interacciones sigue siendo insuficiente para cubrir el mundo real, mientras que los modelos web-scale pueden aportar priors sobre objetos, lenguaje y sentido común. La palabra central aquí es «complementar el prior», no «la simulation y los robot data ya no son necesarios».}
+
+\subsection{Resumen de la sección}
+
+Las dificultades de la inteligencia corporizada provienen del estado parcialmente observable, las acciones continuas, las consecuencias físicas y la composición de horizonte largo. La simulation puede amplificar la experiencia, pero sigue existiendo la sim-to-real gap; la oportunidad de los foundation models está en incorporar conocimiento previo visual y lingüístico a gran escala, y la siguiente sección debe responder cómo se conecta ese conocimiento previo con el control de bajo nivel.
+\section{Qué falta entre los Foundation Models y la Robotics}
+
+Un foundation model sobresale en high-level reasoning, mientras que un sistema robótico debe producir control continuo en un plazo de decenas a cientos de milisegundos. Entre ambos no existe una API natural: difieren la representación de las entradas y salidas del modelo, la escala de los datos de entrenamiento, la frecuencia de control y las restricciones de seguridad. Esta sección desarrolla por completo el «por qué no se pueden conectar directamente» de la lecture.
+
+\subsection{High-level reasoning y low-level control}
+
+En la figura, PaLM-SayCan, a la izquierda, se encarga de elegir la skill de alto nivel a partir de un objetivo expresado en lenguaje; RT-1, a la derecha, se encarga de convertir la imagen y la instrucción en acciones de bajo nivel. El primero responde «qué hacer a continuación»; el segundo, «cómo deben moverse en este instante las articulaciones o el efector final». El plan de alto nivel tolera respuestas del orden de segundos y pasos discretos; la policy de bajo nivel debe manejar errores continuos y correcciones en lazo cerrado.
+
+\lecturefigure{slide-09-foundation-models-robotics-gap.jpg}{Foundation Models + Robotics: high-level reasoning y low-level control}{Diapositiva V009 recuperada de la grabación oficial; 00:13:42}
+
+Una policy de bajo nivel puede escribirse como
+$$
+a_t\sim \pi_\theta(a_t\mid o_{\le t},g),
+$$
+donde $a_t$ es la acción actual, $o_{\le t}$ es el observation history visual, de proprioception, etc., hasta el instante $t$, $g$ es el goal expresado en lenguaje y $\pi_\theta$ es la policy con parámetros $\theta$. A diferencia de una respuesta de texto que se produce una sola vez, esta distribución se vuelve a invocar en cada ciclo de control y modifica la observation del paso siguiente.
+
+\begin{importantbox}{First use: policy y trajectory}
+Una \term{Policy (política)} es la correspondencia entre la información actual y una distribución sobre acciones; una \term{trajectory (trayectoria)} es la secuencia temporal $(o_0,a_0,o_1,a_1,\ldots)$. La unidad básica de un robot dataset suele ser la trajectory, no un pair independiente de imagen y texto. Es más costosa, porque cada dato requiere que un agent real o simulado interactúe con el entorno en lazo cerrado.
+\end{importantbox}
+
+\subsection{Del modular stack al joint scaling}
+
+La línea de tiempo pone en paralelo la percepción, planeación y control modulares (perception/planning/control) de 2014--2021 con RT-1, PaLM-E y RT-2 de 2021--2023. La tendencia no es que todos los módulos desaparezcan de golpe, sino que cada vez más representaciones y tareas se colocan en un espacio de parámetros compartido, lo que logra la model consolidation mediante mezclas de datos más grandes. La siguiente diapositiva resume la scaling recipe con «combine large diverse offline datasets», al tiempo que deja abierta la duda con «Scale up and done?».
+
+\lecturefigure{slide-10-robotics-scaling-timeline.jpg}{Línea de tiempo de los sistemas robóticos: de lo modular a la model consolidation}{Diapositiva V010 recuperada de la grabación oficial; 00:15:06}
+
+\lecturefigure{slide-11-scaling-recipe.jpg}{Scaling recipe: datos fuera de línea, modelo multitarea y positive transfer}{Diapositiva V011 recuperada de la grabación oficial; 00:15:36}
+
+\begin{warningbox}{«Scale up» no es la respuesta predeterminada}
+Los datos de lenguaje pueden recolectarse pasivamente de internet; los datos robóticos implican costos de embodiment, entorno, operator, reset y seguridad. Aumentar los parámetros solo puede producir transfer si la data mixture aporta supervision pertinente, si la action representation puede aprenderse y si la capacidad del modelo no está ocupada por tareas equivocadas. La escala es una variable experimental, no un lema que sustituya la definición del problema.
+\end{warningbox}
+
+\subsection{Moravec's paradox: la fluidez verbal no equivale a destreza manual}
+
+Esta subsección explica con más detalle por qué el high-level model success no puede extrapolarse directamente al control. La Moravec's paradox señala que el symbolic reasoning, que a los humanos les parece de alto nivel, puede resultar fácil de implementar en una computadora, mientras que las capacidades sensoriomotoras, aunque subjetivamente «no requieren pensar», encierran una larga evolución y experiencia corporal. En la sujeción robótica, los errores milimétricos, los cambios de contacto, los objetos flexibles y las oclusiones suelen ser más difíciles que generar una explicación.
+
+\lecturefigure{slide-12-moravec-paradox.jpg}{Moravec's paradox: la percepción y el movimiento de bajo nivel pueden ser más difíciles que el razonamiento de alto nivel}{Diapositiva V012 recuperada de la grabación oficial; 00:18:33}
+
+\teachervoice{Fei Xia recurre a la Moravec's paradox para explicar por qué el éxito de los LLM no resolvió automáticamente la robótica: saber describir «cómo sujetar una taza» y poder sujetarla de forma estable ante variaciones de fricción, oclusiones e impactos de contacto son capacidades de niveles distintos. El curso toma esta brecha como el problema que define la low-level embodied intelligence.}
+
+\subsection{Dos causas de fondo: escasez de datos e interfaz desalineada}
+
+La primera challenge slide muestra, mediante diferencias de órdenes de magnitud, la escasez de robot trajectories; la segunda señala que un LLM produce token de texto, mientras que el robot necesita posición, rotación, gripper, velocidad o par. Aunque el LLM posea conocimiento semántico, si durante el entrenamiento no vio supervisión de acciones que pueda alinearse, o si su espacio de salida no puede expresar la precisión del control, no puede convertirse directamente en una policy.
+
+\lecturefigure{slide-13-challenge-lack-of-data.jpg}{Challenge 1: hay muchos menos robot data que image-text / text data}{Diapositiva V013 recuperada de la grabación oficial; 00:20:21}
+
+\lecturefigure{slide-14-challenge-llm-interface.jpg}{Challenge 2: el LLM no tiene una low-level control interface natural}{Diapositiva V014 recuperada de la grabación oficial; 00:21:30}
+
+\lecturefigure{slide-15-agenda-two-parts.jpg}{Dos rutas: model consolidation y new interfaces}{Diapositiva V015 recuperada de la grabación oficial; 00:23:27}
+
+\begin{knowledgebox}{Qué corrige cada una de las dos rutas}
+La ruta de PaLM-E / RT-2 corrige principalmente el \textbf{reparto de datos y representaciones}: entrena conjuntamente las web-scale semantic tasks y las robot trajectories en un mismo modelo. La ruta de Language to Rewards corrige principalmente la \textbf{interfaz desalineada}: el modelo de lenguaje no produce directamente cada actuator command, sino una reward specification que un controlador puede optimizar.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La brecha entre los foundation models y el robot control puede reducirse a data regime, action representation, control loop y safety constraint. A continuación, la lecture intenta primero integrar el modelo y los datos en un VLA unificado y, después, conservar el controller tradicional y dejar al LLM solo a cargo de la reward interface.
+\section{PaLM-E: inyectar la percepción multimodal en el modelo de lenguaje}
+
+PaLM-E es el punto de partida de la primera línea de trabajo. No trata al robot como un downstream classifier independiente, sino que inserta sensor embedding continuos en la language token sequence, de modo que un único embodied multimodal language model atienda a la vez la planning del robot, la respuesta a preguntas visuales, el captioning y las tareas generales de lenguaje. La pregunta central es si esta consolidation produce positive transfer en lugar de interferencia entre tareas.
+
+\subsection{Model family y objetivo de consolidation}
+
+La diapositiva de la familia de modelos ubica PaLM-SayCan, RT-1, PaLM-E y RT-2 en un mismo diagrama de evolución. El eje vertical es la escala del foundation model y el horizontal es la capacidad de la low-level policy; PaLM-E intenta fusionar la embodied planning con las capacidades generales de lenguaje y visión, y RT-2 da un paso más al hacer que el VLM genere directamente action token.
+
+\lecturefigure{slide-16-model-consolidation-family.jpg}{2023--2024 Google DeepMind robotics model family}{Diapositiva V016 recuperada del video oficial; 00:26:00}
+
+\lecturefigure{slide-17-palm-e-title.jpg}{PaLM-E: Embodied Multimodal Language Model}{Diapositiva V017 recuperada del video oficial; 00:26:03}
+
+\subsection{Cómo entra el sensor embedding al LLM}
+
+PaLM-E proyecta la image, el state estimate u otra sensor observation, mediante un encoder y una projection, a la misma dimensión que los language token, y luego inserta esos vectores en el prompt. Si el embedding de un token de texto es $E(w_i)$, la sensor feature es $z_j$ y la projection es $W_s$, la secuencia de entrada puede abstraerse como
+$$
+x=\big[E(w_1),\ldots,E(w_k),W_sz_1,\ldots,W_sz_m,E(w_{k+1}),\ldots\big].
+$$
+Aquí $w_i$ es el $i$-ésimo token de texto, $z_j$ es la $j$-ésima sensor feature, $W_s$ proyecta la sensor feature a la LLM hidden dimension y $x$ es la embedding sequence unificada que se envía al Transformer.
+
+\lecturefigure{slide-18-palm-e-architecture.jpg}{PaLM-E: la salida del sensor encoder como language-model token}{Diapositiva V018 recuperada del video oficial; 00:26:12}
+
+\begin{importantbox}{La consolidation de PaLM-E no significa que todos los sensor se conviertan en texto}
+El sensor embedding y el text embedding comparten la interfaz de secuencia, pero tienen orígenes distintos. El modelo los fusiona en un mismo hidden space mediante self-attention; esto no significa que la image, la proprioception o el state estimate se traduzcan sin pérdida a lenguaje natural, ni garantiza que el conocimiento previo del LLM pueda aplicarse directamente a cada estado del robot.
+\end{importantbox}
+
+\subsection{Mixed-task training: que los robot data se apoyen en los web data}
+
+La training slide incluye a la vez embodied robotics tasks, vision-language tasks y tareas generales de lenguaje. La intuición es que los robot data son escasos, pero las web tasks pueden entrenar la semántica visual, las relaciones entre objetos y el seguimiento de instrucciones en lenguaje; si la representación compartida funciona, el modelo puede mejorar la toma de decisiones del robot con tareas auxiliares a gran escala. Un objetivo simplificado es
+$$
+\mathcal{L}=\lambda_r\,\mathbb{E}_{D_r}\!\left[-\log p_\theta(y_r\mid x_r)\right]
++\lambda_w\,\mathbb{E}_{D_w}\!\left[-\log p_\theta(y_w\mid x_w)\right].
+$$
+Aquí $D_r$ es el robot/embodied dataset, $D_w$ es el web-scale vision-language o language dataset, $x$ es la secuencia de entrada, $y$ son los token objetivo y $\lambda_r,\lambda_w$ controlan el peso de muestreo o de pérdida de los dos tipos de tarea durante el entrenamiento.
+
+\lecturefigure{slide-19-palm-e-training-and-tasks.jpg}{Entrenamiento mixto embodied y vision-language de PaLM-E}{Diapositiva V019 recuperada del video oficial; 00:28:09}
+
+\lecturefigure{slide-20-palm-e-main-model.jpg}{Main model: PaLM-E-562B y entradas de varios tipos de sensor / task}{Diapositiva V020 recuperada del video oficial; 00:29:30}
+
+\begin{lstlisting}[caption={Pseudocódigo conceptual del muestreador de entrenamiento multitarea}]
+for step in range(num_steps):
+    task = sample_task(weights={"robot": lambda_r, "web": lambda_w})
+    batch = datasets[task].next_batch()
+    inputs = encode_text_and_sensors(batch)
+    loss = autoregressive_loss(model(inputs), batch.targets)
+    optimizer.step(loss)
+\end{lstlisting}
+
+\teachervoice{El ponente enfatiza que el objetivo de PaLM-E no es mantener un modelo dedicado para cada tarea, sino observar si el joint scaling permite que las tareas se ayuden entre sí. Por eso esta nota entiende «one model» como una hipótesis experimental de parámetros y representaciones compartidos, no como que en el despliegue deban desaparecer todos los módulos de perception, planning y safety.}
+
+\subsection{Cómo leer la positive transfer}
+
+La diapositiva de Multimodal example muestra que el modelo puede responder preguntas visuales, procesar el estado del robot y ejecutar embodied planning; la bar chart es más importante, porque compara el desempeño en robot task con distintos esquemas de entrenamiento. Se define la diferencia entre el entrenamiento conjunto y el entrenamiento de una sola tarea sobre la tarea objetivo $T$ como
+$$
+\Delta_T=\operatorname{Score}(M_{\text{joint}},T)-\operatorname{Score}(M_{\text{single}},T).
+$$
+Aquí $M_{\text{joint}}$ usa la mezcla multitarea y $M_{\text{single}}$ usa solo los datos de la tarea objetivo. $\Delta_T>0$ es positive transfer y $\Delta_T<0$ es negative interference. Debe interpretarse tarea por tarea y según la cantidad de datos; no basta con mirar el promedio.
+
+\lecturefigure{slide-21-palm-e-multimodal-examples.jpg}{Ejemplos multimodales y de embodied task de PaLM-E}{Diapositiva V021 recuperada del video oficial; 00:32:27}
+
+\lecturefigure{slide-22-palm-e-positive-transfer.jpg}{Positive transfer de PaLM-E: ganancia relativa por grupo de tareas}{Diapositiva V022 recuperada del video oficial; 00:36:27}
+
+\begin{knowledgebox}{Lectura de la figura: primero la training mixture, después la bar height}
+En la figura, cada color representa una configuración de model/data distinta, y el eje horizontal muestra los grupos de tareas. El primer paso no es buscar la barra más alta, sino confirmar si la comparación solo cambia la model scale, si se agregan general visual-language data y si los robot data son los mismos; el segundo paso es observar si la ganancia se concentra en algún tipo de tarea. La figura respalda que «el entrenamiento conjunto puede producir transfer», pero no demuestra que cualquier web data ayude, ni que todas las embodied tasks compartan la misma representation óptima.
+\end{knowledgebox}
+
+\subsection{La conclusión correcta del Real robot result}
+
+La diapositiva de Real Robot Results presenta lado a lado el language prompt, la observation de imagen y el comportamiento del robot. Demuestra que el modelo puede ejecutar tareas de entrenamiento y de generalización en una plataforma real, y muestra que un mismo model checkpoint atiende varias instrucciones; no cuantifica por separado la confiabilidad a largo plazo, la tasa de recuperación, el desgaste del hardware ni los incidentes de seguridad, por lo que no se puede inferir que el sistema esté listo para desplegarse a partir de unos cuantos videos exitosos.
+
+\lecturefigure{slide-23-palm-e-real-robot-results.jpg}{Resultados de PaLM-E en robots reales y transferencia entre tareas}{Diapositiva V023 recuperada del video oficial; 00:37:57}
+
+\begin{warningbox}{La positive transfer no es «el conocimiento de internet convertido automáticamente en acciones»}
+La web task aporta prior sobre objetos, lenguaje y relaciones; la robot trajectory aporta supervisión sobre acciones y sus consecuencias. Si el objeto objetivo, la camera geometry, la action semantics o el embodiment no son compatibles con el entrenamiento, el modelo todavía puede fallar. La transfer es un efecto estadístico que surge del entrenamiento conjunto y de la alineación de representaciones, no un botón de copia de conocimiento que prescinda de los robot data.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+PaLM-E logra la model consolidation mediante una embedding sequence unificada y un mixed-task objective. Su evidencia importante no es que el modelo «pueda ver imágenes y conversar», sino si las tareas auxiliares y la scale mejoran la embodied task; además, las demo con robots reales deben seguir evaluándose por separado de la confiabilidad a largo plazo y la seguridad.
+\section{RT-2: de Vision-Language Model a Vision-Language-Action Model}
+
+PaLM-E todavía produce principalmente language-level plan o answer. RT-2 va un paso más allá: conserva la capacidad semántica visual del VLM y, al mismo tiempo, discretiza la action del robot en tokens, de modo que el autoregressive decoder predice directamente acciones de bajo nivel. De ahí surge la interfaz del modelo Vision-Language-Action (VLA).
+
+\subsection{Por qué es útil el VLM prior}
+
+El VLM aprende, mediante el preentrenamiento imagen-texto, categorías de objetos, atributos, relaciones, usos comunes e instrucciones en lenguaje. Es posible que los datos de robots nunca contengan combinaciones como «pon la fresa en el tazón del color correcto» o «retira el animal extinto», pero el VLM ya aprendió de los datos de internet conceptos como strawberry, color matching y extinct animal. RT-2 busca comprobar si estos semantic prior pueden incorporarse a la action prediction bajo robot trajectory supervision.
+
+\lecturefigure{slide-24-rt2-transition.jpg}{Del mundo semántico del VLM al control robótico de RT-2}{Diapositiva V024 recuperada de la grabación oficial; 00:39:54}
+
+\lecturefigure{slide-25-vlm-world-understanding.jpg}{El VLM codifica a la vez visual y semantic world knowledge}{Diapositiva V025 recuperada de la grabación oficial; 00:40:42}
+
+\begin{knowledgebox}{First use: VLA}
+Un \term{Vision-Language-Action model (VLA)} recibe una observation visual y una instruction en lenguaje, y produce acciones del robot o tokens de acción. Su diferencia con un VLM común no está solo en el label de la última capa: los datos de entrenamiento contienen robot trajectories de lazo cerrado, los tokens de salida tienen semántica de control y la inferencia además está sujeta a restricciones de frecuencia de control, hardware y capa de seguridad.
+\end{knowledgebox}
+
+\subsection{Representar la action como tokens}
+
+RT-1 ya había entrenado una Transformer policy con action bins discretos; RT-2 lleva la misma idea a un decoder de VLM de gran tamaño. Sea $[l_j,u_j]$ el rango de la dimensión $j$ de la acción continua, discretizada con $B$ bins; entonces
+$$
+z_{t,j}=\operatorname{clip}\!\left(
+\left\lfloor \frac{a_{t,j}-l_j}{u_j-l_j}B\right\rfloor,0,B-1
+\right).
+$$
+Aquí $a_{t,j}$ es la dimensión $j$ de la acción $a_t$, $z_{t,j}$ es el token index discreto correspondiente, $l_j,u_j$ son el rango físico y $B$ es el número de bins. En la inferencia, el centro del token se decodifica de vuelta a una acción continua, que luego se entrega al robot controller.
+
+\lecturefigure{slide-26-vlm-as-robot-policy.jpg}{RT-1 y RT-2: de image + text a discretized actions}{Diapositiva V026 recuperada de la grabación oficial; 00:45:15}
+
+\lecturefigure{slide-27-action-tokenization.jpg}{Tokenización de acciones: discretización de las dimensiones de posición, rotación y gripper}{Diapositiva V027 recuperada de la grabación oficial; 00:45:57}
+
+\begin{lstlisting}[caption={Conversión conceptual entre acción continua y action token}]
+def encode_action(action, low, high, bins):
+    ratio = (action - low) / (high - low)
+    token = floor(clip(ratio, 0.0, 1.0) * bins)
+    return clip(token, 0, bins - 1)
+
+def decode_action(token, low, high, bins):
+    center = (token + 0.5) / bins
+    return low + center * (high - low)
+\end{lstlisting}
+
+\begin{warningbox}{Los tres tipos de error del action token}
+El primero es el \textbf{quantization error}: con muy pocos bins se pierde precisión; el segundo es el \textbf{support error}: un dexterous motion que no apareció en el entrenamiento puede no tener un token pattern adecuado; el tercero es la \textbf{semantic collision}: si los action tokens comparten la vocabulary de texto o su correspondencia no es clara, el decoder puede confundir la semántica de la salida. La tokenización hace que el modelo sea entrenable, pero eso no significa que desaparezca la dificultad del control continuo.
+\end{warningbox}
+
+\subsection{Autoregressive action y co-fine-tuning}
+
+Una vez que la acción de un paso de tiempo se escribe como la token sequence $z_{t,1:J}$, el modelo predice
+$$
+p_\theta(z_{t,1:J}\mid I_t,g)
+=\prod_{j=1}^{J}p_\theta(z_{t,j}\mid I_t,g,z_{t,<j}),
+$$
+donde $I_t$ es la image observation actual, $g$ es la instruction en lenguaje, $J$ es la dimensión de la acción o el número de tokens, y $z_{t,<j}$ son los action tokens generados previamente. La autoregressive factorization aprovecha la language modeling machinery, pero el orden de las dimensiones y la decoding latency influyen en el control.
+
+El co-fine-tuning muestrea de forma alternada web VQA/caption examples y robot trajectory examples. Los web examples mantienen el semantic prior; los robot examples le enseñan al modelo cuándo producir action tokens. Si se entrena solo con robot data, el modelo, aunque sea de gran escala, puede olvidar la semántica general; si se usa solo web data, no hay ninguna supervisión de acciones.
+
+\lecturefigure{slide-28-rt2-training-data-models.jpg}{RT-2 training mixture: web-scale data + robot trajectories}{Diapositiva V028 recuperada de la grabación oficial; 00:46:54}
+
+\lecturefigure{slide-29-rt2-inference.jpg}{RT-2 inference: la imagen y la instrucción pasan por el VLA, que produce action tokens}{Diapositiva V029 recuperada de la grabación oficial; 00:48:54}
+
+\teachervoice{El ponente describe la action representation como un problema que todavía se explora. Decimal, float-like string y extra tokens pueden funcionar, pero ninguno se ha declarado el mejor de manera universal; si en el futuro se cambia a una nueva embodiment o se agrega una action dimension, sigue abierta la pregunta de si la vocabulary anterior puede transferirse.}
+
+\begin{importantbox}{La cadena causal del co-fine-tuning}
+Los web data aportan semantic variation; los robot data anclan la semántica a la action; los parámetros compartidos permiten que ambas supervisiones interactúen; el ablation verifica después si la improvement proviene realmente del co-fine-tuning. Solo si se enlazan estos cuatro pasos, «el conocimiento de internet entra en el control» deja de ser un relato y se convierte en un mecanismo comprobable.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+RT-2 transforma un VLM en un VLA: la visión y el lenguaje entran en el mismo decoder, las acciones de bajo nivel se discretizan en tokens, y los web data y las robot trajectories se entrenan en conjunto. Esta interfaz aprovecha plenamente el autoregressive Transformer, pero debe afrontar los problemas de quantization, latencia de control, OOD action y transferencia a nuevas embodiment.
+\section{Resultados de RT-2: ver la novelty y también los límites}
+
+La parte de resultados presenta cuatro tipos de evidencia: casos de éxito, resúmenes por categoría, ablation y benchmarks específicos. Una lectura rigurosa pregunta por separado qué responde cada uno, en lugar de reunir todas las demos llamativas bajo la etiqueta de «emergence». Esta sección los desglosa en cuatro niveles: qualitative, quantitative, causal y compositional.
+
+\subsection{Emergent skills: combinar instrucciones nuevas, no crear de la nada}
+
+La qualitative grid muestra a RT-2 ejecutando acciones sobre objetos, símbolos y combinaciones semánticas que no aparecen directamente en los robot data, por ejemplo reconocer una marca de refresco de cola, elegir el objeto más pequeño o entender categorías abstractas. Lo que se llama emergent se parece más a \textbf{una nueva combinación de web semantics + learned motor primitive}; el espacio de acciones sigue proviniendo del robot controller entrenado y del token vocabulary.
+
+\lecturefigure{slide-30-rt2-emergent-skills.jpg}{Emergent skills de RT-2: símbolos, sentido común y combinación de instrucciones nuevas}{Diapositiva V030 recuperada de la grabación oficial; 00:49:30}
+
+\lecturefigure{slide-31-rt2-emergent-skills-chart.jpg}{Clasificación de las emergent skills: symbol understanding, reasoning, human recognition}{Diapositiva V031 recuperada de la grabación oficial; 00:50:24}
+
+\begin{knowledgebox}{Lectura de la figura: qué oculta una gráfica de barras de promedios}
+La gráfica de barras agrega varias task families; primero se comparan los modelos dentro de la misma category y después se mira el average. Si reasoning mejora mientras motor execution no cambia, el semantic prior está actuando; si human recognition es alto pero unseen environment es bajo, la transferencia de conceptos visuales no equivale a robustez ante la escena. El promedio no indica en qué objetos, acciones o entornos se concentran las fallas.
+\end{knowledgebox}
+
+\subsection{Clasificación seen / unseen y ablation}
+
+La quantitative slide separa unseen objects, unseen backgrounds y unseen environments, y este diseño es necesario: el cambio de objeto pone a prueba la semantic recognition, el cambio de fondo pone a prueba la robustez visual y el cambio de entorno además modifica la geometry y la affordance. La ablation slide compara después co-fine-tuning, solo robot data y distintas model scale, para intentar identificar de dónde proviene la transfer.
+
+\lecturefigure{slide-32-rt2-quantitative-generalization.jpg}{Tasa de éxito de RT-2 en el entorno seen y en varias configuraciones unseen}{Diapositiva V032 recuperada de la grabación oficial; 00:51:00}
+
+\lecturefigure{slide-33-rt2-ablation-results.jpg}{Ablation de RT-2: contribución del co-fine-tuning y de la data mixture}{Diapositiva V033 recuperada de la grabación oficial; 00:51:48}
+
+\begin{warningbox}{La ablation también tiene límites de extrapolación}
+Si la ablation se realiza con el mismo robot, la misma camera, el mismo task template y el mismo evaluation protocol, puede mostrar el efecto de la configuración de entrenamiento sobre ese sistema, pero no responde directamente sobre hardware nuevo, control táctil, entornos humanos dinámicos ni tareas de varias horas. Cuanto más estricto es el control experimental, más clara es la explicación causal; al mismo tiempo, el ámbito de aplicación también debe declararse con claridad.
+\end{warningbox}
+
+\subsection{Language Table y chain-of-thought}
+
+El Language Table benchmark evalúa manipulation sobre una mesa descrita mediante lenguaje, y sirve para comparar instruction following y generalización composicional. La página de chain-of-thought, por su parte, hace que el modelo genere primero un razonamiento semántico visual y después la action; muestra que el intermediate reasoning puede ayudar con tareas del tipo «mover a cierto lugar el objeto que puede contener agua», pero para saber si el reasoning textual impulsa realmente la acción de forma causal hace falta una intervention, no basta con mirar la trace en lenguaje natural.
+
+\lecturefigure{slide-34-language-table-benchmark.jpg}{Language Table: resultados de generalización de las push-object instruction}{Diapositiva V034 recuperada de la grabación oficial; 00:52:03}
+
+\lecturefigure{slide-35-rt2-chain-of-thought.jpg}{Chain-of-thought y secuencia de acciones de RT-2-PaLM-E}{Diapositiva V035 recuperada de la grabación oficial; 00:53:30}
+
+\begin{knowledgebox}{Qué significa que «el reasoning ayudó a la policy»}
+La evidencia más sólida no es que el modelo escriba una explicación aparentemente razonable, sino que modificar o retirar el intermediate reasoning cambie de forma sistemática el action success; o bien que el model supere claramente, en held-out tasks que requieren combinar relaciones en varios pasos, a un baseline de la misma capacidad que no genera reasoning. La trace en lenguaje natural es una ventana de diagnóstico; no equivale automáticamente a una faithful internal computation.
+\end{knowledgebox}
+
+\subsection{Síntesis de los VLA y problemas aún sin resolver}
+
+La página de VLA summary enumera como beneficios las tareas nuevas, los objetos nuevos, la chain-of-thought y la generalization, y presenta como líneas futuras la data diversity, el context adicional y la ampliación de capability. No declara resuelto el low-level control; al contrario, los resultados indican que ya aparece la semantic transfer, pero los robot data, la precisión de las acciones y la closed-loop reliability siguen siendo los cuellos de botella decisivos.
+
+\lecturefigure{slide-36-vla-summary.jpg}{Síntesis de capacidades de los modelos VLA y problemas futuros}{Diapositiva V036 recuperada de la grabación oficial; 00:55:36}
+
+\teachervoice{El ponente llama a estos resultados «semantic transfer» y no inteligencia robótica general. El tono de la clase importa: que el modelo pueda ejecutar órdenes que no aparecieron textualmente en el entrenamiento es una capacidad nueva que merece atención; pero sigue operando en el mismo action space, la misma plataforma robótica y escenarios limitados.}
+
+\subsection{Resumen de la sección}
+
+Las conclusiones confiables de RT-2 se sostienen en varios niveles de evidencia a la vez: los qualitative cases muestran combinaciones nuevas, las category metrics miden la generalización, la ablation rastrea el co-fine-tuning y Language Table mide la instruction generalization. En conjunto respaldan que el VLM prior puede transferirse al control, pero no eliminan los límites de embodiment, confiabilidad y seguridad.
+\section{RT-X: ¿pueden los Cross-Embodiment Data seguir ampliando la Transfer?}
+
+Si los datos de un solo robot son demasiado pocos, una dirección natural es combinar trajectories de varias instituciones, varios robots y varias tareas. Open X-Embodiment / RT-X unifica en lo posible el action space, la observation y el dataset schema, y luego examina si un modelo puede beneficiarse de distintas embodiment. Es un campo de prueba más cercano a la realidad para la scaling law en robotics.
+
+\subsection{Data mixture y action heterogeneity}
+
+La diapositiva del collage muestra que los datos provienen de distintos brazos robóticos, camera, workspace y tareas. Al combinarlos hay que resolver la action dimension, el coordinate frame, la control frequency, la gripper semantics y los missing sensors. Un simple concatenate puede hacer que un dataset grande opaque a uno pequeño, y también puede hacer que action labels incompatible produzcan negative transfer.
+
+\lecturefigure{slide-37-rtx-data-collage.jpg}{Open X-Embodiment: mezcla de datos entre instituciones y entre robots}{Diapositiva V037 recuperada de la grabación oficial; 00:56:33}
+
+\lecturefigure{slide-38-rtx-positive-transfer.jpg}{RT-X: resultados de positive transfer del entrenamiento entre embodiment}{Diapositiva V038 recuperada de la grabación oficial; 00:57:09}
+
+\begin{knowledgebox}{Términos clave: las cuatro dimensiones del robotics scaling}
+\begin{tabularx}{\textwidth}{@{}L{0.18\textwidth}X@{}}
+\toprule
+Dimensión & Qué se incrementa y riesgo principal \\
+\midrule
+Model scale & Parámetros y compute; el riesgo es que la data sea insuficiente y que aumenten la latency y la memory \\
+Task scale & Variedad de instrucciones y comportamientos; el riesgo es el conflicto de label/action y la long-tail failure \\
+Environment scale & Escenarios, objetos y fondos; el riesgo es la observation shift y las affordance nuevas \\
+Embodiment scale & Morfología del robot y action space; el riesgo es la incompatibilidad de coordenadas, frecuencias y semántica de control \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\teachervoice{La síntesis que hace Fei Xia de RT-X es mesurada: en el campo de la robótica se han visto «signs of life» de positive transfer, pero la comunidad de modelos de lenguaje ya considera la transfer algo habitual. Dicho de otro modo, el cross-embodiment scaling es una señal importante, pero todavía no llega a la etapa madura en la que «más datos implica necesariamente mejores resultados».}
+
+\subsection{Conclusiones de la Part 1}
+
+La primera parte concluye en tres puntos: la model consolidation acerca el high-level reasoning y el low-level control a un mismo sistema; el joint scaling pone a prueba si los diverse data producen transfer; y la positive transfer es el criterio decisivo para evaluar si el scaling se sostiene. A continuación, el curso deja de ampliar una sola end-to-end policy y adopta otra interfaz: la salida del LLM pasa a ser reward code.
+
+\lecturefigure{slide-39-part1-summary.jpg}{Part 1: model consolidation, joint scaling y positive transfer}{Diapositiva V039 recuperada de la grabación oficial; 00:57:51}
+
+\subsection{Resumen de la sección}
+
+RT-X convierte el problema de la escasez de datos en un problema de estandarización de datos entre embodiment y de transfer. Extiende la línea de RT-2, pero la action heterogeneity y el dataset imbalance hacen más difícil el «modelo unificado»; esto también explica por qué la segunda línea opta por conservar el controller tradicional.
+\section{Language to Rewards: que el LLM escriba el objetivo, no directamente las acciones}
+
+La segunda parte redefine la interfaz. Si el LLM genera directamente actuator-level code, los errores semánticos pasan de inmediato al control; si genera directamente action tokens, puede quedar limitado por el support del entrenamiento y por la precisión de la discretización. Language to Rewards hace que el LLM genere una reward function y que un optimizer de bajo nivel busque después una trajectory que satisfaga la reward y las restricciones.
+
+\subsection{Por qué tanto raw code como raw action pueden ser malas interfaces}
+
+Después de la portada, los ejemplos de falla comparan dos interfaces directas: pedirle al modelo que escriba código de control de bajo nivel puede producir lógica no ejecutable o peligrosa; pedirle que emita largas cadenas numéricas de action carece de una semántica física estable y de feedback correction. El problema de fondo no es si el LLM puede generar tokens, sino qué representación intermedia conserva la intención expresada en lenguaje y, a la vez, permite que el controller aproveche la dinámica.
+
+\lecturefigure{slide-40-language-to-rewards-title.jpg}{Language to Rewards for Robotic Skill Synthesis}{Diapositiva V040 recuperada de la grabación oficial; 00:58:30}
+
+\lecturefigure{slide-41-naive-language-action-interface.jpg}{Fragilidad de generar directamente code o action sequence}{Diapositiva V041 recuperada de la grabación oficial; 00:58:45}
+
+\lecturefigure{slide-42-interface-question.jpg}{Pregunta central: ¿cuál es la mejor interfaz entre language y low-level action?}{Diapositiva V042 recuperada de la grabación oficial; 00:58:51}
+
+\begin{importantbox}{La reward es una specification, no una policy completa}
+La reward function describe «qué estado o comportamiento es mejor»; la policy/controller decide «cómo llegar ahí». Al separar ambas, el LLM puede usar su conocimiento semántico para escribir el objetivo, y el MPC puede usar dynamics, constraint y el state actual para optimizar en lazo cerrado. Sin embargo, la reward misspecification sigue produciendo reward hacking, por lo que la specification también requiere revisión e iteración.
+\end{importantbox}
+
+\subsection{Reward translator + motion controller}
+
+Sea $g$ la instruction en lenguaje natural; el LLM genera el reward program $R_\phi(s_t,a_t;g)$, y el controller resuelve dentro del horizon $H$
+$$
+\max_{a_{t:t+H-1}}
+\sum_{k=0}^{H-1}\gamma^k R_\phi(s_{t+k},a_{t+k};g)
+\quad\text{s.t.}\quad
+s_{t+k+1}=f(s_{t+k},a_{t+k}),
+$$
+y ejecuta solo la primera acción, para luego replanificar con la nueva observation. Aquí $\phi$ representa el reward program generado por el LLM, $\gamma$ es el descuento temporal, $H$ es el planning horizon y $f$ es el simulator o la learned dynamics. Este receding-horizon loop es el núcleo del MPC.
+
+\lecturefigure{slide-43-language-to-reward-pipeline.jpg}{Language-to-Reward pipeline: LLM reward translator + motion controller}{Diapositiva V043 recuperada de la grabación oficial; 01:00:15}
+
+\lecturefigure{slide-44-reward-translator-prompt.jpg}{Motion descriptor prompt y reward code generado}{Diapositiva V044 recuperada de la grabación oficial; 01:01:15}
+
+\begin{lstlisting}[caption={Pseudocódigo conceptual del reward program y del ciclo de ejecución del MPC}]
+instruction = "make the robot dog stand on two feet"
+reward_code = llm.generate_reward(instruction, robot_schema)
+reward = sandbox.compile_and_validate(reward_code)
+
+while not task_done:
+    state = observe_robot_and_scene()
+    action_plan = mpc.optimize(dynamics, reward, state, constraints)
+    execute(action_plan[0])
+    if user_feedback_available():
+        reward = revise_reward(reward, user_feedback())
+\end{lstlisting}
+
+\begin{warningbox}{Antes de generar code se necesitan sandbox y validation}
+El reward code generado por el LLM puede hacer referencia a states inexistentes, contener errores de signo, provocar desbordamientos numéricos, omitir safety constraints u obtener una reward alta mediante un shortcut imprevisto. Un sistema real requiere una schema-restricted API, revisión estática, unit tests, límites de rango numérico, timeout, simulator rollout y human approval; no se puede desplegar Python arbitrario directamente en un controlador real.
+\end{warningbox}
+
+\subsection{Qué capacidades de la robótica tradicional conserva el MPC}
+
+La diapositiva de MuJoCo MPC muestra que, tras modificar la reward, el optimizer puede sintetizar nuevas acciones en tiempo real. En comparación con los action tokens directos, el MPC usa explícitamente dynamics rollout, puede incorporar restricciones como joint limit, collision, balance y energy, y replanifica cuando se actualiza la observation. Su costo es que requiere un modelo utilizable, cómputo de optimización en línea y un reward landscape cuidadosamente diseñado.
+
+\lecturefigure{slide-45-mujoco-mpc-controller.jpg}{MuJoCo MPC: síntesis del controller en tiempo real a partir de la reward}{Diapositiva V045 recuperada de la grabación oficial; 01:01:33}
+
+\lecturefigure{slide-46-language-to-rewards-skill-set.jpg}{Habilidades de robot-dog y dexterous skills generadas con Language to Rewards}{Diapositiva V046 recuperada de la grabación oficial; 01:01:51}
+
+\teachervoice{El ponente resume esta interfaz como «el LLM hace la semantic translation, en la que es bueno, y el controller hace la physical optimization, en la que es bueno». No se trata de renunciar al end-to-end learning por volver al pasado, sino de delimitar con claridad la responsabilidad de cada componente, de modo que los conocimientos previos del lenguaje, el modelo de dinámica y las restricciones de seguridad puedan coexistir.}
+
+\subsection{Resumen de la sección}
+
+Language to Rewards convierte el lenguaje natural en un objective optimizable, en lugar de emitir directamente cada acción. El reward program aporta la semántica de la tarea y el MPC aporta la dinámica en lazo cerrado y las restricciones; el sistema permite modificar el objetivo de forma interactiva, pero debe prevenir la reward misspecification y el code inseguro.
+\section{Evidencia de Language-to-Rewards: de la simulación (Simulation) al robot real (Real Robot)}
+
+Una vez que el mecanismo funciona, hay que examinar tres preguntas: si las reward generadas cubren diverse skills, si superan a una LLM interface más directa y si la reward y el controller del simulator pueden transferirse al hardware real. El curso responde capa por capa con humanoid, quadruped, dexterous hand y real-robot manipulation.
+
+\subsection{Prompt-to-skill: el movimiento proviene de la optimización, no de la memorización}
+
+Las diapositivas de humanoid y manipulation colocan juntos el user prompt, el code generado y el motion final. El modelo no necesita haber visto cada trayectoria articular durante su entrenamiento con lenguaje; usa la semántica de «backflip», «open drawer», etc., para escribir una state-based reward, y después el optimizer busca la trayectoria. Por eso, un mismo LLM puede generar distintos objective a partir de diferentes robot schema.
+
+\lecturefigure{slide-47-humanoid-reward-code.jpg}{Humanoid skill: del lenguaje al reward code y de ahí al movimiento optimizado}{Diapositiva V047 recuperada de la grabación oficial; 01:04:27}
+
+\lecturefigure{slide-48-manipulation-reward-code.jpg}{Manipulation skill: la reward y el movimiento de open the drawer}{Diapositiva V048 recuperada de la grabación oficial; 01:04:39}
+
+\begin{knowledgebox}{Cómo leer una demo: revisar al menos cuatro capas}
+La primera capa es si el prompt es claro; la segunda, si la reward realmente codifica la tarea y no un shortcut visual; la tercera, si el optimizer encuentra de forma estable una solución factible; la cuarta, si la execution sigue teniendo éxito tras una perturbación. Los videos suelen mostrar solo los fragmentos exitosos de la cuarta capa; los apuntes deben reponer las tres capas anteriores.
+\end{knowledgebox}
+
+\subsection{Baseline comparison: reward-only y code-as-policy}
+
+La gráfica de Benchmark compara Language to Rewards, un método simplificado que describe la reward solo con lenguaje y baselines como code-as-policy directo. Al leer la figura conviene observar la estabilidad relativa en cada task: si la reward interface supera a direct code en múltiples morphology, eso indica que separar en capas el semantic objective y el controller tiene valor; si en unas pocas tareas la diferencia es pequeña, puede deberse a que el controller ya basta por sí mismo o a que el prompt no requiere semántica compleja.
+
+\lecturefigure{slide-49-language-to-rewards-benchmark.jpg}{Comparación de Language to Rewards con reward-only / code-as-policy}{Diapositiva V049 recuperada de la grabación oficial; 01:05:06}
+
+\begin{knowledgebox}{Lectura de la figura: no se compara «quién escribe mejor Python»}
+Las barras verdes, azules y negras reflejan la task performance final que produce cada interface. La variable central es el nivel de abstracción de la salida del LLM: si la reward specification deja espacio de búsqueda al optimizador, o si el direct policy code fija el movimiento demasiado pronto. La figura respalda que la reward interface es más eficaz en estas tareas, pero no demuestra que todas las tareas sean adecuadas para MPC ni mide la latencia del hardware real.
+\end{knowledgebox}
+
+\subsection{Sim-to-real: capas de reward, trajectory y hardware}
+
+La diapositiva de Sim-to-real muestra reward translation, planned trajectory, simulator rollout y real execution. El éxito de la transferencia depende de la geometría de la tarea, la robot calibration y la controller robustness; si la simulator dynamics no es precisa, MPC puede producir movimientos con puntaje alto en simulation pero no ejecutables en el mundo real. Por eso, la Real-robot apple demo es una evidencia necesaria, aunque sigue siendo una validación con un número limitado de objetos y plataformas.
+
+\lecturefigure{slide-50-sim-to-real-transfer.jpg}{De la reward y la planned trajectory a la simulation / real execution}{Diapositiva V050 recuperada de la grabación oficial; 01:05:36}
+
+\lecturefigure{slide-51-real-robot-apple.jpg}{Un robot real ejecuta «pick up the apple»}{Diapositiva V051 recuperada de la grabación oficial; 01:05:57}
+
+\begin{warningbox}{First use: sim-to-real gap}
+\term{Sim-to-real gap} es la diferencia entre la simulación y la realidad en visión, dinámica, contacto, latencia, ruido de sensores y desgaste del hardware. Entre las medidas de mitigación habituales están domain randomization, system identification, robust control, online correction y real-data fine-tuning. Una transfer exitosa demuestra que el pipeline es viable, pero no significa que el gap haya desaparecido.
+\end{warningbox}
+
+\subsection{El LLM como general pattern machine}
+
+Al final, el ponente abstrae el LLM como sequence transformation, sequence completion y sequence improvement. Language to Rewards usa transformation: la instruction se convierte en reward code; la interactive revision usa improvement: modifica la reward según el feedback; RT-2 usa completion: dados la image, la instruction y un prefijo de action, predice los token siguientes. Esta abstracción coloca ambas rutas dentro del mismo marco computacional.
+
+\lecturefigure{slide-52-llm-general-pattern-machines.jpg}{Las tres pattern operation del LLM: transformación, completado y mejora}{Diapositiva V052 recuperada de la grabación oficial; 01:07:12}
+
+\lecturefigure{slide-53-sequence-improvement.jpg}{Sequence improvement: iterar la reward y el movimiento según la retroalimentación}{Diapositiva V053 recuperada de la grabación oficial; 01:08:51}
+
+\teachervoice{El curso reincorpora la retroalimentación del usuario al loop: si el motion generado es demasiado rápido, la postura no es natural o el objetivo es ambiguo, el usuario puede modificar la descripción, el LLM actualiza la reward y el controller vuelve a optimizar. Esta interactividad es una ventaja de la reward interface, pero también implica que el comportamiento del sistema depende de la calidad conjunta del prompt, el state schema, el code validator y el optimizer.}
+
+\subsection{Resumen de la sección}
+
+La cadena de evidencia de Language to Rewards va de las diverse simulated skills y la baseline comparison hasta sim-to-real y el robot real. Muestra que el reward program es una interfaz semántica eficaz, aunque sigue dependiendo del controller, el dynamics model, la validation y la seguridad del hardware. Las diferencias entre ambas rutas se compararán de forma unificada en la siguiente sección.
+\section{Direct Action y Reward Program: comparación a nivel de sistema}
+
+Las dos partes de la Lecture no se contradicen entre sí. RT-2 incorpora la action generation al modelo grande y obtiene representaciones compartidas e inference rápida; Language to Rewards conserva el optimizer y obtiene constraint handling y modificación interactiva de objetivos. La elección de arquitectura real depende de los datos, la complejidad de las acciones, la frecuencia de control, la disponibilidad de modelos y los requisitos de seguridad.
+
+\subsection{Diapositiva de resumen final: modelo, datos e interfaz}
+
+La diapositiva de Final summary resume la primera parte como model consolidation, joint scaling y positive transfer, y la segunda parte como new interfaces to LLMs. La Key takeaway vuelve a enfatizar: rethinking scaling puede hacer que la robotics se parezca más al foundation-model training; rethinking interface permite que el LLM se encargue de la semantic translation en lugar de asumir todos los detalles físicos de bajo nivel.
+
+\lecturefigure{slide-54-final-summary.jpg}{Final summary: Language to Rewards y general pattern machines}{Diapositiva V054 recuperada del video oficial; 01:09:39}
+
+\lecturefigure{slide-55-key-takeaway.jpg}{Key takeaway: escalar el modelo de forma conjunta y también rediseñar la interfaz}{Diapositiva V055 recuperada del video oficial; 01:10:39}
+
+\subsection{Tradeoff table de las dos rutas}
+
+La siguiente tabla no busca elegir un ganador permanente, sino dejar clara la component responsibility. Los sistemas también pueden ser híbridos: primero se usa Language to Rewards en el simulator para generar diverse trajectories y luego se hace distill hacia una VLA; o bien la VLA propone el skill y el MPC se encarga del último tramo de contacto de alta precisión.
+
+\begin{longtable}{@{}L{0.20\textwidth}L{0.32\textwidth}L{0.32\textwidth}@{}}
+\toprule
+Dimensión & Direct action / VLA & Reward program + controller \\
+\midrule
+Salida principal & action tokens o parámetros de acción continuos & state/action reward code u objective \\
+Origen semántico & web + robot co-fine-tuning & pretrained LLM + robot schema / prompt \\
+Ejecución física & la policy aprende implícitamente la dynamics y el feedback & el optimizer usa explícitamente la dynamics y las constraint \\
+Costo de inferencia & una o pocas pasadas de autoregressive decoding & cada paso requiere rollout / optimization \\
+Requisitos de datos & gran cantidad de robot trajectories; admite distillation & puede escribir la reward sin ejemplos previos, pero requiere simulator/model y validation \\
+Ventajas & de extremo a extremo, rápida, puede compartir representaciones con el VLM & acciones diversas, restricciones explícitas, objetivos modificables de forma interactiva \\
+Riesgos principales & OOD action, quantization, behavior support, fallas no interpretables & reward hacking, code error, model bias, fallas de la optimización en línea \\
+Escenarios adecuados & skill repetitivo de alta frecuencia, demonstrations suficientes, embodiment fija & tareas semánticas nuevas, constraint complejas, dynamics model disponible \\
+\bottomrule
+\end{longtable}
+
+\begin{importantbox}{Esquema híbrido presentado en clase}
+Usar Language to Rewards para generar simulator trajectories a gran escala y semánticamente diversas, y luego hacer distill de esos datos hacia un Transformer/VLA, permite aprovechar a la vez la capacidad de exploración del optimizer y la inference rápida de la policy. La dirección inversa también es viable: la VLA se encarga de la skill proposal de alto nivel y el MPC ejecuta localmente cumpliendo los límites de colisión, equilibrio o fuerza.
+\end{importantbox}
+
+\teachervoice{En la sesión de Q\&A, el ponente compara explícitamente las dos rutas: la direct action generation es muy coherente con el autoregressive modeling, pero puede tener dificultades para producir dexterous motion fuera de la distribución de entrenamiento; la reward generation aprovecha la optimization de la robotics tradicional, permite añadir safety constraint y produce acciones más diversas. Esta respuesta se acerca más al diseño de sistemas reales que la disyuntiva «de extremo a extremo o modular».}
+
+\subsection{Los datos siguen siendo el mayor bottleneck}
+
+Aunque la escala de los modelos crezca, el campo de los robots sigue careciendo de datos de lazo cerrado a escala de internet. En el lenguaje, la positive transfer ya es tan común que ni siquiera se destaca por separado, mientras que la robotics todavía busca señales tempranas. El cuello de botella de los datos no es solo de cantidad: la coverage de fallas, recuperaciones, estados peligrosos, tareas de largo plazo y distintas embodiment suele ser más escasa que la de demonstrations exitosas.
+
+\begin{knowledgebox}{Seis preguntas para auditar los datos}
+¿Cuántas trajectories independientes se recolectaron? ¿Se conservan las fallas? ¿Son diversos los entornos y los objetos? ¿La action distribution cubre la recovery? ¿Los distintos operator introducen style bias? ¿La evaluation se hace en environment y object realmente held-out? Si estas preguntas no tienen respuesta, reportar solo el «total de horas» no basta para juzgar la dataset quality.
+\end{knowledgebox}
+
+\subsection{La Physical safety no puede limitarse a heredar la LLM alignment}
+
+Las últimas preguntas de los estudiantes se centraron en la seguridad. Los errores de un robot actúan directamente sobre las personas y el entorno, por lo que no se puede depender solo de que el LLM se niegue a responder. El sistema necesita hardware torque/force limit, emergency stop, workspace boundary, collision monitor, software interlock, safe controller, simulation test y human supervision. El ponente mencionó además que el equipo explora la constitutional safety, pero no dio detalles públicos; estas notas solo registran esa dirección futura y no presentan un sistema no publicado como una solución validada.
+
+\begin{warningbox}{«El modelo no dice cosas peligrosas» no equivale a que el robot sea seguro}
+Los objetivos de seguridad incluyen al menos: si la instrucción en sí es legítima, si el modelo entiende a qué objeto se refiere, si el plan entra en zonas peligrosas, si las acciones de bajo nivel exceden los límites de fuerza o velocidad, si el sistema hace fail safe cuando fallan los sensores y si el usuario puede detenerlo. La Language alignment cubre solo una parte; las safety layer de hardware y de controller deben existir de forma independiente.
+\end{warningbox}
+
+\teachervoice{El ponente dijo que el equipo se toma la safety «muy en serio», porque un sistema físico puede dañar a las personas o al entorno. Puso como ejemplo de límite de fuerza en hardware un robot finger desprendible, y usó la instrucción ambigua «meter al gato en el lavavajillas» para mostrar que un semantic misunderstanding puede convertirse en una catastrophic physical failure, y no en una simple hallucination de texto.}
+
+\subsection{Resumen de la sección}
+
+Las rutas VLA y reward-program asignan más responsabilidad a la learned policy o al optimizer, respectivamente. La primera destaca en representaciones compartidas e inference rápida; la segunda, en constraint explícitas y en la composición de tareas nuevas; los sistemas híbridos suelen ser más realistas. Sea cual sea la ruta, ni la robot data coverage ni las safety layers independientes pueden sustituirse con scale.
+\section{Síntesis y ampliación}
+
+Esta clase parte de la pregunta «¿por qué los robots todavía no saben ordenar una casa?» y llega a una descomposición clara del sistema: el foundation model aporta el semantic prior, los robot data aportan el action grounding, la interface determina el nivel de abstracción de la salida del modelo, el controller se encarga de la dynamics y de las constraints, la evaluation verifica la transfer y la safety layer limita las consecuencias físicas. PaLM-E demuestra que el sensor embedding y el language model pueden entrenarse en conjunto; RT-2 conecta los action tokens a un VLM y forma un VLA; RT-X pone a prueba la cross-embodiment positive transfer; Language to Rewards, por su parte, deja que el LLM escriba el objective y que el MPC escriba la trajectory.
+
+\subsection{Seis lecciones de ingeniería transferibles}
+
+\begin{enumerate}
+  \item \textbf{Primero se define la interfaz y después se elige el modelo.} Decidir si la salida es una skill, un action token, una trajectory, una reward o una constraint es más fundamental que aumentar los parámetros sin criterio.
+  \item \textbf{Tratar la data mixture como objeto de diseño.} Los web data, los robot success, los failure, los recovery y los datos de varias embodiments requieren pesos y auditorías distintos.
+  \item \textbf{Separar la semantic generalization de la motor generalization.} Reconocer un objeto nuevo no equivale a producir una acción de contacto nueva; las métricas de evaluación deben desglosarse.
+  \item \textbf{Demostrar la ruta de la transfer con ablations.} Observar solo que el modelo grande funciona mejor no permite distinguir el efecto de la scale, el co-fine-tuning, los robot data y el web prior.
+  \item \textbf{Conservar la visibilidad del controller y de la safety layer.} Aunque la policy sea de extremo a extremo, la capa de ejecución debe seguir teniendo guardrails de rate/force/geometry y un emergency stop.
+  \item \textbf{Considerar el hybrid bootstrap.} El reward optimizer puede generar diverse data y el VLA puede someterse a distill para obtener una policy rápida; ambos pueden formar un data flywheel.
+\end{enumerate}
+
+\begin{importantbox}{Esta clase condensada en una frase}
+La contribución más importante de los foundation models a la robótica no es que el modelo de lenguaje controle todo directamente, sino que nos permite rediseñar \textbf{las representaciones compartidas, los datos de entrenamiento y las interfaces de tarea}; un embodied system realmente utilizable todavía debe conectar semántica, acción, dinámica, evaluación y seguridad en un ciclo cerrado.
+\end{importantbox}
+
+\subsection{Las tres afirmaciones que más se malinterpretan}
+
+\begin{warningbox}{No convertir evidencia parcial en conclusiones generales}
+«RT-2 tiene emergent skills» no significa que haya aprendido cualquier acción nueva; «RT-X muestra positive transfer» no significa que la robotics scaling law ya esté madura; «el LLM puede escribir la reward» no significa que el código generado pueda llevarse directamente a un robot real. Las tres afirmaciones deben acompañarse de las condiciones de action support, dataset boundary, controller, validation y safety.
+\end{warningbox}
+
+\subsection{Lecturas adicionales}
+
+\begin{itemize}
+  \item Driess et al., \href{https://arxiv.org/abs/2303.03378}{\emph{PaLM-E: An Embodied Multimodal Language Model}}
+  \item Brohan et al., \href{https://arxiv.org/abs/2212.06817}{\emph{RT-1: Robotics Transformer for Real-World Control at Scale}}
+  \item Brohan et al., \href{https://arxiv.org/abs/2307.15818}{\emph{RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control}}
+  \item Open X-Embodiment Collaboration, \href{https://arxiv.org/abs/2310.08864}{\emph{Open X-Embodiment: Robotic Learning Datasets and RT-X Models}}
+  \item Yu et al., \href{https://arxiv.org/abs/2306.08647}{\emph{Language to Rewards for Robotic Skill Synthesis}}
+  \item Lynch et al., \href{https://arxiv.org/abs/2206.04717}{\emph{Interactive Language: Talking to Robots in Real Time}}
+\end{itemize}
+
+Al leer estos artículos puede seguirse usando la lista de verificación de cinco casillas de esta clase: observation, model, interface, controller, evidence. En cuanto alguna de ellas quede oculta tras las palabras «de extremo a extremo» o «emergent», hay que seguir preguntando de dónde vienen los datos, cómo se expresan las acciones, quién se encarga de las restricciones físicas, cómo se registran las fallas y qué experimento podría refutar la explicación actual.
+
+\end{document}

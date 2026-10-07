@@ -1,0 +1,722 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+
+\renewcommand{\notetitle}{Lecture 10: GLOM—cómo una red neuronal fija representa una Part-Whole Hierarchy dinámica}
+\renewcommand{\noteauthors}{Elaborado a partir de la conferencia de Geoffrey Hinton, los subtítulos oficiales hechos por personas y el artículo original de GLOM}
+\renewcommand{\notedate}{CS25 V2 · Versión reescrita source-first de 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{2022-08-11}
+\renewcommand{\videoduration}{52:48}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=CYaju6aCMoQ}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.94\textwidth]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\begin{document}
+\makecscover
+
+\section{Auditoría de fuentes y límites de la evidencia: aclarar primero que GLOM todavía no es un «éxito»}
+
+Lo que con más facilidad se escribe mal en esta clase no son las fórmulas, sino el nivel de la evidencia. El \term{GLOM} que presenta Geoffrey Hinton no es un modelo ya entrenado que haya obtenido puntuaciones en conjuntos de datos estándar; es, ante todo, un documento de diseño sobre la forma de representar: si una red neuronal no puede, como un programa, reservar dinámicamente un bloque de memoria para guardar un parse-tree node, ¿se puede usar un activity pattern dinámico en hardware fijo para representar una estructura jerárquica que es distinta en cada imagen? El valor de esta clase está en reunir capsule, contrastive learning, attention, distillation y neural field en una hipótesis unificada, no en ofrecer una receta de producto ya validada.
+
+\lecturefigure{slide-01-title.jpg}{Tema de la clase: cómo representar una part-whole hierarchy en una red neuronal.}{Video oficial de Stanford Online 00:00:26--00:01:07.}
+
+\begin{warningbox}{El límite histórico más importante: es un design sketch, no un benchmark result}
+Desde la apertura, Hinton llama al sistema completo imaginary system y «vaporware». El artículo original, \href{https://arxiv.org/abs/2102.12627}{arXiv:2102.12627}, tiene 44 páginas, y el registro público muestra una sola versión, del 2021-02-25. En la clase se mencionan unos cuantos toy fragments, pero no se reportan resultados completos de un GLOM de extremo a extremo en benchmarks de segmentation, recognition o reasoning. Por ello, todas las frases que aparecen más adelante, como «deberían formarse islands» o «se puede entrenar con consensus», expresan mecanismos de diseño e hipótesis comprobables, no hechos ya demostrados.
+\end{warningbox}
+
+\teachervoice{El ponente cuenta que en un principio estaba escribiendo un documento de diseño de un sistema y al final descubrió que el documento de diseño en sí ya era lo bastante interesante; puede que existan algunos «little bits», pero el conjunto completo no existe. Conservar esta autolimitación es fundamental, porque determina que debemos leerlo como una architecture review y no como una leaderboard review.}
+
+\subsection{Tres ideas existentes, condensadas en un problema de representación}
+
+La ruta de GLOM no consiste en inventar una layer totalmente nueva, sino en recombinar tres líneas: el Transformer aporta la interacción basada en similitud; el unsupervised/contrastive representation learning aporta la señal de aprendizaje sobre «qué activity deben coincidir»; el neural field aporta una función condicionada por la posición que indica «cómo un mismo objeto de alto nivel genera distintas partes de bajo nivel en distintas coordenadas». Capsule, distillation y recurrent settling atraviesan todo el planteamiento.
+
+\lecturefigure{slide-02-three-advances.jpg}{GLOM intenta combinar el Transformer, el aprendizaje de representaciones por contraste y el neural field.}{Video oficial de Stanford Online 00:01:08--00:01:51.}
+
+\begin{knowledgebox}{Tipos de evidencia que usa esta clase}
+\begin{tabularx}{\textwidth}{L{0.22\textwidth}L{0.31\textwidth}>{\raggedright\arraybackslash}X}
+\toprule
+Tipo de evidencia & Qué puede aportar esta clase & Qué no se puede inferir directamente \\
+\midrule
+Motivación desde la teoría de la representación & La contradicción entre conexiones fijas y una parse structure dinámica & Que GLOM sea necesariamente entrenable o necesariamente superior a los modelos existentes \\
+Demostraciones psicológicas & Las personas eligen un intrinsic coordinate frame y una alternative parse & Que el cerebro implemente necesariamente las ecuaciones concretas de actualización vectorial de GLOM \\
+Esbozo de arquitectura & El flujo de información entre column, level, attention y top-down/bottom-up & Cifras medidas de convergencia estable, eficiencia de muestras y costo de cómputo \\
+Analogías con artículos existentes & SimCLR, BERT, Hough y NeRF aportan mechanism reutilizables & Que el éxito de esos sistemas se transfiera automáticamente a GLOM \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{La ingeniería y la neurociencia no tienen el mismo criterio de aceptación}
+
+Hinton divide la investigación en redes neuronales en dos tipos de objetivo: el objetivo de ingeniería solo pregunta si el sistema funciona; el objetivo de neurociencia pregunta además si ese mecanismo podría explicar la biological intelligence. Los pesos compartidos o una ResNet de cien capas son perfectamente razonables para un ingeniero, pero no necesariamente son un modelo directo del cerebro. GLOM aborda a propósito ambos tipos de problema, por lo que las notas deben separar la engineering plausibility de la biological plausibility.
+
+\lecturefigure{slide-03-two-research-goals.jpg}{Dos objetivos de investigación: crear tecnología eficaz o usar redes artificiales para entender el cerebro.}{Video oficial de Stanford Online 00:01:52--00:02:37.}
+
+\teachervoice{El ponente recuerda que la investigación en redes neuronales se sostuvo durante mucho tiempo gracias a una creencia sencilla: el cerebro ya había demostrado que el aprendizaje complejo es posible en principio. Este juicio histórico no significa que los modelos de ingeniería deban copiar al cerebro, sino que la biological existence proof todavía puede inspirar nuevas representation question.}
+
+\subsection{Resumen de la sección}
+
+Esta clase trata de una propuesta de diseño con límites históricos explícitos. El orden de lectura debe ser: primero entender la representational contradiction que quiere resolver; después examinar si cada mecanismo constituye una hipótesis computable, entrenable y falsable; y solo al final discutir su relación con los object-centric model o los world model modernos.
+\section{La contradicción entre un hardware fijo y un Parse Tree dinámico}
+
+Que en una imagen «el ojo pertenezca a la cara y la rueda pertenezca al coche» no es un árbol fijo; con otra imagen cambian el número de nodos, los tipos de partes y la forma en que se conectan. Un programa puede solicitar memoria de forma dinámica y escribir un pointer, pero las neuronas reales no pueden reescribir todos sus pesos de conexión en unos cuantos milisegundos. Por ello, el problema central de GLOM puede plantearse así: \emph{sin asignar dinámicamente neuron identity, ¿cómo puede la activity representar un parse tree que cambia con cada entrada?}
+
+\lecturefigure{slide-04-hard-part-whole-hierarchies.jpg}{Cada imagen tiene un parse tree distinto, pero una red neuronal real no puede asignar neuronas nuevas al instante.}{Video oficial de Stanford Online 00:02:38--00:04:13.}
+
+\begin{importantbox}{Contradicción central}
+Los parámetros de conexión de la red $\theta$ cambian muy lentamente de un ejemplo a otro, mientras que la estructura $\mathcal T(I)$ que corresponde a la entrada $I$ es distinta cada vez. El objetivo no es que $\theta$ almacene directamente un árbol fijo, sino que el estado dinámico $\mathbf E(I)$ calculado a partir de $\theta$ codifique $\mathcal T(I)$ dentro de una sola inference.
+\end{importantbox}
+
+\subsection{Symbolic allocation, Capsule routing y universal capsule}
+
+La respuesta de la Symbolic AI es directa: tomar un bloque de memory como node y escribir en él pointers que apuntan a otros nodes. La línea de capsules temprana, en cambio, asigna de antemano muchos nodos posibles, y cada capsule se dedica a representar un tipo de entity; una entrada solo activa unas pocas capsules, y el routing decide la parent-child connection. Esto evita crear neuronas de forma dinámica, pero trae consigo una gran cantidad de hardware inactivo, capsules type-specific y una routing optimization.
+
+\lecturefigure{slide-05-symbolic-ai-and-capsules.jpg}{Dos líneas anteriores: memoria simbólica dinámica, o capsules asignadas de antemano seguidas de routing.}{Video oficial de Stanford Online 00:04:14--00:05:35.}
+
+\teachervoice{Hinton valora las ideas de investigación con una frase muy útil para la enseñanza: algunas ideas «want to work» y otras no quieren funcionar; las capsules están entre ambas: con mucho esfuerzo pueden funcionar, pero el proceso es difícil. No es un rechazo de las capsules, sino un recordatorio: cuanto más fuerte es el prior estructural, más claramente debe explicarse el optimization contract.}
+
+GLOM transforma la capsule en una \term{universal capsule}: el hardware sigue organizado en columns según la posición espacial, pero el embedding de un mismo nivel en cada column ya no queda ligado de antemano a «solo puede representar una nariz» o «solo puede representar una rueda». Puede representar cualquier identity y pose; «qué es esta vez» lo determina la activity, no el tipo fijo de la capsule.
+
+\subsection{Column, level e island of agreement}
+
+Se divide la imagen en posiciones espaciales $x\in\mathcal X$ y en cada posición se construye una column; dentro de la column hay varios niveles $\ell=0,1,\ldots,L$. Una misma posición puede representar, de abajo hacia arriba, textura, nostril, nose, face, person y scene. GLOM no asigna una neurona dedicada a un «face node», sino que hace que las posiciones que pertenecen a una misma face formen gradualmente, en el face level, embeddings aproximadamente idénticos.
+
+\lecturefigure{slide-06-islands-of-identical-vectors.jpg}{Nueva representación: las islands de embeddings del mismo nivel representan los parse-tree nodes.}{Video oficial de Stanford Online 00:05:36--00:08:29.}
+
+Sea $\mathbf e_{x,\ell}^{(t)}\in\mathbb R^d$ el vector dinámico de la posición $x$, el nivel $\ell$ y el settling step $t$. Una island candidata $S$ puede describirse con la siguiente condición aproximada:
+
+\[
+\max_{x,y\in S}\left\|\mathbf e_{x,\ell}^{(t)}-\mathbf e_{y,\ell}^{(t)}\right\|_2\le \varepsilon.
+\]
+
+Aquí, $S$ es un conjunto de posiciones en un nivel dado, $d$ es la dimensión del embedding, $t$ es el paso de iteración de la recurrent inference y $\varepsilon$ es la tolerancia de «suficientemente parecido». Las flechas bidimensionales de la clase solo usan la dirección para representar la equality; no significa que la representación real tenga solo dos dimensiones, ni exige que todas las componentes sean estrictamente bitwise identical.
+
+\begin{importantbox}{La activity dinámica es el pointer}
+Los pesos de los parámetros determinan «cómo se actualizan los vectores»; la activity del embedding determina «a quién pertenece esta posición en la entrada actual». Como la activity puede cambiar con cada imagen, una red fija puede formar islands distintas; estas islands y sus correspondencias entre niveles cumplen el papel de dynamic parse-tree nodes.
+\end{importantbox}
+
+\lecturefigure{slide-07-column-embedding-hierarchy.jpg}{Esquema de posiciones unidimensionales: en los niveles bajos los vectores son distintos; en los altos se forman gradualmente agreement islands más grandes.}{Video oficial de Stanford Online 00:08:30--00:09:15.}
+
+\begin{knowledgebox}{Lectura de la figura: la dirección de la flecha solo codifica «si son iguales o no»}
+Primero se recorren las posiciones espaciales sobre el eje horizontal y luego los niveles de abstracción sobre el eje vertical. En el nivel más bajo, las flechas negras son todas distintas, lo que indica que el contenido local de cada patch es diferente; al subir, aparecen en posiciones contiguas flechas rojas, verdes y azules con la misma dirección, lo que indica que en ese nivel se interpretan como una misma part, object o scene. Los signos de interrogación indican estados que aún no han hecho settle. La figura no proporciona los valores reales de los embeddings, su confianza ni los umbrales de frontera; por ello solo permite leer la intención del diseño y no debe leerse como un segmentation result.
+\end{knowledgebox}
+
+\begin{knowledgebox}{Términos clave: no confundir cuatro objetos en una sola palabra}
+\begin{tabularx}{\textwidth}{L{0.21\textwidth}L{0.29\textwidth}X}
+\toprule
+Término & Qué es en GLOM & Posibles confusiones \\
+\midrule
+column & El hardware y el estado de varios niveles en una posición espacial & No es un channel de una CNN ni una column de una base de datos \\
+level & Una escala de abstracción de la part-whole hierarchy & No es sinónimo de la capa $k$ de una red profunda común \\
+embedding & El activity vector dinámico de una posición, un nivel y un paso de tiempo & No es un vector de palabras fijo ni son los pesos de la red \\
+island & Región aproximadamente uniforme formada por posiciones contiguas o relacionables del mismo nivel & No es una mask dada de antemano en la entrada, y no se garantiza que coincida con el ground-truth object \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{Una estructura más amplia que la segmentación espacial ordinaria}
+
+Hinton señala en particular que una island no tiene por qué expresar únicamente regiones contiguas de la imagen. En el lenguaje, dos fragments de una frase pueden obtener la misma representación en un nivel superior, aunque en la secuencia no formen un bloque bidimensional contiguo. Esto significa que lo que GLOM busca expresar es «pertenecer en común a una higher-level entity», y no solo una connected-component segmentation.
+
+\teachervoice{En clase se usa el ejemplo de «shut» y «up»: en el nivel bajo son dos fragments distintos, y en el nivel alto pueden compartir el vector de «shut up». Este ejemplo sugiere que la topología de una island la determinan la neighborhood y el attention graph, y no debe entenderse en sentido estrecho como una mancha de color sólida sobre el plano de píxeles.}
+
+\begin{warningbox}{Una island no equivale automáticamente a un object}
+Aunque en algún nivel aparezcan bloques grandes de vectores parecidos, pueden provenir de la texture, del fondo, de un collapse erróneo o de un optimization shortcut. Para afirmar que «el modelo descubre objetos» se necesitan además pruebas como segmentation alignment, intervention, cross-view consistency y uso causal en tareas posteriores. Esta sesión no presenta esos experimentos.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+GLOM sustituye la type-specific node allocation por universal capsules y dynamic embeddings. Su afirmación central no es «agregar más capas de attention», sino hacer que el agreement pattern de cada nivel sea en sí mismo la parse structure; el siguiente paso, el verdaderamente difícil, es lograr que ese agreement pueda formarse sin colapsar globalmente.
+\section{Por qué el sistema de coordenadas es el núcleo de la Part-Whole Relation}
+
+Si un nostril respalda que «aquí hay una nose», no solo debe predecir la identity, sino también la position, la orientation y la scale de la nose. Dicho de otro modo, la part-whole relation no es una etiqueta discreta, sino una transformación entre intrinsic coordinate frames. Hinton recurre primero a un conjunto de experimentos psicológicos para que el público perciba que nuestra comprensión de un mismo conjunto de líneas cambia según el reference frame interno.
+
+\lecturefigure{slide-08-psychological-coordinate-frames.jpg}{Las siguientes diapositivas usan demostraciones psicológicas para mostrar que el parse visual y los sistemas de coordenadas son reales.}{Video oficial de Stanford Online 00:09:16--00:13:31.}
+
+\subsection{Cube demonstration: la dificultad no es la rotación, sino el cambio de frame}
+
+En clase se pide al público imaginar un wire-frame cube, girar la body diagonal original hasta dejarla vertical y luego señalar la posición de las demás esquinas. Muchas personas no tienen dificultades con la geometría tridimensional; lo que ocurre es que están acostumbradas a ubicar el cube en un intrinsic frame de «cara inferior horizontal, aristas verticales hacia arriba». En cuanto se les obliga a usar un frame desconocido, la internal representation del mismo objeto cambia drásticamente.
+
+\lecturefigure{slide-09-cube-demonstration.jpg}{Cube mental-rotation task: convertir la body diagonal conocida en el eje vertical.}{Video oficial de Stanford Online 00:13:32--00:16:07.}
+
+\begin{knowledgebox}{Lectura de la figura: lo que la tarea cambia en realidad es el intrinsic frame}
+Primero se localiza el front-bottom-right corner que originalmente toca la mesa y luego el top-back-left corner opuesto; en clase se pide girar esta body diagonal hasta convertirla en el eje vertical. Las relaciones geométricas de los otros seis corners no desaparecen, pero se retira el sistema de coordenadas conocido de «cara inferior horizontal, aristas verticales hacia arriba». Si al público le cuesta ubicar las esquinas, la evidencia respalda la reference-frame dependence, no una falta general de capacidad de rotación tridimensional.
+\end{knowledgebox}
+
+\begin{knowledgebox}{Qué pueden demostrar los experimentos psicológicos}
+Muestran que el reasoning humano elige un reference frame y depende de él, y que cambiar de frame modifica las relaciones accesibles; no demuestran que las neuronas usen necesariamente GLOM embedding, matrix capsule ni alguna attention rule específica. Aquí el papel de la evidencia es de motivation, no de implementation identification.
+\end{knowledgebox}
+
+\subsection{Six rods: una misma entrada puede tener parses completamente distintos}
+
+Las seis varillas pueden verse como una crown de tres lóbulos o como un central rectangle con varios lóbulos inclinados. Las dos percepts no discrepan sobre la posición de los segmentos externos, pero difieren por completo en qué aristas «se agrupan de forma natural» y cuáles parecen parallel. Hinton lo compara con la structural ambiguity de una oración: la truth condition puede ser la misma, pero el parse es distinto.
+
+\lecturefigure{slide-10-six-rods-percept.jpg}{Otra percept de las seis varillas: una misma entrada geométrica puede organizarse con estructuras distintas.}{Video oficial de Stanford Online 00:16:08--00:16:55.}
+
+\lecturefigure{slide-11-alternative-percepts.jpg}{Distintas internal representations pueden explicar un mismo hecho externo.}{Video oficial de Stanford Online 00:16:56--00:17:55.}
+
+\teachervoice{El ponente enfatiza que esto no es como el Necker cube: no es que creas que cambió la depth del mundo exterior, sino que ves el mismo hecho con otra estructura. Usa las dos lecturas sintácticas de «next weekend we should be visiting relatives» para mostrar que un representation change no necesariamente modifica la truth condition.}
+
+\subsection{La intrinsic relation va en los weights; la viewer pose, en la activity}
+
+«La relación fija entre la crown y los flaps» debe mantenerse invariante con el viewpoint, por lo que conviene representarla con learned weights; «la pose de la crown respecto del observador», en cambio, varía con el punto de vista, por lo que conviene representarla con dynamic activity. Las $R_{wx}$, $R_{wv}$ y $R_{xv}$ de la figura de la clase pueden entenderse como transformaciones entre los object/part/viewer frames.
+
+\lecturefigure{slide-12-crown-parse-tree.jpg}{Crown parse tree: las aristas guardan la parent-child intrinsic coordinate relation.}{Video oficial de Stanford Online 00:17:56--00:17:59.}
+
+\lecturefigure{slide-13-zigzag-parse-tree.jpg}{Zig-zag/rectangle parse: los mismos rods corresponden a otro árbol estructural.}{Video oficial de Stanford Online 00:18:00--00:20:41.}
+
+\begin{knowledgebox}{Lectura de la figura: comparar el node grouping, no la posición de los segmentos}
+Los nodos hoja de ambos árboles siguen siendo el mismo conjunto de seis rods; lo que cambia son los nodes intermedios: el crown parse organiza los tres flaps dentro de un mismo whole, mientras que el zig-zag parse destaca el rectangle y los lóbulos inclinados superior e inferior. La $R$ de las aristas representa la intrinsic frame relation. Al leer la figura, primero se compara qué hojas comparten parent y después qué relations deben mantenerse invariantes con el viewpoint; no hay que confundir las dos figuras con dos objetos externos distintos.
+\end{knowledgebox}
+
+Una composition simplificada puede escribirse así:
+
+\[
+R_{xv}=R_{wv}R_{xw}.
+\]
+
+Aquí, $R_{xw}$ representa la intrinsic relation de la part $x$ respecto del whole $w$, $R_{wv}$ representa la pose actual del whole respecto del viewer $v$ y $R_{xv}$ es la part-to-viewer pose que se deduce. Distintas conventions pueden cambiar el orden de la multiplicación; lo que importa didácticamente es separar el viewpoint-invariant knowledge del viewpoint-dependent state.
+
+\begin{warningbox}{La matrix equation no es un compromiso de implementación de la clase}
+El artículo de GLOM analiza varias representaciones de pose/identity y no exige que toda relation sea una matriz explícita de transformación rígida. El embedding real también debe dar cabida a identity, uncertainty, texture y estructuras no rígidas. Forzar toda la semántica dentro de $SE(3)$ sería una simplificación excesiva.
+\end{warningbox}
+
+\subsection{La mental image no es un pixel buffer}
+
+La postura de Hinton sobre la mental imagery es que una imagen interna puede ser una structural description más un conjunto de viewer-relative transforms. Para responder preguntas espaciales, las personas eligen implícitamente orientation, scale y position; si se cambia de frame, también cambian la ruta de razonamiento y las «relaciones evidentes».
+
+\lecturefigure{slide-14-mental-image-crown.jpg}{Mental image: se añade la node-to-viewer pose al árbol estructural para facilitar la propagación del viewpoint.}{Video oficial de Stanford Online 00:20:42--00:22:01.}
+
+\teachervoice{En clase se pide al público imaginar «una milla hacia el este, una milla hacia el norte y otra milla hacia el este». La mayoría supone por defecto que el north apunta hacia arriba y elige cierta escala y cierta posición en la imagen, aunque resolver el problema no exige ninguna de esas elecciones. Este pequeño experimento revela que el reference frame suele ser una variable latente del reasoning.}
+
+\subsection{Resumen de la sección}
+
+La part-whole hierarchy necesita expresar a la vez identity y pose. GLOM busca colocar el relation knowledge estable en la función de la red, y el viewpoint y el parse específicos de cada entrada en la embedding activity; el cube, los six rods y la mental imagery aportan una motivación cognitiva para esta división de funciones, pero no sustituyen los experimentos con el modelo.
+\section{Contrastive Learning: la agreement es el punto de partida, no la respuesta}
+
+El objetivo aparente de las islands es que «distintas posiciones de la misma entity obtengan el mismo vector», lo cual se parece mucho al contrastive learning. Sin embargo, un image-level objective común solo sabe que dos crop provienen de la misma imagen; no necesariamente sabe si pertenecen a la misma scene, al mismo object o a objects distintos. GLOM toma prestadas las ideas de agreement y anti-collapse, pero tiene que transformarlas en un proceso dinámico level-specific, local y pose-aware.
+
+\lecturefigure{slide-15-contrastive-learning-intro.jpg}{Contrastive visual representation learning: aprender representaciones mediante la agreement entre distintos patch de la misma imagen.}{Video oficial de Stanford Online, 00:22:02--00:24:15.}
+
+\subsection{Muestras positivas, aumento de datos y collapse en SimCLR}
+
+La sección anterior solo afirmó que «la agreement permite aprender representaciones», pero no explicó cómo evitar que todos los vectores se vuelvan iguales. Esta sección usa SimCLR para cubrir ese hueco: primero se precisa cómo se genera el positive pair, después se observa por qué la naïve agreement sufre collapse y, por último, se lleva esa lección de vuelta a las local islands de GLOM. Para una imagen $x$, SimCLR muestrea dos vistas aumentadas $\tilde x_i,\tilde x_j$, que pasan por un encoder $f$ compartido y una projection head $g$ para obtener $\mathbf z_i,\mathbf z_j$. La perturbación de color impide que el modelo tome el atajo de usar solo el color histogram; las muestras positivas deben quedar cerca, y las muestras de imágenes distintas deben, como mínimo, poder distinguirse.
+
+\lecturefigure{slide-16-simclr-mechanism.jpg}{Flujo de SimCLR: dos aumentos de crop/color, encoder compartido, projection y agreement.}{Video oficial de Stanford Online, 00:24:16--00:25:07.}
+
+\begin{knowledgebox}{Lectura de la figura: primero, distinguir $h$ de $z$}
+Las dos ramas, izquierda y derecha, muestrean de la misma imagen original distintos crop y perturbaciones de color; al pasar por la $f$ compartida se obtienen las representation $h_i,h_j$, y luego, a través de la projection head $g$, se obtienen los $z_i,z_j$ que usa el contrastive objective. El «acercar/alejar» de la figura ocurre en el projection space; el linear probe posterior suele leer la encoder representation. Esta diferencia muestra que el espacio donde actúa el objetivo de entrenamiento y el espacio que finalmente se usa pueden ser distintos, y también recuerda que el consensus target de GLOM debe precisar sobre qué level y qué state actúa.
+\end{knowledgebox}
+
+Si solo se minimiza la distancia de los pair de la misma imagen, la solución más fácil es mapear todas las entradas a una constante $\mathbf c$:
+
+\[
+f(x)=\mathbf c\qquad \forall x.
+\]
+
+Aquí, $f$ es el encoder, $x$ es cualquier entrada y $\mathbf c$ es una representación constante única. Esto lleva a cero toda la positive loss, pero no contiene ninguna información. Los objective del tipo InfoNCE impiden esta solución mediante negatives del mismo batch u otro anti-collapse mechanism. Aquí no se desarrolla la derivación completa de la normalización con temperatura; lo importante es que «la agreement debe diseñarse junto con la separation».
+
+\begin{warningbox}{El primer riesgo de un objetivo de agreement: el colapso global}
+«Hacer más parecidas las posiciones parecidas» no puede funcionar por sí solo. GLOM necesita que la local neighborhood, la evidence bottom-up/top-down, la identity-pose prediction, la level separation y el objective de entrenamiento impidan en conjunto que toda la imagen, todos los niveles y todas las muestras se conviertan en un solo vector. Esta clase propone las fuentes de señal, pero no ofrece una demostración de estabilidad a gran escala.
+\end{warningbox}
+
+\subsection{El linear probe solo demuestra que la información puede leerse linealmente}
+
+Tras el entrenamiento autosupervisado se congela el encoder y se entrena un clasificador lineal; así se puede comprobar si la representación contiene label information fácil de leer. Un buen resultado indica que las feature son útiles, pero no indica que la representación haya descompuesto explícitamente part, whole y pose, ni que sea equivalente a un supervised model en generation, robustness o causal reasoning.
+
+\lecturefigure{slide-17-linear-probe-quality.jpg}{Uso de un linear classifier para evaluar qué tan legibles son las representaciones tras el preentrenamiento sin etiquetas.}{Video oficial de Stanford Online, 00:25:08--00:28:11.}
+
+\begin{knowledgebox}{Cómo interpretar correctamente un linear probe}
+\begin{itemize}
+  \item probe alto: la información de clase es aproximadamente separable de forma lineal en la frozen representation;
+  \item probe bajo: puede deberse a que falta información o a que la información está codificada de forma no lineal;
+  \item lo que el probe no puede demostrar por sí solo: límites de objetos, part-whole relation, pose equivariance o uncertainty calibration.
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Los crop de una misma imagen pueden pertenecer a objetos distintos}
+
+Si una escena urbana contiene a la vez un automóvil, un árbol y un peatón, forzar dos crop hacia el mismo vector puede hacer que solo se aprenda la scene identity, e incluso que se borre la object distinction. El objetivo de GLOM es el siguiente: en el scene level puede haber consistencia en un área amplia; en el object level solo deben coincidir las posiciones del mismo object, y en el part level se forman islands más pequeñas. Es decir, el alcance espacial de la agreement debe determinarse conjuntamente por la hierarchy y la evidence.
+
+\lecturefigure{slide-18-contrastive-part-mismatch.jpg}{Un contrastive objective común confunde los niveles de scene, object y part.}{Video oficial de Stanford Online, 00:28:12--00:28:49.}
+
+\lecturefigure{slide-19-spatial-coherence.jpg}{GLOM busca usar attention para descubrir la consistencia espacial local en distintos coordinate frames.}{Video oficial de Stanford Online, 00:28:50--00:30:17.}
+
+\teachervoice{Hinton remonta la idea a los primeros trabajos de spatial coherence: los output vector adyacentes deben coincidir donde la superficie real o la profundidad son continuas. El problema nuevo de GLOM es que «no se sabe de antemano dónde están las regiones consistentes», por lo que usa similarity attention para que las region se formen durante la inference.}
+
+\subsection{Resumen de la sección}
+
+El contrastive learning nos enseña que un objective de consistencia puede aprender representaciones sólidas, pero debe evitar el collapse y debe precisar «en qué nivel, en qué posiciones y bajo qué condiciones debe haber consistencia». GLOM delega estas tres preguntas en el hierarchical state, la coordinate prediction y la local attention.
+\section{El esqueleto de cómputo espaciotemporal de GLOM}
+
+Las secciones anteriores respondieron «por qué se necesita esta representación»; ahora pasamos al mecanismo computable. GLOM guarda un embedding en cada posición espacial y en cada hierarchy level, y actualiza esos estados a lo largo de varios settling steps. Una imagen estática se trata como un video aburrido de fotogramas repetidos, por lo que la temporal recurrence sigue presente; en cambio, la fixation selection, la foveation y la memoria entre fixations de la visión activa real quedan excluidas por ahora.
+
+\lecturefigure{slide-20-first-fixation-disclaimer.jpg}{Alcance de la clase: se ignoran la selección activa de puntos y las fixations múltiples; solo se analiza la primera fixation sobre una imagen nueva.}{Video oficial de Stanford Online 00:30:18--00:34:29.}
+
+\begin{warningbox}{Scope omission: la visión real no es un único forward pass a resolución completa}
+El ojo humano tiene alta resolución en el centro y baja resolución en la periferia, y decide activamente adónde mirar después; el mismo hardware se reutiliza entre fixations. Esta clase congela estos problemas y solo trata el recurrent settling dentro de la first fixation. Si GLOM se extiende a robótica o a video, policy, memory, motion correspondence y latency vuelven a aparecer.
+\end{warningbox}
+
+\subsection{El tensor de estado y sus tres ejes}
+
+La restricción de first fixation respondió «qué ignora por ahora esta clase»; ahora hay que responder «qué guarda realmente el sistema». La distinción más importante es entre hierarchy level y settling time: el primero describe la escala part-whole y el segundo describe el proceso en que la interpretación de una misma entrada se corrige repetidamente; si a ambos se les llama layer, se malinterpretan todas las flechas entre niveles y entre instantes. El estado del sistema puede escribirse como $\mathbf E^{(t)}\in\mathbb R^{|\mathcal X|\times(L+1)\times d}$: eje de posición $x$, eje de hierarchy level $\ell$ y eje de settling time $t$.
+
+\lecturefigure{slide-21-three-adjacent-levels.jpg}{Diagrama de arquitectura de la interacción a lo largo del tiempo entre tres levels adyacentes de una sola column.}{Video oficial de Stanford Online 00:34:30--00:35:13.}
+
+\begin{knowledgebox}{Lectura de la figura: el eje horizontal es time y el vertical es hierarchy}
+Cada columna de cuadros pequeños pertenece a la misma retinal location; de izquierda a derecha están los settling steps consecutivos y de abajo arriba los tres part-whole levels $L-1,L,L+1$. Las flechas azules llevan el nivel inferior del instante anterior al nivel actual, las flechas rojas bajan el nivel superior del instante anterior, las flechas verdes conservan la historia del mismo nivel y las flechas diagonales punteadas representan la lateral interaction con otras columns espaciales. La figura solo dibuja una location, por lo que la spatial neighborhood solo queda completa al combinarla con la siguiente slide.
+\end{knowledgebox}
+
+\teachervoice{El ponente dice que GLOM se diseñó originalmente para video; una imagen estática es solo un «very boring video» en el que todos los fotogramas son iguales. Esta frase explica por qué en la figura aparecen a la vez hierarchy y time, y por qué no deben leerse todas las flechas como network depth ordinaria.}
+
+\subsection{La ecuación de actualización unificada de las cuatro contributions}
+
+El siguiente estado en la posición $x$ y el nivel $\ell$ se compone de cuatro tipos de información: la predicción ascendente desde el nivel inferior, la predicción descendente desde el nivel superior, la temporal persistence del mismo estado y el attention consensus de la vecindad del mismo nivel. Una formulación didáctica es:
+
+\[
+\tilde{\mathbf e}_{x,\ell}^{(t+1)}=
+\lambda_{\mathrm{bu}} f_{\mathrm{bu}}^{\ell}\!\left(\mathbf e_{x,\ell-1}^{(t)}\right)
++\lambda_{\mathrm{td}} f_{\mathrm{td}}^{\ell}\!\left(\mathbf e_{x,\ell+1}^{(t)},x\right)
++\lambda_{\mathrm{self}}\mathbf e_{x,\ell}^{(t)}
++\lambda_{\mathrm{lat}}\mathbf c_{x,\ell}^{(t)}.
+\]
+
+\[
+\mathbf e_{x,\ell}^{(t+1)}=\operatorname{Norm}\!\left(\tilde{\mathbf e}_{x,\ell}^{(t+1)}\right).
+\]
+
+Aquí, $f_{\mathrm{bu}}^{\ell}$ es la part-to-whole prediction, $f_{\mathrm{td}}^{\ell}$ es la whole-to-part prediction, $x$ puede funcionar como neural-field location condition, $\mathbf c_{x,\ell}^{(t)}$ es el lateral consensus y los cuatro $\lambda$ representan pesos que se ajustan según level, time o reliability. La figura de la clase dice «average», y el artículo original discute además la source reliability; esta ecuación es una síntesis del mecanismo, no la única implementation oficial.
+
+\lecturefigure{slide-22-four-interactions.jpg}{Actualización de cuatro vías: bottom-up, top-down, previous state y lateral attention.}{Video oficial de Stanford Online 00:35:14--00:35:47.}
+
+\begin{knowledgebox}{Lectura de la figura: cada una de las cuatro entradas cumple una función distinta}
+La bottom-up source, con el número 1, aporta evidence local; la top-down source, con el número 2, aporta whole context; la previous-state source, con el número 3, aporta inertia, y el neighborhood average, con el número 4, aporta agreement dentro del mismo nivel. No son cuatro residual branches intercambiables: sin la 1, el sistema se desconecta de la entrada; sin la 2, pierde la corrección por contexto; sin la 3, tiende a oscilar, y sin la 4, las hypotheses entre posiciones no pueden formar islands.
+\end{knowledgebox}
+
+\begin{importantbox}{Por qué bottom-up / top-down no son una simple línea}
+Ambas rutas necesitan una multi-layer neural network, porque no solo cambian la dimensión, sino que también deben realizar la transformación de identity y de coordinate frame. La misma bottom-up function debe poder manejar casos de distinto tipo, como nostril-to-nose y steering-wheel-to-car; «universal» exige que la semántica la determine la activity, y no que haya un módulo programado de forma fija para cada tipo de parte.
+\end{importantbox}
+
+\subsection{Similarity-gated lateral attention}
+
+La ecuación de actualización de cuatro vías deja aún una pregunta central: ¿cómo distingue la lateral branch entre «un vecino que debe formar parte de la misma island» y «otro objeto que solo está cerca en el espacio»? Esta sección desarrolla esa regla de selección y explica por qué locality y temperature forman parte del anti-collapse contract. Dentro de la vecindad del mismo nivel $\mathcal N_\ell(x)$, solo los embeddings que ya son similares se atraen con fuerza entre sí; la forma presentada en clase se aproxima a un dot-product softmax:
+
+\[
+\alpha_{xy}^{(t,\ell)}=
+\frac{\exp\!\left(\beta_\ell\,\mathbf e_{x,\ell}^{(t)\top}\mathbf e_{y,\ell}^{(t)}\right)}
+{\sum_{z\in\mathcal N_\ell(x)}\exp\!\left(\beta_\ell\,\mathbf e_{x,\ell}^{(t)\top}\mathbf e_{z,\ell}^{(t)}\right)},
+\qquad
+\mathbf c_{x,\ell}^{(t)}=\sum_{y\in\mathcal N_\ell(x)}\alpha_{xy}^{(t,\ell)}\mathbf e_{y,\ell}^{(t)}.
+\]
+
+Aquí, $\alpha_{xy}$ es el lateral weight de $y$ sobre $x$, $\beta_\ell$ controla la similarity sharpness, $\mathcal N_\ell(x)$ es la level-specific neighborhood y $\mathbf c$ es el consenso de la vecindad. La localidad es importante: si todas las posiciones se atrajeran globalmente desde el principio, el global collapse se volvería un shortcut más fuerte.
+
+\lecturefigure{slide-23-attention-weighted-average.jpg}{El attention-weighted average de vectores similares del mismo nivel debe propiciar la formación de islands.}{Video oficial de Stanford Online 00:35:48--00:37:13.}
+
+\begin{knowledgebox}{Lectura de la figura: el texto en rojo «islands are echo chambers» es a la vez mecanismo y riesgo}
+La posición central $x$ compara primero su same-level embedding con cada posición de la vecindad; las más similares reciben un softmax weight mayor y después se forma el weighted average. La retroalimentación positiva hace más consistentes las regiones que ya son similares, y así se forma una island; pero la misma retroalimentación positiva también puede amplificar una hypothesis errónea. Al leer la figura conviene plantearse tres preguntas a la vez: qué tan grande es el neighbor range, cómo se normaliza la similarity y cómo la bottom-up evidence corrige la attention errónea que cruza un boundary real.
+\end{knowledgebox}
+
+\begin{knowledgebox}{Diferencias entre la attention de GLOM y el Transformer estándar}
+\begin{tabularx}{\textwidth}{L{0.24\textwidth}L{0.33\textwidth}>{\raggedright\arraybackslash}X}
+\toprule
+Dimensión & Configuración habitual del Transformer estándar & Esbozo de GLOM en esta clase \\
+\midrule
+Q/K/V & Pueden provenir de proyecciones distintas & En clase, embedding, key, query y value se simplifican al extremo en un mismo vector \\
+Alcance & Habitualmente global o con un sparse pattern predefinido & Level-specific local neighborhood; los niveles superiores pueden ser más lejanos y más dispersos \\
+Ejecución & Un único forward con un número fijo de capas & Múltiples recurrent settling sobre la misma entrada \\
+Objetivo & Token contextualization & Formar islands en el mismo nivel, consistentes con la coordinate prediction de los niveles superior e inferior \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Pseudocódigo didáctico de una sola settling update de GLOM}]
+def glom_step(state, level, neighbors, weights):
+    next_state = {}
+    for x in state.locations:
+        current = state[x, level]
+        lower = state[x, level - 1]
+        upper = state[x, level + 1]
+
+        bottom_up = bottom_up_net[level](lower)
+        top_down = top_down_net[level](upper, location=x)
+
+        scores = [dot(current, state[y, level]) for y in neighbors(x, level)]
+        alpha = softmax(weights.beta[level] * scores)
+        lateral = weighted_sum(alpha, [state[y, level] for y in neighbors(x, level)])
+
+        mixed = (weights.bu * bottom_up + weights.td * top_down
+                 + weights.self * current + weights.lat * lateral)
+        next_state[x] = normalize(mixed)
+    return next_state
+\end{lstlisting}
+
+\subsection{Resumen de la sección}
+
+La unidad de cómputo de GLOM no es un block estático, sino un recurrent consensus process sobre un estado tridimensional de position, level y time. La update de cuatro vías transporta a la vez evidence local, whole expectation, temporal inertia y agreement de la vecindad; si falta cualquiera de ellas, la estructura puede perder pose, context, estabilidad o fronteras.
+\section{Ambiguity: de Pairwise Message a Hough-Style Voting}
+
+La evidencia de bajo nivel es ambigua por naturaleza: un circle puede ser left eye, right eye, front wheel o back wheel. Si cada part candidata envía directamente a todas las demás parts candidatas un pose-transformed message del tipo «¿me apoyas?», los relation types y los spatial pairs crecen con rapidez. GLOM propone otra dirección: que cada part prediga la identity-pose de su parent y que después, en el parent level, se verifique si esas predicciones coinciden.
+
+\lecturefigure{slide-24-upper-level-disambiguation.jpg}{Uso de la spatial relation correcta para resolver ambiguous parts en el parent level.}{Video oficial de Stanford Online 00:39:04--00:43:35.}
+
+\subsection{La complejidad del transformational random field}
+
+Supongamos que la nose hypothesis necesita preguntar si cerca existe una mouth compatible. El message no dice solo «hay / no hay mouth»: también tiene que transformar la nose pose mediante la nose-to-mouth relation en una expected mouth pose y, de regreso, aplicar la inverse transform. Si $N$ posiciones candidatas y $H$ tipos de relation head interactúan directamente, el número de messages en el esquema ingenuo se acerca a $O(HN^2)$, y cada message incluye una coordinate transform.
+
+\begin{warningbox}{Aquí $O(N^2)$ es una presión de diseño, no datos medidos con un profiler}
+En la clase se usa para explicar por qué el direct relation-specific messaging es complejo. El costo real depende además de la local window, el candidate pruning, el head sharing, la sparsity y la representation dimension; no puede usarse para clasificar directamente por velocidad a GLOM frente a la Hough route.
+\end{warningbox}
+
+\subsection{Hough transform: que las parts converjan en el parent space}
+
+Una alternativa más sencilla es que nose y mouth no se reconozcan entre sí de forma directa, sino que cada una prediga la identity y la pose de la face. Si dos parts con posiciones y apariencias distintas producen el mismo parent embedding, la attention del parent level las considerará como apoyo mutuo. Esto se parece al Hough voting clásico: la evidence local se proyecta en un hypothesis space común, y los picos representan explicaciones consistentes.
+
+\lecturefigure{slide-25-hough-transform.jpg}{Ruta Hough-style: las parts predicen el whole y después se compara si las whole hypotheses coinciden.}{Video oficial de Stanford Online 00:43:36--00:44:31.}
+
+\begin{knowledgebox}{Lectura de la figura: comparación entre direct relation y common-parent vote}
+La direct route, a la izquierda de la figura, requiere que la nose envíe relation-specific messages a distintas mouths, eyes, etc. potenciales; la parte derecha proyecta cada part en el whole hypothesis space. Aunque nose y mouth están en columns distintas, basta con que predigan el mismo face identity-pose vector para apoyarse mutuamente en el face level. La comparación decisiva no es «si hay o no attention», sino si la attention ocurre en el pairwise part space o en el common parent space.
+\end{knowledgebox}
+
+La parent prediction de una part $p$ puede abstraerse como:
+
+\[
+\hat{\mathbf e}_{w}^{(p)}=f_{\mathrm{bu}}\!\left(\mathbf e_p\right).
+\]
+
+Si nose y mouth pertenecen a la misma face, el caso ideal es
+
+\[
+\hat{\mathbf e}_{\mathrm{face}}^{(\mathrm{nose})}
+\approx
+\hat{\mathbf e}_{\mathrm{face}}^{(\mathrm{mouth})}.
+\]
+
+Aquí, $\mathbf e_p$ contiene la part identity y la pose, $f_{\mathrm{bu}}$ aprende la part-to-whole relation y $\hat{\mathbf e}_w^{(p)}$ es el vote de esa part por su parent. La agreement respalda un parent común, pero la disagreement también puede deberse a occlusion, a una bad pose estimate o a varios objects superpuestos.
+
+\begin{importantbox}{Por qué esta ruta reduce el routing burden}
+El embedding de cada column describe siempre «qué es, en cierto nivel» esa posición espacial; dentro de la column no hace falta mover dinámicamente la activity a otra capsule dedicada. Las conexiones entre columns siguen existiendo, pero se reducen a same-level similarity attention: lo que se compara son los parent votes, no una routing table dedicada para cada part-pair.
+\end{importantbox}
+
+\subsection{Cómo conservar multiple hypotheses}
+
+En la early inference, un circle no puede reducirse de inmediato a una única explicación. Hinton propone que cada neuron del embedding aporte una log-probability basis function amplia sobre el joint identity-pose space $z=(\text{identity},\text{pose})$; al sumar las contribuciones de varias active neurons, puede formarse una distribución aguda o multimodal.
+
+\lecturefigure{slide-26-joint-identity-pose.jpg}{Representación de una multimodal prediction mediante una joint identity-pose log-probability basis.}{Video oficial de Stanford Online 00:44:32--00:44:45.}
+
+\begin{knowledgebox}{Lectura de la figura: solo al sumar vague bases se forma una sharp hypothesis}
+Una sola neuron aporta una log-probability surface amplia sobre el joint identity-pose space, por lo que no puede leerse por sí sola como «esta neuron es el ojo izquierdo». La suma de varias active bases equivale a la intersección de varias constraints y puede dejar uno o varios picos. La figura no muestra la normalized probability, el método de entrenamiento ni la calibration; solo explica cómo la distributed activity podría, en principio, conservar multiple hypotheses.
+\end{knowledgebox}
+
+Una formulación didáctica es:
+
+\[
+\log p(z\mid\mathbf e)=\sum_{i=1}^{d} e_i\,\phi_i(z)-\log Z(\mathbf e).
+\]
+
+Aquí, $z$ es la identity-pose hypothesis, $e_i$ es la $i$-ésima activity del embedding, $\phi_i(z)$ es la basis function amplia de esa neuron en el hypothesis space y $Z(\mathbf e)$ es la normalization constant. Sumar las log probabilities de distintas evidences equivale a multiplicar las probabilities, lo que permite que las regiones de apoyo superpuestas se vuelvan más agudas.
+
+\begin{warningbox}{El propio expositor llama a este razonamiento un weak argument}
+Se trata de una representational hypothesis: explica cómo la high-dimensional distributed activity \emph{podría} expresar multimodal uncertainty. En la clase no se presentan calibrated likelihood, basis visualization, ablation ni neural recording que validen la fórmula. Las notas conservan la fórmula para que la hipótesis pueda ponerse a prueba, no para darle una falsa autoridad empírica.
+\end{warningbox}
+
+\teachervoice{Hinton dice que la perception debe manejar uncertainty, por lo que una neuron no puede representar un solo objeto determinado; pero también reconoce que «es la única forma que se me ocurre» no constituye una prueba sólida. Esta autocrítica debe estar en la misma página que la fórmula; de lo contrario, el lector tomará una preferencia de diseño por un hecho.}
+
+\subsection{Resumen de la sección}
+
+GLOM usa el part-to-whole vote para convertir el relation-specific pairwise messaging en parent-level agreement; después usa una distributed log-probability basis para dejar espacio a la early ambiguity. Ambos pasos tienen mucho poder explicativo, pero requieren, respectivamente, un complexity experiment y una uncertainty calibration para convertirse en mecanismos validados.
+\section{Entrenamiento: Masked Reconstruction, Settling y Consensus Distillation}
+
+El mecanismo de representación solo funciona si el objective permite aprender las islands correctas. La clase presenta dos tipos de signal complementarios. El primero, como en BERT, oculta patches de la entrada y hace que el sistema los reconstruya tras varias settling iterations. El segundo acerca las bottom-up/top-down predictions a un consensus embedding que fusiona información del vecindario y del tiempo, para favorecer la formación de regiones localmente coherentes.
+
+\subsection{Masked reconstruction y BPTT}
+
+Dadas una imagen $I$ y una mask $M$, se eliminan algunos patches de la entrada. El sistema ejecuta unos $T\approx10$ recurrent steps y después predice el contenido faltante desde el nivel más bajo. La loss de reconstrucción se retropropaga a través del time y de la hierarchy, por lo que la hypothesis de alto nivel, la evidence de bajo nivel y el lateral agreement pueden recibir gradient.
+
+\lecturefigure{slide-27-deep-end-to-end-training.jpg}{Deep end-to-end training: aplicar mask a la entrada, settle, reconstruir y retropropagar a través del tiempo.}{Video oficial de Stanford Online 00:44:46--00:45:43.}
+
+\[
+\mathcal L_{\mathrm{rec}}=
+\sum_{x\in M}
+\ell\!\left(D\!\left(\mathbf e_{x,0}^{(T)}\right),I_x\right).
+\]
+
+Donde $M$ son las masked locations, $I_x$ es el patch real, $D$ es el decoder que reconstruye la entrada a partir del embedding del nivel más bajo, $T$ son los settling steps y $\ell$ puede ser una pixel, feature o distribution loss. La clase no fija una forma única; lo importante es que el error recorra el recurrent inference path.
+
+\begin{warningbox}{«Train like BERT» no significa que la optimization sea igual de sencilla}
+La mask prediction de BERT recorre principalmente un forward graph de profundidad fija; GLOM, en cambio, debe hacer BPTT a través del settling time, de los levels superiores e inferiores, de las attention neighborhoods y de las shared prediction nets. La estabilidad del gradiente, la memory, la truncation, el fixed point y los early-exit criteria son problemas de ingeniería adicionales.
+\end{warningbox}
+
+\subsection{El consensus embedding como teacher}
+
+El target que resulta de mezclar las cuatro entradas se denomina \term{consensus embedding}. Si cada uno de los predictors bottom-up y top-down solo ve un tipo de source, pueden entrenarse para aproximar el consensus, que ya fusiona la información de los vecindarios similares, del instante anterior y de otro nivel. Como la lateral attention ya favorece los nearby similar states, aproximarse al consensus impulsa indirectamente la island formation.
+
+\lecturefigure{slide-28-consensus-and-distillation.jpg}{Las redes de predicción se acercan al consensus: una perspectiva de online co-distillation.}{Video oficial de Stanford Online 00:45:44--00:47:11.}
+
+\begin{knowledgebox}{Lectura de la figura: el teacher no es una etiqueta, sino un estado fusionado}
+Las nets bottom-up y top-down dan cada una su prediction; el historial del mismo nivel, la attention del vecindario y la información de las otras direcciones forman en conjunto el consensus. El entrenamiento acerca cada prediction de una sola fuente a este target fusionado, de modo que distintas columns pueden intercambiar conocimiento. Al leer la figura deben tenerse presentes dos limitaciones: el consensus depende del propio modelo actual y puede derivar; y si todos los peers comparten el mismo sesgo, la co-distillation reforzará el error en lugar de corregirlo.
+\end{knowledgebox}
+
+Sea $\mathbf c_{x,\ell}^{(t)}$ un stop-gradient teacher; puede escribirse:
+
+\[
+\mathcal L_{\mathrm{cons}}=
+\sum_{x,\ell,t}
+\left\|
+f_{\mathrm{bu}}^{\ell}\!\left(\mathbf e_{x,\ell-1}^{(t)}\right)
+-\operatorname{sg}\!\left(\mathbf c_{x,\ell}^{(t)}\right)
+\right\|_2^2
++
+\left\|
+f_{\mathrm{td}}^{\ell}\!\left(\mathbf e_{x,\ell+1}^{(t)},x\right)
+-\operatorname{sg}\!\left(\mathbf c_{x,\ell}^{(t)}\right)
+\right\|_2^2.
+\]
+
+Donde $\operatorname{sg}$ denota stop-gradient, que evita que teacher y student deriven arbitrariamente a la vez por la misma ruta; los dos términos entrenan, respectivamente, el predictor bottom-up y el top-down. El artículo también analiza una biological variant sin weight sharing completo; la figura de la clase se inclina más por un modelo compartido orientado a la ingeniería.
+
+\subsection{Weight sharing y brain plausibility}
+
+Un sistema de ingeniería puede copiar los mismos weights bottom-up/top-down en todas las posiciones; el cerebro no necesariamente comparte pesos de forma exacta. El artículo de GLOM propone la co-distillation: los local models de distintas posiciones, aunque sus parámetros difieran ligeramente, pueden intercambiar conocimiento mediante un consensus común. Esta idea explica cómo la «compartición funcional aproximada» puede prescindir del exact parameter tying, pero introduce problemas de teacher quality y de coordination.
+
+\lecturefigure{slide-29-shared-weights.jpg}{En ingeniería pueden compartirse los pesos entre columns; en el cerebro puede compartirse el conocimiento mediante consensus/co-distillation.}{Video oficial de Stanford Online 00:47:22--00:48:51.}
+
+\begin{knowledgebox}{Términos clave de distillation}
+\begin{tabularx}{\textwidth}{L{0.22\textwidth}L{0.30\textwidth}X}
+\toprule
+Término & De dónde proviene el teacher & Papel en esta clase \\
+\midrule
+knowledge distillation & Salida de un modelo grande preentrenado o de un ensemble & Transmitir el soft target al student \\
+online distillation & Los peers/ensemble en entrenamiento generan el target al momento & Sincronizar el conocimiento de varios modelos o fragmentos \\
+co-distillation & Los peers son teachers entre sí, o el consensus del ensemble enseña a todos los peers & Acercar los predictors de distintas columns a un target común island-compatible \\
+consensus & Estado que fusiona información temporal, bottom-up, top-down y lateral & No es ground truth; puede amplificar errores comunes \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Pseudocódigo didáctico de masked reconstruction y consensus training}]
+def train_step(image, mask, steps=10):
+    visible = apply_mask(image, mask)
+    state = initialize_columns(visible)
+
+    consensus_targets = []
+    for _ in range(steps):
+        state, consensus = glom_step_all_levels(state)
+        consensus_targets.append(stop_gradient(consensus))
+
+    reconstruction = decode_lowest_level(state)
+    reconstruction_loss = loss_on_masked_patches(reconstruction, image, mask)
+
+    consensus_loss = 0.0
+    for target in consensus_targets:
+        consensus_loss += prediction_to_consensus_loss(state, target)
+
+    total_loss = reconstruction_loss + CONSENSUS_WEIGHT * consensus_loss
+    total_loss.backward()  # backpropagation through settling time
+\end{lstlisting}
+
+\begin{warningbox}{El consensus también puede equivocarse colectivamente}
+Si la evidence inicial está sesgada, la attention es demasiado aguda o el vecindario cruza fronteras reales, todos los predictors pueden converger hacia un consensus erróneo. Un sistema confiable necesita source weighting, uncertainty, boundary diagnostics, curriculum o alternative hypotheses; no puede tomar «todos coinciden» por «todos aciertan».
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La propuesta de entrenamiento combina el error externo que aporta la masked reconstruction con la señal estructural interna que aporta la consensus distillation. Muestra cómo pueden optimizarse las islands, pero también expone la parte de ingeniería más difícil de GLOM: el recurrent BPTT, el teacher drift, el collapse, la fuga a través de las fronteras y la settling stability.
+\section{Replication, Cluster Formation y Hierarchical Sparsity}
+
+GLOM replica el mismo embedding de alto nivel en las muchas posiciones que cubre un object, lo que parece un gran desperdicio. La refutación de Hinton es esta: mientras el binding no está determinado, cada posición necesita conservar una hypothesis independiente para decidir de forma gradual «qué posiciones deben ser iguales»; la replicación no es la compresión óptima final, sino el costo de la inference flexibility y de la locality.
+
+\lecturefigure{slide-30-object-embedding-replication.jpg}{Cada object patch replica el object-level embedding; parece un desperdicio, pero conserva la hypothesis local.}{Video oficial de Stanford Online 00:48:52--00:49:47.}
+
+\teachervoice{El ponente recurre a una analogía de biology: las células replican el mismo ADN, y distintas partes de un órgano pueden tener protein-expression vectors similares. La función didáctica de esta analogía es mostrar que la locality puede justificar la redundancia; no afirma que un embedding de GLOM equivalga a un gen o a la expresión de proteínas.}
+
+\subsection{Forming clusters, no clustering sobre puntos fijos}
+
+El clustering ordinario recibe data points fijos y después descubre los grupos; en GLOM, los propios data points cambian con la interacción bottom-up, top-down, lateral y temporal. El sistema no agrupa embeddings ya existentes, sino que forma conjuntamente los embeddings y las cluster boundaries dentro de la recurrent dynamics.
+
+\begin{importantbox}{El significado computacional de «Hedge your bets»}
+En los primeros steps, la posición $x$ puede conservar una parent hypothesis distinta de la de sus vecinas; solo a medida que se acumula evidencia, las positions compatibles se absorben en la misma island. Si desde el inicio se comprimiera todo el object en una sola shared variable, un binding erróneo sería difícil de corregir localmente. Lo que se obtiene a cambio de la replicación es delayed commitment.
+\end{importantbox}
+
+\begin{warningbox}{La formación dinámica no implica obtener automáticamente los discrete clusters correctos}
+Los vectores continuos pueden formar transiciones difusas, varios attractors locales o un global consensus. Si se necesitan object slots discretos, hay que definir además el readout, el threshold, la connectedness, el temporal tracking y la birth/death rule. Esta clase no completa ese contract.
+\end{warningbox}
+
+\subsection{Los niveles altos, más lejanos y más dispersos}
+
+En los niveles bajos, las parts son pequeñas y sus bordes son finos, por lo que requieren dense interaction de corto alcance; en los niveles altos, las islands de object/scene son grandes y su redundancia interna es alta, de modo que pueden ampliar el receptive radius y muestrear solo unas cuantas posiciones. El objetivo es que, al subir de hierarchy level, el communication range crezca sin que se dispare el edge count.
+
+\lecturefigure{slide-31-sparse-high-level-replication.jpg}{Las islands de alto nivel son más grandes y pueden usar attention connections de mayor alcance y más dispersas.}{Video oficial de Stanford Online 00:49:48--00:50:07.}
+
+\begin{knowledgebox}{Lectura de la figura: que el range aumente no exige que el edge count crezca en la misma proporción}
+Una object island de alto nivel cubre muchos patches y se espera que sus vectores internos sean muy redundantes; por eso, una posición no necesita conectarse con todas las posiciones de la island: basta con que un sparse sample alcance puntos representativos para que pueda obtener la misma whole hypothesis. La figura expresa una range--density tradeoff: el interaction radius crece con el level y la densidad de conexiones disminuye. No proporciona el neighbor-search cost, la miss rate ni el throughput real, así que solo puede tomarse como una systems hypothesis.
+\end{knowledgebox}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Intención de diseño de la locality, el range y la sparsity en la jerarquía de GLOM.}
+\begin{tabularx}{\textwidth}{L{0.17\textwidth}L{0.24\textwidth}L{0.24\textwidth}>{\raggedright\arraybackslash}X}
+\toprule
+Nivel & Entidad típica & Interaction pattern & Riesgo principal \\
+\midrule
+Bajo & edge, texture, small part & De corto alcance, relativamente dense; protege los bordes finos & Ver solo lo local puede hacer perder el whole context \\
+Medio & major part, object component & De alcance medio, gated por similarity & Tiende a fusionar instancias parecidas pero distintas \\
+Alto & object, person, scene & De largo alcance, relativamente sparse; aprovecha la redundancia de las islands grandes & El sparse sample puede omitir objetos pequeños o generar conflictos entre varias instancias \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{warningbox}{«La misma carga de trabajo en cada nivel» es un objetivo, no un resultado medido}
+Para verificar esta afirmación hay que precisar, en cada nivel, el número de posiciones, el neighbor count, el embedding width, el número de pasos de iteración, la routing/ANN search, el memory traffic y el communication pattern. Decir solo «más sparse» no basta para demostrar que los FLOPs, la latency o la energy se mantienen constantes.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La embedding replication conserva grados de libertad para el gradual binding y la local correction; la hierarchical sparsity intenta convertir esa redundancia en una interacción escalable. Juntas expresan la disyuntiva central de GLOM: es preferible repetir en la state memory antes que comprimir de antemano una uncertain structure en un único node irreversible.
+\section{Neural Field: cómo un mismo Whole genera distintas Parts}
+
+En los últimos dos minutos se resolvió una cuestión que es fácil pasar por alto, pero que determina si el top-down path es coherente: si la face-level island es el mismo vector en todas las posiciones y todas las columnas comparten la misma top-down network, ¿por qué en unas posiciones la salida es nose y en otras mouth? La respuesta es que la top-down function también recibe la target location.
+
+\subsection{Location-conditioned top-down prediction}
+
+Sea $\mathbf e_w$ el whole embedding y $x$ la posición que se debe predecir; entonces el shared decoder es la función
+
+\[
+\hat{\mathbf e}_{\mathrm{part}}(x)=f_{\mathrm{td}}\!\left(\mathbf e_w,x\right).
+\]
+
+Aquí, $\mathbf e_w$ codifica a la vez la whole identity y la pose, $x$ especifica la posición de la imagen que se consulta, y la salida es el lower-level identity-pose embedding que debería aparecer en esa posición. El mismo face vector, combinado con distintos valores de $x$, puede generar nose, mouth u otra part prediction; esta es la forma básica de un coordinate-conditioned neural field.
+
+\teachervoice{Hinton plantea primero una contradicción aparente: las red arrows y las green arrows son completamente distintas, pero los face vectors del nivel superior son idénticos; si los top-down weights también se comparten, ¿cómo se obtienen resultados distintos? Su solución es introducir también la query location como entrada. Esta aclaración convierte «pesos compartidos» de un lema en una firma de función.}
+
+\begin{knowledgebox}{Qué resuelve aquí el neural field}
+\begin{itemize}
+  \item Entrada: el whole identity/pose embedding más la target coordinate;
+  \item Salida: la lower-level prediction en esa coordinate;
+  \item Valor: con un mismo decoder compartido, se producen partes distintas en posiciones distintas;
+  \item No equivale a: la clase no exige usar el volume rendering, el ray sampling ni la photometric loss de NeRF.
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Relación con los coordinate-conditioned models actuales}
+
+NeRF, las implicit neural representations y algunos world model decoders usan «global/local latent + coordinate/query» para producir salidas específicas de cada posición. Lo distintivo de GLOM es que el decoder no se limita a renderizar píxeles a partir de un único global latent, sino que está integrado en recurrent islands de varios niveles: la top-down prediction debe converger junto con la bottom-up evidence, el lateral agreement y el temporal state.
+
+\begin{warningbox}{Una Connection no es una lineage claim}
+Relacionar GLOM con los object-centric decoders, slot models y world models actuales es una interpretación de ingeniería; no puede afirmarse que estos últimos «implementaron GLOM», salvo que de verdad cumplan condiciones más fuertes, como la island representation, la multi-level recurrence, el four-source consensus y la coordinate-aware part-whole prediction.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La Location condition resuelve la contradicción expresiva de la shared top-down network: una misma whole representation puede emitir distintas part predictions según la coordenada. Es también el componente de todo el diseño más cercano a una técnica moderna consolidada, pero la dificultad de GLOM sigue siendo cómo entrenar ese decoder de forma estable y conjunta con las islands dinámicas.
+\section{Revisión a nivel de sistema: qué combina realmente GLOM}
+
+Llegados a este punto, GLOM puede condensarse en un recurrent structured inference loop: la evidence de bajo nivel propone hacia arriba una parent hypothesis, el context de alto nivel predice hacia abajo la part, la same-level attention hace que las hypothesis similares formen islands, el previous state aporta inertia, la masked reconstruction y la consensus distillation entrenan estas funciones, y el location-conditioned decoder se encarga de generar, a partir de un shared whole, las distintas parts.
+
+\lecturefigure{slide-32-summary.jpg}{Síntesis de la clase: combinar Transformer, contrastive learning y neural field para construir GLOM.}{Video oficial de Stanford Online 00:50:08--00:52:20.}
+
+\subsection{Lista de mecanismos y modos de falla}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Mecanismos de GLOM, problemas que resuelven y evidencia que todavía falta.}
+\begin{tabularx}{\textwidth}{L{0.20\textwidth}L{0.30\textwidth}>{\raggedright\arraybackslash}X}
+\toprule
+Mecanismo & Problema que intenta resolver & Validación pendiente \\
+\midrule
+Dynamic embeddings & Representar con hardware fijo el parse específico de cada entrada & Alignment con la ground-truth hierarchy \\
+Islands of agreement & Representar un mismo node con la misma activity & Evitar el collapse, separación entre instancias, estabilidad de las fronteras \\
+Bottom-up/top-down maps & Consistencia de identity/pose entre part y whole & Coordinate equivariance y occlusion robustness \\
+Local similarity attention & Descubrir regiones de spatial coherence & Attractor, error propagation y convergence \\
+Hough-style parent voting & Evitar la explosión del pairwise relation routing & Desempeño en scenes complejas, con múltiples instancias y con deformable objects \\
+Consensus distillation & Hacer que los local predictors compartan información estructural & Teacher drift, consensos erróneos y optimization stability \\
+Sparse upper levels & Ampliar el range sin disparar el cost & FLOPs, memory, latency y communication reales \\
+Neural field decoder & Que un mismo whole prediga parts distintas en posiciones distintas & Calidad de generación tras el entrenamiento conjunto con las islands \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Experimentos que conviene exigir al leer el artículo}
+
+Si hoy se quisiera llevar GLOM de un design document a un artículo de sistemas, haría falta, como mínimo, cerrar el ciclo con los siguientes experimentos:
+
+\begin{enumerate}
+  \item \textbf{Representation readout}: definir cómo se extraen nodes, edges, identity y pose a partir de los embeddings continuos;
+  \item \textbf{Causal use}: tras intervenir una island, verificar si la prediction de la part/whole correspondiente cambia conforme a la estructura;
+  \item \textbf{Convergence}: medir settling steps, fixed-point stability, oscillation y early stopping;
+  \item \textbf{Anti-collapse}: comparar local attention, negative pairs, variance regularization y consensus weighting;
+  \item \textbf{Generalization}: evaluar con viewpoints nuevos, part compositions nuevas, occlusion, multiple instances y video tracking;
+  \item \textbf{Systems accounting}: reportar state memory, attention edges, BPTT activation, wall-clock latency y energy;
+  \item \textbf{Ablation}: retirar por separado top-down, bottom-up, persistence, lateral attention, location condition y distillation.
+\end{enumerate}
+
+\begin{importantbox}{Una afirmación falsable sobre GLOM}
+Si las islands realmente desempeñan el papel de parse-tree node, retirar o perturbar una island del parent-level debería alterar de forma sistemática la top-down prediction de sus constituent parts, y no solo reducir la puntuación de clasificación global. Esta intervention se acerca más a una evidencia del mecanismo que el argumento de que «la visualización parece un object».
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La fortaleza de GLOM es reunir representation, inference, learning y coordinate generation en un mismo lenguaje de diseño; su debilidad es que casi todos sus eslabones clave carecen de experimentos de extremo a extremo. Precisamente porque la evidencia está incompleta, resulta especialmente adecuado como architecture thinking exercise: obliga al lector a reescribir la «estructura de los objetos», que era un término intuitivo, en forma de state, message, loss y verification contract.
+\section{Síntesis y ampliación}
+
+Esta clase parte de una pregunta sencilla pero incisiva: ¿cómo puede una red neuronal de conexiones fijas representar una part-whole hierarchy que es distinta para cada entrada? La respuesta de GLOM no asigna node hardware de forma dinámica. En su lugar, deja que la activity de la position-by-level grid forme islands mediante recurrent interaction. Los vectores aproximadamente coincidentes de una misma island representan un parse node. Las learned functions entre el nivel superior y el inferior expresan la part-whole prediction, la lateral attention expresa la agreement dentro del mismo nivel y el location-conditioned neural field hace que un mismo whole genere parts distintas en posiciones distintas.
+
+\subsection{La clase completa condensada en seis pasos causales}
+
+\begin{enumerate}
+  \item \textbf{Dynamic state replaces dynamic memory allocation}: la estructura específica de cada entrada se escribe en la activity, no modificando los weights;
+  \item \textbf{Coordinate-aware prediction proposes hierarchy}: las parts votan hacia arriba por el whole y el whole predice hacia abajo las parts;
+  \item \textbf{Local similarity attention forms islands}: las same-level hypotheses que ya son similares se refuerzan entre sí;
+  \item \textbf{Recurrent settling delays commitment}: la inference de varios pasos admite ambiguity, corrección y top-down feedback;
+  \item \textbf{Reconstruction and consensus train the loop}: el prediction error externo y la co-distillation interna moldean conjuntamente la representación;
+  \item \textbf{Location-conditioned decoding preserves weight sharing}: un mismo whole vector produce salidas distintas para cada coordinate.
+\end{enumerate}
+
+\begin{importantbox}{Conclusión didáctica final}
+Lo que más vale conservar de GLOM no es una update rule aún no validada, sino una representation discipline: si afirmas que un modelo entiende la estructura de los objetos, debes explicar dónde existen los node, cómo se codifica la part-whole relation, cómo se preserva la ambiguity, cómo se forma el binding, cómo se entrena la estructura mediante la loss y qué intervention puede demostrar que el cómputo posterior realmente utiliza esa estructura.
+\end{importantbox}
+
+\subsection{Seis errores frecuentes}
+
+\begin{warningbox}{No presentes una propuesta de diseño como una historia de éxito}
+\begin{enumerate}
+  \item No digas que GLOM ya resolvió la object-centric vision; esta clase no presenta un benchmark completo;
+  \item No tomes las flechas bidimensionales por la embedding dimension real ni por una pose matrix explícita;
+  \item No equipares directamente una island con una ground-truth segmentation mask;
+  \item No equipares consensus con truth: la agreement también puede ser un shared error;
+  \item No tomes la Hough analogy como una complexity advantage demostrada;
+  \item No equipares el location-conditioned decoder con un NeRF/modern world model completo.
+\end{enumerate}
+\end{warningbox}
+
+\subsection{Una conexión prudente con los sistemas actuales}
+
+Las object-centric representation, los slot-based model, el iterative refinement, las equivariant network, las implicit neural representation, los video world model y la sparse hierarchical attention actuales abordan, cada uno, problemas parciales de GLOM. La comparación verdaderamente valiosa no se fija en los nombres, sino que revisa punto por punto: si hay un dynamic entity state, si se trata la pose de forma explícita, si se conservan multiple hypotheses, si se admite top-down correction, si existe una part-whole relation legible y si la estructura se ha validado mediante causal intervention.
+
+\teachervoice{Antes de terminar, Hinton dice que fue una talk compleja y que quizá su mejor uso sea animar a todos a leer el artículo largo. Este cierre hace eco del «vaporware» de la apertura: no anuncia que el problema esté resuelto, sino que invita a los lectores a convertir una representation idea en un modelo y en experimentos más rigurosos.}
+
+\subsection{Lecturas adicionales}
+
+\begin{center}
+\footnotesize
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+\href{https://arxiv.org/abs/2102.12627}{Hinton, \emph{GLOM}}: documento de diseño completo. &
+\href{https://arxiv.org/abs/1710.09829}{Sabour et al., \emph{Capsules}}: antecedentes de routing. \\[0.25em]
+\href{https://arxiv.org/abs/2002.05709}{Chen et al., \emph{SimCLR}}: contrastive scaffold. &
+\href{https://arxiv.org/abs/1706.03762}{Vaswani et al., \emph{Transformer}}: línea base de attention. \\[0.25em]
+\href{https://arxiv.org/abs/1810.04805}{Devlin et al., \emph{BERT}}: masked reconstruction. &
+\href{https://arxiv.org/abs/1804.03235}{Anil et al., \emph{Online Distillation}}: co-distillation. \\[0.25em]
+\href{https://arxiv.org/abs/2003.08934}{Mildenhall et al., \emph{NeRF}}: coordinate-conditioned field. & \\
+\end{tabularx}
+\end{center}
+
+\end{document}

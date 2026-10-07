@@ -1,0 +1,858 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+\usepackage{multicol}
+
+\renewcommand{\notetitle}{Lecture 22: Recipe for Training Helpful Chatbots}
+\renewcommand{\noteauthors}{Elaborado a partir de la conferencia de Nazneen Rajani, las 71 diapositivas oficiales, los subtítulos manuales y los materiales originales de H4/Zephyr}
+\renewcommand{\notedate}{CS25 V3 · versión reescrita source-first de 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{Clase: 2023-10-31; publicación: 2023-12-14}
+\renewcommand{\videoduration}{1:08:49}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=mcep6W8oB1I}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.94\textwidth,height=0.54\textheight,keepaspectratio]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\let\standardtableofcontents\tableofcontents
+\renewcommand{\tableofcontents}{%
+  \begingroup
+  \footnotesize
+  \renewcommand{\baselinestretch}{0.94}\selectfont
+  \setlength{\parskip}{0pt}
+  \standardtableofcontents
+  \endgroup
+}
+
+\begin{document}
+\makecscover
+
+\section{Auditoría de fuentes: esto no es una tabla universal de recetas de Alignment}
+
+Lo más valioso de esta clase no son unos cuantos hiperparámetros fijos, sino una forma de organizar los experimentos: primero se descompone el «helpful chatbot» en demonstration data, preference data, training objective y evaluation protocol; después se cambian, uno por uno, la distribución de los datos y el evaluador, y se observa si las conclusiones se mantienen estables. La versión anterior comprimía estos niveles en una lista de nombres (SFT, reward model, PPO/DPO) e incluía una tasa de aprendizaje y un batch size uniformes que la clase no respalda; esta reescritura vuelve a la evidencia de la clase del 31 de octubre de 2023 y coloca las salvedades del ponente junto a cada conclusión.
+
+\subsection{Materiales oficiales e identificación de versiones}
+
+Las fuentes principales de esta sesión son la página del curso Stanford CS25 V3, la grabación oficial de Stanford Online \texttt{mcep6W8oB1I}, los subtítulos manuales \texttt{en-US} y el deck público de la ponente. En el sitio de la ponente existen dos versiones, de 67 y de 71 páginas; la grabación proyecta con claridad ``Recipe 2'' y ``Zephyr-7B'' entre 00:26:30--00:26:40, por lo que se eligió el \texttt{transformers\_united.pdf} de 71 páginas, que contiene esas diapositivas, y no la variante de 67 páginas, a la que le faltan las páginas de distillation y de UN advisory.
+
+\lecturefigure{slide-01.jpg}{Portada del deck oficial: Recipes for Training Helpful Chatbots}{Diapositivas oficiales p.1}
+
+\begin{knowledgebox}{Lectura de la figura: Recipe designa una descomposición de ingeniería, no un ajuste misterioso}
+El plural ``Recipes'' del título ya indica que no existe un procedimiento único. Al leer cada grupo de experimentos conviene hacerse cuatro preguntas: quién escribió las muestras, qué objetivo se optimiza, qué evaluador se usa y si la conclusión se reproduce con otros evaluadores. Si solo se registran los nombres de los modelos y las tablas de clasificación, se pierde el verdadero método de investigación de esta sesión.
+\end{knowledgebox}
+
+\lecturefigure{slide-02.jpg}{El equipo H4, sus objetivos, ingredients y procedure}{Diapositivas oficiales p.2}
+
+\begin{importantbox}{Las cuatro H de H4}
+H4 se refiere a \term{Helpful, Harmless, Honest, Huggy}. Aunque la sesión parte de estos cuatro objetivos, estudia principalmente la helpfulness y los SFT data; la harmlessness, la honesty y una safety evaluation completa aparecen solo en los límites de preference/red-teaming, por lo que esta sesión no debe equipararse con una solución de seguridad integral.
+\end{importantbox}
+
+\teachervoice{Desde el inicio, Rajani explica que el equipo quiere reproducir la ``secret sauce'' del alignment sobre un open-access pretrained model, pero la mayor parte de la clase se centra en el primer paso: cómo convertir el modelo base en un helpful chatbot capaz de completar las tareas del usuario. Esta delimitación del alcance fija los límites de interpretación de todos los resultados posteriores.}
+
+\lecturefigure{slide-03.jpg}{Ruta de la clase: SFT, datos de RLHF, distillation, experimentos y sesgos del evaluador}{Diapositivas oficiales p.3}
+
+\begin{knowledgebox}{Lectura de la figura: la sesión tiene dos recipes y una línea de auditoría}
+La primera recipe consiste en human-curated demonstrations/preferences; la segunda, en los AI-generated data y el AI feedback de Zephyr; ambas rutas desembocan finalmente en la evaluation. Los GPT-4 evaluator quirks del extremo derecho no son un apéndice, sino una auditoría inversa de todas las conclusiones anteriores basadas en tablas de clasificación.
+\end{knowledgebox}
+
+\subsection{Límites de la evidencia y estrategia de cobertura}
+
+De las 71 páginas del deck, 66 contienen información didáctica; se omiten a propósito las páginas separadoras 6, 32, 48 y 59 y la página final de Thanks (71), y se conservan todos los demás progressive highlights. Las tablas de clasificación, los costos y las capacidades de los modelos citados en el texto son lecture-time snapshots: por ejemplo, ``Zephyr beats ChatGPT'' solo significa que obtuvo un resultado específico con los protocolos de AlpacaEval/MT-Bench mostrados en ese momento; no demuestra que sea más seguro, más veraz ni superior en todas las tareas.
+
+\begin{warningbox}{No conviertas un snapshot de 2023 en una timeless law}
+Las tablas de clasificación cambian con el prompt template, el judge model, el sampling, la filtración de datos y los modelos participantes. La conclusión más duradera de esta sesión no es la clasificación de ningún modelo, sino esta: los experimentos con datos deben leerse junto con un evaluator audit; de lo contrario, una respuesta más larga o más parecida a la distribución de entrenamiento del judge puede tomarse erróneamente por más helpful.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Esta sesión es un experimento conjunto de data--objective--evaluator, no una tabla general de ajuste de hiperparámetros. La forma correcta de leerla es distinguir siempre entre los hechos de la clase, los juicios de ingeniería del ponente, las métricas sustitutas de las tablas de clasificación y las explicaciones de mecanismos que añadimos con base en los artículos originales.
+\section{De Base Model a Chatbot: tres señales de supervisión}
+
+La sección anterior estableció los límites de la evidencia; esta sección construye primero un lenguaje común. Lo que se llama «entrenar un chatbot» comprende al menos tres niveles: demonstration learning, preference learning y policy optimization. Cada uno usa estructuras de datos distintas, resuelve problemas distintos y requiere también métodos de evaluación distintos.
+
+\subsection{SFT, Reward Model y RLHF}
+
+\term{SFT (supervised fine-tuning, fine-tuning supervisado)} toma el prompt $x$ y una completion $y$, humana o sintética, como par supervisado, y minimiza la next-token cross-entropy:
+\[
+\mathcal{L}_{\mathrm{SFT}}(\theta)
+=-\sum_{t=1}^{|y|}\log \pi_{\theta}(y_t\mid x,y_{<t}).
+\]
+Aquí $\theta$ son los parámetros del chatbot, $y_t$ es el $t$-ésimo token objetivo y $y_{<t}$ es el prefijo ya dado. Lo que aprende SFT es «responder como en la demostración»; no aprende directamente a comparar cuál de dos respuestas es mejor.
+
+\lecturefigure{slide-04.jpg}{Flujo de entrenamiento al estilo InstructGPT: SFT proporciona el punto de partida de la helpfulness}{Diapositivas oficiales p.4}
+
+\begin{knowledgebox}{Lectura de la figura: la estructura de las label es distinta en cada paso}
+En el primer paso, personas escriben el prompt y la demonstration; en el segundo, el modelo genera varias respuestas y las personas solo las ordenan; en el tercero, la learned reward actualiza la policy. Primero observe quién produce el texto en cada paso y después cómo el trabajo humano pasa de «escribir la respuesta completa» a «comparar respuestas»; así se entiende por qué la escala, el ruido y el costo de los datos difieren entre las tres etapas.
+\end{knowledgebox}
+
+\term{reward model (modelo de recompensa, RM)} asigna a $(x,y)$ un escalar $r_{\phi}(x,y)$. Para una preferred answer $y_w$ y una rejected answer $y_l$, suele usarse la pairwise loss de Bradley--Terry:
+\[
+\mathcal{L}_{\mathrm{RM}}(\phi)
+=-\log \sigma\!\left(r_{\phi}(x,y_w)-r_{\phi}(x,y_l)\right).
+\]
+Aquí $\phi$ son los parámetros del reward model y $\sigma$ es la sigmoid; al modelo le basta con que la puntuación del winner supere a la del loser, sin que el valor de la recompensa tenga un significado físico absoluto.
+
+\lecturefigure{slide-05.jpg}{Preference ranking y RLHF añaden harmlessness y restricciones de valores}{Diapositivas oficiales p.5}
+
+\begin{importantbox}{El objetivo de RLHF no es «maximizar la reward y listo»}
+\term{RLHF (reinforcement learning from human feedback)} optimiza la policy con la learned reward y, por lo general, la restringe al mismo tiempo con una KL penalty para que no se aleje del reference model:
+\[
+\max_{\theta}\;\mathbb{E}_{y\sim\pi_{\theta}(\cdot\mid x)}
+\left[r_{\phi}(x,y)-\beta\log\frac{\pi_{\theta}(y\mid x)}{\pi_{\mathrm{ref}}(y\mid x)}\right].
+\]
+Aquí $\beta$ controla la tensión entre «perseguir la preferencia» y «conservar el comportamiento del modelo original». El reward hacking, el distribution shift y los errores del RM pueden hacer que una puntuación más alta no equivalga a una mejor respuesta.
+\end{importantbox}
+
+\teachervoice{El ponente explica el step 1 como «hacer primero que el modelo sea un helpful chatbot» y presenta los steps 2/3 como la incorporación de guardrails. Esta formulación es un relato de clase; no significa que SFT solo afecte la helpfulness ni que RLHF solo afecte la harmlessness: en la práctica, las tres etapas modifican a la vez el estilo, la exactitud factual y el comportamiento de rechazo.}
+
+\subsection{Términos clave: no confundir los tres tipos de muestras}
+
+La distinción siguiente es el conocimiento previo mínimo para leer las figuras posteriores. Si a la demonstration, al preference pair y al policy rollout se les llama por igual «datos de entrenamiento», no se puede explicar por qué la misma cantidad de muestras tiene costos y contenido informativo completamente distintos.
+
+\begin{knowledgebox}{Tres tipos de señales de supervisión}
+\begin{tabularx}{\textwidth}{@{}L{0.18\textwidth}L{0.25\textwidth}X@{}}
+\toprule
+Objeto & Estructura de la muestra & Qué aprende \\
+\midrule
+SFT & prompt + target completion & Imitar la token distribution de la respuesta objetivo \\
+Reward model & prompt + chosen/rejected responses & Aprender un orden de preferencia relativo \\
+RL policy & prompt + sampled response + scalar reward & Hacer que la policy produzca con más frecuencia responses de reward alta \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+SFT, reward modeling y RLHF usan tres tipos distintos de label. Cuando más adelante se hable de 10K demonstrations, 20K dialogues o 100K preference examples, primero hay que preguntar a qué estructura de muestra pertenecen; no se pueden comparar directamente las cifras.
+\section{Instruction Data Landscape: quién escribe el prompt y quién escribe la completion}
+
+Una vez establecido el objetivo de entrenamiento, el siguiente paso es decidir de dónde provienen las demonstrations. En clase no se dividieron los datos simplemente en «buenos/malos»; en cambio, se compararon el costo, la escalabilidad, la carga de filtrado y la herencia de estilo a lo largo de un espectro continuo que va de model-generated a human-written.
+
+\subsection{Estructura básica de una muestra}
+
+La sección anterior ya distinguió tres tipos de señales de supervisión; esta sección primero descompone una demonstration de SFT para responder en qué puntos exactos la fuente de los datos entra en el modelo. Al leer las dos diapositivas siguientes, conviene rastrear por separado quién produce el prompt y quién produce la completion, en lugar de evaluar solo si la respuesta final es fluida. La unidad mínima de SFT suele ser instruction/context más completion. Esta definición parece sencilla, pero oculta dos decisiones fundamentales: si el prompt proviene de la distribución real de usuarios y si la completion la escribe una persona, un modelo fuerte o un modelo débil por autoarranque; estas dos fuentes determinan la cobertura de capacidades y la transmisión de sesgos.
+
+\lecturefigure{slide-07.jpg}{Estructura instance/completion de una instruction demonstration}{Diapositiva oficial p.7}
+
+\begin{knowledgebox}{Lectura de la figura: primero se separan input provenance y output provenance}
+En la figura, el bloque azul es instruction/context y el bloque verde es la demonstration. Ambos pueden provenir de productores distintos: por ejemplo, una persona escribe el prompt y GPT-4 escribe la answer, o un modelo genera ambas partes. Al juzgar la calidad de los datos no basta con leer la fluidez de la answer; también hay que verificar si el prompt cubre las tareas de los usuarios objetivo.
+\end{knowledgebox}
+
+\lecturefigure{slide-08.jpg}{Espectro continuo de los datos de SFT, de model-generated a human-written}{Diapositiva oficial p.8}
+
+\begin{knowledgebox}{Lectura de la figura: el eje horizontal no es una simple clasificación por calidad}
+Los métodos de la izquierda son baratos y escalables, pero dependen más de la seed, del teacher model y del filtrado; los de la derecha son costosos, pero pueden incorporar intenciones humanas reales y una expresión concisa. El eje horizontal muestra la authorship: no garantiza que estar más a la derecha sea mejor ni que la synthetic data sea necesariamente de baja calidad.
+\end{knowledgebox}
+
+\teachervoice{Rajani insiste en que la diferencia entre Surge, OpenAssistant, Dolly y Self-Instruct es, ante todo, «quién escribe el input y quién escribe el output». No está elaborando un dataset leaderboard, sino construyendo una provenance taxonomy.}
+
+\subsection{Tres mecanismos de Synthetic Data}
+
+Aunque todos pertenecen a la model-generated data, el human role no es el mismo en Self-Instruct, UltraChat y CAMEL. Al compararlos lado a lado se entiende que las variables centrales de un synthetic pipeline son la seed, retrieval/material, los agent roles y el filtering, y no un simple interruptor de «generar con GPT».
+
+\lecturefigure{slide-09.jpg}{Self-Instruct: seed tasks, bootstrapping y filtering}{Diapositiva oficial p.9}
+
+\begin{knowledgebox}{Lectura de la figura: la cadena de expansión y la cadena de errores son la misma}
+Unas pocas seeds escritas por personas se amplían mediante few-shot generation y, tras pasar por task classification y filtrado, entran en el conjunto de tareas. La capacidad de expansión proviene del teacher model; el colapso de patrones, las repeticiones y los errores también se propagan desde ese mismo teacher, por lo que el filtering no es un paso de limpieza opcional, sino parte del algoritmo de generación.
+\end{knowledgebox}
+
+\lecturefigure{slide-10.jpg}{UltraChat: human-in-the-loop que selecciona materiales y genera de forma iterativa}{Diapositiva oficial p.10}
+
+\begin{knowledgebox}{Lectura de la figura: las personas no necesariamente escriben la respuesta final, pero también pueden cambiar la distribución de los datos}
+Las personas buscan temas y materiales de apoyo, y deciden las tareas y la dirección de las preguntas de seguimiento; un modelo fuerte genera el contenido de los diálogos. En comparación con el autoarranque puramente basado en modelos, este mecanismo sitúa el trabajo humano en la selección de temas y el refinamiento iterativo, y a cambio de un menor costo de redacción obtiene un control más explícito de la cobertura.
+\end{knowledgebox}
+
+\lecturefigure{slide-11.jpg}{CAMEL: role-playing de user/assistant para generar diálogos de varios turnos}{Diapositiva oficial p.11}
+
+\begin{knowledgebox}{Lectura de la figura: la interacción entre dos agents sigue restringida por la tarea inicial}
+Un modelo desempeña el papel de AI assistant y otro el de user, y ambos desarrollan la conversación por su cuenta en torno a una task de alto nivel. Es adecuado para generar interaction traces a gran escala, pero el prompt de cada rol, la termination y los sesgos compartidos por los modelos determinan la diversidad de los diálogos; no se debe equiparar automáticamente «multi-agent» con «usuarios más reales».
+\end{knowledgebox}
+
+\teachervoice{En clase, los tres métodos se ordenaron como líneas de producción con distinto «grado de participación humana»: Self-Instruct se apoya en seed/filter, UltraChat hace que las personas aporten materiales y refinen repetidamente, y CAMEL solo pide a las personas definir la tarea de alto nivel. Con esto, el ponente muestra que la synthetic data no es un tipo de datos, sino una familia de workflows.}
+
+\subsection{Del Landscape a la elección de H4}
+
+En ese momento, los datos públicos crecían con rapidez, pero el equipo aun así decidió comprar instruction demonstrations completamente escritas por personas. Esta decisión no niega la synthetic data; su propósito era obtener una línea base humana controlable para después comparar, en experimentos posteriores, el task mix, la length y la quantity.
+
+\lecturefigure{slide-12.jpg}{Versión actualizada del instruction dataset landscape de 2023}{Diapositiva oficial p.12}
+
+\begin{knowledgebox}{Lectura de la figura: los nombres de los conjuntos de datos requieren una explicación de su mecanismo}
+Self-Instruct/Unnatural Instructions se basan principalmente en la expansión con modelos; T0/FLAN convierten NLP tasks existentes al instruction format; UltraChat/ShareGPT dependen de diálogos de modelos o de usuarios; Dolly/OpenAssistant/Surge están más cerca de la redacción humana. El conocimiento verdaderamente transferible es el mecanismo y la provenance, no memorizar nombres.
+\end{knowledgebox}
+
+\lecturefigure{slide-13.jpg}{H4 elige Surge-Instruct dentro del SFT data continuum}{Diapositiva oficial p.13}
+
+\begin{importantbox}{Por qué comprar todavía datos humanos}
+El equipo quería usar «human-written» como grupo de control experimental: si el estilo, los errores factuales o las preferencias de longitud de un synthetic teacher ya están en los datos, es difícil determinar si la mejora del modelo final proviene de la cobertura de tareas o de la teacher imitation. Los datos humanos son costosos, pero ofrecen una estructura de errores distinta.
+\end{importantbox}
+
+\teachervoice{El ponente dice sin rodeos que humans inefficient and expensive, pero que tampoco se debe subestimar la calidad de la manually created data. Que H4 eligiera a principios de 2023 una ruta «muy manual» fue un diseño de investigación sujeto a restricciones de presupuesto, no una recomendación permanente para todos los proyectos.}
+
+\begin{knowledgebox}{Términos clave: fuentes de datos comunes}
+\begin{tabularx}{\textwidth}{@{}L{0.18\textwidth}L{0.25\textwidth}X@{}}
+\toprule
+Nombre & Problema que resuelve & Posición del mecanismo en esta clase \\
+\midrule
+Self-Instruct & Ampliar un instruction set a partir de pocas seeds & Generación con modelo + filtrado por clasificación \\
+UltraChat & Diálogos de varios turnos a gran escala & Personas eligen temas/materiales + generación con modelo fuerte \\
+CAMEL & Trayectorias de interacción con roles & Dos LLM en role-playing \\
+FLAN/T0 & Unificar el instruction format multitarea & Reescritura de tareas y mixture \\
+LIMA & Pocas demostraciones de alta calidad & human-written, cantidad pequeña \\
+OpenAssistant y Dolly & Diálogos humanos de la comunidad o de empleados & human-authored baseline \\
+Surge-Instruct & Demonstrations humanas controlables de H4 & vendor workforce + distribución especificada \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La pregunta fundamental de la instruction data es la authorship y el workflow: quién decide la tarea, quién produce el contenido y quién filtra. La synthetic data y la human data conllevan costos y sesgos distintos, y los experimentos posteriores deben registrar esta provenance de forma explícita.
+\section{SFT Dataset Design: además de la cantidad, la distribución}
+
+La sección anterior eligió un human-written baseline; esta sección aborda el problema de adquisición realmente difícil: cuántos ejemplos se necesitan, de qué tareas, de qué longitud y qué población los redacta. La aportación central de la clase es reformular «recolectar 10K ejemplos» como un design vector multidimensional.
+
+\subsection{Diminishing Returns no significa «los datos no importan»}
+
+La sección anterior explicó por qué H4 necesita un human-written baseline; esta subsección pregunta además, dado que los datos escritos por personas son caros, en qué punto aumentar el número de ejemplos empieza a perder valor marginal. Al leer la curva, primero hay que distinguir entre «la pendiente del beneficio disminuye» y «los datos dejan de importar». Trabajos previos sugieren que el beneficio de las instruction de alta calidad se desacelera después de unos cuantos miles de ejemplos, pero esta conclusión depende del modelo base, de la mezcla de tareas y del evaluator. La interpretación correcta es que el beneficio marginal decrece y que hace falta una controlled ablation; la interpretación errónea es que cualquier conjunto de 1K ejemplos basta.
+
+\lecturefigure{slide-14.jpg}{Escala de datos y diminishing returns en investigaciones previas sobre SFT}{Diapositiva oficial p.14}
+
+\begin{knowledgebox}{Lectura de la figura: la curva respalda un beneficio marginal decreciente, no un tamaño óptimo universal}
+El eje horizontal es el número de instruction añadidas y el eje vertical es el desempeño en una evaluación específica. Primero observa en qué momento disminuye la pendiente y después revisa el task mix y el model que usa la curva. La saturación indica que seguir replicando ejemplos similares aporta menos valor, pero no descarta que añadir tareas nuevas, aumentar la dificultad o corregir errores siga siendo eficaz.
+\end{knowledgebox}
+
+\teachervoice{Al iniciar la adquisición, el equipo partía de dos supuestos previos aparentemente contradictorios: la escala de datos debería estar en tens of thousands, pero después de unas pocas instructions de alta calidad el desempeño se satura rápidamente. El ponente usa esta contradicción para introducir las task/length ablation posteriores, en lugar de ofrecer un número mágico de ejemplos.}
+
+\lecturefigure{slide-15.jpg}{SFT data desiderata: task, length, quantity, human y synthetic}{Diapositiva oficial p.15}
+
+\begin{importantbox}{Dataset size no es un estadístico suficiente}
+Dos conjuntos de datos con 10K ejemplos cada uno pueden diferir por completo en task entropy, prompt length, completion length, multi-turn ratio, perfil de los redactores y correlación de los errores. Si los modelos muestran desempeños distintos, la causa no puede atribuirse únicamente a ``more data'' o ``better quality''.
+\end{importantbox}
+
+\subsection{Task Distribution: qué practica finalmente el modelo}
+
+El task mix determina cómo se reparte el token budget entre capacidades como generation, QA, coding y classification. La clase muestra primero la distribución de InstructGPT y después la que H4 eligió para la Surge collection, y subraya que la distribution es una función conjunta de los requisitos del producto y de la posibilidad de evaluarlo.
+
+\lecturefigure{slide-16.jpg}{Instruction task distribution de InstructGPT}{Diapositiva oficial p.16}
+
+\begin{knowledgebox}{Lectura de la figura: los porcentajes son una asignación del presupuesto de entrenamiento}
+Cada fila de la tabla no solo representa el nombre de una tarea, sino también un espacio de respuestas distinto: classification tiene entropía más baja, brainstorm/generation tiene entropía más alta, y en coding/math es más probable que exista una corrección ejecutable o única. Un cambio en la distribución modifica a la vez la dificultad de aprendizaje y la evaluator reliability.
+\end{knowledgebox}
+
+\lecturefigure{slide-17.jpg}{Task mix elegido por H4/Surge}{Diapositiva oficial p.17}
+
+\begin{knowledgebox}{Lectura de la figura: comparar diferencias, no buscar la única receta correcta}
+Primero compara cómo se desplazan las proporciones de generation, rewrite, coding, QA, etc., respecto a la línea base, y después pregunta a qué objetivo sirve ese desplazamiento. La distribución de H4 es un diseño con un presupuesto, una población de redactores y unos supuestos de aplicación de 2023; no es la universal mixture de todos los chatbot.
+\end{knowledgebox}
+
+\teachervoice{El ponente resume el problema de adquisición como «how many thousands of what task?». Esta frase es más precisa que «la calidad de los datos importa más»: la calidad tiene que concretarse en cobertura de tareas, posibilidad de determinar si una respuesta es correcta y objetivos de las tareas posteriores.}
+
+\begin{lstlisting}[caption={Código conceptual para repartir un demonstration budget limitado según proporciones objetivo}]
+target_mix = {
+    "generation": 0.15, "open_qa": 0.05, "brainstorm": 0.10,
+    "rewrite": 0.15, "summarize": 0.10, "math": 0.05,
+    "coding": 0.15, "classify": 0.10, "closed_qa": 0.05,
+    "extract": 0.10,
+}
+
+def allocate_examples(total_examples, target_mix):
+    counts = {task: round(total_examples * ratio)
+              for task, ratio in target_mix.items()}
+    counts[max(counts, key=counts.get)] += total_examples - sum(counts.values())
+    return counts
+\end{lstlisting}
+
+\subsection{Length Distribution: más largo no significa más útil}
+
+La prompt/response length modifica la task difficulty, el número de tokens de entrenamiento, el generation style y las preferencias del judge. La clase coloca lado a lado la length table de los prior datasets y las restricciones elegidas, lo que anticipa la metric reversal que aparece más adelante.
+
+\lecturefigure{slide-18.jpg}{Distribución de prompt y completion length en conjuntos de datos existentes}{Diapositiva oficial p.18}
+
+\begin{knowledgebox}{Lectura de la figura: el número de ejemplos y el número de tokens son dos presupuestos distintos}
+Con los mismos 10K examples, duplicar la longitud media de completion consume aproximadamente el doble de target tokens. Las respuestas largas también tienden a incluir listas, explicaciones y redundancia, y un LLM judge puede tomar estas style signal como helpfulness; por eso length es a la vez una variable de entrenamiento y un evaluation confounder.
+\end{knowledgebox}
+
+\lecturefigure{slide-19.jpg}{Length constraint elegida por H4 e intervalos prioritarios}{Diapositiva oficial p.19}
+
+\begin{warningbox}{El length effect no puede juzgarse solo con curvas de correlación}
+Si los prompt largos se concentran en ciertas tareas, o las completion largas provienen de redactores específicos, la performance--length correlation puede deberse a task/source confounding. El valor de las ablation posteriores consiste en controlar parte de las variables, pero aun así no permite obtener automáticamente una ley causal universal.
+\end{warningbox}
+
+\subsection{Tareas, ejemplos y población de redactores de Surge-Instruct}
+
+Las dos subsecciones anteriores ya fijaron dos variables de diseño, task y length; esta subsección las aplica al conjunto de datos finalmente adquirido y añade la workforce provenance, que suele pasarse por alto. Al leer las tres diapositivas siguientes, responde en orden «qué se recolectó», «cómo son los ejemplos» y «quién los escribe», y después evalúa cómo esta información limita la extrapolación de los resultados. Surge-Instruct recolectó finalmente unos 10K instruction--demonstration pairs; la descripción del conjunto de datos solo está completa cuando se reúnen los tres tipos de evidencia.
+
+\lecturefigure{slide-20.jpg}{Composición por tareas de los 10K datos de Surge-Instruct}{Diapositiva oficial p.20}
+
+\begin{knowledgebox}{Lectura de la figura: el gráfico de pastel y la tabla de conteos deben leerse juntos}
+Generation ocupa la porción más grande, pero open QA, brainstorm, chat, rewrite, summarize, coding, etc., forman en conjunto la mixture. Primero revisa los conteos absolutos para que el gráfico de pastel no oculte las categorías pequeñas, y luego verifica si las tareas cubren el producto previsto; la figura describe la distribution, pero no demuestra directamente qué categoría produce la mejora.
+\end{knowledgebox}
+
+\lecturefigure{slide-21.jpg}{Ejemplos de generation, classification, brainstorm y QA en Surge-Instruct}{Diapositiva oficial p.21}
+
+\begin{knowledgebox}{Lectura de la figura: el criterio de «buena respuesta» cambia según la task}
+Un knock-knock joke requiere estilo y estructura; classification requiere etiquetas discretas; brainstorm prioriza la cobertura y la concisión; open QA prioriza los hechos. Entrenarlos juntos con la misma loss es sencillo, pero al evaluar hay que conservar task-specific criteria.
+\end{knowledgebox}
+
+\lecturefigure{slide-22.jpg}{Perfil demográfico de la Surge annotator workforce}{Diapositiva oficial p.22}
+
+\begin{warningbox}{Demographics es una descripción de la procedencia, no una prueba de representatividad}
+La US-based workforce y su distribución por género, edad, raza y escolaridad ayudan a entender quién produjo los datos, pero no demuestran que representen a los usuarios de todo el mundo. Las notas conservan esta información para dar seguimiento a la viewpoint coverage y a los posibles sesgos, no para tratar la demographic diversity como una certificación de calidad.
+\end{warningbox}
+
+\teachervoice{Al enumerar el annotator background, el ponente reconoce que la human-written data también tiene una distribución de producción. Los datos escritos por personas no carecen de sesgo de manera automática; solo trasladan la fuente del sesgo del teacher model a los redactores, las guías, el proveedor y el proceso de revisión.}
+
+\subsection{Resumen de la sección}
+
+La SFT collection es un diseño conjunto de task, length, quantity y workforce. Solo si se registran estas variables pueden explicarse las diferencias posteriores en el leaderboard; informar únicamente «10K datos de alta calidad» descarta la información experimental más importante.
+\section{Preference Data: convertir «mejor» en etiquetas entrenables}
+
+Una demonstration le indica al modelo cómo responder; la preference data, en cambio, pide a una persona o a un judge comparar varias respuestas. Añade grados de libertad como la task entropy, la longitud de la conversación, la prioridad entre valores y la rating scale, por lo que no se puede copiar sin cambios el proceso de SFT data collection.
+
+\subsection{La interfaz de anotación de Helpfulness y Harmlessness}
+
+Una preference sample suele contener varias model responses al mismo prompt, junto con una etiqueta chosen/rejected o rank/margin. El anotador no tiene que reescribir la respuesta, pero sí debe interpretar de forma estable qué significa «más helpful, más truthful o más harmless».
+
+\lecturefigure{slide-23.jpg}{Interfaz de helpfulness y harmlessness para Human preference data}{Diapositivas oficiales, p.23}
+
+\begin{knowledgebox}{Lectura de la figura: la label es el resultado de una comparación, no la verdad de un hecho}
+La interfaz reduce el juicio humano a una pairwise choice o a una ordinal score. En preguntas factuales, la exactitud puede verificarse; en redacción, consejos y brainstorming, la preferencia depende del estilo, la longitud y los valores personales. Por eso la preference label es una protocol-dependent measurement.
+\end{knowledgebox}
+
+\lecturefigure{slide-24.jpg}{Las cinco desiderata de un preference dataset}{Diapositivas oficiales, p.24}
+
+\begin{importantbox}{Las cinco perillas de la preference collection}
+La task distribution determina qué se compara; la length distribution determina la carga de lectura y el contexto; single/multi-turn determina cuánto depende del historial; helpfulness/honesty/harmlessness determina la prioridad entre valores; la rating/ranking scale determina la label resolution. Un cambio en cualquiera de estas perillas puede modificar el reward model.
+\end{importantbox}
+
+\teachervoice{El ponente considera explícitamente la preference data como «otro problema de diseño de datos». Si los mismos prompts se convierten en conversaciones multi-turn, si se cambia la tie-break rule entre valores o si se cambia la rating scale, se obtienen señales de supervisión distintas.}
+
+\subsection{Pilot: probar primero el flujo de anotación y después contratar a gran escala}
+
+El equipo pidió primero a distintos vendors un pilot sobre 300 prompts de Self-Instruct, con la plantilla de Anthropic. El objetivo del pilot no era solo comparar proveedores, sino también detectar si la interface, la guideline o el model endpoint introducían un sesgo sistemático en las labels.
+
+\lecturefigure{slide-25.jpg}{Pilot de preference collection con 300 prompts}{Diapositivas oficiales, p.25}
+
+\begin{knowledgebox}{Lectura de la figura: el pilot es un measurement system test}
+A la izquierda aparece la plantilla de anotación y a la derecha la tabla de resultados por vendor/task. Antes de ampliar la escala, conviene verificar si los distintos proveedores entienden la misma scale, si la tie rate es anómala y si algunas tasks son difíciles de juzgar. Si la measurement no es estable, agregar muestras solo repite el sesgo con mayor precisión.
+\end{knowledgebox}
+
+\lecturefigure{slide-26.jpg}{Diagnostics de task confusion/distribution en la preference data del pilot}{Diapositivas oficiales, p.26}
+
+\begin{knowledgebox}{Lectura de la figura: la matriz muestra la cobertura y la confusión entre tareas}
+La zona diagonal representa la intended category; las entradas fuera de la diagonal señalan inconsistencias en la task definition o en la prompt classification. Primero hay que ver qué categorías se confunden entre sí y después determinar si el label noise proviene del annotator, de la taxonomy o del prompt mismo; la matriz, por sí sola, no demuestra la calidad de las respuestas.
+\end{knowledgebox}
+
+\subsection{20K Dialogues, 80K Prompts y restricciones de Multi-turn}
+
+La collection a gran escala tenía como meta unos 20K dialogues, con un total aproximado de 80K prompts. La distribución de tareas incluye a propósito distintos niveles de entropy, como generation, coding, math y QA; cada conversación completa tiene menos de 2,048 tokens y un promedio de unos cuatro turnos, para ajustarse al context de los modelos de ese momento y conservar follow-ups realistas.
+
+\lecturefigure{slide-27.jpg}{Los 20K dialogues del preference dataset y la asignación de tareas}{Diapositivas oficiales, p.27}
+
+\begin{knowledgebox}{Lectura de la figura: 20K y 80K describen unidades de conteo distintas}
+20K es el número de dialogues y 80K, el número de prompts dentro de las conversaciones de varios turnos; con un promedio de cuatro turnos, ambos órdenes de magnitud se relacionan de forma natural. Todo reporte de entrenamiento o de costos debe indicar la unit; de lo contrario, una conversación de cuatro turnos se contará por error como una muestra o como cuatro muestras inconsistentes.
+\end{knowledgebox}
+
+\teachervoice{El equipo agregó tareas de baja entropía, como math, coding y closed QA, porque en ellas es más fácil juzgar si una respuesta es correcta; la creative generation se parece más a una conversación real, pero puede admitir muchas respuestas razonables, lo que reduce la concordancia entre las preferencias humanas.}
+
+\begin{lstlisting}[caption={Estructura conceptual para convertir una multi-turn chosen/rejected conversation en un lote de DPO}]
+def build_preference_example(dialogue, chosen, rejected, margin):
+    return {
+        "prompt": render_history(dialogue),
+        "chosen": chosen,
+        "rejected": rejected,
+        "preference_margin": margin,
+        "turn_count": len(dialogue),
+    }
+\end{lstlisting}
+
+\lecturefigure{slide-28.jpg}{Longitud, número de turnos, valores y rating policy de la preference collection}{Diapositivas oficiales, p.28}
+
+\begin{knowledgebox}{Lectura de la figura: las constraints sirven al modelo y a los anotadores a la vez}
+El 2,048-token cap evita exceder el context del modelo y también limita el costo de lectura de la anotación; el promedio de cuatro turnos aporta follow-ups sin que la conversación completa se vuelva demasiado larga. Que el equipo priorizara helpfulness sobre harmlessness es una capability-stage choice y no debe interpretarse como un principio universal sobre la prioridad de la seguridad.
+\end{knowledgebox}
+
+\teachervoice{La preference collection no es una entrega única: cada semana el equipo recibía datos, hacía fine-tuning del modelo y entregaba al vendor un endpoint mejor para generar los pairs de la semana siguiente. La policy que enfrenta el annotator cambia continuamente, por lo que el dataset es un co-evolving process.}
+
+\subsection{Chosen, Rejected y Preference Margin}
+
+La subsección anterior describió la escala, el número de turnos y la prioridad entre valores de la collection; esta sección pasa al interior de un registro de entrenamiento y explica qué información aporta cada uno de winner, loser y margin. Al leer los ejemplos, primero hay que localizar el punto donde las dos respuestas realmente difieren y después ver si el margin corresponde a la magnitud de esa diferencia. Los ejemplos multi-turn mostrados en clase subrayan que tanto la chosen como la rejected pueden ser buenas; el margin expresa la intensidad de la preferencia, no una puntuación absoluta. Los pairs con margin grande sirven para aprender errores evidentes; los de margin pequeño contienen señales finas de style/value, pero también es más probable que incluyan annotator noise.
+
+\lecturefigure{slide-29.jpg}{Multi-turn chosen/rejected preference examples y margin}{Diapositivas oficiales, p.29}
+
+\begin{knowledgebox}{Lectura de la figura: primero el punto de divergencia, después el margin}
+El ejemplo de la izquierda difiere claramente en la imitación de un personaje y en el manejo de una posible amenaza, y su margin es grande; el de la derecha es un texto de aniversario en el que ambas respuestas son utilizables y solo difieren ligeramente en detalles omitidos y en la redacción. La información de los Pairwise data proviene de «dónde difieren», no solo del texto del winner.
+\end{knowledgebox}
+
+\teachervoice{El equipo usó primero la scale de 1 a 8 de Anthropic y después la cambió a un esquema tipo Llama-2 de winner + margin de 1 a 4, porque este último explica con mayor facilidad «cuál es mejor y por cuánto». Un Scale change modifica la label distribution, por lo que también es una variable experimental.}
+
+\subsection{Resumen de la sección}
+
+La Preference data reduce la calidad de respuestas abiertas a etiquetas comparativas protocol-dependent. Una collection eficaz requiere diseñar en conjunto la task entropy, el multi-turn context, la tie-break rule entre valores, la rating scale y los endpoints iterativos.
+\section{Recipe 2: Zephyr y Alignment Distillation}
+
+Los human data son costosos, así que la clase pasa después a la segunda recipe: hacer que un modelo fuerte produzca dialogue y preference, y luego destilar el alignment behavior a un open model más pequeño. Esta ruta puede escalar, pero también se copian el estilo del teacher model y los sesgos del judge.
+
+\subsection{De Human Feedback a AI Feedback}
+
+\term{alignment distillation (destilación de la alineación)} se refiere aquí a entrenar un modelo más pequeño con AI-generated dialogues y AI-ranked preferences. No consiste en aplicar directamente knowledge distillation tradicional a los teacher logits, sino en destilar la conducta de instruction-following y de preference.
+
+\lecturefigure{slide-30.jpg}{Recipe 2: Distillation of AI Alignment}{Diapositiva oficial p.30}
+
+\begin{importantbox}{La diferencia entre las dos recipes está en el label producer}
+En la human recipe, las demonstrations/preferences las producen principalmente personas; en la Zephyr recipe, los dialogues y rankings los produce principalmente un modelo fuerte. Ambas pueden usar un SFT/DPO objective similar, pero la provenance de la señal de supervisión y la failure correlation son completamente distintas.
+\end{importantbox}
+
+\lecturefigure{slide-31.jpg}{Zephyr-7B: tres etapas, dSFT, AI feedback y dDPO}{Diapositiva oficial p.31}
+
+\begin{knowledgebox}{Lectura de la figura: las tres columnas forman un pipeline de transformación de datos}
+La primera columna genera multi-turn dialogues a partir de un prompt, que se usan para distilled SFT; la segunda hace que varios modelos generen candidatos y que GPT-4 haga el ranking; la tercera envía el par chosen/rejected a DPO. Cada columna filtra la distribución y también hereda los sesgos del teacher/judge.
+\end{knowledgebox}
+
+\term{DPO (Direct Preference Optimization)} compara directamente la log-probability relativa que la policy asigna a chosen/rejected, y la calibra con una reference policy:
+\[
+\mathcal{L}_{\mathrm{DPO}}(\theta)
+=-\log\sigma\!\left(
+\beta\log\frac{\pi_{\theta}(y_w\mid x)}{\pi_{\mathrm{ref}}(y_w\mid x)}
+-\beta\log\frac{\pi_{\theta}(y_l\mid x)}{\pi_{\mathrm{ref}}(y_l\mid x)}
+\right).
+\]
+Donde $\beta$ controla la intensidad de la actualización de preferencias, y $y_w/y_l$ son, respectivamente, chosen/rejected. DPO no entrena explícitamente un reward model, y tampoco equivale a «no requiere SFT»; la ablation posterior muestra precisamente que el SFT es el punto de partida decisivo.
+
+\teachervoice{Rajani llama a Zephyr «distillation of AI alignment»: UltraChat se encarga del dSFT, los AI-generated rankings forman UltraFeedback y, al final, DPO destila las preferences. Al interpretar los resultados de la clase hay que tener presente que tanto el teacher como el judge provienen de un modelo fuerte.}
+
+\subsection{Resumen de la sección}
+
+Zephyr sustituye con AI data una gran cantidad de redacción y ordenamiento manuales, y convierte el alignment pipeline en una destilación escalable. Al tiempo que bajan los costos, el training--evaluation coupling y la teacher style imitation se vuelven los nuevos riesgos principales.
+\section{El training graph y el evaluation graph deben dibujarse por separado}
+
+Con dos recetas sobre la mesa, el curso no declara de inmediato a un ganador; primero enumera las etapas de entrenamiento y las de evaluación. La estructura más importante aquí es esta: preentrenamiento, in-context, SFT y RLHF forman el training graph; instruction following, human Elo, LLM judge, reward-model test y red teaming forman otro grafo, el evaluation graph.
+
+\subsection{Cuatro Adaptation Stage}
+
+Ya se presentaron las dos recetas, la human y la synthetic; esta sección primero las coloca en el diagrama más amplio de model adaptation, para no confundir una etapa de entrenamiento con el sistema completo. Al leer las tres diapositivas siguientes, conviene distinguir «si se actualizan los parámetros», «de dónde proviene la señal de supervisión» y «si el objetivo es una capacidad o una preferencia de valores», y observar en qué paso empieza a aparecer la chatbot branch. Un mismo base model puede adquirir conductas distintas mediante prompt, SFT o preference optimization.
+
+\lecturefigure{slide-33.jpg}{Preentrenamiento, in-context learning, SFT y RLHF}{Diapositiva oficial p.33}
+
+\begin{knowledgebox}{Lectura de la figura: las cuatro filas no son un flujo lineal obligatorio}
+El preentrenamiento aprende una next-token distribution general; el in-context learning solo modifica la entrada; SFT modifica los parámetros para seguir instructions; RLHF/DPO ajusta después la conducta según las preferences. Un proyecto puede omitir o repetir algunas etapas, pero debe indicar a qué capa pertenece el model checkpoint actual.
+\end{knowledgebox}
+
+\lecturefigure{slide-34.jpg}{Correspondencia entre training stage y chatbot evaluation target}{Diapositiva oficial p.34}
+
+\begin{knowledgebox}{Lectura de la figura: el objetivo de entrenamiento y la pregunta de evaluación no se corresponden uno a uno aunque se llamen igual}
+Un SFT loss bajo no garantiza que las respuestas sean útiles, y un reward loss bajo no garantiza que la policy sea segura. La evaluation debe observarse desde varios ángulos: held-out tasks, pairwise preference, human study y adversarial prompts; de lo contrario, solo se verifica que el modelo sabe optimizar el surrogate de entrenamiento.
+\end{knowledgebox}
+
+\lecturefigure{slide-35.jpg}{Posición de la chatbot training branch dentro del adaptation stack}{Diapositiva oficial p.35}
+
+\begin{importantbox}{El training loss es un indicador del proceso, no de la calidad del producto}
+La cross-entropy, el preference loss y la policy reward solo indican que el modelo se acerca más a su respectivo objective. No responden directamente sobre factuality, harmlessness, calibration ni la satisfacción de usuarios reales; es necesario introducir una measurement externa.
+\end{importantbox}
+
+\subsection{Helpfulness, Harmlessness y tres capas de Evaluation}
+
+La subsección anterior dibujó el training graph; esta pasa al evaluation graph, que es distinto, y responde por qué «el modelo sabe hacer la tarea» y «el modelo es confiable ante entradas peligrosas» no pueden compartir una sola puntuación. Al leer las diapositivas progresivas que siguen, observa primero qué nuevo tipo de falla queda expuesto con cada capa de evaluation que se agrega. La evaluation incluye al menos instruction following, reward-model ranking y red teaming; las dos primeras capas suelen optimizar el desempeño promedio, mientras que la tercera busca activamente vulnerabilidades en la cola; ninguna de las tres puede sustituirse por un único leaderboard.
+
+\lecturefigure{slide-36.jpg}{Helpfulness y Harmlessness son dimensiones de evaluación distintas}{Diapositiva oficial p.36}
+
+\begin{knowledgebox}{Lectura de la figura: capacidad y seguridad pueden cambiar a la vez, y también entrar en conflicto}
+Un modelo más dispuesto a responder puede mejorar la helpfulness, pero aumenta el riesgo ante solicitudes peligrosas; un rechazo más estricto, en cambio, puede perjudicar a los usuarios normales. La izquierda y la derecha de la figura no son categorías excluyentes, sino dimensiones que deben medirse por separado para luego discutir el tradeoff.
+\end{knowledgebox}
+
+\lecturefigure{slide-37.jpg}{Instruction following, RM evaluation y red teaming}{Diapositiva oficial p.37}
+
+\begin{knowledgebox}{Lectura de la figura: tres niveles corresponden a tres tipos de falla}
+El Step 1 verifica «si sabe hacerlo»; el Step 2, «si sabe elegir»; el Step 3, «ante qué entradas pierde el control». Un modelo que genera buenas respuestas con un prompt estándar puede exhibir vulnerabilidades ante un prompt adversarial; un RM que sabe ordenar un pair también puede ser engañado por respuestas fuera de distribución.
+\end{knowledgebox}
+
+\lecturefigure{slide-38.jpg}{Ejemplo de pregunta abierta para instruction following/helpfulness}{Diapositiva oficial p.38}
+
+\begin{warningbox}{Un open-ended prompt no tiene una reference única}
+Brainstorm New Year resolutions admite muchas respuestas razonables, así que exact match no aplica. En ese caso, la human/LLM preference es práctica, pero es más susceptible a la longitud, el formato y el tono; el evaluador debe explicar su rubric y no limitarse a reportar el win rate.
+\end{warningbox}
+
+\teachervoice{La ponente reúne distintos benchmarks no para encontrar una clasificación general definitiva, sino para mostrar que cada herramienta responde una pregunta distinta. Más adelante descubre la metric reversal precisamente porque las funciones de preferencia de estos evaluators no son iguales.}
+
+\subsection{Elo, AlpacaEval, Arena y MT-Bench}
+
+Las cinco diapositivas siguientes muestran los chatbot leaderboards comunes en 2023. El \term{Elo rating} agrega los pairwise outcomes en una puntuación de capacidad relativa; si las puntuaciones de los modelos $i,j$ son $R_i,R_j$, el modelo de probabilidad de victoria habitual es:
+\[
+P(i\succ j)=\frac{1}{1+10^{(R_j-R_i)/400}},\qquad
+R_i' = R_i + K(S_i-P(i\succ j)).
+\]
+Donde $S_i\in\{0,0.5,1\}$ es el outcome real y $K$ es el tamaño del paso de actualización. Elo depende del grafo de emparejamientos, de la distribución de prompts y de quienes votan; no es una unidad absoluta de calidad.
+
+\lecturefigure{slide-39.jpg}{Elo leaderboard de human evaluation de Hugging Face H4}{Diapositiva oficial p.39}
+
+\begin{knowledgebox}{Lectura de la figura: primero pregunta quién vota y sobre qué prompts}
+El leaderboard agrega los pairwise human votes en un Elo. El tamaño de muestra, la cobertura de emparejamientos entre modelos y la prompt mixture influyen en la incertidumbre; puntuaciones cercanas no necesariamente reflejan diferencias significativas. Se acerca más a las preferencias de los usuarios que una sola metric automática, pero es costoso y aún tiene sesgos de grupo.
+\end{knowledgebox}
+
+\lecturefigure{slide-40.jpg}{AlpacaEval: pairwise evaluation con un LLM judge potente}{Diapositiva oficial p.40}
+
+\begin{knowledgebox}{Lectura de la figura: la automatización se paga con judge dependence}
+AlpacaEval compara el candidate con una reference answer y reporta el win rate; es rápido y reproducible. El problema es que el judge puede preferir respuestas largas, ciertos formatos o su propio estilo de generación; si los datos de entrenamiento también provienen de la misma judge family, se produce un data--evaluator coupling.
+\end{knowledgebox}
+
+\lecturefigure{slide-41.jpg}{Elo crowdsourced de LMSYS Chatbot Arena}{Diapositiva oficial p.41}
+
+\begin{knowledgebox}{Lectura de la figura: los prompts de usuarios reales aumentan la validez ecológica, pero también los factores de confusión}
+Arena muestra al azar y de forma anónima dos modelos y recoge la elección del usuario, lo que permite cubrir la distribución de uso natural; sin embargo, el perfil de los usuarios, el orden de presentación, la latencia del modelo y los rechazos por seguridad pueden influir en el vote. El Elo es un resultado compuesto de la conducta del sistema, no mide solo la capacidad lingüística.
+\end{knowledgebox}
+
+\lecturefigure{slide-42.jpg}{MT-Bench: preguntas de varios turnos y LLM scoring}{Diapositiva oficial p.42}
+
+\begin{knowledgebox}{Lectura de la figura: score y ranking son dos judge interfaces distintas}
+MT-Bench hace que el judge califique cada respuesta de forma independiente y cubre follow-ups de varios turnos; reduce el position bias propio de la comparación pairwise directa, pero sigue dependiendo de la rubric, de la judge calibration y del prompt set. Más adelante, la clase muestra que el scoring solo atenúa el sesgo, no lo elimina.
+\end{knowledgebox}
+
+\lecturefigure{slide-43.jpg}{Captura del LMSYS leaderboard al momento de la clase}{Diapositiva oficial p.43}
+
+\begin{warningbox}{Un leaderboard snapshot no debe compararse directamente entre fechas distintas}
+Esta diapositiva solo describe el ecosistema público alrededor del 2023-10-31. Las versiones de los modelos, el sampling, el system prompt y el volumen de votos se actualizan; al citarla, hay que fijarse en el evaluation design, no presentar las posiciones concretas como hechos de 2026.
+\end{warningbox}
+
+\subsection{El Benchmark Gap de Reward Model y Red Teaming}
+
+Había bastantes instruction-following benchmarks, pero la evaluación de RM y de vulnerabilidades aún carecía de estándares públicos y unificados. Las cuatro diapositivas siguientes revelan esa carencia capa por capa: primero se agrega el RM ranking, luego el red teaming y, por último, se muestra la práctica pública de H4.
+
+\lecturefigure{slide-44.jpg}{El evaluation stack incorpora el reward-model ranking}{Diapositiva oficial p.44}
+
+\begin{knowledgebox}{Lectura de la figura: la RM evaluation no puede limitarse a reutilizar los pairs de entrenamiento}
+El RM debe probarse con held-out prompts, distintos response generators y pairs difíciles de distinguir. Si los test pairs provienen de la misma fuente que los datos de entrenamiento, el modelo podría reconocer solo la longitud, las plantillas de rechazo o el estilo del teacher, en lugar de comprender la helpfulness/truthfulness.
+\end{knowledgebox}
+
+\lecturefigure{slide-45.jpg}{Tabla de modelos y datos para el benchmarking de reward models}{Diapositiva oficial p.45}
+
+\begin{knowledgebox}{Lectura de la figura: los huecos de la tabla son en sí mismos la conclusión}
+Las columnas comparan model, training data y evaluation source; cuando hay pocos RM benchmarks públicos y el origen de los datos no es transparente, las puntuaciones entre modelos carecen de una escala común. Esta diapositiva respalda la existencia de un «benchmarking gap», no que algún RM ya represente de forma confiable los valores humanos.
+\end{knowledgebox}
+
+\lecturefigure{slide-46.jpg}{El evaluation stack incorpora el red-teaming}{Diapositiva oficial p.46}
+
+\begin{knowledgebox}{Lectura de la figura: la helpfulness promedio y la seguridad en la cola son dos tipos de estadísticos}
+El red teaming construye activamente prompts que inducen peligros, extralimitaciones o capacidades nuevas; se centra en las rare failures y no debe quedar cubierto por un benchmark promedio. Un modelo con alta puntuación promedio todavía puede fallar en una pequeña clase de adversarial inputs.
+\end{knowledgebox}
+
+\lecturefigure{slide-47.jpg}{La práctica Red Teaming Large Language Models de H4}{Diapositiva oficial p.47}
+
+\begin{warningbox}{El red-team set también se sobreajusta}
+Los attack patterns conocidos pueden resolverse con rechazos basados en plantillas, pero dejan nuevas superficies de ataque. Un red teaming de alta calidad requiere threat model, diversidad de atacantes, nuevas pruebas e incident taxonomy; una prompt list aplicada una sola vez no constituye una certificación de seguridad completa.
+\end{warningbox}
+
+\begin{knowledgebox}{Términos clave: cinco tipos de evaluator}
+\begin{tabularx}{\textwidth}{@{}L{0.17\textwidth}L{0.24\textwidth}X@{}}
+\toprule
+Método & Qué mide principalmente & Riesgo principal \\
+\midrule
+Task metrics & Exactitud, TruthfulQA, etc. & Cobertura estrecha, dependencia de la reference \\
+Human pairwise/Elo & Preferencia relativa de los usuarios & Costo, sesgos de grupo y de orden \\
+AlpacaEval y LLM judge & Preference/scoring automáticos & Judge style, acoplamiento con los datos \\
+RM benchmark & Chosen/rejected ranking & Generator shift, shortcut \\
+Red teaming & Vulnerabilidades en la cola y capacidades nuevas & Attack coverage, sobreajuste rápido \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El training graph determina cómo se actualiza el modelo; el evaluation graph determina qué podemos ver. Los leaderboards, los RM tests y el red teaming son perspectivas complementarias; que cualquiera de ellos se ponga en verde por sí solo no demuestra que el chatbot ya sea helpful, truthful y safe.
+\section{Human-Curated SFT Results: el evaluator cambia la conclusión}
+
+Ahora volvemos al experimento con los datos human-written de Surge. La clase va cambiando, uno tras otro, el dataset source, la prompt/response length y el dataset size, y observa al mismo tiempo las Open LLM metrics y MT-Bench. El resultado más importante no es cuál barra queda más alta, sino que los evaluadores con frecuencia producen ordenamientos distintos.
+
+\subsection{El conflicto entre las Open LLM Metrics y MT-Bench}
+
+La sección anterior ya explicó que cada evaluator responde una pregunta distinta; esta sección usa el mismo grupo de checkpoints de LLaMA-2-13B para comprobar si esa diferencia realmente cambia el dataset ranking. Al leer las dos gráficas de barras, primero se fijan el tamaño del modelo y la etapa de entrenamiento, y después se compara si el apparent winner cambia cuando solo se sustituye el evaluator. El Open LLM Leaderboard se inclina por las task metrics estándar, mientras que MT-Bench se inclina por la calificación que el judge asigna a respuestas de varios turnos; como sus ponderaciones son distintas, es natural que el ranking de los modelos se invierta.
+
+\lecturefigure{slide-49.jpg}{Resultados de distintos SFT datasets en el Open LLM Leaderboard}{Diapositiva oficial p.49}
+
+\begin{knowledgebox}{Lectura de la figura: primero cada benchmark, después el aggregate}
+La gráfica de barras se compone de varios task scores, y un aggregate alto puede deberse a un solo punto fuerte. Primero se comparan los subcomponentes, como TruthfulQA y reasoning/knowledge, y después se revisa la task mix del conjunto de datos; la figura muestra correlación y no demuestra por sí sola que una fuente de datos cause una mejora de capacidad.
+\end{knowledgebox}
+
+\lecturefigure{slide-50.jpg}{MT-Bench scores del mismo grupo de SFT models}{Diapositiva oficial p.50}
+
+\begin{warningbox}{La metric reversal es una measurement signal}
+Si Open LLM y MT-Bench eligen ganadores distintos, no conviene escoger el resultado que más guste. Lo correcto es localizar la diferencia: ¿MT-Bench prefiere respuestas más largas? ¿Las metrics estándar ignoran el estilo conversacional? ¿Algún conjunto de datos se ajusta mejor al judge? El conflicto mismo pone al descubierto la evaluation function.
+\end{warningbox}
+
+\teachervoice{La ponente señala que las conclusiones de las metrics automáticas y de MT-Bench a veces son «opposite». No declara que una de las tablas de clasificación sea la verdad, sino que lleva la contradicción a los análisis posteriores de length y del sesgo de GPT-4.}
+
+\subsection{La Response Length como Confounder}
+
+En la subsección anterior se observó la inversión del ranking; esta subsección rastrea el confounder que con más facilidad se pasa por alto: los distintos conjuntos de entrenamiento moldean modelos con distinta longitud y formato de respuesta. Al leer la tabla de longitudes, primero hay que tratarla como una style statistic y no como una calificación de calidad, y después observar si el judge podría premiar esos rasgos superficiales. La average completion length varía mucho entre datasets; si el judge prefiere textos con explicaciones completas, en forma de lista o más largos, la length puede influir a la vez en el style del entrenamiento y en la calificación de la evaluación, lo que produce la ilusión de algo «más helpful».
+
+\lecturefigure{slide-51.jpg}{Response length promedio de Surge, LIMA y OpenAssistant}{Diapositiva oficial p.51}
+
+\begin{knowledgebox}{Lectura de la figura: 211, 482 y 722 son un style proxy, no una calificación de calidad}
+Surge es más breve, LIMA queda en medio y OpenAssistant es más largo. Las cifras solo describen la longitud promedio; para juzgar la calidad también hay que controlar la task, la exactitud factual y la redundancia. Tomar automáticamente una respuesta larga como más completa premia la verbosity y no la usefulness.
+\end{knowledgebox}
+
+\subsection{Prompt Length y Performance}
+
+La clase observa además varias metrics según la average prompt length. Un prompt largo puede contener más contexto, pero también puede corresponder a una tarea más difícil; por eso la dirección de la curva debe interpretarse junto con la task composition.
+
+\lecturefigure{slide-52.jpg}{Relación entre la performance y la average prompt length}{Diapositiva oficial p.52}
+
+\begin{knowledgebox}{Lectura de la figura: en curvas de varios paneles, primero la consistencia}
+Primero se comprueba si las pendientes de cada benchmark van en la misma dirección y después se buscan el turning point y las líneas atípicas. Si solo sube una metric, la length podría estar mejorando la behavior que esa metric prefiere, no la capacidad en general. Las curvas tampoco controlan la task difficulty.
+\end{knowledgebox}
+
+\lecturefigure{slide-53.jpg}{MT-Bench scores con distintos prompt-length settings}{Diapositiva oficial p.53}
+
+\begin{warningbox}{La reacción del LLM judge ante la length no es estable}
+En clase se encontró que MT-Bench y parte de las metrics automáticas vuelven a no coincidir, y que GPT-4 no siempre prefiere sin más el modelo asociado a prompts más largos. El judge bias es multidimensional: la verbosity de la respuesta, el formato, el estilo de entrenamiento y la task actúan en conjunto.
+\end{warningbox}
+
+\subsection{Dataset Size Ablation y Diminishing Returns}
+
+El último grupo de experimentos con human data extrae subconjuntos de distinto tamaño de Surge-Instruct. La ablation se acerca más a una relación causal que la comparación entre conjuntos de datos, porque la provenance y la task taxonomy son más homogéneas, aunque todavía hay que considerar la varianza del muestreo, los training tokens y el evaluator.
+
+\lecturefigure{slide-54.jpg}{Indicadores automáticos de la dataset size ablation de Surge-Instruct}{Diapositiva oficial p.54}
+
+\begin{knowledgebox}{Lectura de la figura: la pendiente marginal y la incertidumbre}
+A medida que aumentan las muestras, varias curvas tienden a una meseta, lo que respalda los diminishing returns. La figura no muestra todas las semillas aleatorias ni los intervalos de confianza, así que no conviene sobreinterpretar diferencias pequeñas; lo más confiable es la tendencia de que «la mayor parte de la ganancia aparece pronto y seguir agregando datos similares rinde cada vez menos».
+\end{knowledgebox}
+
+\lecturefigure{slide-55.jpg}{Resultados de MT-Bench para la misma dataset-size ablation}{Diapositiva oficial p.55}
+
+\begin{knowledgebox}{Lectura de la figura: el evaluator también reordena la misma ablation}
+Los cambios en MT-Bench no tienen por qué ir en la misma dirección que los indicadores automáticos. Si agregar datos mejora las tasks estándar pero no el judge score, puede tratarse de una separación entre la task coverage y el conversational style; a la inversa, también puede tratarse de una judge style reward. La conclusión del experimento debe expresarse como un metric vector, no como una calificación total.
+\end{knowledgebox}
+
+\teachervoice{La conclusión de Rajani es que, entre las metrics automáticas, TruthfulQA es la que más diferencia a los modelos, mientras que MT-Bench tiene una correlación limitada con esas metrics. Ella interpreta este fenómeno como un benchmark gap, en lugar de declarar sin más que MT-Bench o los benchmarks tradicionales fracasan.}
+
+\subsection{Resumen de la sección}
+
+En el Human-curated SFT, la fuente, la longitud y el tamaño de los datos influyen en el modelo, pero el evaluator cambia de manera notable el apparent winner. Un experimento de alta calidad debe reportar a la vez las task metrics, los judge scores, las response statistics y la human evidence, y tratar las discrepancias como resultados que hay que explicar.
+\section{Distillation Results: SFT es la base, DPO es el incremento}
+
+Después de la human-data ablation, la clase regresa a Zephyr. Aquí hay que separar la leaderboard claim de la training ablation: la primera muestra la competitividad bajo un protocolo específico; solo la segunda responde de forma más directa cuál es la contribución de dSFT, chosen-only SFT y dDPO por separado.
+
+\subsection{Lecture-time Leaderboard Evidence}
+
+Zephyr-7B se basa en Mistral-7B; usa UltraChat para dSFT y después los pares chosen/rejected de UltraFeedback para dDPO. En clase se mostró que, en MT-Bench y AlpacaEval de ese momento, se acercaba a modelos más grandes o los superaba; estos resultados dependen de GPT-4 family judges, que son justamente lo que audita la siguiente sección.
+
+\lecturefigure{slide-56.jpg}{Transición de sección hacia los distillation results}{Diapositiva oficial p.56}
+
+\begin{knowledgebox}{Lectura de la figura: de la human-curated ablation a la AI-distilled recipe}
+Aunque esta diapositiva contiene poca información, marca un cambio en la fuente de la evidencia: los modelos siguientes ya no aprenden principalmente de vendor-written demonstrations, sino de AI-generated dialogues/preferences. Al comparar, hay que tener en cuenta también la provenance.
+\end{knowledgebox}
+
+\lecturefigure{slide-57.jpg}{Resultados de Zephyr-7B en MT-Bench y AlpacaEval mostrados en clase}{Diapositiva oficial p.57}
+
+\begin{knowledgebox}{Lectura de la figura: el recuadro rojo indica competitividad dentro del protocolo, no una victoria en todas las dimensiones}
+La tabla incluye a la vez el tamaño en parámetros, MT-Bench y AlpacaEval. Primero se comparan los open models de la misma escala y luego el judge score frente a los proprietary systems; la figura no mide directamente la seguridad, la verificación de hechos, la retention de usuarios reales ni la robustness fuera de distribución.
+\end{knowledgebox}
+
+\subsection{Ablation: DPO-only, SFT-only y SFT+DPO}
+
+La ablation aporta más información sobre el mecanismo. Aplicar DPO directamente sobre el base model da resultados muy pobres; solo con dSFT ya se obtiene la mayor parte de la ganancia; añadir dDPO después de dSFT mejora un poco más. Usar las chosen responses como SFT targets ordinarios tampoco sustituye por completo al preference objective.
+
+\lecturefigure{slide-58.jpg}{Ablation de dSFT/dDPO en Zephyr}{Diapositiva oficial p.58}
+
+\begin{knowledgebox}{Lectura de la figura: primero identificar las condiciones necesarias, después comparar los incrementos}
+La fila DPO-only muestra que la preference optimization requiere una policy que ya tenga instruction-following; la fila SFT-only alcanza aproximadamente el 80--90\% del desempeño final; SFT+DPO es la mejor, pero con un incremento pequeño. La tabla respalda «DPO es refinement», no «DPO es inútil» ni «cualquier SFT basta».
+\end{knowledgebox}
+
+\teachervoice{El ponente dice explícitamente que DPO without SFT ``doesn't work at all'', que SFT ya aporta el 80--90\% del desempeño global y que DPO proporciona la ganancia restante. La chosen-only SFT tampoco equivale a aprovechar la pairwise preference.}
+
+\subsection{Resumen de la sección}
+
+Zephyr demuestra que los AI-generated data pueden sostener un open model sólido, pero también introducen en el pipeline el teacher/judge bias. La conclusión duradera de la ablation es: primero, SFT establece la base de instruction-following; después, la preference optimization realiza un refinamiento relativo.
+\section{GPT-4 as Evaluator: el Judge también necesita ser evaluado}
+
+Las dos secciones anteriores ya mostraron el metric conflict; esta sección convierte a GPT-4 de «herramienta de evaluación» en «objeto evaluado». \term{LLM-as-a-judge} se refiere a pedirle a un modelo de lenguaje que califique u ordene respuestas según una rubric; reduce el costo de la evaluación humana, pero puede presentar position, style, self-preference y task-dependent errors.
+
+\subsection{Position Bias y Prompted Overcorrection}
+
+Ya vimos que el evaluator puede reordenar los modelos. Esta subsección comienza la auditoría del judge con el invariante más básico: si el contenido de las respuestas no cambia y solo se intercambian sus posiciones izquierda y derecha, en principio el veredicto no debería cambiar. Al leer las dos gráficas de distribution, primero compare la distribución de posiciones de human y de GPT-4, y después verifique si el prompt-level debiasing realmente restablece el equilibrio. Sin embargo, los datos de la clase muestran que GPT-4 tiende a elegir la opción de la izquierda o la primera; lo más preocupante es que decirle directamente al modelo «tienes un sesgo hacia la izquierda» hace que se desvíe en sentido contrario, hacia el otro lado.
+
+\lecturefigure{slide-60.jpg}{Positional bias del pairwise judge GPT-4}{Diapositiva oficial p.60}
+
+\begin{knowledgebox}{Lectura de la figura: comparar la rating distribution de GPT-4 y de human}
+La masa de los ratings de GPT-4 se concentra en el intervalo que favorece a la primera opción, mientras que la human distribution es más equilibrada. Observe primero el distribution skew y después si aparece en todos los model pairs; la figura demuestra un protocol bias, no que el modelo «prefiera conscientemente la izquierda».
+\end{knowledgebox}
+
+\lecturefigure{slide-61.jpg}{Al pedir explícitamente debias, el sesgo se invierte hacia el otro lado}{Diapositiva oficial p.61}
+
+\begin{warningbox}{Un Self-critique prompt no equivale a calibration}
+El modelo puede repetir «quizá tengo un sesgo», pero puede entender la corrección como elegir la otra opción. Una mitigation real debe basarse en counterbalanced pairs, swap consistency, human calibration e intervalos de confianza, no solo en añadir un recordatorio al prompt.
+\end{warningbox}
+
+\teachervoice{El ponente describe este fenómeno como un bias que ``flips in the opposite direction''. Esto indica que el prompt-level debiasing quizá solo cambia la heurística de salida, sin aprender una decision rule correcta y sin sesgo.}
+
+\subsection{Scoring es un poco mejor que Ranking, pero no resuelve el problema de raíz}
+
+Calificar cada response de forma independiente reduce la competencia directa por posición entre dos respuestas dentro del mismo prompt; sin embargo, el score sigue influido por el rubric anchoring, la longitud y la judge calibration, por lo que solo mitiga el problema parcialmente.
+
+\lecturefigure{slide-62.jpg}{Mitigación parcial del position bias mediante Independent scoring}{Diapositiva oficial p.62}
+
+\begin{knowledgebox}{Lectura de la figura: un interface change cambia el error mode}
+Ranking compara A/B directamente y es propenso al sesgo de posición; scoring evalúa cada respuesta por separado y puede producir compresión de puntuaciones, anchor drift o falta de comparabilidad entre prompts distintos. Ninguna interface se convierte automáticamente en la verdad; debe validarse con swap test y human agreement.
+\end{knowledgebox}
+
+\subsection{Training--Evaluation Doping y Style Preference}
+
+Si el candidate model se entrena con GPT-4 data y luego lo evalúa un GPT-4 judge, el judge puede preferir la distribución de expresiones que le resulta familiar. La clase lo llama evidence of doping: se parece a la train/test contamination, pero la contaminación ocurre en el style/preference space y no necesariamente como exact answer memorization.
+
+\lecturefigure{slide-63.jpg}{GPT-4 prefiere los models entrenados con GPT-4 data}{Diapositiva oficial p.63}
+
+\begin{warningbox}{Que el Evaluator y los datos de entrenamiento compartan origen rompe la independencia}
+Cuando el teacher, el preference generator y el judge pertenecen a la misma model family, el candidate puede aprender la verbosity, la estructura y los descargos de responsabilidad del judge. Una puntuación alta puede indicar distribution match y no una mejor correspondencia con las preferencias humanas reales. Conviene añadir un human holdout y judges heterogéneos.
+\end{warningbox}
+
+\lecturefigure{slide-64.jpg}{Preferencia de GPT-4 por la response diversity y la length}{Diapositiva oficial p.64}
+
+\begin{knowledgebox}{Lectura de la figura: la longitud es una style feature visible}
+El diagrama de dispersión y la tendencia muestran la relación entre el GPT-4 score y los unique tokens y la response length. Observe primero la correlación global y después los residuos dentro de una misma tarea; una respuesta larga y variada puede ser realmente más completa, o simplemente obtener style credit con más facilidad. La correlación no sustituye un factuality check.
+\end{knowledgebox}
+
+\teachervoice{El ponente observó que GPT-4 prefiere GPT-4-like data, las respuestas largas y el list-like style, mientras que la escritura humana puede ser más concisa y presentar los hechos de manera más directa. Este resultado vuelve a vincular el alto judge score de Zephyr con la provenance de sus datos de entrenamiento.}
+
+\subsection{La Task Entropy determina la Human Correlation}
+
+La última diapositiva desglosa la judge--human correlation por task. GPT-4 coincide más con las personas en las creative/high-entropy tasks, pero lo hace peor en las low-entropy tasks como math, coding y reasoning; esto es contraintuitivo, porque estas últimas parecen más fáciles de juzgar, pero requieren ejecución o verificación rigurosa.
+
+\lecturefigure{slide-65.jpg}{La concordancia entre GPT-4 y los humanos varía según la task category}{Diapositiva oficial p.65}
+
+\begin{knowledgebox}{Lectura de la figura: primero separar por task, después ver la overall correlation}
+El coeficiente de correlación global oculta las diferencias entre categorías. Brainstorm/generation puede juzgarse por semántica y estilo, mientras que coding/math puede requerir ejecutar pruebas o verificar paso a paso; un judge de lenguaje se deja engañar con facilidad por explicaciones que parecen razonables. La figura respalda una task-conditional evaluation policy.
+\end{knowledgebox}
+
+\teachervoice{El ponente considera este resultado counterintuitive y dice explícitamente que el equipo no estudió a fondo qué prompts provocan el sesgo. La clase solo confirma el fenómeno y algunas mitigation viables; no debe presentarse «el left-to-right training causa el sesgo hacia la izquierda» como una causalidad demostrada.}
+
+\begin{lstlisting}[caption={Implementación conceptual de la Counterbalanced pairwise LLM-judge evaluation}]
+def balanced_judge_pairs(response_a, response_b, judge):
+    first = judge(left=response_a, right=response_b)
+    second = judge(left=response_b, right=response_a)
+    return {
+        "a_left": first,
+        "a_right": invert_pairwise_label(second),
+        "swap_consistent": first == invert_pairwise_label(second),
+    }
+\end{lstlisting}
+
+\begin{importantbox}{LLM Judge Audit Checklist}
+Como mínimo, reporte: pair order randomization, swap consistency, response length, judge model/version, prompt/rubric, temperature, human agreement, task-stratified results y si los training data del candidate provienen de la misma judge family.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Un LLM judge es un measurement instrument de alto rendimiento, no un árbitro sin sesgo. Position, prompted overcorrection, training--evaluation coupling, verbosity y task-specific verification pueden cambiar las conclusiones; antes de usar un judge, primero hay que calibrarlo.
+\section{Cierre de la clase y Q\&A: costo, escala y preguntas abiertas}
+
+Al final de la clase, los experimentos anteriores se condensan en takeaways, y en la sesión de Q\&A se añade intuición de ingeniería sobre el costo de los vendors, la pair-order mitigation, el reward model scoring y el tamaño de las muestras. Esta información es muy valiosa, pero debe registrarse como «estimaciones hechas en el momento por la ponente», no como teoremas.
+
+\subsection{Takeaways: la recipe es un objeto de cuatro dimensiones}
+
+Las secciones anteriores trataron por separado data, objective y evaluator; esta sección los condensa de nuevo en una plantilla de sistema ejecutable y revisa si los bullets finales de la ponente cubren todas las etapas. Al leer la página de takeaways no conviene memorizar punto por punto, sino construir un ciclo cerrado a lo largo de «cómo entran los datos al entrenamiento, cómo se mide el entrenamiento y cómo la medición retroalimenta la siguiente ronda». Una chatbot recipe reproducible debe incluir como mínimo data distribution, optimization stage, evaluation suite y provenance audit; si falta cualquiera de estas dimensiones, la puntuación del modelo resulta difícil de explicar o de reproducir.
+
+\lecturefigure{slide-66.jpg}{Síntesis de la ponente: datos, resultados de SFT, benchmark gap y quirks de GPT-4}{Diapositiva oficial p.66}
+
+\begin{knowledgebox}{Lectura de la figura: reordenar los bullets como cadena causal}
+Data amount/length/task/human role determinan la distribución de entrenamiento; SFT y DPO modifican la policy; TruthfulQA, MT-Bench y otros observan cortes distintos; los benchmarks de RM/red-team todavía tienen huecos; y el GPT-4 judge, a su vez, se ve afectado por data/style/position. El último grupo de quirks limita, en sentido inverso, todas las leaderboard claims anteriores.
+\end{knowledgebox}
+
+\subsection{Public Labor e Institutional Context}
+
+La subsección anterior completó la síntesis técnica; esta conserva el contexto social y de equipo que la ponente colocó deliberadamente al final, y responde «quién produce los datos, quién asume la gobernanza y quién aporta los recursos para la reproducción». Al leer este grupo de páginas conviene verlas como provenance y como límites de responsabilidad, no como nueva benchmark evidence. La clase cierra con reportajes periodísticos, el UN advisory body y los recursos de H4; estas páginas no son evidencia de desempeño, pero recuerdan que detrás de una alignment recipe hay trabajo humano, gobernanza y colaboración de código abierto, y omitirlas haría pasar el sistema, de forma equivocada, por un proceso puramente algorítmico.
+
+\lecturefigure{slide-67.jpg}{Reportaje de The New York Times sobre el human labor en RLHF}{Diapositiva oficial p.67}
+
+\begin{knowledgebox}{Lectura de la figura: el «secret ingredient» de alignment incluye un labor system}
+Las data guidelines, la vendor management, la revisión de calidad y el annotator welfare influyen en el modelo final. Ocultarlos bajo un dataset name hace desaparecer a la vez la reproducibilidad, el costo y los límites de responsabilidad.
+\end{knowledgebox}
+
+\lecturefigure{slide-68.jpg}{Contexto temporal de la clase: la ponente se integra al UN AI Advisory Body}{Diapositiva oficial p.68}
+
+\begin{knowledgebox}{Lectura de la figura: el institutional role muestra que el problema va más allá del benchmark}
+La helpfulness/safety de un chatbot involucra idiomas de todo el mundo, trabajo, gobernanza e interés público. Esta página registra el contexto de la clase de 2023 y no sirve para demostrar ninguna conclusión técnica; recuerda que el evaluation target proviene, en última instancia, de decisiones sociales.
+\end{knowledgebox}
+
+\lecturefigure{slide-69.jpg}{Recursos oficiales de H4 sobre red teaming, leaderboard y dialogue-agent}{Diapositiva oficial p.69}
+
+\begin{knowledgebox}{Lectura de la figura: tres enlaces corresponden a tres puntos de entrada para la reproducción}
+Los recursos de red teaming apuntan al descubrimiento de vulnerabilidades, el LLM leaderboard apunta a la evaluator audit y los dialog agents apuntan a la práctica de entrenamiento. El lector debe reproducir los experimentos a partir de los métodos originales y de la documentación de los datos, no limitarse a copiar las cifras de la tabla de clasificación.
+\end{knowledgebox}
+
+\lecturefigure{slide-70.jpg}{Agradecimientos al equipo central de H4 y a la comunidad de código abierto}{Diapositiva oficial p.70}
+
+\begin{knowledgebox}{Lectura de la figura: los resultados de investigación son producto de un equipo y de una comunidad}
+Los datos, el entrenamiento, la evaluación y la publicación los realizaron conjuntamente distintos miembros. Conservar la attribution no es solo cortesía: también ayuda a rastrear el origen del código, los datos, el paper y el blog, y evita atribuir todos los errores de juicio a una sola ponente o a un solo modelo.
+\end{knowledgebox}
+
+\subsection{Q\&A: el costo y la scale solo pueden interpretarse con sus unidades}
+
+En la sesión de Q\&A, Rajani estimó que el costo total de comprar a Surge/Scale AI unos 20K preference dialogues y unos 10K demonstrations fue de aproximadamente 500 mil dólares. Esta cifra depende del vendor, la tarea, el número de turnos y el proceso de calidad de 2023; su valor didáctico es mostrar que el costo de los datos humanos basta para cambiar la línea de investigación, no ofrecer una cotización vigente del mercado.
+
+\teachervoice{Al comparar la synthetic generation con los vendor data, la ponente dijo que la primera es más cost-effective; la human collection costó cerca de half a million dollars. Aquí las unidades son, respectivamente, dialogues, prompts y demonstrations, y no deben mezclarse como «30K samples».}
+
+La mitigation práctica del pair-order bias consiste en que cada model aparezca con la misma probabilidad a la izquierda y a la derecha, y en generar el reversed ordering sobre distintos prompts. Esto reduce el position effect de primer orden, pero no resuelve el judge style bias, la task verification ni el data coupling.
+
+\teachervoice{Ante la pregunta «qué prompts provocan el bias», la ponente reconoció con franqueza que el equipo no lo estudió de manera sistemática. Distinguió entre el observed left bias y la speculative cause, y presentó el balanced ordering como una mitigación de ingeniería, sin afirmar que se hubiera encontrado una explicación del mecanismo.}
+
+La última pregunta indagó cómo el reward model le da señal a la RL policy. La clase lo explicó con la intuición de «asignar una puntuación a la sequence completa y optimizar mediante muestreo repetido», y comparó los órdenes de magnitud de unos 100K RLHF examples frente a unos 10K SFT examples.
+
+\teachervoice{Los 10K/100K son una order-of-magnitude intuition que la ponente dio en el momento: el pipeline de preference/RL requiere una gran cantidad de sampled comparisons, mientras que la SFT demonstration es más directa. No puede desligarse del model, la task, el turn count y la label unit para escribirse como un sample-complexity theorem.}
+
+\subsection{Resumen de la sección}
+
+El costo real de una recipe incluye el trabajo humano, la gobernanza de datos y la evaluator validation. La sesión de Q\&A aportó intuición sobre la escala y dejó preguntas abiertas, y demostró una vez más que toda cifra debe registrarse junto con su unidad, su protocolo y su nivel de evidencia.
+\section{Síntesis y ampliación}
+
+Esta clase puede condensarse en una sola frase: \textbf{entrenar un helpful chatbot no consiste en elegir un optimizer, sino en diseñar de forma conjunta la data distribution, el preference protocol, el training objective y el measurement system.} Los H4 human-data experiments y el Zephyr synthetic-data pipeline muestran dos rutas viables; la GPT-4 evaluator audit demuestra, a su vez, que si la measurement y los training data tienen el mismo origen, el ranking premia el style matching y no el objetivo real.
+
+\subsection{Once conclusiones aplicables}
+
+\begingroup
+\footnotesize
+\setlength{\columnsep}{1.2em}
+\begin{multicols}{2}
+\begin{enumerate}[itemsep=0.05em,topsep=0.1em,parsep=0pt,leftmargin=*]
+  \item Reportar la dataset provenance: quién escribe el prompt, quién escribe la completion y quién filtra.
+  \item Describir los datos con la task/length/turn distribution, no solo con el example count.
+  \item Distinguir las unidades de conteo de demonstration, preference pair y policy rollout.
+  \item El SFT establece primero el instruction-following; DPO/RLHF suele ser un refinement, no un sustituto de esa base.
+  \item Los human-written data y los synthetic data tienen errores con correlaciones distintas; conviene conservar un holdout heterogéneo.
+  \item El reward model debe evaluarse con nuevos generators, pairs difíciles de distinguir y held-out tasks.
+  \item Reportar a la vez task metrics, human preference, LLM judge y response statistics.
+  \item Ante una metric reversal, no se elige un ganador: se localiza la evaluator preference.
+  \item El LLM judge requiere order swap, length control, human calibration y task stratification.
+  \item El red teaming mide los riesgos de cola; no puede sustituirse por un helpfulness score promedio.
+  \item El costo, la escala y el leaderboard deben indicar siempre fecha, unidades y protocol.
+\end{enumerate}
+\end{multicols}
+\endgroup
+
+\begin{importantbox}{Visión final del sistema}
+Un alignment pipeline puede escribirse como un ciclo cerrado:
+\[
+\text{Data source}\rightarrow\text{Training objective}\rightarrow\text{Candidate behavior}
+\rightarrow\text{Evaluator}\rightarrow\text{Next data round}.
+\]
+El sesgo del Evaluator determina qué datos se recolectan en la siguiente ronda, por lo que el measurement error vuelve a escribirse en la training distribution. El verdadero objetivo de ingeniería no es ganar el ranking una vez, sino lograr que el ciclo cerrado pueda auditarse, calibrarse y corregirse.
+\end{importantbox}
+
+\subsection{Lecturas adicionales}
+
+\begingroup
+\scriptsize
+\begin{itemize}[itemsep=0pt,topsep=0.15em,parsep=0pt]
+  \item Ouyang et al., \href{https://arxiv.org/abs/2203.02155}{Training language models to follow instructions with human feedback}: flujo básico de SFT, reward modeling y PPO/RLHF.
+  \item Wang et al., \href{https://arxiv.org/abs/2212.10560}{Self-Instruct}; Ding et al., \href{https://arxiv.org/abs/2305.14233}{UltraChat}; Li et al., \href{https://arxiv.org/abs/2303.17760}{CAMEL}: tres rutas de synthetic instruction/dialogue generation.
+  \item Tunstall et al., \href{https://arxiv.org/abs/2310.16944}{Zephyr: Direct Distillation of LM Alignment}: dSFT, AI feedback y dDPO.
+  \item Zheng et al., \href{https://arxiv.org/abs/2306.05685}{Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena}: LLM judge, position bias y human agreement.
+  \item Hugging Face H4, \href{https://huggingface.co/blog/llm-leaderboard}{LLM evaluator bias analysis} y \href{https://huggingface.co/blog/red-teaming}{red-teaming workflow}: punto de acceso oficial a la práctica detrás de las slides de la clase.
+\end{itemize}
+\endgroup
+
+\end{document}

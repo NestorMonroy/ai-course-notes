@@ -1,0 +1,649 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+
+\renewcommand{\notetitle}{Lecture 02: Generative Pretraining——de GPT-3 e iGPT a Codex}
+\renewcommand{\noteauthors}{Elaborado a partir de la conferencia de Mark Chen, los subtítulos con marcas de tiempo y los artículos originales de GPT/iGPT/DALL-E/Codex}
+\renewcommand{\notedate}{Curso Fall 2021 · Versión reescrita source-first de 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{2022-07-11}
+\renewcommand{\videoduration}{48:38}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=qGkzHFllWDY}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.96\textwidth]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\begin{document}
+\makecscover
+
+\section{Auditoría de fuentes: lo que esta clase trata en realidad es «cómo se evalúa la distribución generada»}
+
+La conferencia de Mark Chen va desde el 3-gram hasta GPT-3, iGPT, DALL-E y Codex. En apariencia es una cronología de modelos, pero el hilo conductor real es el cambio constante de la evaluation interface. En la etapa de texto se comparan la sample coherence y la capacidad humana de reconocimiento. En la etapa de aprendizaje no supervisado se compara la transfer. En la etapa de imágenes se observan a la vez la completion y la representation. En la etapa de código, los resultados generados deben pasar unit tests y se usa pass@k para evaluar múltiples muestreos.
+
+El video original es una slide talk a pantalla completa y el repositorio no tiene un deck independiente. Este documento recupera 45 teaching slides a partir de las transiciones del video oficial. El bumper de Stanford, tres páginas que solo son separadores, los agradecimientos y el thank-you repetido se marcan como optional. La clase se impartió en 2021. Las descripciones de productos y capacidades de Codex, GPT-3 y DALL-E se tratan según ese momento histórico y no deben reescribirse como si describieran el estado actual de los productos en 2026.
+
+\begin{importantbox}{Los tres ciclos cerrados de esta clase}
+\begin{enumerate}
+  \item \textbf{Generation loop}: aprender la distribución $\rightarrow$ muestreo $\rightarrow$ evaluación humana/de la tarea $\rightarrow$ ajuste de la scale y la recipe;
+  \item \textbf{Transfer loop}: unlabeled data $\rightarrow$ autoregressive objective $\rightarrow$ representation/behavior $\rightarrow$ downstream task;
+  \item \textbf{Code loop}: problem prompt $\rightarrow$ sampled programs $\rightarrow$ unit tests $\rightarrow$ pass@k $\rightarrow$ temperature/model decision.
+\end{enumerate}
+\end{importantbox}
+
+\begin{warningbox}{Sample quality, benchmark score y deployment reliability son cosas distintas}
+Que un texto parezca una noticia no prueba que sea verdadero. Que una imagen corresponda al prompt no prueba que haya generalización composicional. Que un programa pase los benchmark tests no prueba que sea seguro o mantenible, ni que cumpla requisitos ocultos. Este documento distingue en todo momento entre «en la distribución del modelo existe una muestra correcta», «la decoding actual encontró esa muestra» y «el sistema desplegado puede confiar en la salida».
+\end{warningbox}
+
+\begin{knowledgebox}{Términos clave: los cuatro objetos de un sistema generativo}
+\textbf{Model distribution} es la distribución de probabilidad que el modelo asigna a las salidas candidatas. \textbf{Sample} es una salida concreta obtenida de esa distribución. \textbf{Verifier} juzga a los candidatos mediante reglas, tests o evaluación humana. \textbf{Selector} elige la salida final entre varios candidatos. El modelo, el muestreo, la verificación y la selección pueden mejorarse por separado, así que el éxito final no puede atribuirse por completo a la escala de parámetros.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Esta no es solo una clase sobre la historia de GPT. Es una clase sobre cómo se evalúa el modelado generativo. A medida que la salida pasa del texto a las imágenes y al código, la evaluación tiene que dejar de medir la similitud superficial y pasar a medir la evidencia de la tarea y la distribución de muestreo.
+\section{De 3-Gram a GPT-3: la escala de calidad de los modelos de lenguaje}
+
+Un \term{language model} (modelo de lenguaje) asigna probabilidades a secuencias de tokens. Dado $x_1,\ldots,x_T$, la factorización autorregresiva es
+\[
+p(x_1,\ldots,x_T)=\prod_{t=1}^{T}p(x_t\mid x_{<t}).
+\]
+Las diferencias entre modelos están principalmente en cómo se representa el contexto condicional, cuánta historia pueden usar y cómo escalan los parámetros y los datos. El ponente muestra primero samples, y no primero benchmarks, para que el lector vea de manera intuitiva los modos de falla de los modelos probabilísticos.
+
+\subsection{3-Gram: la estadística local genera «palabras relacionadas», pero difícilmente forma una semántica global}
+
+Un \term{n-gram} supone que el token actual depende solo de los $n-1$ tokens anteriores. Un 3-gram se escribe $p(x_t\mid x_{t-2},x_{t-1})$. Sus probabilidades pueden obtenerse suavizando conteos, y es fácil de entrenar e interpretar; sin embargo, su ventana de contexto es fija, las combinaciones raras son dispersas y no puede mantener entidades, hechos ni estructura discursiva a larga distancia.
+
+\lecturefigure{slide-01-3gram.jpg}{El sample de 3-gram ya tiene palabras localmente relacionadas, pero carece de sintaxis estable y de semántica global.}{Video oficial 00:08; encuadre histórico de Shannon 1951.}
+
+\begin{knowledgebox}{Lectura de la figura: no basta con preguntar si la oración «parece inglés»}
+En el sample, montos, años y vocabulario comercial coocurren localmente, lo que indica que la estadística de ventana corta captura la adyacencia de palabras; en cambio, las relaciones numéricas, la consistencia de entidades y el propósito de la oración se derrumban. La evaluación puede dividirse en cuatro niveles: lexical coherence, syntactic coherence, semantic consistency y factual consistency. Un n-gram suele tener señal en el corto alcance de los dos primeros niveles; en los dos últimos le falta estado.
+\end{knowledgebox}
+
+\begin{knowledgebox}{Definición y limitaciones de la perplexity}
+La \term{perplexity} (perplejidad) es la exponencial de la cross-entropy promedio:
+\[
+\operatorname{PPL}=\exp\!\left(-\frac{1}{T}\sum_{t=1}^{T}\log p(x_t\mid x_{<t})\right).
+\]
+Intuitivamente puede entenderse como el «número efectivo de candidatos» en cada paso; un valor más bajo suele indicar mejor predicción sobre esa distribución de prueba. Sin embargo, no conviene comparar directamente la PPL entre distintos tokenizers, limpiezas de datos y dominios; una PPL más baja tampoco garantiza por sí misma la exactitud factual, la controlabilidad ni el éxito en la tarea.
+\end{knowledgebox}
+
+\subsection{RNN: un estado oculto en lugar de una ventana fija}
+
+Esta sección pasa de la ventana fija al estado recurrente. La RNN actualiza $h_t=f(x_t,h_{t-1})$, de modo que, en teoría, cualquier historia puede influir en la predicción actual. Elimina la ventana fija del n-gram, pero comprime toda la historia en un único estado y obliga a que el entrenamiento sea secuencial en el tiempo. Las secuencias largas además enfrentan desvanecimiento o explosión del gradiente y sobrescritura de información.
+
+\lecturefigure{slide-02-rnn.jpg}{El sample de la RNN es más coherente que el de 3-gram, pero las entidades y la estructura de largo alcance siguen derivando con facilidad.}{Video oficial 00:27; Sutskever et al. 2011.}
+
+\begin{knowledgebox}{Lectura de la figura: lo que mejora la RNN es la continuidad del estado}
+La RNN puede sostener temas locales y patrones de caracteres o palabras durante más tiempo, por lo que el sample ya no parece solo una bolsa de palabras. El problema es que cada paso pasa por el mismo recurrent bottleneck, y la información antigua debe atravesar muchas transformaciones no lineales para llegar al futuro. Que en la salida aparezcan «oraciones que parecen lenguaje y argumentos que no parecen argumentos» muestra que la fluidez y la planeación global siguen siendo capacidades distintas.
+\end{knowledgebox}
+
+\teachervoice{El ponente muestra los modelos nivel por nivel con samples reales, en lugar de afirmar que «la nueva arquitectura supera en todo a la anterior». Nota de clase: el progreso de los modelos generativos suele manifestarse primero en que los errores se vuelven más difíciles de detectar, por lo que la evaluation también debe actualizarse a la par.}
+
+\subsection{Big LSTM: las compuertas y la escala mejoran la memoria, pero no eliminan la ruta secuencial}
+
+La \term{LSTM} (Long Short-Term Memory) usa input, forget y output gates para controlar el cell state, lo que mitiga los problemas de optimización de la RNN simple. LSTM más grandes, más datos y better regularization impulsaron de forma notable el language modeling, pero el entrenamiento sigue siendo recursivo por pasos de tiempo, y la información de larga distancia todavía debe recorrer una ruta de $O(T)$.
+
+\lecturefigure{slide-03-big-lstm.jpg}{La LSTM a gran escala genera texto más parecido al natural, pero aún exhibe repeticiones, deriva y errores estructurales.}{Video oficial 01:12; Jozefowicz et al. 2016.}
+
+\begin{knowledgebox}{Lectura de la figura: scale y architecture cambian el sample al mismo tiempo}
+La slide coloca a la Big LSTM entre la RNN y el Transformer, como recordatorio de no atribuir todo el progreso a un solo componente. Las compuertas mejoran la memoria, la escala del modelo y de los datos reduce la incertidumbre local y la training recipe mejora la estabilidad; pero la recurrent dependency sigue limitando el paralelismo en hardware. Una comparación justa exige controlar el número de parámetros, el número de tokens y el compute, en lugar de elegir solo las muestras más vistosas.
+\end{knowledgebox}
+
+\subsection{Transformer: entrenamiento paralelo y rutas de información más cortas}
+
+El Transformer usa self-attention para que los tokens interactúen directamente; las operaciones matriciales se adaptan mejor a los accelerators y permiten escalar a lotes, modelos y datos más grandes. No resolvió automáticamente los problemas de hechos, planeación y objetivos, pero cambió el scaling regime factible.
+
+\lecturefigure{slide-04-transformer.jpg}{La mejora del sample del Transformer proviene de la acción conjunta de arquitectura, escala, datos y entrenamiento.}{Video oficial 01:52.}
+
+\begin{knowledgebox}{Lectura de la figura: la model completion es una distribución condicional, no una consulta a una base de conocimiento}
+La slide presenta un prompt y una completion: la salida puede continuar el formato y el tema, pero aun así inventar detalles. Un language model predice «qué continuación es probable dentro de la distribución de entrenamiento» y no ejecuta un fact-check por defecto. A medida que los samples se vuelven más fluidos, a las personas les resulta más fácil confundir calidad lingüística con calidad factual; por eso la later evaluation requiere grounding en la tarea, retrieval o external checks.
+\end{knowledgebox}
+
+\subsection{GPT-2: Transformer escalado y muestras de texto largo}
+
+Esta sección pasa al decoder-only scaling. GPT-2 escala el Transformer a más datos y parámetros, y pone el énfasis en el zero-shot task behavior. En clase se muestra primero la escala del modelo y de los datos, y después muestras de noticias, con la intención de que el lector observe la coherence entre párrafos, la imitación de estilo y las failures.
+
+\lecturefigure{slide-05-gpt2-model.jpg}{GPT-2 amplía el Transformer decoder-only hasta convertirlo en un modelo general de generación de texto.}{Video oficial 02:33; Radford et al. 2019.}
+
+\begin{knowledgebox}{Lectura de la figura: el número de parámetros es solo una columna del sistema}
+Aumentar la escala del modelo suele ir acompañado de más tokens de entrenamiento, distintos lote/optimizer, context y compute. Decir únicamente «tiene más parámetros, por eso aparece la capacidad» ignora la data diversity y la optimization. Al leer esta slide, conviene tomar architecture, parameters, data, objective y evaluation como una recipe conjunta.
+\end{knowledgebox}
+
+\lecturefigure{slide-06-gpt2-example-1.jpg}{La muestra de noticias de GPT-2 exhibe estilo discursivo y continuidad de entidades, y al mismo tiempo conserva un riesgo de invención verificable.}{Video oficial 03:05.}
+
+\begin{knowledgebox}{Lectura de la figura: las muestras largas se revisan claim por claim}
+Primero se revisan la sintaxis y la conexión entre párrafos; después se marcan las claims sobre personas, lugares, cifras y causas; por último se verifica si esas claims pueden sustentarse con el prompt o con evidencia externa. El modelo puede mantener el estilo periodístico y, aun así, «completar con seguridad» los detalles. Si la evaluación de muestras solo pregunta si el texto se lee con fluidez, pasará por alto de manera sistemática la hallucination.
+\end{knowledgebox}
+
+\lecturefigure{slide-07-gpt2-example-2.jpg}{La segunda muestra de GPT-2 muestra que distintos prompts exponen distintos tipos de coherence failure.}{Video oficial 03:38.}
+
+\begin{knowledgebox}{Lectura de la figura: no se debe representar la distribución del modelo con una sola muestra}
+El sampling seed, la temperature, el top-p y el prompt modifican la salida. Una muestra vistosa no representa el desempeño promedio, y una muestra mala tampoco prueba que el modelo sea inútil. Es necesario fijar el decoding protocol, reportar el número de muestras y combinar likelihood, human rating y downstream success.
+\end{knowledgebox}
+
+\subsection{GPT-3: ¿pueden las personas identificar noticias generadas?}
+
+Cuando la calidad del texto mejora, la evaluation pasa de «se ve claramente mal» a experimentos controlados con personas. El artículo de GPT-3 pidió a los participantes juzgar si una noticia había sido generada por el modelo; la precisión varía con la escala del modelo. Este experimento mide la detection bajo condiciones específicas de prompt, longitud, muestreo y participantes; no equivale a veracidad ni a inteligencia general.
+
+\lecturefigure{slide-08-gpt3-human-detection.jpg}{GPT-3 convierte el sample realism en un experimento cuantificable mediante una tarea de identificación por personas.}{Video oficial 05:12; Brown et al. 2020.}
+
+\begin{knowledgebox}{Lectura de la figura: primero se define la unidad experimental}
+Cada item es un fragmento de noticia generado por el modelo o escrito por una persona; el participante emite un juicio de clasificación binaria. El resultado depende de la familiaridad con el tema, la longitud del texto, la temperatura de generación y la instruction. Un valor cercano a chance solo indica que, en ese contexto, es difícil distinguir el origen; no indica que el contenido sea verídico, inofensivo o apto para la producción de noticias.
+\end{knowledgebox}
+
+\lecturefigure{slide-09-gpt3-detection-curve.jpg}{Los modelos más grandes dificultan la detección, pero la curva debe interpretarse junto con el diseño experimental.}{Video oficial 08:10; Brown et al. 2020.}
+
+\begin{knowledgebox}{Lectura de la figura: el eje horizontal es la escala; el vertical no es «inteligencia»}
+La curva relaciona el model size con la human detection accuracy. La tendencia principal es que, al aumentar la escala, el estilo generado se acerca más a la distribución humana; la curva no mide la exactitud factual, la trazabilidad de las fuentes ni la consistencia a largo plazo. Las barras de error, el baseline y la sample policy determinan la solidez de la conclusión. No se puede extrapolar una sola curva a todos los idiomas y a todas las tareas de generación.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Del n-gram a GPT-3, los samples se vuelven progresivamente más coherentes, y la evaluación pasa de fallas evidentes a simple vista a experimentos controlados con personas. La scale cambia la calidad de la distribución, pero hace aún más importantes los problemas de veracidad y de identificación del origen.
+\section{Por qué el Generative Modeling puede convertirse en Unsupervised Learning}
+
+El aprendizaje supervisado depende de etiquetas $(x,y)$, mientras que gran parte de los datos de internet solo tiene $x$. El modelado generativo construye la señal de entrenamiento al predecir los propios datos, por lo que puede aprender representation y behavior sin etiquetas de tarea creadas por personas. La cuestión central no es que haya «cero etiquetas», sino si el objective autosupervisado obliga al modelo a capturar estructura útil para las tareas posteriores.
+
+\subsection{El cuello de botella de las etiquetas y la expansión de tareas}
+
+En la clase, \term{unsupervised learning} (aprendizaje no supervisado) designa en general el aprendizaje de representaciones que no depende de etiquetas de tarea creadas por personas; en el contexto actual suele llamarse con más precisión \term{self-supervised learning}, porque el target se construye automáticamente a partir de los datos originales. La next-token label de un modelo de lenguaje proviene del propio texto.
+
+\lecturefigure{slide-10-unsupervised-learning.jpg}{La demanda de datos de las tareas supervisadas lleva a los modelos a buscar señales de entrenamiento que puedan generarse automáticamente a partir de datos sin procesar.}{Video oficial 09:09.}
+
+\begin{knowledgebox}{Lectura de la figura: la diferencia entre ambas rutas está en cómo se producen las etiquetas}
+El supervised learning requiere task-specific labels, que son costosas y de cobertura limitada; la ruta unsupervised/self-supervised aprende estructura general a partir de raw data a gran escala y luego la transfiere mediante prompting o fine-tuning. Esto no elimina las human choices: la recolección y el filtrado de datos, el tokenizer, el objective y la evaluation siguen siendo decisiones de diseño humanas.
+\end{knowledgebox}
+
+\lecturefigure{slide-11-unlabeled-data.jpg}{Internet ofrece cantidades enormes de datos sin etiquetar, pero la escala no equivale a calidad ni a autorización.}{Video oficial 10:38.}
+
+\begin{knowledgebox}{Lectura de la figura: el ícono del planeta representa la escala y también la gobernanza}
+Los web data a gran escala abarcan diferencias de idioma, código, imágenes y cultura, y aportan una signal amplia para el preentrenamiento; al mismo tiempo contienen duplication, bias, private data, copyright y contamination. La clase se centra en «si existe un gran acervo de datos»; en la práctica de ingeniería también hay que responder por el origen, la licencia, la limpieza, la deduplicación, la retención y la eliminación.
+\end{knowledgebox}
+
+\subsection{Analysis by synthesis y el autoregressive objective}
+
+La intuición de \term{analysis by synthesis} es la siguiente: si un modelo puede generar muestras que coinciden con la distribución de los datos, debe haber aprendido parte de su estructura latente. El autoregressive objective maximiza
+\[
+\mathcal{L}(\theta)=\sum_{t=1}^{T}\log p_\theta(x_t\mid x_{<t}).
+\]
+Cada posición produce una señal de entrenamiento, lo que lo hace adecuado para escalar (scale); pero el objective solo exige predecir tokens y no garantiza que la representation interna corresponda uno a uno con los conceptos humanos.
+
+\lecturefigure{slide-12-autoregressive-analysis-by-synthesis.jpg}{La autoregressive generation aprende estructura al predecir los datos; es una forma de implementar analysis by synthesis.}{Video oficial 11:11.}
+
+\begin{knowledgebox}{Lectura de la figura: la generación es la interfaz de entrenamiento; la representation es un subproducto}
+Para predecir el siguiente token, el modelo aprovecha la sintaxis, el tema, las entidades, el sentimiento y las regularidades del mundo; estos factores pueden formar direcciones legibles en los hidden states. Pero el modelo también puede aprovechar un surface shortcut. Para juzgar si una representation es útil se necesitan probing, intervention y transfer, no solo una loss baja.
+\end{knowledgebox}
+
+\subsection{Sentiment neuron: representaciones emergentes y los límites de la interpretación}
+
+Radford et al. encontraron, en un character-level language model, una unidad fuertemente correlacionada con el sentimiento de las reseñas (review sentiment). Este resultado muestra que un objective generativo puede aprender features útiles para clasificación, y también recuerda que «una neuron» suele ser un fenómeno propio de un modelo y un método de análisis específicos; no debe extrapolarse a la idea de que todos los conceptos se codifican en una sola neurona.
+
+\lecturefigure{slide-13-sentiment-neuron.jpg}{En un modelo generativo no supervisado aparece una dirección de representación relacionada con el sentimiento.}{Video oficial 13:00; Radford et al. 2017.}
+
+\begin{knowledgebox}{Lectura de la figura: a la izquierda, la distribución; a la derecha, la trayectoria de activación}
+El lado izquierdo compara la diferencia de distribución de las reviews positivas y negativas en la neuron activation; el lado derecho muestra la posición en el texto y la variación de la activation. La correlación respalda que esta unidad transporta una sentiment signal, pero por sí sola no demuestra que sea el único mecanismo causal. La causalidad y la generalización pueden ponerse a prueba con clamping, ablation o classifier transfer.
+\end{knowledgebox}
+
+\teachervoice{El ponente usa la sentiment neuron para responder «por qué generar texto ayuda a las tareas posteriores»: para hacer synthesis, el modelo posiblemente primero haga analysis. La advertencia de la clase es que se trata de una posibilidad, no de una garantía; la representation quality todavía debe validarse con evidencia en las tareas posteriores.}
+
+\subsection{Resumen de la sección}
+
+El preentrenamiento generativo usa los propios datos para construir supervisión densa y puede aprender representaciones transferibles a partir de la escala de datos sin etiquetar. Su ventaja proviene de la cobertura de la señal; su riesgo, de la distancia que sigue existiendo entre el objective y las tareas reales.
+\section{GPT-1 y GPT-2: de Fine-Tuning a Zero-Shot Interface}
+
+La evolución temprana de la serie GPT no consiste solo en el aumento de parámetros: también modifica la task interface. GPT-1 aplica supervised fine-tuning después de un preentrenamiento general; GPT-2 pone más énfasis en que la tarea pueda escribirse en un contexto de lenguaje natural para que un mismo language model la resuelva en modo zero-shot.
+
+\subsection{GPT-1: Pretrain then fine-tune}
+
+\term{fine-tuning} (ajuste fino) consiste en seguir actualizando los parámetros preentrenados con datos de la tarea objetivo. GPT-1 usa un Transformer de tipo decoder-style para el generative pretraining y después construye formatos de entrada para tareas como clasificación, entailment y question answering, y ajusta el modelo a cada una.
+
+\lecturefigure{slide-14-gpt1-architecture.jpg}{GPT-1 conecta el preentrenamiento general de lenguaje con el ajuste a cada tarea.}{Video oficial 14:11; Radford et al. 2018.}
+
+\begin{knowledgebox}{Lectura de la figura: reutilizar la arquitectura no significa no modificar nada}
+A la izquierda está la Transformer representation unificada; a la derecha, una task-specific input transformation y un output head adaptan el modelo a cada tarea. El pretraining proporciona la inicialización, pero el fine-tuning sigue requiriendo etiquetas, hiperparámetros y un checkpoint por tarea. Es más eficiente que entrenar desde cero, aunque no llega a una prompt-only interface unificada.
+\end{knowledgebox}
+
+\subsection{GPT-2: Zero-shot reading comprehension}
+
+Esta sección usa primero reading comprehension para ilustrar la interfaz de texto unificada. \term{zero-shot} significa que, para la tarea objetivo, no se proporcionan examples de entrenamiento ni se actualizan parámetros; solo se pide al modelo que ejecute la tarea mediante el contexto en lenguaje natural. GPT-2 concatena question, context y answer continuation en una secuencia y se observa si el language modeling resuelve implícitamente el QA.
+
+\lecturefigure{slide-15-gpt2-reading-comprehension.jpg}{GPT-2 intenta zero-shot reading comprehension mediante el formato del texto.}{Video oficial 15:21; Radford et al. 2019.}
+
+\begin{knowledgebox}{Lectura de la figura: la tarea se reescribe como continuation}
+El modelo no tiene un QA head dedicado; predice el texto que sigue al prompt. La evaluación debe definir answer extraction, exact match o semantic equivalence; si el prompt format cambia mucho, los resultados pueden variar de forma considerable. Zero-shot demuestra la flexibilidad de la interface, pero no implica que el modelo siga realmente cualquier instruction.
+\end{knowledgebox}
+
+\subsection{Zero-shot summarization}
+
+La summarization también se escribe como un documento seguido de una indicación y del resumen. El language model aprovecha formatos similares de los datos de entrenamiento y produce una continuation más corta. La dificultad central está en la coverage, la faithfulness y la compression, no en la fluidez gramatical.
+
+\lecturefigure{slide-16-gpt2-summarization.jpg}{GPT-2 replantea la summarization como continuación de texto condicionada.}{Video oficial 16:44.}
+
+\begin{knowledgebox}{Lectura de la figura: la calidad de un resumen tiene al menos tres ejes}
+La coverage verifica si se conservan los hechos clave; la faithfulness, si se introducen claims que no están en el texto original; la compression, la longitud y la redundancia. Las overlap metrics como ROUGE solo cubren parte de estas dimensiones. Un modelo generativo puede escribir resúmenes más naturales y, al mismo tiempo, producir con más facilidad errores factuales difíciles de detectar.
+\end{knowledgebox}
+
+\subsection{Zero-shot translation}
+
+A continuación, la misma interfaz de continuation se aplica a la traducción. El modelo puede inducirse con «oración fuente + language marker»; los resultados de GPT-2 muestran que una signal multitarea puede absorberse del web text, aunque sigue habiendo una brecha clara frente a los translation systems entrenados específicamente.
+
+\lecturefigure{slide-17-gpt2-translation.jpg}{La zero-shot translation de GPT-2 muestra la signal latente entre idiomas presente en el web pretraining.}{Video oficial 17:30.}
+
+\begin{knowledgebox}{Lectura de la figura: comparar el baseline y la definición de la tarea}
+La tendencia de la figura debe contrastarse con un supervised translation baseline. El language model pudo haber visto fragmentos paralelos, plantillas o sitios web similares, por lo que zero-shot no equivale a «nunca haber visto la relación de traducción». Conviene revisar la contamination, la language coverage y los idiomas de pocos recursos, en lugar de mirar solo el promedio de los idiomas con muchos recursos.
+\end{knowledgebox}
+
+\begin{warningbox}{Zero-shot es un evaluation protocol, no una propiedad mágica}
+Que algo sea zero-shot depende de si la tarea objetivo participó en el entrenamiento, de si el prompt contiene ejemplos, de si el benchmark se filtró y de si se actualizaron los parámetros. Con un web-scale pretraining es difícil demostrar que «la tarea nunca apareció», así que la formulación más precisa es que no hubo supervised fine-tuning explícito sobre el benchmark objetivo.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+GPT-1 reutiliza representaciones mediante pretrain/fine-tune; GPT-2 reescribe las tareas como continuation y avanza hacia una interfaz unificada en lenguaje natural. El zero-shot behavior es valioso, pero depende en gran medida del prompt, de la data exposure y de la metric.
+\section{GPT-3: meta-learning y curvas de aprendizaje few-shot}
+
+GPT-3 va más allá y coloca examples dentro del context, de modo que el modelo ajusta su salida según la demonstration local sin actualizar parámetros. La clase lo llama language-model meta-learning: el outer loop es el preentrenamiento y el inner-like behavior ocurre en el context. Esta formulación es una analogía funcional; no hace falta suponer que el modelo realmente ejecuta descenso de gradiente.
+
+\subsection{Meta-learning interface}
+
+Esta sección define primero la interfaz de la tarea en tiempo de inferencia. \term{few-shot} se refiere a proporcionar dentro del prompt unos pocos input-output examples; \term{in-context learning} se refiere a que el modelo cambia su comportamiento únicamente con base en ese contexto. Para los parámetros $\theta$, la predicción sigue siendo $p_\theta(y\mid x,\text{demonstrations})$, y $\theta$ no cambia.
+
+\lecturefigure{slide-18-gpt3-metalearning.jpg}{GPT-3 coloca la task description y las demonstrations en el mismo context.}{Video oficial 18:15; Brown et al. 2020.}
+
+\begin{knowledgebox}{Lectura de la figura: la estructura de dos niveles entre entrenamiento e inferencia}
+El preentrenamiento actualiza los parámetros sobre una gran variedad de formatos de tarea; el inference prompt aporta una definición temporal de la tarea. El modelo puede producir el behavior mediante pattern completion, retrieval-like matching o un learned algorithm. Sea cual sea el mecanismo interno, en la práctica de ingeniería hay que probar el demonstration order, las label words, el format y el context length.
+\end{knowledgebox}
+
+\subsection{Few-shot arithmetic}
+
+Esta sección usa la arithmetic curve para examinar la interacción entre scale y demonstrations. La figura compara zero/one/few-shot con el model size; algunas tareas, según el número de dígitos, mejoran notablemente al aumentar la escala, pero las curvas difieren según la dificultad, lo que indica que la capacidad no es un scalar único.
+
+\lecturefigure{slide-19-few-shot-arithmetic.jpg}{Las curvas de arithmetic de GPT-3 muestran la interacción entre scale, shots y dificultad de la tarea.}{Video oficial 19:23.}
+
+\begin{knowledgebox}{Lectura de la figura: primero, qué representa cada curva}
+El eje horizontal suele ser el model size y el vertical la accuracy; el color o el tipo de línea distingue el número de dígitos o el shot setting. Lo importante no es que «más grande siempre es mejor», sino que algunas tareas tienen una pendiente más pronunciada y otras se quedan cerca del azar. Acertar en aritmética también puede depender de la tokenización y del formato de los datos de entrenamiento, por lo que no equivale directamente a razonamiento matemático general.
+\end{knowledgebox}
+
+\subsection{Word unscrambling}
+
+Unscrambling pide al modelo recuperar una palabra a partir de caracteres o fragmentos de palabra. Se acerca más a un algorithmic mapping que la language completion habitual, y permite observar si las demonstrations llevan al modelo a inferir la regla.
+
+\lecturefigure{slide-20-word-unscrambling.jpg}{Word unscrambling usa few-shot examples para probar la inducción de reglas.}{Video oficial 20:14.}
+
+\begin{knowledgebox}{Lectura de la figura: atención a la task format sensitivity}
+Que la curva suba indica que los modelos más grandes aprovechan mejor los context examples, pero la segmentación por caracteres, las mayúsculas y minúsculas, los espacios y el formato de la respuesta modifican la dificultad. Si basta con cambiar el label token para que el desempeño caiga notablemente, lo que el modelo aprendió puede ser un pattern frágil y no un algorithm estable.
+\end{knowledgebox}
+
+\subsection{General few-shot learning}
+
+A continuación, el desempeño en múltiples tareas y la scale se reúnen en una misma figura de síntesis. El Average puede mostrar la tendencia global, pero también oculta las diferencias entre tareas, la transferencia negativa y la benchmark saturation; por eso hay que volver a la per-task evidence.
+
+\lecturefigure{slide-21-general-few-shot.jpg}{Las curvas multitarea de GPT-3 colocan zero/one/few-shot y la tendencia con la escala en los mismos ejes.}{Video oficial 20:36.}
+
+\begin{knowledgebox}{Lectura de la figura: debajo del promedio está la distribución de tareas}
+Compare la separación entre zero-shot, one-shot y few-shot, y luego observe si crece con la escala. Si la mejora few-shot proviene solo de unas cuantas tareas, el promedio engaña; además, el benchmark puede estar inflado por contamination del preentrenamiento. Una conclusión confiable requiere un per-task breakdown, confidence y held-out data governance.
+\end{knowledgebox}
+
+\teachervoice{El ponente describe el cambio central de GPT-3 como «language model metalearning». La nota de clase se centra en la interface: la tarea se coloca en el context en lugar de reentrenar el modelo para cada tarea. Esta interfaz cobró gran importancia después, pero las curvas de entonces ya mostraban que no funciona de manera uniforme entre tareas y formatos.}
+
+\subsection{Resumen de la sección}
+
+GPT-3 convierte las demonstrations en entrada en tiempo de inferencia y así da forma a la in-context interface. La scale mejoró la capacidad de aprovechar el contexto, pero no eliminó la sensibilidad al formato, las diferencias entre tareas ni el riesgo de contamination.
+\section{iGPT: ¿puede el preentrenamiento autoregressive transferirse a Pixels?}
+
+Si el núcleo del preentrenamiento generative es modelar la distribución de una secuencia, una imagen también puede cuantizarse, aplanarse y predecirse en orden de píxeles o de code. El problema es que la imagen tiene estructura local bidimensional y el raster order es una elección arbitraria; una causal factorization razonable para el lenguaje no es necesariamente el sesgo inductivo más eficaz para la visión.
+
+\subsection{Convertir la imagen en una secuencia}
+
+Esta sección convierte primero la imagen en una secuencia que un decoder pueda procesar. iGPT representa la imagen como tokens de píxel y se entrena con next-pixel prediction; el modelo puede generar completion y también usar su hidden representation para classification probing.
+
+\lecturefigure{slide-22-image-gpt-question.jpg}{Image GPT pone a prueba si la misma receta autoregressive se extiende a las imágenes.}{Video oficial, 23:42; Chen et al. 2020.}
+
+\begin{knowledgebox}{Lectura de la figura: a la izquierda, la pregunta; a la derecha, la factorization}
+La imagen se despliega en un orden fijo y el modelo predice el siguiente píxel o valor discreto. Así puede reutilizarse directamente un Transformer decoder-only, pero la adyacencia bidimensional se convierte en un orden unidimensional. El éxito muestra que la architecture es general; la brecha en eficiencia y en sample quality muestra que el bias del dominio sigue siendo importante.
+\end{knowledgebox}
+
+\subsection{Completions: la versión visual de la distribución condicional}
+
+A continuación se usa la completion para observar la distribución condicional. Dada la mitad superior de una imagen, el modelo genera la mitad inferior; la diversidad de salidas indica que existen varias plausible continuation, no que el modelo «recupere la única imagen verdadera». Antes de leer la figura conviene preguntar qué conserva la restricción de entrada, qué atributos siguen siendo inciertos y si las distintas muestras cubren realmente varios modos razonables.
+
+\lecturefigure{slide-23-igpt-completions.jpg}{Las completion de iGPT muestran la incertidumbre multimodal de la generación visual condicional.}{Video oficial, 25:31.}
+
+\begin{knowledgebox}{Lectura de la figura: la respuesta correcta no son los píxeles de la imagen original}
+Si la mitad superior de un rostro puede corresponder a varias mitades inferiores, la ground truth píxel por píxel es solo una muestra. La evaluación debe considerar la perceptual plausibility, la global consistency y la diversity. Usar solo el pixel MSE penaliza generaciones razonables pero distintas, y también puede favorecer promedios borrosos.
+\end{knowledgebox}
+
+\subsection{Feature learning}
+
+Después se examina si el objective generativo aprende feature útiles para clasificación; este es el punto central del transfer loop. La variación de la probe accuracy según la capa o el tamaño del modelo puede mostrar dónde es más separable la representation.
+
+\lecturefigure{slide-24-igpt-feature-learning.jpg}{iGPT evalúa a la vez las generative samples y las learned visual features.}{Video oficial, 26:24.}
+
+\begin{knowledgebox}{Lectura de la figura: la calidad de generación y la calidad de representación son dos ejes}
+La tabla compara modelos, capas o evaluation protocol. Un modelo puede generar imágenes vistosas sin ofrecer el mejor linear probe, o al revés. El representation learning requiere congelar las feature y unificar el classifier y la data split, para no confundir la probe capacity con la backbone quality.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+iGPT demuestra que el preentrenamiento autoregressive puede transferirse a pixels y producir a la vez generation y representation. También pone de manifiesto la importancia del sequence order, del sesgo visual y del protocolo de evaluación.
+\section{DALL-E: Text-to-Image y Zero-Shot Transformation}
+
+DALL-E coloca los text token y los image token en un mismo autoregressive model y aprende $p(\text{image}\mid\text{text})$. En la clase se usan interpolation, prompts complejos e image-to-image examples para mostrar su capacidad de composición. Los ejemplos son muy convincentes, pero también son los más fáciles de someter a cherry-pick; por eso la sample gallery debe tomarse como evidencia cualitativa y no como una estadística de la distribución completa.
+
+\subsection{Interpolación y composición de conceptos}
+
+Esta sección empieza con la interpolación de conceptos para observar cómo el condicionamiento textual desplaza la distribución visual. Al leer la figura hay que revisar al mismo tiempo la continuidad, la identidad de los objetos y las muestras fallidas, y no solo si la imagen resulta interesante. En la sección anterior, iGPT solo recibía un prefijo visual; aquí el lenguaje especifica los atributos objetivo, por lo que el cumplimiento de la condición y el realismo visual deben evaluarse por separado.
+
+\lecturefigure{slide-25-dalle-interpolation.jpg}{DALL-E genera, mediante el condicionamiento textual, muestras de imágenes que varían de forma continua entre conceptos.}{Video oficial 29:10; Ramesh et al. 2021.}
+
+\begin{knowledgebox}{Lectura de la figura: la interpolación muestra control por condición, no demuestra una geometría de conceptos perfecta}
+Las prompt variation, como pasar de gato a perro, hacen que la apariencia de la salida cambie de forma continua, lo que indica que los token de texto pueden controlar la distribución visual. Hay que revisar las muestras fallidas, la prompt paraphrase, el object count y la spatial relation, para no fijarse solo en la grid más exitosa. La composición de conceptos también puede provenir de coocurrencias en los datos de entrenamiento y no de reglas abstractas.
+\end{knowledgebox}
+
+\subsection{Muestras diversas de texto a imagen}
+
+A continuación se comparan varios grupos de prompts y samples para observar si diversity e instruction adherence se cumplen a la vez, y se registra el sesgo que puede introducir la gallery selection. Una misma fila responde «cuántos candidatos razonables puede generar el modelo»; la comparación entre filas responde «si al cambiar la condición textual cambian de manera predecible el objeto, el material y el estilo».
+
+\lecturefigure{slide-26-dalle-examples.jpg}{Varios grupos de samples de DALL-E muestran la composición de condiciones de objeto, material, estilo y texto.}{Video oficial 30:13.}
+
+\begin{knowledgebox}{Lectura de la figura: dentro de una fila se observa la diversity; entre filas, la instruction adherence}
+Las muestras diversas de un mismo prompt muestran la distribution breadth; la comparación entre prompts distintos muestra si se respeta la condición. También hay que registrar de cuántos candidatos se seleccionó cada grid, si se usó un reranker y cuál es la tasa de fallos. Sin un selection protocol, la gallery no permite estimar la experiencia real del usuario.
+\end{knowledgebox}
+
+\subsection{Zero-shot image-to-image}
+
+Después, la generación condicionada se extiende a image-to-image. El modelo puede volver a describir la imagen de entrada o transformarla hacia un concepto nuevo; aquí zero-shot significa que no se entrenó un mapping específico para esa transformation concreta, aunque los datos de preentrenamiento pueden contener relaciones similares.
+
+\lecturefigure{slide-27-dalle-zero-shot-image2image.jpg}{La zero-shot transformation de DALL-E combina la entrada visual con la condición textual.}{Video oficial 30:33.}
+
+\begin{knowledgebox}{Lectura de la figura: observar la conservación del contenido y el cambio de atributos}
+Una transformation ideal conserva la identidad y la disposición, y al mismo tiempo cambia los atributos que indica el prompt. Ambos objetivos suelen entrar en conflicto: cambiar demasiado poco es no obedecer y cambiar demasiado es identity drift. La evaluación requiere tres tipos de metric, content preservation, condition adherence y perceptual quality, y no solo la estética.
+\end{knowledgebox}
+
+\lecturefigure{slide-28-dalle-more-image2image.jpg}{Más transformation examples exponen el alcance y la inestabilidad de la generalización composicional.}{Video oficial 31:33.}
+
+\begin{knowledgebox}{Lectura de la figura: el valor de varios ejemplos está en encontrar los límites}
+Al observar varios source/prompt, se ve qué objetos, posturas y fondos se conservan con facilidad y en cuáles ocurre colapso de modos o fuga de atributos. Unas cuantas muestras exitosas respaldan que «la capacidad existe», pero no permiten estimar que «la capacidad es confiable». En ingeniería conviene muestrear al azar, evaluar a ciegas y reportar la distribución de rechazos y fallos.
+\end{knowledgebox}
+
+\begin{warningbox}{«Parecerse» y «ser correcto» en la generación visual}
+Una imagen no tiene una única respuesta correcta píxel por píxel, pero sigue sujeta a restricciones de hechos, identidad, derechos de autor, sesgo y seguridad. La perceptual quality no sustituye la evaluación de provenance, consent y policy; el espacio de salida abierto de los modelos generativos hace que la evaluación sea más difícil, no innecesaria.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+DALL-E extiende el preentrenamiento autoregressive a la multimodal conditional generation. La gallery muestra que la capacidad existe; la confiabilidad, en cambio, requiere muestreo aleatorio, pruebas de composición y un selection protocol explícito.
+\section{Code as Modality: por qué BLEU no basta}
+
+El código es a la vez una token sequence y algo con semántica ejecutable. Dos cadenas muy distintas pueden implementar la misma función, y dos cadenas parecidas pueden diferir por un solo símbolo que provoca un error grave. Por eso, la evaluación de la code generation debe ejecutar la specification siempre que sea posible, en lugar de solo comparar el reference overlap.
+
+\subsection{¿Es el código solo otra modality?}
+
+Esta sección vuelve a las salidas que pueden verificarse automáticamente. El código puede seguir la token generation recipe, pero el parser, el runtime y los tests hacen que «correcto» sea más operable, y también más estricto, que la similitud en lenguaje natural. El texto y las imágenes vistos antes dependían sobre todo de evaluación humana o perceptual; con el código, por primera vez, la distribución de candidatos puede entrar en un ciclo cerrado de ejecución automática, clasificación de fallas y búsqueda.
+
+\lecturefigure{slide-29-code-modality.jpg}{El código puede generarse con un modelo de lenguaje, pero su corrección está restringida por la semántica de ejecución.}{Video oficial 32:20.}
+
+\begin{knowledgebox}{Lectura de la figura: la misma recipe, con un verifier adicional}
+La tokenización del código y el autoregressive objective pueden reutilizarse directamente de GPT, pero el código cuenta con parser, type checker, tests y runtime. Estos proporcionan una retroalimentación automática más fuerte que la del lenguaje natural. Al mismo tiempo, los programas plantean problemas de security, resource, dependency y specification ambiguity; pasar un número limitado de tests es solo una de las evidencias.
+\end{knowledgebox}
+
+\teachervoice{El ponente pregunta «isn't code just another modality?» y de inmediato pasa a HumanEval. Nota de clase: la interfaz del modelo puede unificarse, pero la evaluation no admite atajos; la ventaja del código es que tiene un executable verifier, y la responsabilidad también es mayor.}
+
+\subsection{HumanEval: problema, firma, docstring y tests}
+
+\term{HumanEval} es un conjunto de Python function problems escritos a mano. Cada problema proporciona la function signature y el docstring, y el modelo genera el body; unas \term{unit tests} (pruebas unitarias) ocultas revisan varias entradas. \term{functional correctness} (corrección funcional) significa que el programa produce el comportamiento correcto en los specification cases, no que su texto se parezca al reference code.
+
+\lecturefigure{slide-30-humaneval-dataset.jpg}{HumanEval evalúa el código generado con una function specification y hidden tests.}{Video oficial 33:33; Chen et al. 2021.}
+
+\begin{knowledgebox}{Lectura de la figura: qué contratos incluye un problema}
+La signature define la interfaz, el docstring da la specification en lenguaje natural, los examples pueden sugerir los casos límite y los tests definen la corrección observable. Si los tests no cubren entradas anómalas, la complejidad o los efectos secundarios, un programa erróneo todavía puede aprobarlos. La benchmark quality depende de la specification clarity y de la test coverage.
+\end{knowledgebox}
+
+\lecturefigure{slide-31-humaneval-example.jpg}{El HumanEval example muestra la relación entre el prompt y la implementation candidata.}{Video oficial 35:15.}
+
+\begin{knowledgebox}{Lectura de la figura: primero razonar a mano, luego ejecutar los tests}
+Lea el nombre de la función, los parámetros y el docstring, y enumere los normal, boundary, empty, duplicate e invalid cases; después revise el código candidato. El modelo puede escribir una implementación sintácticamente correcta y aparentemente razonable que, sin embargo, falla por off-by-one, mutation o límites de tipo. La ejecución es una verificación necesaria, pero un secure sandbox y un timeout también son indispensables.
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Forma simplificada de un functional check al estilo HumanEval}]
+def candidate(values):
+    # generated implementation
+    ...
+
+assert candidate([1, 2, 3]) == expected_normal
+assert candidate([]) == expected_empty
+assert candidate(boundary_case) == expected_boundary
+\end{lstlisting}
+
+\subsection{Pass@k: al menos una muestra correcta en la distribución}
+
+Si se muestrean $k$ candidatos independientes del modelo, \term{pass@k} indica la probabilidad de que al menos uno pase los tests. Si para cada problema se muestrean $n$ programas, de los cuales $c$ son correctos, el artículo de Codex usa el estimador
+\[
+\widehat{\operatorname{pass@}k}
+=1-\frac{\binom{n-c}{k}}{\binom{n}{k}},
+\]
+y cuando $n-c<k$ el resultado es 1. El numerador es el número de combinaciones de $k$ muestras elegidas entre las incorrectas, y el denominador es el número de todos los subconjuntos de tamaño $k$; su cociente es la probabilidad de que «todas las elegidas sean incorrectas».
+
+\lecturefigure{slide-32-pass-at-k.jpg}{Pass@k evalúa la probabilidad de encontrar al menos un programa funcionalmente correcto en varios muestreos.}{Video oficial 36:00; Chen et al. 2021.}
+
+\begin{knowledgebox}{Lectura de la figura: pass@1 y pass@100 responden a preguntas de producto distintas}
+Pass@1 se aproxima a la experiencia de un usuario que solo ve una completion; un large-k se acerca más a un sistema que puede generar muchos candidatos y elegir con tests/reranker. Un pass@100 alto con un pass@1 bajo indica que los programas correctos existen en la distribución, pero que el decoding por defecto rara vez los alcanza. El valor de despliegue depende de si realmente existe un verifier, del costo de muestreo y de la latencia de selección.
+\end{knowledgebox}
+
+\begin{warningbox}{Pass@k no es la proporción de «el modelo sabe escribir software»}
+Los problemas de HumanEval son cortos, con specification clara y tests automatizados. El software real incluye dependencias entre archivos, requisitos ambiguos, security, performance, maintenance y review. El pass@k de un benchmark es evidencia de una capacidad acotada, no de autonomous software-engineering reliability.
+\end{warningbox}
+
+\subsection{Codex training snapshot}
+
+La slide de la clase registra que los datos de Codex de entonces eran 159 GB de code recopilados de 54 millones de repositories, y que se hizo fine-tuning a partir de GPT-3 models de distintos tamaños; el tokenizer añadió soporte para spaces. Esta es una descripción histórica de la época del artículo y no representa los datos de productos posteriores ni la política actual.
+
+\lecturefigure{slide-33-codex-training-details.jpg}{Codex parte de GPT-3, aplica fine-tuning con un code corpus a gran escala y ajusta el tokenizer.}{Video oficial 36:59; Chen et al. 2021.}
+
+\begin{knowledgebox}{Lectura de la figura: además del volumen de datos, hay una representation choice}
+El repository count no se traduce directamente en examples independientes y de alta calidad; se requieren deduplicación, revisión de licencias, filtrado de seguridad y una train-test contamination audit. Los spaces tienen semántica en la indentación de Python, y el cambio en el tokenizer puede reducir la longitud de las secuencias y mejorar el aprendizaje de la estructura. El fine-tuning reutiliza las capacidades de lenguaje natural y también conecta el prompt en lenguaje natural con la code distribution.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La code generation hereda la language-model recipe, pero gracias a la executable semantics obtiene un verifier más fuerte. HumanEval y pass@k elevan el criterio de «parece código» a «al menos un candidato pasa los tests», aunque siguen cubriendo solo una pequeña parte del software real.
+\section{Easy, Medium, Hard: por qué una sola decodificación subestima la capacidad de la distribución}
+
+El ponente usa tres HumanEval problem para mostrar las diferencias de orden de magnitud en pass@1. El valor de las slides no está en memorizar la implementación concreta, sino en observar cómo la prompt ambiguity, la algorithm depth y la rare correctness modifican la sampling strategy.
+
+\subsection{Easy problem}
+
+Esta sección examina primero el easy case para establecer la línea base en la que «las muestras correctas se ubican en la región de alta probabilidad», y después aumenta gradualmente la dificultad de algorithm y de boundary. Al leer el código, primero se enumera a mano la specification a partir del docstring y luego se observa si el modelo cubre los casos normal y los edge cases solo con una plantilla común.
+
+\lecturefigure{slide-34-easy-problem.jpg}{La implementación correcta del Easy problem se ubica en la región de alta probabilidad de la distribución del modelo.}{Video oficial 38:03.}
+
+\begin{knowledgebox}{Lectura de la figura: un pass@1 alto también exige leer la specification}
+Cuando el código es corto, el pattern es común y hay pocos boundary, el greedy o un sample a baja temperatura aciertan con facilidad. Primero se verifica que el prompt esté completo y después que el candidate maneje empty/negative/duplicate. Una puntuación alta puede provenir de plantillas frecuentes en el entrenamiento y no implica que el modelo comprenda todas las variantes.
+\end{knowledgebox}
+
+\subsection{Medium problem}
+
+A continuación se observa el medium case: la estructura principal puede ser correcta, pero basta un branch o un off-by-one para que fallen todas las hidden tests. Este tipo de problema es el que mejor muestra que la fluidez en lenguaje natural está desvinculada de la corrección en ejecución, y también el más adecuado para analizar si múltiples sampling producen errores complementarios.
+
+\lecturefigure{slide-35-medium-problem.jpg}{El Medium problem exige más pasos o más manejo de casos límite, y la probabilidad de obtener una muestra correcta baja notablemente.}{Video oficial 38:36.}
+
+\begin{knowledgebox}{Lectura de la figura: el error puede concentrarse en un solo branch}
+Los candidatos suelen tener ya el esqueleto correcto, pero fallan en el rango del ciclo, en el orden de las condiciones o en el state update. En ese caso, múltiples sampling pueden explorar la variante correcta; también se puede mejorar la selección con test feedback, static analysis o un repair loop. El benchmark solo cuenta el pass final y no explica el tipo de error, por lo que se necesita una taxonomy adicional.
+\end{knowledgebox}
+
+\subsection{Hard problem}
+
+Al pasar al hard case, la pregunta ya no es «si la salida por defecto es correcta», sino si el program correcto tiene en la distribución suficiente probability mass para que la search lo encuentre. Si la mayoría de los samples comparten el mismo algorithm erróneo, aumentar $k$ solo repite el fracaso; solo si los errores son diversos puede el verifier filtrar un candidato correcto de la cola larga.
+
+\lecturefigure{slide-36-hard-problem.jpg}{La tasa de acierto con una sola muestra en el Hard problem es muy baja, pero la distribución todavía puede contener implementaciones correctas.}{Video oficial 39:00.}
+
+\begin{knowledgebox}{Lectura de la figura: un pass@1 bajo no equivale a capacidad nula}
+Si pass@1 es del orden de milésimas, una demo de un solo intento casi siempre falla; una gran cantidad de samples todavía puede encontrar un programa correcto. El sistema debe decidir si puede asumir el costo de generar, ejecutar y filtrar. Sin un verifier confiable, large-k solo produce más código que no puede auditarse.
+\end{knowledgebox}
+
+\subsection{Por qué se necesita una sampling-aware metric}
+
+Ahora se pasa de los ejemplos de un solo problema a la distribución de todo el benchmark. El histograma muestra que algunos problemas se resuelven casi siempre y que otros presentan una cola larga; el pass@1 promedio oculta la diferencia entre «basta con pocos candidatos para resolverlo» y «no se resuelve ni con muchas más muestras». La pregunta que conviene llevar es: a qué problemas debe asignarse el generation budget adicional y cuándo conviene mejorar el modelo en lugar de seguir muestreando.
+
+\lecturefigure{slide-37-need-pass-at-k-hist.jpg}{La probabilidad de éxito por problema tiene una cola larga; una sola puntuación promedio oculta las diferencias en lo que puede obtenerse mediante muestreo.}{Video oficial 40:30.}
+
+\begin{knowledgebox}{Lectura de la figura: eje horizontal, tasa de éxito por problema; eje vertical, número de problemas}
+Si muchos problemas se concentran cerca de 0 o de 1, el desempeño del modelo es bimodal; la región intermedia es la que más puede mejorarse mediante sampling. Hay que reportar la per-problem distribution y no solo la mean. También conviene revisar cómo se desplaza la mass con distintos model size y si los problemas difíciles obtienen realmente una probabilidad distinta de cero.
+\end{knowledgebox}
+
+\lecturefigure{slide-38-need-pass-at-k-scatter.jpg}{La mejora de pass@1 a pass@k no es uniforme entre problemas.}{Video oficial 40:57.}
+
+\begin{knowledgebox}{Lectura de la figura: que un punto se aleje de la diagonal indica sampling value}
+Si un punto sube notablemente en el eje de k alto, el muestreo diverso puede encontrar rare correct programs; los puntos que siguen pegados a cero indican que la distribution casi no tiene masa correcta. El sampling no lo resuelve todo: solo amplifica la probability mass existente y no puede crear de la nada un algorithm que el modelo nunca aprendió.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La dificultad del problema cambia la posición de las muestras correctas en la distribución. Pass@1 mide el acierto por defecto en un solo intento, y pass@k mide el potencial de búsqueda de un sistema de generación y filtrado; ambos requieren una interpretación per-problem.
+\section{Temperature, sampling y oracle approximation}
+
+La sampling strategy determina de qué región de la model distribution se toman los candidatos. La \term{temperature} (temperatura) se aplica a los logits $z_i$ así:
+\[
+p_T(i)=\frac{\exp(z_i/T)}{\sum_j\exp(z_j/T)}.
+\]
+Con $T<1$ la distribución se vuelve más aguda y favorece los token de alta probabilidad; con $T>1$ aumenta la diversidad, pero también los errores sintácticos o semánticos. La temperatura óptima depende de la metric y de $k$.
+
+\subsection{Calibrar la temperature para pass@k}
+
+Esta sección vincula primero los parámetros de decoding con el presupuesto de evaluación. La temperatura no debe fijarse por costumbre, sino calibrarse según $k$, el verifier y el presupuesto de latencia. Una temperatura baja concentra los candidatos en la mode, lo que conviene cuando se muestra una sola salida; una temperatura alta amplía la search coverage, pero solo unas tests confiables pueden convertir la diversity en corrección final.
+
+\lecturefigure{slide-39-temperature-calibration.jpg}{Una temperatura baja favorece pass@1; una temperatura más alta puede aportar candidatos diversos cuando $k$ es grande (large-k).}{Video oficial 41:26.}
+
+\begin{knowledgebox}{Lectura de la figura: cada curva corresponde a un presupuesto de búsqueda}
+Cuando $k=1$, una temperatura demasiado alta dispersa la masa de probabilidad hacia errores de baja probabilidad; cuando $k$ es grande, una diversity moderada evita repetir el mismo patrón de error. La temperatura óptima no es una constante del modelo: debe calibrarse en validation tasks según el generation budget real, y hay que evitar el benchmark overfitting.
+\end{knowledgebox}
+
+\subsection{La «efectividad irrazonable» del sampling}
+
+A continuación se observa la curva de beneficio al aumentar el candidate budget, y la benchmark gain se pone en una misma decisión junto con los costos de inferencia, ejecución y selección. El desplazamiento horizontal de la curva significa más samples; la subida vertical significa que en más problemas aparece al menos un candidato correcto. Entre ambos no hay un aumento gratuito de capacidad.
+
+\lecturefigure{slide-40-sampling-effectiveness.jpg}{Al aumentar los samples, pass@k puede superar con mucho el desempeño de una sola salida.}{Video oficial 42:19.}
+
+\begin{knowledgebox}{Lectura de la figura: la mejora proviene de la search, no necesariamente de una mejor muestra individual}
+La curva muestra que el mismo modelo, con un candidate budget mayor, resuelve más problemas. Un sistema real además tiene que pagar los costos de inference, sandbox, test y ranking. Si las tests son incompletas, el selector puede favorecer el exploit; si varios candidatos están muy correlacionados, el número efectivo de muestras es menor que el $k$ nominal.
+\end{knowledgebox}
+
+\teachervoice{El ponente llama al sampling «unreasonably effective». La nota de clase no invita a muestrear más a ciegas, sino que recuerda que la calidad del modelo es toda una conditional distribution; cuando un producto muestra una sola completion, el decoding y el verifier determinan juntos la capacidad visible.}
+
+\subsection{Aproximar el oracle}
+
+Después se introduce el límite superior de la selección. Aquí el \term{oracle} es un selector hipotético: siempre que entre los $k$ candidatos exista un programa correcto, puede identificarlo y devolverlo. Las unit tests son una oracle approximation finita: cuanto más completa su cobertura, más confiable es la selección. Esta abstracción separa «el modelo no generó la respuesta correcta» de «el sistema no reconoció la respuesta correcta» como dos cuellos de botella medibles.
+
+\lecturefigure{slide-41-oracle-sampling.jpg}{El sampling más un verifier aproxima el oracle que «elige el programa correcto del conjunto de candidatos».}{Video oficial 43:17.}
+
+\begin{knowledgebox}{Lectura de la figura: comparar la distancia entre la model curve y la oracle curve}
+Si el pass@k de tipo oracle es alto pero el del selector real es bajo, el cuello de botella está en la verification/ranking; si ambos son bajos, el cuello de botella está en la model distribution. Los equipos de ingeniería deben invertir por separado en generation, tests, static analysis y reranking, y no atribuir toda la diferencia a los parámetros del modelo.
+\end{knowledgebox}
+
+\begin{warningbox}{Las pruebas pueden satisfacerse, pero también aprovecharse con trampas}
+Unas tests finitas permiten overfit, hard-code o efectos secundarios no cubiertos. El código generado debe ejecutarse en un sandbox, revisando timeout, memory, network, filesystem y dependency. El oracle es un límite superior abstracto, no una garantía de seguridad en la práctica.
+\end{warningbox}
+
+\subsection{Codex-S: la señal de supervisión sigue dando forma}
+
+Codex-S aplica supervised fine-tuning sobre un code-pretrained model, con stand-alone Python functions y sus solutions correctas. Esto modifica la prompt-to-solution distribution y la ajusta mejor a las tareas de tipo HumanEval (HumanEval-style tasks).
+
+\lecturefigure{slide-42-codex-s-training.jpg}{Codex-S usa datos de funciones supervisados para alinear aún más la completion de tipo HumanEval (HumanEval-style).}{Video oficial 44:10; Chen et al. 2021.}
+
+\begin{knowledgebox}{Lectura de la figura: el fine-tuning mejora el ajuste a la tarea (task fit), pero también puede estrechar la distribución}
+Los supervised examples enseñan explícitamente al modelo a pasar del docstring al function body, lo que eleva la benchmark performance. Hay que revisar si se sacrifican otros lenguajes, el repository context o la diversity, y evitar la train-test similarity. La fine-tuning gain no significa que el base model no importe, sino que el objective se acerca más a la evaluation.
+\end{knowledgebox}
+
+\subsection{Main figure: escala del modelo, Codex y sampling budget}
+
+Esta sección integra model family, scale y sampling budget, y distingue la pretraining gain, la code fine-tuning gain y la search gain, para no mezclar los tres efectos en una sola cifra.
+
+\lecturefigure{slide-43-main-figure.jpg}{La main figure de Codex compara en conjunto model family, escala y pass@k.}{Video oficial 45:52; Chen et al. 2021.}
+
+\begin{knowledgebox}{Lectura de la figura: primero la leyenda, después las pendientes y las distancias}
+El eje horizontal o las curvas suelen codificar el model size o el sampling budget; los colores distinguen GPT, Codex y Codex-S. Compare primero la fine-tuning gain con el mismo $k$, y luego la search gain de un mismo modelo de pass@1 a pass@100. No tome pass@100 como la experiencia interactiva de una sola completion, ni ignore el costo de generar 100 candidatos.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La temperature controla el equilibrio calidad–diversidad, pass@k incorpora el presupuesto de candidatos a la evaluación, las tests aproximan el oracle y Codex-S modifica la distribución mediante supervised data. La capacidad de un sistema de código proviene de tres elementos: model, decoding y verifier.
+\section{Limitations: de Benchmark Capability a Software Reliability}
+
+La clase no terminó en la main figure, sino que mostró la brittle completion, la relación entre model-size/compute y las conclusiones. Un pass@k alto puede demostrar que existen muestras funcionalmente correctas en un benchmark estrecho, pero no cubre automáticamente specification, security, composition ni mantenimiento.
+
+\subsection{Brittleness y composition}
+
+Esta sección revisa primero los failures y después explica los límites de la main figure. La prompt brittleness y la degradación en composition muestran que un benchmark de funciones cortas no puede representar el software a repository-scale.
+
+\lecturefigure{slide-44-limitations.jpg}{Las limitations de Codex incluyen la prompt brittleness y la degradación rápida en composition más compleja.}{Video oficial, 46:53.}
+
+\begin{knowledgebox}{Lectura de la figura: a la izquierda, fragilidad local; a la derecha, tendencia con la escala}
+Un cambio pequeño en el prompt puede provocar una completion errónea; a medida que la tarea requiere combinar más pasos, la exactitud disminuye. El tamaño del modelo mejora la curva, pero no garantiza la extrapolación a programas largos ni a repositories reales. Conviene evaluar paraphrase, hidden requirements, multi-file dependency, security y regression.
+\end{knowledgebox}
+
+\begin{warningbox}{La functional correctness todavía no es production readiness}
+El código de producción también necesita readability, types, security, performance, licenses, dependency policy, observabilidad y human review. Aunque todas las unit tests pasen, pueden existir entradas no cubiertas o efectos secundarios peligrosos. La salida del modelo debe integrarse al proceso de ingeniería de software, no saltárselo.
+\end{warningbox}
+
+\subsection{Los cuatro juicios duraderos de la slide de conclusiones}
+
+Al final, la slide de conclusiones se reformula como proposiciones verificables: bajo qué condiciones de data, metric y cost se cumplen el modelado generativo, la scale, la transferencia entre modalidades y el sampling. Al repasar toda la sesión, conviene colocar sample quality, representation transfer, benchmark pass y deployment reliability en columnas distintas, para no dejar que una sola historia de éxito cubra todos los niveles.
+
+\lecturefigure{slide-45-conclusion.jpg}{El ponente resume toda la sesión con el preentrenamiento generativo, la scale, la cross-modality y el sampling.}{Video oficial, 47:38.}
+
+\begin{knowledgebox}{Lectura de la figura: reformular las conclusiones como proposiciones verificables}
+El modelado generativo puede aprovechar datos sin etiquetar; la scale suele mejorar el sample y la transfer; una misma recipe puede transferirse a image/code; el sampling puede amplificar los rare success de la distribución. Cada afirmación debe acotarse en data, model, metric y cost. La extensión más importante es esta: cuando existe un verifier, el modelo generativo puede formar un sistema junto con la búsqueda; cuando el verifier no es confiable, el muestreo múltiple también puede amplificar el riesgo.
+\end{knowledgebox}
+
+\teachervoice{Al cierre, el ponente enfatiza a la vez la amplitud del generative modeling y sus limitations. Recordatorio de la clase: lo destacable de Codex no es que «los problemas de código estén resueltos», sino que el code ofrece un entorno de investigación que se puede ejecutar, muestrear y verificar, en el que la distribución del modelo y la búsqueda del sistema pueden medirse por separado.}
+
+\subsection{Resumen de la sección}
+
+La benchmark capability es evidencia necesaria, no confiabilidad del software. Codex nos permite ver la estructura del sistema de generación, muestreo, prueba y selección, y también deja más claros la prompt brittleness, la composition y los límites de seguridad.
+\section{Síntesis y ampliación}
+
+Esta clase une la historia de los modelos de lenguaje, el aprendizaje no supervisado, la generación multimodal y la code evaluation en una sola metodología:
+
+\begin{enumerate}
+  \item \textbf{La calidad de la generación tiene niveles}: el léxico, la sintaxis, la semántica, los hechos y el éxito en la tarea no pueden reducirse a «si se parece o no»;
+  \item \textbf{La perplexity solo mide la predicción de la distribución}: no demuestra por sí sola la veracidad, la controlabilidad ni la downstream utility;
+  \item \textbf{El autoregressive objective aporta autosupervisión densa}: el analysis by synthesis puede producir una representation transferible, pero también puede aprender shortcuts;
+  \item \textbf{GPT-1/2/3 cambiaron la interfaz de las tareas}: el fine-tuning, la zero-shot continuation y las in-context demonstrations ampliaron sucesivamente la reutilización;
+  \item \textbf{Lo multimodal exige redefinir el token y la metric}: iGPT y DALL-E demuestran que la recipe es transferible, no que la estructura del dominio carezca de importancia;
+  \item \textbf{El código necesita un functional verifier}: el overlap de cadenas no puede sustituir a la semántica de ejecución;
+  \item \textbf{Pass@k mide el rare success dentro de la distribución}: pass@k y pass@1 corresponden a distintos candidate budgets y a distintas experiencias de producto;
+  \item \textbf{La temperature debe calibrarse según k}: una temperatura baja busca la calidad de una sola muestra; una temperatura alta, con el respaldo de un verifier, puede ampliar la cobertura de la búsqueda;
+  \item \textbf{El sampling solo puede amplificar la masa de probabilidad existente}: si la probabilidad del programa correcto es cero, ninguna cantidad de samples sirve;
+  \item \textbf{La production reliability requiere un proceso completo}: el sandbox, los tests, el static analysis, la review, la security y el maintenance no pueden sustituirse con un benchmark.
+\end{enumerate}
+
+\begin{importantbox}{Tarea de Generative-System Evaluation}
+Elige una tarea de texto, imagen o código: define la model distribution, la decoding policy, el candidate budget, el verifier y el final selector; reporta a la vez pass@1/quality, pass@k/diversity, cost, latency y la failure taxonomy. Para la tarea de código, deriva el estimador de pass@k y diseña tres tipos de tests ocultos; para la tarea de texto o imagen, explica por qué tu verifier no puede ser un oracle perfecto.
+\end{importantbox}
+
+\begin{knowledgebox}{Autoevaluación final: hay que distinguir tres «existencias»}
+\textbf{Existir en la distribución}: alguna muestra correcta tiene probabilidad distinta de cero; \textbf{poder encontrarse}: la temperature, el valor de $k$ y la search actuales permiten muestrearla; \textbf{poder reconocerse}: los tests o el ranker pueden seleccionarla de forma confiable. La mayoría de las diferencias entre productos de modelos generativos ocurren entre estos tres niveles.
+\end{knowledgebox}
+
+\subsection{Lecturas adicionales}
+
+{\small
+\begin{itemize}[nosep,leftmargin=*]
+  \item \href{https://www.cs.utoronto.ca/~ilya/pubs/2011/LANG-RNN.pdf}{\textbf{Generating Text with Recurrent Neural Networks}}: RNN language generation.
+  \item \href{https://arxiv.org/abs/1602.02410}{\textbf{Exploring the Limits of Language Modeling}}: large LSTM language modeling.
+  \item \href{https://arxiv.org/abs/1704.01444}{\textbf{Learning to Generate Reviews and Discovering Sentiment}}: sentiment neuron y unsupervised representation.
+  \item \href{https://cdn.openai.com/research-covers/language-unsupervised/language_understanding_paper.pdf}{\textbf{GPT-1}} y \href{https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf}{\textbf{GPT-2}}: de pretrain/fine-tune a zero-shot.
+  \item \href{https://arxiv.org/abs/2005.14165}{\textbf{GPT-3}}: few-shot/in-context evaluation y human detection study.
+  \item \href{https://arxiv.org/abs/2006.10738}{\textbf{iGPT}}: generative pretraining from pixels.
+  \item \href{https://arxiv.org/abs/2102.12092}{\textbf{DALL-E}}: zero-shot text-to-image generation.
+  \item \href{https://arxiv.org/abs/2107.03374}{\textbf{Codex}}: HumanEval, pass@k y code generation evaluation.
+\end{itemize}
+}
+
+\end{document}
