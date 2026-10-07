@@ -1,0 +1,94 @@
+\section{Dense baseline: primero, cómo organiza Mistral 7B la attention y la MLP}
+
+Mixtral no reescribe todo el Transformer. Conserva la attention y la residual structure de Mistral 7B y solo sustituye la MLP de cada capa por una expert MLP top-two-of-eight. Para entender con precisión «qué fue lo único que cambió», esta sección establece primero la dense baseline: Grouped-Query Attention, Sliding-Window Attention, RMSNorm, SwiGLU y tensor shape.
+
+\subsection{MHA, MQA y GQA: primero hay que contar los query heads y los KV heads}
+
+La Multi-Head Attention (MHA) estándar da a cada query head su propio key/value head; la Multi-Query Attention (MQA) hace que todos los query heads compartan un solo conjunto de K/V; la Grouped-Query Attention (GQA) se ubica entre ambas: un grupo de query heads comparte un KV head. Mistral 7B usa 32 query heads y 8 KV heads, con el objetivo de conservar más libertad de representación y, al mismo tiempo, reducir la presión sobre la KV cache y la memory bandwidth.
+
+\lecturefigure{slide-02-dense-attention.jpg}{Grouped-Query Attention y Sliding-Window Attention en Mistral 7B}{Grabación oficial de Stanford Online 00:03:55}
+
+Sea $H_q$ el número de query heads, $H_{kv}$ el número de KV heads, $d_h$ la head dimension y $L$ la longitud de la secuencia. En la decodificación autorregresiva, el número de elementos de la KV cache por capa es aproximadamente
+\[
+N_{KV}=2L H_{kv}d_h,
+\]
+donde el coeficiente $2$ corresponde a key y value. Si se pasa de $H_{kv}=H_q=32$ en MHA a $H_{kv}=8$ en GQA, con la misma precisión y la misma longitud de secuencia la KV cache se reduce aproximadamente a la cuarta parte.
+
+El núcleo de la attention sigue siendo
+\[
+\operatorname{Attn}(Q,K,V)=\operatorname{softmax}\!\left(\frac{QK^{\top}}{\sqrt{d_h}}+M\right)V,
+\]
+donde $M$ es la causal/sliding-window mask. GQA cambia la forma en que se comparten K/V, no esta fórmula de ponderación probabilística.
+
+\begin{knowledgebox}{Concepto previo: por qué la KV cache es un costo de inferencia}
+La KV cache guarda los key/value que cada token anterior generó en cada capa, para no recalcular todo el prefijo en cada paso de decodificación. Reside principalmente en la HBM de la GPU (High Bandwidth Memory, la DRAM de video de alto ancho de banda); el crecimiento de la longitud, el número de capas, el número de KV heads o el batch aumenta linealmente su capacidad requerida y consume ancho de banda de lectura y escritura. Por eso el beneficio de GQA no es solo «unas cuantas matrices menos», sino una reducción del estado que permanece residente a largo plazo.
+\end{knowledgebox}
+
+\begin{warningbox}{GQA no es una compresión gratuita}
+Reducir los KV heads puede hacer perder la independencia de los distintos query heads respecto a la representación de K/V. La calidad final depende de la escala del modelo, los datos de entrenamiento y el head grouping; los resultados de un benchmark no pueden deducirse solo de la fórmula de la caché.
+\end{warningbox}
+
+\teachervoice{00:02:18--00:03:36, Albert enfatiza que ni GQA ni la sliding-window attention son invenciones nuevas de Mistral, sino diseños existentes combinados en una dense baseline sólida. Al curso le interesa cómo funcionan en conjunto las decisiones de ingeniería, no adjudicarse una novelty puntual.}
+
+\subsection{Sliding-window attention: cómo se propaga una ventana local a través de las capas}
+
+GQA resuelve el número de KV heads; la Sliding-Window Attention (SWA, atención de ventana deslizante) resuelve el alcance visible de cada capa. Cada posición atiende directamente solo a los $w$ tokens más recientes, de modo que la attention matrix de una capa pasa de $L^2$ conexiones globales a cerca de $Lw$; sin embargo, la información puede propagarse paso a paso a lo largo de las capas, por lo que los tokens de capas profundas pueden absorber indirectamente un contexto más lejano.
+
+El conjunto directamente visible de la posición $t$ en la capa $\ell$ puede escribirse como
+\[
+\mathcal{N}_{\ell}(t)=\{j\mid \max(0,t-w+1)\le j\le t\}.
+\]
+Si cada capa permite la transmisión local, la distancia máxima idealizada de propagación de la información crece con el número de capas y es aproximadamente $\ell(w-1)$. Esto no demuestra que «la capa $\ell$ tenga attention global sin pérdidas», pero muestra que el cálculo local puede difundirse mediante la depth.
+
+\begin{importantbox}{GQA y SWA resuelven cuellos de botella distintos}
+GQA reduce principalmente la representación de K/V y la KV cache; SWA reduce principalmente las conexiones de attention por capa y el cálculo en secuencias largas. Ambas pueden usarse al mismo tiempo, porque una modifica el head sharing y la otra el token neighborhood.
+\end{importantbox}
+
+\subsection{Una capa de dense Transformer: leer las shapes es más confiable que memorizar nombres de módulos}
+
+Los diagramas de arquitectura tienden a ocultar detalles, por eso el ponente presenta directamente una implementación en PyTorch de una sola capa y escribe la tensor dimension en los nombres de las variables. Al leer el código hay que seguir cuatro cosas: la shape de la Q/K/V projection, la codificación posicional después de RoPE, el attention residual y el SwiGLU MLP residual. Solo así se ve que lo único que Mixtral sustituye después es la ruta de la MLP.
+
+\lecturefigure{slide-03-dense-layer-code.jpg}{Tabla de parámetros e implementación en PyTorch de una capa de Transformer de Mistral 7B}{Grabación oficial de Stanford Online 00:06:45}
+
+Si la entrada es $X\in\mathbb{R}^{L\times d}$, el dense block puede resumirse como
+\begin{align*}
+H &= X+\operatorname{Attention}(\operatorname{RMSNorm}(X)),\\
+Y &= H+\operatorname{MLP}(\operatorname{RMSNorm}(H)).
+\end{align*}
+Mistral usa una MLP de estilo SwiGLU, que puede escribirse como
+\[
+\operatorname{MLP}(x)=W_2\left(\operatorname{SiLU}(W_1x)\odot W_3x\right),
+\]
+donde $W_1,W_3$ expanden la hidden dimension a la intermediate dimension, $W_2$ la proyecta de vuelta y $\odot$ es la multiplicación elemento a elemento. Cada expert de Mixtral replica esta parametrización de la MLP, no la capa completa de attention.
+
+\begin{lstlisting}[caption={Pseudocódigo shape-first de un Dense Transformer block}]
+q = x @ Wq            # [tokens, query_heads, head_dim]
+k = x @ Wk            # [tokens, kv_heads, head_dim]
+v = x @ Wv            # [tokens, kv_heads, head_dim]
+h = x + attention(q, k, v, causal_window)
+y = h + swiglu(rms_norm(h), W1, W2, W3)
+\end{lstlisting}
+
+\begin{knowledgebox}{Primer uso: fused kernel}
+Un fused kernel (kernel fusionado) combina varias operaciones de GPU, como RMSNorm, projection, activation o gating, en menos kernel launches, lo que reduce las lecturas y escrituras de resultados intermedios en la HBM y el launch overhead. Puede mejorar el rendimiento real, pero no cambia la estructura matemática del modelo; por lo tanto, la optimización de kernels no debe ocultar la diferencia conceptual entre total parameters y active parameters.
+\end{knowledgebox}
+
+\teachervoice{00:03:36--00:06:49, el ponente dice que la Transformer architecture tiene una gran cantidad de pequeñas decision choices y que un solo diagrama de bloques no basta; por eso usa código con sufijos de tensor-shape para mostrar a la audiencia qué hace exactamente cada matriz.}
+
+\subsection{Evidencia de la dense baseline: un modelo pequeño no es un modelo débil}
+
+Antes de pasar a los modelos dispersos, el curso usa los benchmarks de Mistral 7B de aquel momento para mostrar que la dense baseline ya era sólida. La comparación de la figura es una instantánea de los modelos al momento de su publicación en 2023, no un leaderboard de 2026; su función es controlar variables: las mejoras de Mixtral deben entenderse en relación con Mistral 7B, de la misma familia, en lugar de atribuir todas las mejoras a MoE.
+
+\lecturefigure{slide-04-mistral7b-performance.jpg}{Comparación de benchmarks de Mistral 7B al momento de su publicación en 2023}{Grabación oficial de Stanford Online 00:07:01}
+
+\begin{knowledgebox}{Lectura de la figura: primero confirmar el tamaño del modelo, luego ver la categoría de la tarea}
+La figura compara Mistral 7B con varias configuraciones de Llama 2. El primer paso no es buscar la barra más alta, sino confirmar la escala de parámetros de cada baseline; el segundo es ver si los resultados son consistentes entre tareas; el tercero es revisar si hay ventajas que aparecen en un solo benchmark. El curso solo la usa para demostrar que la dense baseline es competitiva y no toma ninguna gráfica de barras como una clasificación general de capacidades.
+\end{knowledgebox}
+
+\begin{warningbox}{Límites de comparabilidad de los benchmarks históricos}
+El prompt, la configuración few-shot, el tokenizer, el evaluation harness y la contamination pueden cambiar las puntuaciones. Esta figura sirve para explicar por qué el equipo partió de Mistral 7B para estudiar Mixtral, no para compararlo directamente con modelos más recientes.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Mistral 7B ofrece un dense control claro: GQA reduce los KV heads, SWA limita las conexiones por capa y RMSNorm/SwiGLU organizan el residual block. Mixtral conserva estas estructuras y sustituye la única MLP de la segunda residual branch por una sparse expert mixture. Por lo tanto, todo el análisis posterior de capacidad y costo debe basarse en «attention compartida + varias expert MLP».

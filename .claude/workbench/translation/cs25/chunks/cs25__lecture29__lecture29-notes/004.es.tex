@@ -1,0 +1,65 @@
+\section{Por qué MoE-fy MLP: evidencia de desempeño e hipótesis de trabajo}
+
+La sección anterior explicó «cómo enrutar»; esta pregunta «por qué conviene ampliar primero el MLP». El ponente adopta una intuición común, aunque no demostrada, sobre la división de funciones: el MLP se parece más a un almacén de conocimiento y la attention, a un mecanismo de composición y de algoritmos. Si esta intuición es parcialmente cierta, ampliar la MLP capacity debería ayudar más en las knowledge-heavy tasks; a continuación, la clase pone a prueba esta tendencia con dos grupos de gráficas de benchmark y plantea la pregunta inversa de MoE-fying attention.
+
+\subsection{El MLP almacena conocimiento y la attention ejecuta algoritmos: una intuición útil pero riesgosa}
+
+El valor de esta slide está en que enuncia la hipótesis de forma explícita, no en que la demuestre. El conocimiento y el cómputo de un Transformer se distribuyen entre embeddings, attention, MLP, normalization y residual interactions; dividir las funciones en dos categorías sirve para organizar experimentos, pero no permite afirmar que una layer o un expert se encarga de una sola función cognitiva.
+
+\lecturefigure{slide-10-why-moe-mlp.jpg}{Por qué conviene MoE-fy primero el MLP: la hipótesis de trabajo knowledge-versus-reasoning}{Grabación oficial de Stanford Online 00:10:58}
+
+\begin{warningbox}{No conviertas una intuición sobre el mecanismo en un teorema de localización}
+Aunque la ampliación del MLP y la mejora en el knowledge benchmark ocurran al mismo tiempo, no puede concluirse que «el conocimiento solo existe en el MLP». El aumento de parámetros, los cambios en la dinámica de entrenamiento, la router regularization y el aprovechamiento de los datos pueden influir en el resultado. La formulación confiable es: esta clase usa esa intuición para formular una predicción y luego examina si las categorías de tareas la cumplen aproximadamente.
+\end{warningbox}
+
+\teachervoice{00:10:32--00:11:44, Albert llama directamente conventional wisdom a esta distinción y anticipa que MoE-fying MLP mejorará sobre todo la knowledge; no la presenta como una conclusión rigurosa de neurociencia.}
+
+\subsection{Category bars: la mayor ganancia está en las tareas de conocimiento, pero no es la única}
+
+La gráfica de barras compara Mistral 7B, Mixtral 8x7B y varias baselines de Llama 2. Al leerla, primero agrupa por category y después compara la diferencia dense/sparse dentro de la misma familia; no empieces por el promedio general. El ponente observa que la mejora más notable está en las knowledge-heavy tasks; reasoning/comprehension también mejoran, aunque en menor medida.
+
+\lecturefigure{slide-11-mixtral-performance-bars.jpg}{Benchmark de Mixtral 8x7B al momento de su release-time en distintas categorías de tareas}{Grabación oficial de Stanford Online 00:11:41}
+
+Si la puntuación en una tarea es $s_m$ y la de la baseline correspondiente es $s_b$, puede usarse la ganancia relativa
+\[
+\Delta_{\mathrm{rel}}=\frac{s_m-s_b}{|s_b|+\epsilon}
+\]
+para comparar magnitudes distintas, aunque esto sigue sin resolver la benchmark saturation, la prompt sensitivity ni la contamination. La conclusión didáctica de la figura es que «la ganancia se distribuye de manera desigual», no que «el conocimiento y el razonamiento ya están completamente separados».
+
+\begin{knowledgebox}{Lectura de la figura: cuatro pasos para evitar el category cherry-picking}
+Primero, confirma si cada grupo usa el mismo evaluation harness; segundo, distingue métricas como accuracy y exact match; tercero, observa la diferencia de Mistral 7B a Mixtral dentro de la misma familia; cuarto, revisa si el patrón es consistente entre categorías. Elegir solo la barra más alta exagera la generalidad de MoE.
+\end{knowledgebox}
+
+\subsection{Active-parameter plot: el eje horizontal no es el total model size}
+
+El segundo grupo de gráficas pone active parameters en el eje horizontal y subraya que Mixtral usa unos 12.9B parámetros por token y, aun así, se ubica en una mejor performance region. Este eje responde «cuánta calidad se obtiene con un cómputo activo similar», pero no responde «qué tan grande es el checkpoint», «cuánta memoria de GPU ocupa» ni «cuánto cuesta el all-to-all». Por eso respalda el argumento capacity-to-compute, pero no el argumento capacity-to-memory.
+
+\lecturefigure{slide-12-mixtral-performance-plots.jpg}{Gráfica cost-performance de active parameters contra el desempeño en distintas tareas}{Grabación oficial de Stanford Online 00:12:34}
+
+Un serving cost más completo, aunque todavía simplificado, puede escribirse como
+\[
+C_{\text{serve}}\approx C_{\text{shared}}+kC_{\text{expert}}+C_{\text{router}}+C_{\text{dispatch}}+C_{\text{imbalance}},
+\]
+donde los dos primeros términos corresponden aproximadamente al cómputo y los tres últimos, al enrutamiento, la comunicación y la espera. Los active parameters solo aproximan los dos primeros términos; no representan toda la latency ni el dollar cost.
+
+\begin{warningbox}{La Pareto frontier de la figura no incluye todas las variables de producción}
+La gráfica de Pareto formada por benchmark quality y active parameters no considera HBM residency, interconnect, batch size, quantization, kernel maturity ni tail latency. La selección de ingeniería requiere una contabilidad de sistema aparte.
+\end{warningbox}
+
+\teachervoice{00:11:44--00:12:38, el ponente explica personalmente que el eje horizontal son los active parameters y el vertical, el desempeño en cada tipo de tarea; subraya que la mejora en la categoría knowledge de Mistral 7B a Mixtral es especialmente grande.}
+
+\subsection{Por qué no MoE-fy attention: la estabilidad antes que la imaginación}
+
+Si ampliar la MLP capacity funciona, la pregunta natural es convertir también las Q/K/V projection en switch layers. La clase señala que esta línea ya se ha explorado experimentalmente, pero la estabilidad numérica es un obstáculo real: algunas configuraciones se pueden entrenar en fp32 y divergen (diverge) al pasar a bf16. Como el entrenamiento de los grandes modelos actuales depende de la eficiencia de la baja precisión, poder entrenar de forma estable importa más que el ahorro de parámetros sobre el papel.
+
+\lecturefigure{slide-13-moe-attention-question.jpg}{Pregunta abierta: convertir también la attention projection en MoE}{Grabación oficial de Stanford Online 00:14:06}
+
+\begin{knowledgebox}{Concepto previo: bf16 stability}
+bf16 conserva el mismo número de exponent bits que fp32, pero su mantissa es más corta, por lo que los errores de redondeo en multiplicaciones y sumas, softmax, normalization y router logits son más notorios. Que el entrenamiento diverja (diverge) depende de scaling, normalization, optimizer, initialization y kernel implementation; no puede atribuirse solo a que «la baja precisión es mala».
+\end{knowledgebox}
+
+\teachervoice{00:12:38--00:14:03, Albert deja MoE attention como una open research question explícita: los intentos existentes pueden divergir (diverge) en bf16, y en el futuro se necesitarán mejores técnicas de normalization o de estabilización.}
+
+\subsection{Resumen de la sección}
+
+Las gráficas de desempeño respaldan una conclusión limitada: con active parameters similares, el capacity-to-compute tradeoff de Mixtral es muy favorable, y la ganancia en las knowledge-heavy tasks destaca especialmente. No demuestran que el MLP concentre en exclusiva el conocimiento, ni que los active parameters equivalgan al costo real de servicio. MoE-fying attention, por su parte, nos recuerda que toda ampliación estructural debe superar el umbral de ingeniería de la estabilidad en baja precisión.

@@ -1,0 +1,79 @@
+\section{PaLM-E: inyectar la percepción multimodal en el modelo de lenguaje}
+
+PaLM-E es el punto de partida de la primera línea de trabajo. No trata al robot como un downstream classifier independiente, sino que inserta sensor embedding continuos en la language token sequence, de modo que un único embodied multimodal language model atienda a la vez la planning del robot, la respuesta a preguntas visuales, el captioning y las tareas generales de lenguaje. La pregunta central es si esta consolidation produce positive transfer en lugar de interferencia entre tareas.
+
+\subsection{Model family y objetivo de consolidation}
+
+La diapositiva de la familia de modelos ubica PaLM-SayCan, RT-1, PaLM-E y RT-2 en un mismo diagrama de evolución. El eje vertical es la escala del foundation model y el horizontal es la capacidad de la low-level policy; PaLM-E intenta fusionar la embodied planning con las capacidades generales de lenguaje y visión, y RT-2 da un paso más al hacer que el VLM genere directamente action token.
+
+\lecturefigure{slide-16-model-consolidation-family.jpg}{2023--2024 Google DeepMind robotics model family}{Diapositiva V016 recuperada del video oficial; 00:26:00}
+
+\lecturefigure{slide-17-palm-e-title.jpg}{PaLM-E: Embodied Multimodal Language Model}{Diapositiva V017 recuperada del video oficial; 00:26:03}
+
+\subsection{Cómo entra el sensor embedding al LLM}
+
+PaLM-E proyecta la image, el state estimate u otra sensor observation, mediante un encoder y una projection, a la misma dimensión que los language token, y luego inserta esos vectores en el prompt. Si el embedding de un token de texto es $E(w_i)$, la sensor feature es $z_j$ y la projection es $W_s$, la secuencia de entrada puede abstraerse como
+$$
+x=\big[E(w_1),\ldots,E(w_k),W_sz_1,\ldots,W_sz_m,E(w_{k+1}),\ldots\big].
+$$
+Aquí $w_i$ es el $i$-ésimo token de texto, $z_j$ es la $j$-ésima sensor feature, $W_s$ proyecta la sensor feature a la LLM hidden dimension y $x$ es la embedding sequence unificada que se envía al Transformer.
+
+\lecturefigure{slide-18-palm-e-architecture.jpg}{PaLM-E: la salida del sensor encoder como language-model token}{Diapositiva V018 recuperada del video oficial; 00:26:12}
+
+\begin{importantbox}{La consolidation de PaLM-E no significa que todos los sensor se conviertan en texto}
+El sensor embedding y el text embedding comparten la interfaz de secuencia, pero tienen orígenes distintos. El modelo los fusiona en un mismo hidden space mediante self-attention; esto no significa que la image, la proprioception o el state estimate se traduzcan sin pérdida a lenguaje natural, ni garantiza que el conocimiento previo del LLM pueda aplicarse directamente a cada estado del robot.
+\end{importantbox}
+
+\subsection{Mixed-task training: que los robot data se apoyen en los web data}
+
+La training slide incluye a la vez embodied robotics tasks, vision-language tasks y tareas generales de lenguaje. La intuición es que los robot data son escasos, pero las web tasks pueden entrenar la semántica visual, las relaciones entre objetos y el seguimiento de instrucciones en lenguaje; si la representación compartida funciona, el modelo puede mejorar la toma de decisiones del robot con tareas auxiliares a gran escala. Un objetivo simplificado es
+$$
+\mathcal{L}=\lambda_r\,\mathbb{E}_{D_r}\!\left[-\log p_\theta(y_r\mid x_r)\right]
++\lambda_w\,\mathbb{E}_{D_w}\!\left[-\log p_\theta(y_w\mid x_w)\right].
+$$
+Aquí $D_r$ es el robot/embodied dataset, $D_w$ es el web-scale vision-language o language dataset, $x$ es la secuencia de entrada, $y$ son los token objetivo y $\lambda_r,\lambda_w$ controlan el peso de muestreo o de pérdida de los dos tipos de tarea durante el entrenamiento.
+
+\lecturefigure{slide-19-palm-e-training-and-tasks.jpg}{Entrenamiento mixto embodied y vision-language de PaLM-E}{Diapositiva V019 recuperada del video oficial; 00:28:09}
+
+\lecturefigure{slide-20-palm-e-main-model.jpg}{Main model: PaLM-E-562B y entradas de varios tipos de sensor / task}{Diapositiva V020 recuperada del video oficial; 00:29:30}
+
+\begin{lstlisting}[caption={Pseudocódigo conceptual del muestreador de entrenamiento multitarea}]
+for step in range(num_steps):
+    task = sample_task(weights={"robot": lambda_r, "web": lambda_w})
+    batch = datasets[task].next_batch()
+    inputs = encode_text_and_sensors(batch)
+    loss = autoregressive_loss(model(inputs), batch.targets)
+    optimizer.step(loss)
+\end{lstlisting}
+
+\teachervoice{El ponente enfatiza que el objetivo de PaLM-E no es mantener un modelo dedicado para cada tarea, sino observar si el joint scaling permite que las tareas se ayuden entre sí. Por eso esta nota entiende «one model» como una hipótesis experimental de parámetros y representaciones compartidos, no como que en el despliegue deban desaparecer todos los módulos de perception, planning y safety.}
+
+\subsection{Cómo leer la positive transfer}
+
+La diapositiva de Multimodal example muestra que el modelo puede responder preguntas visuales, procesar el estado del robot y ejecutar embodied planning; la bar chart es más importante, porque compara el desempeño en robot task con distintos esquemas de entrenamiento. Se define la diferencia entre el entrenamiento conjunto y el entrenamiento de una sola tarea sobre la tarea objetivo $T$ como
+$$
+\Delta_T=\operatorname{Score}(M_{\text{joint}},T)-\operatorname{Score}(M_{\text{single}},T).
+$$
+Aquí $M_{\text{joint}}$ usa la mezcla multitarea y $M_{\text{single}}$ usa solo los datos de la tarea objetivo. $\Delta_T>0$ es positive transfer y $\Delta_T<0$ es negative interference. Debe interpretarse tarea por tarea y según la cantidad de datos; no basta con mirar el promedio.
+
+\lecturefigure{slide-21-palm-e-multimodal-examples.jpg}{Ejemplos multimodales y de embodied task de PaLM-E}{Diapositiva V021 recuperada del video oficial; 00:32:27}
+
+\lecturefigure{slide-22-palm-e-positive-transfer.jpg}{Positive transfer de PaLM-E: ganancia relativa por grupo de tareas}{Diapositiva V022 recuperada del video oficial; 00:36:27}
+
+\begin{knowledgebox}{Lectura de la figura: primero la training mixture, después la bar height}
+En la figura, cada color representa una configuración de model/data distinta, y el eje horizontal muestra los grupos de tareas. El primer paso no es buscar la barra más alta, sino confirmar si la comparación solo cambia la model scale, si se agregan general visual-language data y si los robot data son los mismos; el segundo paso es observar si la ganancia se concentra en algún tipo de tarea. La figura respalda que «el entrenamiento conjunto puede producir transfer», pero no demuestra que cualquier web data ayude, ni que todas las embodied tasks compartan la misma representation óptima.
+\end{knowledgebox}
+
+\subsection{La conclusión correcta del Real robot result}
+
+La diapositiva de Real Robot Results presenta lado a lado el language prompt, la observation de imagen y el comportamiento del robot. Demuestra que el modelo puede ejecutar tareas de entrenamiento y de generalización en una plataforma real, y muestra que un mismo model checkpoint atiende varias instrucciones; no cuantifica por separado la confiabilidad a largo plazo, la tasa de recuperación, el desgaste del hardware ni los incidentes de seguridad, por lo que no se puede inferir que el sistema esté listo para desplegarse a partir de unos cuantos videos exitosos.
+
+\lecturefigure{slide-23-palm-e-real-robot-results.jpg}{Resultados de PaLM-E en robots reales y transferencia entre tareas}{Diapositiva V023 recuperada del video oficial; 00:37:57}
+
+\begin{warningbox}{La positive transfer no es «el conocimiento de internet convertido automáticamente en acciones»}
+La web task aporta prior sobre objetos, lenguaje y relaciones; la robot trajectory aporta supervisión sobre acciones y sus consecuencias. Si el objeto objetivo, la camera geometry, la action semantics o el embodiment no son compatibles con el entrenamiento, el modelo todavía puede fallar. La transfer es un efecto estadístico que surge del entrenamiento conjunto y de la alineación de representaciones, no un botón de copia de conocimiento que prescinda de los robot data.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+PaLM-E logra la model consolidation mediante una embedding sequence unificada y un mixed-task objective. Su evidencia importante no es que el modelo «pueda ver imágenes y conversar», sino si las tareas auxiliares y la scale mejoran la embodied task; además, las demo con robots reales deben seguir evaluándose por separado de la confiabilidad a largo plazo y la seguridad.

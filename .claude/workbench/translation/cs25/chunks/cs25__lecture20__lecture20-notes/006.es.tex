@@ -1,0 +1,73 @@
+\section{Eureka: el LLM diseña el reward y el RL aprende el control de bajo nivel}
+
+Voyager es adecuado para una symbolic action interface, pero el dexterous control requiere acciones continuas de alta frecuencia, y no es realista que el LLM escriba directamente cada motor command. Eureka cambia el nivel de la interfaz: el LLM lee el simulator environment code y genera un reward program; después, el RL interno aprende la policy mediante gradientes. La \term{reward reflection (reflexión sobre la recompensa)} consiste en que el modelo corrige el reward code a partir de las curvas de entrenamiento, el reward desglosado por términos y las conductas fallidas, en lugar de hacer una autoevaluación genérica de una respuesta en lenguaje natural.
+
+\subsection{Hybrid-gradient Architecture}
+
+Eureka divide el sistema en una code search externa de caja negra y una policy optimization interna de caja blanca. El LLM externo no necesita retropropagación; su función es proponer un reward ejecutable. El RL interno usa el muestreo en paralelo del simulator y el gradient update para convertir ese objective en acciones. Ambos niveles se conectan mediante las estadísticas de entrenamiento, de modo que el modelo de lenguaje puede «guiar» el control neuronal de bajo nivel sin producir directamente actions de alta frecuencia.
+
+\lecturefigure{slide-39-eureka-architecture.jpg}{Eureka: arquitectura de dos niveles con el código del entorno, el reward program y la RL policy}{Diapositiva V039 recuperada de la grabación oficial; 00:33:36}
+
+\begin{knowledgebox}{Lectura de la figura: primero hay que distinguir quién optimiza qué}
+El LLM externo busca el reward code y el RL interno optimiza la policy con un reward fijo. El código del entorno expone al LLM la observation, el state y las magnitudes calculables; los resultados del entrenamiento regresan como un performance summary. La contribución de Eureka no es que GPT-4 aprenda por sí mismo el motor control, sino que reescribe la objective interface de un sistema de aprendizaje diferenciable.
+\end{knowledgebox}
+
+El proceso de dos niveles puede escribirse así:
+\[
+\phi_{k+1}\sim p_{\mathrm{LLM}}(\phi\mid \text{env code},\,\mathcal{H}_k),
+\qquad
+\theta_k^*=\arg\max_\theta J(\theta; r_{\phi_k}),
+\qquad
+\mathcal{H}_{k+1}=\mathcal{H}_k\cup\{\phi_k,\operatorname{metrics}(\theta_k^*)\}.
+\]
+Aquí $\phi_k$ es el reward program de la iteración $k$, $r_{\phi_k}$ es el reward que este calcula, $\theta_k^*$ son los parámetros de la policy que aprende el RL interno, $J$ es el expected return y $\mathcal{H}_k$ es el historial de rewards y retroalimentación del entrenamiento. El nivel externo modifica el código y el interno modifica los pesos; sus mecanismos de aprendizaje son distintos.
+
+\teachervoice{El ponente llama a Voyager una no-gradient architecture y a Eureka una hybrid-gradient architecture: el ciclo externo de GPT-4 se encarga de elegir la reward function y el ciclo interno de la red neuronal aprende el control mediante el RL gradient. Esta distinción evita describir erróneamente «un sistema en el que participa un LLM» como «un sistema en el que todos los componentes se entrenan de extremo a extremo con el LLM».}
+
+\subsection{Reward Reflection e In-context Evolution}
+
+Que un reward code se ejecute no significa que induzca la conducta correcta. Por ello, Eureka condensa en retroalimentación cada reward term, la tasa de éxito del entrenamiento y la policy behavior, para que el LLM determine qué términos pesan demasiado, cuáles pesan muy poco o cuáles apuntan en la dirección equivocada, y luego genere código e hyperparameters nuevos. El objeto de la reflexión es una specification ejecutable y sus consecuencias.
+
+\lecturefigure{slide-40-eureka-reward-reflection.jpg}{Eureka reflexiona sobre el diseño del reward a partir de la retroalimentación del entrenamiento}{Diapositiva V040 recuperada de la grabación oficial; 00:35:24}
+
+\begin{knowledgebox}{Lectura de la figura: la retroalimentación debe permitir localizar el reward term}
+La diapositiva contiene el reward code, las estadísticas de entrenamiento y el texto de reflexión. Primero se revisan la escala y el signo de cada term; luego, si la policy obtiene puntuaciones altas mediante posturas anómalas; por último, si la nueva sugerencia apunta a una observable failure. Si solo se dispone del retorno total, sin term-wise metrics, al LLM le resulta difícil distinguir entre «no se alcanzó el objetivo» y «un término de shaping dominó la optimización».
+\end{knowledgebox}
+
+\lecturefigure{slide-41-eureka-reward-code-diff.jpg}{El reward code y sus pesos evolucionan a lo largo de varias rondas de retroalimentación}{Diapositiva V041 recuperada de la grabación oficial; 00:35:36}
+
+El diff del código muestra cómo la specification se modifica paso a paso. Primero se comparan los reward terms agregados o eliminados; después, los coefficients y la normalization. Lo importante no es que el código se alargue, sino que la conducta aprendida se acerque más a la intención de la tarea. Las mejoras de la figura respaldan la eficacia de la in-context reward evolution, pero no garantizan la misma robustez ante un simulator nuevo, un robot real o un adversarial state.
+
+\begin{lstlisting}[caption={Pseudocódigo conceptual del ciclo externo de reward generation y el ciclo interno de entrenamiento con RL en Eureka}]
+history = []
+for generation in range(max_generations):
+    candidates = llm.generate_reward_programs(env_code, history)
+    evaluated = []
+    for reward_program in candidates:
+        policy, metrics = train_rl(env, reward_program)
+        rollout_summary = evaluate_policy(policy, env)
+        evaluated.append((reward_program, metrics, rollout_summary))
+    best = select_valid_candidate(evaluated)
+    reflection = llm.reflect(best, term_wise_metrics=True)
+    history.append((best, reflection))
+\end{lstlisting}
+
+\begin{warningbox}{El LLM-generated reward code debe aislarse y verificarse}
+Antes de ejecutarlo deben aplicarse un syntax/type check, una API allowlist, una verificación de rangos numéricos y un timeout; después del entrenamiento hay que revisar NaN, reward saturation, unsafe contact, constraint violation y held-out scenarios. La reward optimization busca activamente cualquier loophole, por lo que «el código se ejecuta» es solo el requisito mínimo.
+\end{warningbox}
+
+\subsection{Dexterity y Simulator Scaling}
+
+Los resultados de Eureka se centran en la dexterous manipulation: tareas con posturas finas, contacto y control continuo, que difícilmente puede generar el LLM paso a paso de forma directa. El entrenamiento en paralelo a gran escala en el simulador Isaac permite que cada reward candidate reciba una feedback relativamente rápida y comparable; por lo tanto, el beneficio del algoritmo depende de contar con un environment code confiable y con recursos de cómputo suficientes.
+
+\lecturefigure{slide-42-dexterity-scaling.jpg}{Las dexterous tasks y la escala del Isaac simulator sustentan la reward search}{Diapositiva V042 recuperada de la grabación oficial; 00:35:54}
+
+\begin{knowledgebox}{Lectura de la figura: los resultados no pueden explicarse por separado de la infraestructura}
+Las curvas de la izquierda comparan el desempeño en las tareas del reward learned/evolved con el human baseline; la parte derecha muestra el simulator scaling. Primero hay que confirmar qué indica el eje horizontal (tarea o escala de recursos) y el vertical (success/score); después, comparar si la ventaja se mantiene de forma estable entre tareas. La conclusión es que la LLM reward search puede producir un objective sólido dentro de un simulator dado; no demuestra que estén resueltos la simulation-to-real gap, el ruido de los sensores ni la seguridad del hardware.
+\end{knowledgebox}
+
+\teachervoice{El ponente destaca que Eureka supera al human-designed reward en varias dexterous tasks, y señala a la vez que la escala del simulator hace viable la búsqueda externa. Dicho de otro modo, la capacidad del método surge de la acción conjunta del LLM prior, el environment source code, el RL optimizer y la infraestructura en paralelo; no puede atribuirse solo al prompt.}
+
+\subsection{Resumen de la sección}
+
+Eureka coloca al LLM en el nivel de objective-design y deja el RL basado en gradientes en el nivel de control continuo. La reward reflection modifica una specification ejecutable a partir de la retroalimentación real del entrenamiento, con lo que forma una hybrid architecture de code search externa y policy learning interno. Establece una interfaz entre el reasoning de alto nivel y el motor control de bajo nivel, y a la vez exige un sandbox estricto, term-wise metrics, constraint audit y límites claros del simulator.

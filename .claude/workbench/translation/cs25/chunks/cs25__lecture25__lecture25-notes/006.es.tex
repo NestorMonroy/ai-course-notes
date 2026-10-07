@@ -1,0 +1,139 @@
+\section{Contextualizing the Whole System: del acoplamiento débil a la optimización conjunta}
+
+La sección anterior todavía mantenía congelado el generator y solo entrenaba la retrieval side. A continuación, la clase extiende el recuadro rojo al retriever, el context y el generator, y se pregunta por qué habría que ensamblar a la fuerza componentes entrenados de forma independiente entre sí. Las diferencias entre RAG, FiD, kNN-LM, RETRO y otros métodos pueden leerse a lo largo de dos ejes: en qué momento se recupera la evidencia y en qué punto el generador fusiona la evidencia.
+
+\subsection{Contextualization of Both}
+
+La diapositiva de arquitectura coloca a la vez el query encoder, el retriever, el context y el generator dentro del recuadro rojo, lo que indica que la loss de la tarea final puede influir en más componentes. El ideal del joint training es que el retriever encuentre los documentos que el generator realmente va a usar, y que el generator aprenda a adoptar un comportamiento predecible cuando la evidencia es insuficiente o contradictoria.
+
+\lecturefigure{slide-22-contextualization-both.jpg}{Arquitectura en la que el retriever y el generator se contextualize conjuntamente}{Video de la clase de Stanford 00:30:06}
+
+\begin{knowledgebox}{Lectura de la figura: joint no significa necesariamente actualizar todos los parámetros de forma sincronizada en cada paso}
+Un document encoder de gran escala no puede volver a codificar todo el corpus inmediatamente después de cada lote; por ello, los sistemas reales suelen congelar parte de los parámetros, actualizar el index de forma asíncrona, actualizar solo la query side o entrenar de forma alternada el retriever y el generator. El joint objective describe el acoplamiento de las señales; la implementation puede ser aproximada.
+\end{knowledgebox}
+
+\teachervoice{La crítica central del ponente es esta: si el retriever, el document encoder y el generator se entrenan de forma independiente con objetivos distintos, solo están obligados a cooperar. Una mejor dirección es que los gradients o la task signal atraviesen todo el sistema en la mayor medida posible.}
+
+\subsection{Original RAG: marginalization sobre el latent document}
+
+La RAG architecture slide muestra que el query encoder obtiene los top documents del Wikipedia index, que el generator calcula la probabilidad de la salida para cada document y que después el document se marginaliza como latent variable. Frente a concatenar directamente todos los documentos, esto distingue con mayor claridad la retrieval probability de la generation probability.
+
+\lecturefigure{slide-23-rag-architecture.jpg}{Arquitectura retriever--generator de RAG de Lewis et al.}{Video de la clase de Stanford 00:30:51}
+
+\begin{knowledgebox}{Lectura de la figura: el document es una latent variable}
+El sistema no trata un retrieved document como una verdad definitiva, sino que pondera varios $z$. El retriever aporta $p_\eta(z\mid x)$ y el generator aporta $p_\theta(y\mid x,z)$; ambos determinan juntos la respuesta, y la probabilidad del retriever también puede recibir la task loss final.
+\end{knowledgebox}
+
+\subsection{RAG-Sequence y RAG-Token}
+
+La equation slide distingue dos tipos de marginalization. RAG-Sequence elige el mismo latent document para toda la salida; RAG-Token permite que cada output token obtenga apoyo de una document mixture distinta. Esta última es más flexible, pero también requiere más cómputo de recuperación y fusión, y hace más difícil explicar la procedencia de toda la salida.
+
+\lecturefigure{slide-24-rag-equations.jpg}{Descomposición probabilística de RAG-Sequence y RAG-Token}{Video de la clase de Stanford 00:31:27}
+
+\begin{importantbox}{Dos RAG likelihood}
+RAG-Sequence se aproxima como
+\[
+p(y\mid x)=\sum_{z\in\operatorname{top}k}p_\eta(z\mid x)
+\prod_{t=1}^{T}p_\theta(y_t\mid x,z,y_{<t}),
+\]
+mientras que RAG-Token coloca la suma dentro de cada token:
+\[
+p(y\mid x)=\prod_{t=1}^{T}\sum_{z\in\operatorname{top}k}
+p_\eta(z\mid x)p_\theta(y_t\mid x,z,y_{<t}).
+\]
+$\eta$ son los parámetros del retriever y $\theta$ los del generator. Ambas difieren en la granularidad con que explican la procedencia.
+\end{importantbox}
+
+\subsection{Freezing Suboptimal: la tabla y la metáfora de Frankenstein}
+
+La ablation table compara BM25, DPR y RAG, así como si el generator o el retriever están congelados. La conclusión de la clase no es que «una columna de cifras sea siempre la mejor», sino que el independent freezing suele costar desempeño en la tarea; cuanto más pueden recibir los componentes la señal de un objetivo común, más probable es que formen una colaboración eficaz. Esta sección reúne la benchmark table con la metáfora de Frankenstein que aparece después: primero se lee el experimento controlado y luego se explica el mecanismo del desajuste.
+
+\lecturefigure{slide-25-freezing-suboptimal-results.jpg}{RAG ablation: efecto de congelar el retriever o el generator}{Video de la clase de Stanford 00:31:51}
+
+\begin{knowledgebox}{Lectura de la tabla: primero las variables de control, después las puntuaciones absolutas}
+Al comparar filas hay que confirmar que el generator size, el retrieval corpus, los training data y la evaluation metric coincidan. La tabla respalda la conclusión direccional de que «congelar limita la adaptación», pero no demuestra que todo RAG jointly trained supere a todo RAG frozen; la escala de los datos y la potencia del modelo siguen pudiendo cambiar el resultado.
+\end{knowledgebox}
+
+\lecturefigure{slide-26-frankenstein-rag.jpg}{La clase usa a Frankenstein para describir el ensamblaje de componentes entrenados de forma independiente}{Video de la clase de Stanford 00:32:15}
+
+\begin{warningbox}{Tres desajustes del problema de Frankenstein}
+\begin{enumerate}
+  \item \textbf{Score mismatch}: la retriever relevance no equivale a la generator utility;
+  \item \textbf{Representation mismatch}: la granularidad de los chunks no corresponde con la attention/fusion del generator;
+  \item \textbf{Objective mismatch}: el retrieval benchmark, el language modeling y la downstream task se optimizan por separado.
+\end{enumerate}
+El valor del joint training está en reducir los desajustes, no en eliminar los errores en los datos ni los errores de razonamiento.
+\end{warningbox}
+
+\teachervoice{El ponente superpone una imagen de Frankenstein sobre la ablation table y dice explícitamente «whole point of RAG: freezing is suboptimal». La broma revela la idea de fondo: que cada componente funcione no significa que formen un sistema optimizado conjuntamente.}
+
+\subsection{FiD: fusionar las representaciones de varios passage en el decoder}
+
+Fusion-in-Decoder codifica de forma independiente cada retrieved passage junto con la question y luego hace que el decoder aplique cross-attend sobre todas las passage representations. Así se evita concatenar documentos largos directamente en la entrada del encoder y se permite que cada passage forme primero su propia representación.
+
+\lecturefigure{slide-27-fid.jpg}{Multi-passage encoding y decoder fusion en Fusion-in-Decoder}{Video de la clase de Stanford 00:33:21}
+
+\begin{knowledgebox}{Lectura de la figura: la fusion location determina la forma del cómputo}
+La early fusion concatena el texto antes del encoder: es simple, pero la longitud crece rápidamente. FiD hace que el encoder procese los passage en paralelo y que la fusión ocurra solo en el decoder, con un desempeño sólido en open-domain QA. Su mejora principal está en la evidence fusion; no entrena automáticamente el retriever.
+\end{knowledgebox}
+
+\subsection{kNN-LM: buscar hidden state similares en el datastore durante la inferencia}
+
+kNN-LM almacena en un datastore la hidden representation de cada token del corpus de entrenamiento junto con su next token. En la inferencia, usa la context representation actual para recuperar los vecinos más cercanos, obtiene una non-parametric token distribution y la interpola con la parametric LM distribution.
+
+\lecturefigure{slide-28-knn-lm.jpg}{Hidden-state datastore y predicción por vecinos más cercanos en kNN-LM}{Video de la clase de Stanford 00:33:42}
+
+\begin{importantbox}{Interpolación entre la distribución parametric y la kNN distribution}
+Si $p_{LM}(w\mid x)$ es la distribución del modelo y $p_{kNN}(w\mid x)$ es la distribución obtenida por votación de los vecinos más cercanos, entonces
+\[
+p(w\mid x)=\lambda p_{kNN}(w\mid x)+(1-\lambda)p_{LM}(w\mid x).
+\]
+$\lambda$ controla la influencia de la memory externa. El datastore puede actualizarse o cambiarse de dominio, pero consultarlo en cada token aumenta la latency y el ancho de banda de almacenamiento.
+\end{importantbox}
+
+\subsection{RETRO: hacer que el modelo dependa de una memory externa desde el preentrenamiento}
+
+RETRO divide las secuencias de entrenamiento en chunks, recupera texto vecino para cada chunk y lo inyecta en el decoder mediante chunked cross-attention. No se trata solo de una inference-time prompt augmentation, sino de que el modelo aprenda durante el preentrenamiento a aprovechar una external memory de gran escala.
+
+\lecturefigure{slide-29-retro-architecture.jpg}{Arquitectura de chunk retrieval y cross-attention de RETRO}{Video de la clase de Stanford 00:35:27}
+
+\begin{knowledgebox}{Lectura de la figura: causality y chunk boundary}
+La generación del chunk actual solo puede usar el historial permitido y los retrieved neighbors; no puede filtrar token futuros. El chunk size, el neighbor count y la retrieval latency determinan en conjunto la memory coverage y el costo de entrenamiento; por eso la segmentación de documentos pasa a formar parte de la arquitectura del modelo.
+\end{knowledgebox}
+
+\begin{importantbox}{División de la capacidad entre parámetros y datastore}
+Si el parametric model tiene una escala $P$ y el external datastore contiene $M$ token, la capacidad del sistema ya no se mide solo por $P$. La propuesta de RETRO es combinar un $P$ más pequeño con un $M$ grande para obtener un factual recall más sólido; sin embargo, cada acceso a $M$ genera costos adicionales de search y cross-attention.
+\end{importantbox}
+
+\subsection{RETRO++ y arquitecturas híbridas}
+
+La slide de RETRO++ muestra un sistema híbrido que, sobre la base de RETRO, incorpora el estilo de in-context RAG, y usa una tabla de resultados para analizar la escala de parámetros y el desempeño en la tarea. Esto muestra que el architecture space no es una clasificación binaria de frozen versus joint: la retrieval puede aparecer a la vez en el preentrenamiento y en el inference context.
+
+\lecturefigure{slide-30-retro-plus-plus.jpg}{RETRO++: combinación de retrieval en preentrenamiento e in-context retrieval}{Video de la clase de Stanford 00:37:24}
+
+\begin{knowledgebox}{Lectura de la tabla: una hybrid architecture debe reportar ambos tipos de retrieval}
+Hay que indicar por separado el datastore del preentrenamiento, el index en tiempo de prueba, si se trata del mismo corpus, si se actualiza el retriever y si el generator ya vio el mismo retrieval format. De lo contrario, decir «se usó RETRO++» no basta para reproducir el experimento ni para comparar costos.
+\end{knowledgebox}
+
+\subsection{Contextualization All the Way}
+
+La última architecture slide encierra en el recuadro rojo toda la retrieval side y el generator, como transición hacia REALM/Atlas. Representa el objetivo: no solo colocar documentos en el context, sino considerar conjuntamente la representation, el retrieval objective, la fusion y el language-model training.
+
+\lecturefigure{slide-31-contextualization-all-the-way.jpg}{De la adaptación local a la contextualization de extremo a extremo}{Video de la clase de Stanford 00:38:00}
+
+\begin{importantbox}{Cuatro preguntas para comparar arquitecturas}
+Ante cualquier modelo RAG, conviene preguntar primero:
+\begin{enumerate}
+  \item ¿La retrieval ocurre en el preentrenamiento, en el fine-tuning o en la inference?
+  \item ¿Qué parámetros se actualizan entre retriever, document encoder y generator?
+  \item ¿La evidence se fusiona en el prompt, en el encoder, en el decoder o en la token distribution?
+  \item ¿Cuándo se reconstruye el index y coinciden el corpus de entrenamiento y el de despliegue?
+\end{enumerate}
+Estas cuatro preguntas se trasladan a sistemas nuevos mejor que memorizar solo los nombres de los modelos.
+\end{importantbox}
+
+\teachervoice{El orden de la clase, de RAG, FiD y kNN-LM hasta RETRO, muestra paso a paso que la retrieval puede entrar en distintos niveles: el context de entrada, la decoder attention, la token distribution o la arquitectura de preentrenamiento.}
+
+\subsection{Resumen de la sección}
+
+El joint RAG trata los documents como latent variables y permite que la señal de la tarea final influya en la retrieval y en la generation. FiD cambia la fusion location, kNN-LM fusiona la memory en el nivel de la token distribution y RETRO usa un external datastore desde el preentrenamiento. El diseño de sistemas requiere describir a la vez el retrieval timing, el fusion point, los updated parameters y el index lifecycle.

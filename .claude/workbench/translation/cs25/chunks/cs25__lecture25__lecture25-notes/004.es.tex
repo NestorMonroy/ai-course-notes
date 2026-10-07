@@ -1,0 +1,88 @@
+\section{Retrieval Stack: Sparse, Dense, Late Interaction y Hybrid}
+
+El recuperador determina qué evidencia puede ver el generator. La clase avanza de la sparse retrieval tradicional al dense bi-encoder, la vector database y la late interaction de ColBERT, y cierra con SPLADE, DRAGON y la hybrid search. Las distintas representaciones no son un simple caso de «el método nuevo desplaza al anterior»: cada una equilibra de forma distinta la exact match, la semantic match, la eficiencia y la facilidad de actualización.
+
+\subsection{Sparse Retrieval: coincidencia exacta en el espacio de términos}
+
+La slide de sparse retrieval presenta TF-IDF, BM25 y DrQA. Las dimensiones del vector de un documento corresponden a términos y la mayoría vale cero; por eso se le llama sparse. Una query obtiene una puntuación alta cuando comparte términos con el document, y por ello suelen salir beneficiados los nombres de marca, los números de identificación, los nombres propios y los token de código.
+
+\lecturefigure{slide-13-sparse-retrieval.jpg}{TF-IDF, BM25 y la sparse retrieval tradicional}{Video de la clase de Stanford 00:15:03}
+
+\begin{importantbox}{La intuición central de BM25}
+Para una query $Q$ y un documento $D$, BM25 puede escribirse como
+\[
+\operatorname{BM25}(D,Q)=\sum_{q\in Q}\operatorname{IDF}(q)
+\frac{f(q,D)(k_1+1)}{f(q,D)+k_1\left(1-b+b\frac{|D|}{\operatorname{avgdl}}\right)}.
+\]
+$f(q,D)$ es la frecuencia del término, $\operatorname{IDF}$ aumenta el peso de los términos poco frecuentes y la normalización por longitud evita que los documentos largos ganen solo por tener más palabras. No comprende la semántica profunda, pero es sólido y eficiente con la exact lexical evidence.
+\end{importantbox}
+
+\teachervoice{En la sesión de Q\&A, el ponente usa Apple y pear para explicar el riesgo de la dense retrieval: cuando un nombre de marca requiere coincidencia exacta, no se quiere que la «cercanía semántica» extienda Apple, la empresa, hacia las pears, la fruta.}
+
+\subsection{Dense Retrieval: llevar la query y el passage a un espacio vectorial compartido}
+
+La slide de dense retrieval presenta ORQA y DPR. El query encoder y el passage encoder generan dense embeddings de baja dimensión, que luego se ordenan con dot product o cosine similarity. Puede recuperar passages semánticamente relacionados aunque no compartan palabras, pero que la representation sea adecuada para el generator y el domain en cuestión depende del entrenamiento.
+
+\lecturefigure{slide-14-dense-retrieval.jpg}{Dense bi-encoder retrieval de ORQA/DPR}{Video de la clase de Stanford 00:16:48}
+
+\begin{importantbox}{Dense similarity y MIPS}
+Sea $e_q\in\mathbb{R}^d$ el embedding de la query y $e_i$ el embedding del documento; las puntuaciones habituales son
+\[
+s(q,d_i)=e_q^\top e_i
+\quad\text{o}\quad
+\cos(e_q,e_i)=\frac{e_q^\top e_i}{\|e_q\|\,\|e_i\|}.
+\]
+Maximum Inner Product Search (MIPS) consiste en buscar de forma aproximada, en un index de gran escala, los vectores con mayor producto interno; bibliotecas como FAISS reducen el costo de la búsqueda exhaustiva mediante cuantización, particiones en cubetas o estructuras de grafo.
+\end{importantbox}
+
+\lecturefigure{slide-15-vector-database.jpg}{Vector database: similarity search sobre miles de millones de embeddings}{Video de la clase de Stanford 00:17:45}
+
+\begin{knowledgebox}{Lectura de la figura: una vector database almacena representaciones consultables}
+Por lo general se encarga de escribir los embeddings, construir el ANN index, filtrar por metadata, ejecutar la top-$k$ search y aplicar actualizaciones. La base de datos no decide por el modelo si un chunk es confiable ni garantiza que la semantic similarity equivalga a la task relevance; eso sigue dependiendo del encoder, el corpus y el downstream objective.
+\end{knowledgebox}
+
+\subsection{ColBERT: de la compresión en un solo vector a la late interaction a nivel de token}
+
+El bi-encoder comprime la query completa y el passage completo en un vector cada uno; es eficiente, pero puede perder coincidencias de grano fino. ColBERT conserva el contextual embedding de cada token, codifica los documentos de antemano y, al consultar, busca para cada query token el document token que mejor coincide, y luego agrega las puntuaciones.
+
+\lecturefigure{slide-16-colbert-late-interaction.jpg}{ColBERT: de la representation interaction a la late interaction}{Video de la clase de Stanford 00:17:51}
+
+\begin{importantbox}{MaxSim late interaction}
+Sean $Q_1,\ldots,Q_m$ los query token embeddings y $D_1,\ldots,D_n$ los document token embeddings; la puntuación típica de ColBERT es
+\[
+s(q,d)=\sum_{i=1}^{m}\max_{1\le j\le n} Q_i^\top D_j.
+\]
+Cada query token encuentra el passage token más relevante, por lo que la representación es más fina que la de un solo vector; el costo es un index más grande y más cómputo por consulta.
+\end{importantbox}
+
+\subsection{SPLADE, DRAGON y Hybrid Search}
+
+La slide de SOTA usa SPLADE para ilustrar la learned sparse expansion: el modelo amplía la query/doc con términos relacionados y aun así puede usar un índice invertido; DRAGON entrena un generalized dense retriever con progressive data augmentation y hard negatives. Al final, la clase destaca que en la developer practice es común fusionar los resultados sparse y dense.
+
+\lecturefigure{slide-17-retrieval-sota-splade-dragon.jpg}{Panorama de SPLADE, DRAGON y la hybrid search presentado en clase}{Video de la clase de Stanford 00:24:57}
+
+\begin{knowledgebox}{Lectura de la figura: dos caminos para que sparse se encuentre con dense}
+SPLADE vuelve a escribir la semantic expansion en un sparse vocabulary de alta dimensión; la hybrid search, en cambio, mantiene por separado BM25 y el dense retriever, y después fusiona las clasificaciones. El primero comparte una sola learned sparse representation; la segunda permite que cada sistema se actualice y filtre por su cuenta.
+\end{knowledgebox}
+
+\begin{importantbox}{Reciprocal Rank Fusion}
+Dados varios recuperadores $r\in\mathcal{R}$, la puntuación fusionada del documento $d$ puede escribirse como
+\[
+\operatorname{RRF}(d)=\sum_{r\in\mathcal{R}}\frac{1}{c+\operatorname{rank}_r(d)},
+\]
+donde $c$ es una constante de suavizado. RRF no exige que las puntuaciones originales de los distintos retriever estén en la misma escala; solo usa la posición en la clasificación, y por eso es un hybrid baseline práctico.
+\end{importantbox}
+
+\begin{lstlisting}[caption={Recuperación en dos etapas: sparse recall + dense rerank}]
+def hybrid_retrieve(query, corpus, top_k=8):
+    sparse_candidates = bm25.search(query, limit=200)
+    dense_scores = dense_encoder.score(query, sparse_candidates)
+    reranked = sort_by_score(sparse_candidates, dense_scores)
+    return reranked[:top_k]
+\end{lstlisting}
+
+\teachervoice{En ese momento, el ponente calificó a DRAGON/DragonPlus como un muy buen off-the-shelf dense retriever y observó que los desarrolladores adoptan de forma generalizada la hybrid search. Estas notas lo conservan como un juicio de la clase de 2023 y no lo presentan como una clasificación permanente válida en 2026.}
+
+\subsection{Resumen de la sección}
+
+La sparse retrieval destaca en los exact terms y en índices invertidos maduros; la dense retrieval destaca en la recuperación semántica; ColBERT cambia un index más grande por token-level interaction, y la hybrid search fusiona varias señales. La elección del retriever debe partir del tipo de query, el domain, la escala del index, la frecuencia de actualización y la generator utility.

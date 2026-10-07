@@ -1,0 +1,69 @@
+\section{RT-2: de Vision-Language Model a Vision-Language-Action Model}
+
+PaLM-E todavía produce principalmente language-level plan o answer. RT-2 va un paso más allá: conserva la capacidad semántica visual del VLM y, al mismo tiempo, discretiza la action del robot en tokens, de modo que el autoregressive decoder predice directamente acciones de bajo nivel. De ahí surge la interfaz del modelo Vision-Language-Action (VLA).
+
+\subsection{Por qué es útil el VLM prior}
+
+El VLM aprende, mediante el preentrenamiento imagen-texto, categorías de objetos, atributos, relaciones, usos comunes e instrucciones en lenguaje. Es posible que los datos de robots nunca contengan combinaciones como «pon la fresa en el tazón del color correcto» o «retira el animal extinto», pero el VLM ya aprendió de los datos de internet conceptos como strawberry, color matching y extinct animal. RT-2 busca comprobar si estos semantic prior pueden incorporarse a la action prediction bajo robot trajectory supervision.
+
+\lecturefigure{slide-24-rt2-transition.jpg}{Del mundo semántico del VLM al control robótico de RT-2}{Diapositiva V024 recuperada de la grabación oficial; 00:39:54}
+
+\lecturefigure{slide-25-vlm-world-understanding.jpg}{El VLM codifica a la vez visual y semantic world knowledge}{Diapositiva V025 recuperada de la grabación oficial; 00:40:42}
+
+\begin{knowledgebox}{First use: VLA}
+Un \term{Vision-Language-Action model (VLA)} recibe una observation visual y una instruction en lenguaje, y produce acciones del robot o tokens de acción. Su diferencia con un VLM común no está solo en el label de la última capa: los datos de entrenamiento contienen robot trajectories de lazo cerrado, los tokens de salida tienen semántica de control y la inferencia además está sujeta a restricciones de frecuencia de control, hardware y capa de seguridad.
+\end{knowledgebox}
+
+\subsection{Representar la action como tokens}
+
+RT-1 ya había entrenado una Transformer policy con action bins discretos; RT-2 lleva la misma idea a un decoder de VLM de gran tamaño. Sea $[l_j,u_j]$ el rango de la dimensión $j$ de la acción continua, discretizada con $B$ bins; entonces
+$$
+z_{t,j}=\operatorname{clip}\!\left(
+\left\lfloor \frac{a_{t,j}-l_j}{u_j-l_j}B\right\rfloor,0,B-1
+\right).
+$$
+Aquí $a_{t,j}$ es la dimensión $j$ de la acción $a_t$, $z_{t,j}$ es el token index discreto correspondiente, $l_j,u_j$ son el rango físico y $B$ es el número de bins. En la inferencia, el centro del token se decodifica de vuelta a una acción continua, que luego se entrega al robot controller.
+
+\lecturefigure{slide-26-vlm-as-robot-policy.jpg}{RT-1 y RT-2: de image + text a discretized actions}{Diapositiva V026 recuperada de la grabación oficial; 00:45:15}
+
+\lecturefigure{slide-27-action-tokenization.jpg}{Tokenización de acciones: discretización de las dimensiones de posición, rotación y gripper}{Diapositiva V027 recuperada de la grabación oficial; 00:45:57}
+
+\begin{lstlisting}[caption={Conversión conceptual entre acción continua y action token}]
+def encode_action(action, low, high, bins):
+    ratio = (action - low) / (high - low)
+    token = floor(clip(ratio, 0.0, 1.0) * bins)
+    return clip(token, 0, bins - 1)
+
+def decode_action(token, low, high, bins):
+    center = (token + 0.5) / bins
+    return low + center * (high - low)
+\end{lstlisting}
+
+\begin{warningbox}{Los tres tipos de error del action token}
+El primero es el \textbf{quantization error}: con muy pocos bins se pierde precisión; el segundo es el \textbf{support error}: un dexterous motion que no apareció en el entrenamiento puede no tener un token pattern adecuado; el tercero es la \textbf{semantic collision}: si los action tokens comparten la vocabulary de texto o su correspondencia no es clara, el decoder puede confundir la semántica de la salida. La tokenización hace que el modelo sea entrenable, pero eso no significa que desaparezca la dificultad del control continuo.
+\end{warningbox}
+
+\subsection{Autoregressive action y co-fine-tuning}
+
+Una vez que la acción de un paso de tiempo se escribe como la token sequence $z_{t,1:J}$, el modelo predice
+$$
+p_\theta(z_{t,1:J}\mid I_t,g)
+=\prod_{j=1}^{J}p_\theta(z_{t,j}\mid I_t,g,z_{t,<j}),
+$$
+donde $I_t$ es la image observation actual, $g$ es la instruction en lenguaje, $J$ es la dimensión de la acción o el número de tokens, y $z_{t,<j}$ son los action tokens generados previamente. La autoregressive factorization aprovecha la language modeling machinery, pero el orden de las dimensiones y la decoding latency influyen en el control.
+
+El co-fine-tuning muestrea de forma alternada web VQA/caption examples y robot trajectory examples. Los web examples mantienen el semantic prior; los robot examples le enseñan al modelo cuándo producir action tokens. Si se entrena solo con robot data, el modelo, aunque sea de gran escala, puede olvidar la semántica general; si se usa solo web data, no hay ninguna supervisión de acciones.
+
+\lecturefigure{slide-28-rt2-training-data-models.jpg}{RT-2 training mixture: web-scale data + robot trajectories}{Diapositiva V028 recuperada de la grabación oficial; 00:46:54}
+
+\lecturefigure{slide-29-rt2-inference.jpg}{RT-2 inference: la imagen y la instrucción pasan por el VLA, que produce action tokens}{Diapositiva V029 recuperada de la grabación oficial; 00:48:54}
+
+\teachervoice{El ponente describe la action representation como un problema que todavía se explora. Decimal, float-like string y extra tokens pueden funcionar, pero ninguno se ha declarado el mejor de manera universal; si en el futuro se cambia a una nueva embodiment o se agrega una action dimension, sigue abierta la pregunta de si la vocabulary anterior puede transferirse.}
+
+\begin{importantbox}{La cadena causal del co-fine-tuning}
+Los web data aportan semantic variation; los robot data anclan la semántica a la action; los parámetros compartidos permiten que ambas supervisiones interactúen; el ablation verifica después si la improvement proviene realmente del co-fine-tuning. Solo si se enlazan estos cuatro pasos, «el conocimiento de internet entra en el control» deja de ser un relato y se convierte en un mecanismo comprobable.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+RT-2 transforma un VLM en un VLA: la visión y el lenguaje entran en el mismo decoder, las acciones de bajo nivel se discretizan en tokens, y los web data y las robot trajectories se entrenan en conjunto. Esta interfaz aprovecha plenamente el autoregressive Transformer, pero debe afrontar los problemas de quantization, latencia de control, OOD action y transferencia a nuevas embodiment.

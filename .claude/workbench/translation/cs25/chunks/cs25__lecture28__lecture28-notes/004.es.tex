@@ -1,0 +1,65 @@
+\section{QLoRA y Guanaco: los límites del entrenamiento con poca memoria}
+
+Los modelos de la sección anterior todavía requieren memoria de GPU costosa e infraestructura de entrenamiento. QLoRA combina base weights cuantizados con adapters de bajo rango, de modo que modelos de 7B/13B, o incluso mayores, puedan someterse a fine-tune con menos GPU. Esto amplía de forma notable el número de participantes, pero no elimina los costos de rollout, reward modeling, RL stability y evaluación.
+
+\subsection{La lógica de parámetros y memoria de LoRA y QLoRA}
+
+Esta sección explica primero la low-rank adaptation. Se congelan los pesos originales $W$ y solo se entrenan dos matrices pequeñas $A,B$, con lo que un incremento de bajo rango aproxima la actualización completa. QLoRA va más allá: almacena cuantizados los base weights congelados y, durante la retropropagación, sigue calculando los gradientes a través de ellos, lo que ahorra memoria de GPU.
+
+\lecturefigure{slide-041.jpg}{QLoRA y Guanaco: LoRA, cuantización y accesibilidad de memoria}{official deck, p.~41}
+
+La actualización de LoRA se escribe como
+\[
+W'=W+\Delta W,
+\qquad \Delta W=\frac{\alpha}{r}BA,
+\]
+donde $W\in\mathbb{R}^{d_{\mathrm{out}}\times d_{\mathrm{in}}}$ es la matriz de pesos congelada, $A\in\mathbb{R}^{r\times d_{\mathrm{in}}}$ y $B\in\mathbb{R}^{d_{\mathrm{out}}\times r}$ son matrices entrenables, $r$ es la dimensión de bajo rango y $\alpha$ es el coeficiente de escala. Cuando $r\ll d$, el número de parámetros entrenables se reduce considerablemente.
+
+\lecturefigure{slide-042.jpg}{Comparación de la memoria de GPU que requieren full fine-tuning, LoRA y QLoRA}{official deck, p.~42}
+
+\begin{knowledgebox}{Qué ocupa la memoria de GPU en el fine-tuning}
+Un fine-tuning completo con Adam suele guardar los pesos, los gradientes y los momentos de primer orden $m$ y de segundo orden $v$ de Adam; estos optimizer states aumentan considerablemente la memoria. LoRA congela la mayoría de los pesos y solo guarda gradientes y $m,v$ para el adapter; QLoRA, además, comprime los pesos congelados a menos bits, lo que reduce todavía más la memoria residente, aunque el cómputo y el error numérico siguen exigiendo un manejo cuidadoso.
+\end{knowledgebox}
+
+La cuantización puede abstraerse como
+\[
+W\approx s\,(q-z),
+\]
+donde $q$ es un entero de pocos bits, $s$ es la scale y $z$ es el zero point. Lo esencial de QLoRA no es simplemente bajar todo el cómputo a baja precisión, sino almacenar el frozen base en representación cuantizada y, al mismo tiempo, conservar la calidad de los gradientes que necesita el entrenamiento del adapter.
+
+\subsection{Guanaco: el valor de un método debe concretarse en un modelo publicado}
+
+La sección anterior solo demuestra que QLoRA reduce el umbral de memoria de GPU para el fine-tuning; esta sección examina una pregunta más estricta: si la ventaja de eficiencia logra superar tres filtros (datos, optimización y evaluación) y producir al final un modelo utilizable. Que una técnica cambie de verdad el ecosistema depende de que dé lugar a un release competitivo. Guanaco entrenó modelos de varios tamaños con QLoRA y datos filtrados de OpenAssistant; al leer la figura, conviene separar primero «cuántos recursos ahorra el método» y «qué calidad alcanza el modelo publicado», y después comprobar si ambos están conectados por un mismo ciclo experimental cerrado. Guanaco muestra que un método de poca memoria no solo hace bajar la loss, sino que también puede producir un modelo conversacional de los más sólidos de su momento.
+
+\lecturefigure{slide-043.jpg}{Guanaco: QLoRA y datos abiertos producen un modelo competitivo}{official deck, p.~43}
+
+\begin{knowledgebox}{Lectura de la figura: los tres niveles de evidencia de un artículo de métodos}
+El primer nivel es si disminuyen la memoria y aumenta el rendimiento; el segundo, si el entrenamiento converge de forma estable; el tercero, si el modelo final es competitivo en evaluaciones humanas o confiables. Solo cuando aparece el tercer nivel la comunidad sabe que el método no sacrificó calidad esencial a cambio de eficiencia. La importancia de Guanaco está en haber conectado los tres niveles.
+\end{knowledgebox}
+
+\teachervoice{00:24:56--00:27:09, Nathan describe QLoRA como la técnica que abrió la participación a más actores y compara una A100 de 80GB con la memoria de las GPU de consumo. El ponente subraya también que fueron Guanaco y la versión filtrada de los datos de OpenAssistant lo que convirtió el método en la publicación de un modelo confiable.}
+
+\subsection{Por qué los LoRA methods no tuvieron éxito automático en RL}
+
+Una vez que el IFT con poca memoria se volvió fácil de reproducir, muchos equipos intentaron aplicar LoRA/QLoRA directamente a RLHF. La dificultad es que RL requiere policy rollout, reference policy, reward model, advantage estimation y múltiples actualizaciones, de modo que la memoria no es el único cuello de botella; la parametrización con adapters también modifica la geometría de la optimización.
+
+\lecturefigure{slide-045.jpg}{¿Son adecuados los LoRA methods para RL? Mucha exploración, pocos modelos que trascendieron}{official deck, p.~45}
+
+\begin{warningbox}{Que baje la loss no demuestra que RLHF haya funcionado}
+Un RL pipeline puede hacer bajar el objetivo de entrenamiento y, aun así, producir reward hacking, deriva de KL, colapso de modos o degradación en las evaluaciones. Se necesitan un release del modelo final, evaluaciones independientes y muestras de comportamiento. En la sesión de preguntas, Nathan da una regla empírica: antes de dedicarse a fondo a un método, esperar a que produzca un modelo competitivo de magnitud comparable.
+\end{warningbox}
+
+\teachervoice{00:27:28--00:28:45, el ponente recuerda que en ese momento la loss de LoRA-RL bajaba y los experimentos entusiasmaban, pero hubo muy pocos modelos que realmente causaran un «splash». A partir de 01:05:44 añade que él espera a que los métodos de este tipo produzcan un release competitivo antes de profundizar en ellos.}
+
+\begin{lstlisting}[caption={Compuertas de validación: de un método eficiente a la publicación de un modelo confiable}]
+check_memory_reduction()
+check_training_stability()
+check_base_capability_retention()
+run_fast_automatic_evals()
+run_human_or_arena_evaluation()
+release_model_recipe_and_data_provenance()
+\end{lstlisting}
+
+\subsection{Resumen de la sección}
+
+Lo que resuelve QLoRA es el umbral de participación: reduce los parámetros entrenables y el almacenamiento de los frozen weights, de modo que más equipos puedan hacer IFT. No resuelve automáticamente los datos, el rollout, la estabilidad ni la evaluación de RLHF. El criterio de evidencia del curso es el ciclo cerrado «método—modelo—evaluación», no solo las curvas de recursos o la loss de entrenamiento.

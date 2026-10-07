@@ -1,0 +1,92 @@
+\section{MoE, sobreajuste y aprendizaje curricular}
+
+Cuando doscientos idiomas y un gran número de direcciones comparten un modelo, la capacidad fija de una red dense debe atender al mismo tiempo tareas muy distintas entre sí. Mixture of Experts (MoE) amplía la capacidad de parámetros mediante enrutamiento condicional, pero los expertos dispersos también facilitan que las tareas de bajos recursos encuentren una ruta especializada capaz de memorizar el conjunto de entrenamiento. Por eso, la clase expone de manera consecutiva MoE, dropout, Expert Output Masking y curriculum learning.
+
+\subsection{Token-level MoE: capacidad condicional, no capacidad gratuita}
+
+MoE coloca varios expert en algunas capas feed-forward, y cada token se enruta solo a unos cuantos expertos. El número total de parámetros puede ser muy grande, mientras que el cómputo efectivo por token es disperso. Distintos idiomas o estructuras pueden desarrollar cierta specialization, lo que reduce la interference que surge cuando todas las tareas se concentran en la misma subcapa dense.
+
+\lecturefigure{slide-28-moe-architecture.jpg}{Compromiso entre capacidad, interferencia y sobreajuste en Token-level Mixture of Experts}{Video de la clase de Stanford 00:27:45}
+
+\begin{knowledgebox}{Lectura de la figura: las tres bullet forman una cadena causal}
+Token-level MoE aumenta la capacidad condicional, lo que puede permitir que coexistan la compartición entre idiomas y la especialización de los expertos; las rutas de expertos pueden reducir parte de la interference; pero, cuando los token de bajos recursos entran una y otra vez en unos pocos expertos, la capacidad adicional memoriza más rápido los datos escasos. MoE resuelve la competencia por capacidad, pero convierte la regularization en un problema más central.
+\end{knowledgebox}
+
+Sea $h$ la representación de un token, con $E$ expertos $f_e$; el enrutador asigna los pesos $g_e(h)$ y el conjunto de los expertos Top-$k$ es $\mathcal{T}_k(h)$. Entonces, la salida de MoE puede escribirse como
+\[
+\operatorname{MoE}(h)=\sum_{e\in\mathcal{T}_k(h)} g_e(h)f_e(h).
+\]
+$E$ denota el número total de expertos, $k$ el número de expertos que activa cada token, $f_e$ es una expert FFN y $g_e(h)$ es el peso de enrutamiento normalizado. El total de parámetros crece con $E$, pero el cómputo por token crece principalmente con $k$.
+
+\begin{knowledgebox}{Términos clave: componentes de MoE}
+\begin{tabularx}{\textwidth}{@{}L{0.21\textwidth}L{0.26\textwidth}X@{}}
+\toprule
+Término & Mecanismo & Riesgo / relación con la clase \\
+\midrule
+Expert & Subred FFN independiente & Aporta capacidad condicional, pero también puede memorizar tareas pequeñas \\
+Router / gate & Elige expertos para cada token & El sesgo de enrutamiento puede concentrar la carga o fijar la división del trabajo por idioma \\
+Top-$k$ routing & Solo activa unos cuantos expertos & Controla el cómputo, pero requiere load balancing \\
+Language interference & Las actualizaciones de una tarea perjudican a otras & Con demasiada compartición, los idiomas de bajos recursos quedan sepultados por los gradientes de los de altos recursos \\
+Overfitting & El entrenamiento continúa y la validación empeora & Aparece antes en las direcciones de bajos recursos; requiere regularización y programación \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{Dense dropout, MoE dropout y EOM}
+
+La figura triple de la clase compara un dense model, MoE con dropout convencional y MoE con Expert Output Masking (EOM). El dropout convencional es eficaz en el modelo dense, pero no basta para contener por completo el sobreajuste de MoE en las direcciones de bajos recursos; EOM enmascara aleatoriamente el expert output de una parte de los token, de modo que el modelo no pueda depender en cada actualización de la capacidad especializada que obtiene por enrutamiento.
+
+\lecturefigure{slide-29-dropout-eom-results.jpg}{Curvas de validación de Dense, MoE, dropout y Expert Output Masking}{Video de la clase de Stanford 00:29:18}
+
+\begin{knowledgebox}{Lectura de la figura: fila superior, bajos recursos; fila inferior, altos recursos; primero observa el punto de inflexión de las curvas}
+El eje horizontal son las updates de entrenamiento y el eje vertical muestra la calidad o la perplexity de validación. Las direcciones de bajos recursos alcanzan antes el punto de inflexión en el que «el entrenamiento continúa pero la validación empeora»; las de altos recursos suelen seguir beneficiándose. El objetivo de EOM no es acelerar el entrenamiento, sino retrasar el sobreajuste de bajos recursos y conservar, en la medida de lo posible, la ventaja de capacidad de MoE.
+\end{knowledgebox}
+
+Para el token $t$ y el experto seleccionado $e$, EOM puede abstraerse como
+\[
+\widetilde{f}_e(h_t)=m_{t,e}f_e(h_t),\qquad
+m_{t,e}\sim\operatorname{Bernoulli}(1-p_{\text{eom}}).
+\]
+$m_{t,e}$ es una mask aleatoria, $p_{\text{eom}}$ es la probabilidad de enmascaramiento y $f_e(h_t)$ es la salida del experto. La implementación real se combina con Top-$k$ de forma más detallada, pero lo esencial es omitir aleatoriamente una parte de la expert contribution, en lugar de aplicar solo dropout convencional a la dense activation final.
+
+\begin{warningbox}{EOM no consiste en «apagar expertos defectuosos»}
+La mask es una regularización aleatoria durante el entrenamiento; no desactiva de forma permanente a un experto según la calidad de un idioma. Reduce la dependencia del modelo respecto de rutas token-expert fijas; si se interpreta como expert pruning estático, se malinterpretan las curvas y el comportamiento en despliegue.
+\end{warningbox}
+
+\teachervoice{Fan describe la capacidad adicional de MoE con la expresión very easy to overfit. La clase no presenta MoE como una arquitectura superior a dense de forma incondicional, sino que la considera, junto con la regularization de bajos recursos, parte de un mismo diseño.}
+
+\subsection{Curriculum learning: incorporar al entrenamiento según el momento de sobreajuste}
+
+Esta sección pasa de la regularización espacial a la programación temporal. Los pares de idiomas difieren en volumen de datos y en el tiempo que pueden entrenarse. NLLB observa primero en qué momento empieza a sobreajustarse cada dirección en un entrenamiento sin curriculum, y después agrupa las direcciones por intervalos; cuanto antes se sobreajusta una dirección, más tarde se incorpora al entrenamiento, de modo que recibe menos updates, mientras que las direcciones de altos recursos entran antes y se entrenan durante más tiempo.
+
+\lecturefigure{slide-30-curriculum-learning.jpg}{Agrupación por intervalos según el momento de sobreajuste de cada par de idiomas e incorporación al entrenamiento por fases}{Video de la clase de Stanford 00:30:21}
+
+\begin{knowledgebox}{Lectura de la figura: el schedule se basa en el comportamiento en validación, no solo en el número de ejemplos}
+Los pares de idiomas con pocos datos suelen sobreajustarse antes, pero con el mismo número de ejemplos el comportamiento puede variar por el ruido, la escritura o el efecto de transferencia. La propuesta de la clase mide primero el overfitting onset y luego define el bucket y el introduction time. Así, el curriculum se guía por un diagnóstico empírico, y no por un orden fijo de «primero altos recursos, después bajos recursos».
+\end{knowledgebox}
+
+Sea $T$ el número total de pasos de entrenamiento y supongamos que el par de idiomas $d$ empieza a sobreajustarse tras unos $k_d$ pasos en el entrenamiento base; entonces puede incorporarse en el momento
+\[
+t_{\text{start}}(d)=T-k_d
+\]
+$t_{\text{start}}(d)$ es el momento de incorporación, $T$ es el total de pasos y $k_d$ es la ventana de entrenamiento que esa dirección tolera. El sistema real usa la mediana de cada intervalo en lugar de un momento independiente por dirección, para reducir la complejidad de la programación.
+
+\begin{lstlisting}[caption={Phased curriculum basado en el momento de sobreajuste en el conjunto de validación}]
+baseline = train_without_curriculum(all_directions)
+for direction in all_directions:
+    onset[direction] = first_overfitting_step(baseline.validation(direction))
+
+buckets = cluster_by_onset(onset)
+model = initialize_model()
+for step in range(total_steps):
+    active = directions_whose_bucket_has_started(step, buckets)
+    model.update(sample_batch(active))
+\end{lstlisting}
+
+\begin{warningbox}{Sumar curriculum y EOM no garantiza un mejor resultado}
+La ablation del artículo de NLLB muestra que, en configuraciones más pequeñas donde EOM ya mitiga el sobreajuste, añadir curriculum puede no aportar nada o incluso empeorar ligeramente; en la configuración completa a gran escala, la combinación vuelve a mejorar las direcciones de bajos recursos. La conclusión debe ligarse al modelo, los datos y la escala de entrenamiento; no puede presentarse como una receta universal.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+MoE aumenta la capacidad condicional y mitiga la interferencia mediante token-level routing, pero amplifica el sobreajuste en bajos recursos. EOM aplica regularización aleatoria al expert output, y el curriculum controla la ventana de entrenamiento según el momento de sobreajuste en el conjunto de validación; el efecto de ambos depende de la escala y de las condiciones de los datos concretas.

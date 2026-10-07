@@ -1,0 +1,101 @@
+\section{Precision Language Models: configuraciones, etapas de entrenamiento y velocidad}
+
+La clase llama Precision Language Models a los sistemas que usan SAFFU, inicialización explícita y entrenamiento con pocos datos. Aquí, precision subraya que el punto de partida de los parámetros y los datos de la tarea son «más específicos», no la precisión numérica FP16/BF16. Al leer la tabla de configuraciones hay que considerar al mismo tiempo vocabulary, embedding, context, parameter count, token budget y hardware; no basta con fijarse en el apodo del modelo.
+
+\subsection{Big y potato: dos reference points con objetivos completamente distintos}
+
+La big configuration usa un vocabulary de unos 16K tokens, un context de unos 2K y unos 50M parameters, y se entrena en una antigua GPU Titan V de 12GB; la potato configuration usa un vocabulary de unos 1K tokens, un context corto y unos 150K parameters, y se entrena en tiempo real en una CPU Le Potato con 2GB de RAM. La primera pone a prueba la escala del modelado de lenguaje; la segunda, el scratch learning local.
+
+\lecturefigure{slide-16-plm-configs.jpg}{Reference configurations big y potato de los precision language models}{Grabación oficial de Stanford Online 00:46:08}
+
+\begin{knowledgebox}{PLM no es precision numérica}
+En esta clase, PLM es el nombre que el equipo le da a una clase de modelos; no se refiere a mixed precision, FP8 ni quantization. Si un documento solo dice «precision model», debe aclarar que se trata de una etiqueta de architecture/training, para no confundirla con la numerical precision.
+\end{knowledgebox}
+
+\begin{warningbox}{El «entrenamiento en tiempo real» debe ir ligado al hardware y a la tarea}
+En potato, «tiempo real» se refiere a una binary switch task local, con modelo, vocabulario, context y datos muy pequeños; no puede extrapolarse a entrenar en tiempo real un modelo conversacional de propósito general con 2GB de RAM.
+\end{warningbox}
+
+\teachervoice{00:46:14--00:49:04, Williams dice que el equipo aún no sabe cómo se comportaría la arquitectura con trillions of tokens o con RLHF; el objetivo de potato es aprovechar la estabilidad con pocos datos para explorar la capacidad de edge scratch-training, a la que los grandes modelos tradicionales no dan prioridad.}
+
+\subsection{De micro a mega: el verdadero uso de la tabla es auditar recursos}
+
+La tabla de configuraciones presenta varias combinaciones de vocabulary, context, dimensiones embedding/hidden y total parameters. Su valor no está en afirmar que cada fila se entrenó por completo, sino en mostrar cómo crecen los parámetros con el ancho y el context, y en dar nombre a las pruebas de estrés small/medium posteriores.
+
+\lecturefigure{slide-17-saffu-size-table.jpg}{Configuraciones de parámetros y tokens de SAFFU/PLM en distintas escalas}{Grabación oficial de Stanford Online 00:48:22}
+
+Si las matrices principales de una branch son aproximadamente $W\in\mathbb{R}^{d\times d}$, $U\in\mathbb{R}^{d\times h}$ y $O\in\mathbb{R}^{h\times V}$, el total de parámetros puede escribirse de forma aproximada como
+\[
+P\approx Vd+d^2+dh+hV+P_{\text{other}}.
+\]
+Conforme crecen el vocabulary $V$ y la dimensión hidden $h$, embedding/output suelen convertirse en los términos dominantes; al aumentar las context branches, $W_b,U_b$ también se replican o se amplían.
+
+\begin{knowledgebox}{Las cuatro cuentas que debe completar la tabla de configuraciones}
+\begin{enumerate}
+  \item Número de parámetros: ¿qué matrices se comparten y cuáles se replican por context branch?
+  \item Tokens de entrenamiento: ¿cuántos datos ve cada etapa (warm start, frozen stage, thawed stage)?
+  \item Memoria: ¿cuánto ocupan weights, optimizer state, activations y cache?
+  \item Tiempo: ¿se contabilizan la construcción de estadísticas, la backpropagation, el cache rebuild y la evaluation?
+\end{enumerate}
+Optimizer state (estado del optimizador) se refiere a tensores adicionales como el primer momento $m$ y el segundo momento $v$ de Adam/AdamW, que aumentan de forma considerable la memoria de entrenamiento; no basta con estimarla a partir del tamaño del archivo de parámetros.
+\end{knowledgebox}
+
+\subsection{Medium PLM: tres etapas, warm, freeze y thaw}
+
+El medium experiment usa unos 12M parameters y la escala de 100M tokens de BabyLM. Las tres etapas de la slide son: primero, construir un warm start con parte de los datos; después, congelar los vectors y entrenar rápidamente el resto de los parámetros con la mayor parte de los datos; por último, hacer thaw de los vectors y aplicar un fine-tuning conjunto con un learning rate menor.
+
+\lecturefigure{slide-18-medium-plm-training.jpg}{Dinámica de entrenamiento warm-start, frozen-vector y thawed-vector del medium PLM}{Grabación oficial de Stanford Online 00:49:09}
+
+Puede abstraerse como
+\[
+\theta^{(0)}=\operatorname{ExplicitInit}(D_{\text{warm}}),
+\]
+\[
+\theta^{(1)}=\operatorname{Train}(D_{\text{main}},\theta^{(0)};E\ \text{frozen}),
+\]
+\[
+\theta^{(2)}=\operatorname{FineTune}(D_{\text{tail}},\theta^{(1)};E\ \text{trainable}).
+\]
+
+\begin{importantbox}{Qué implican freeze y thaw para el sistema}
+Hacer freeze del embedding no solo reduce la memoria de gradient/optimizer, sino que también garantiza que la comparison cache siga siendo válida; el thaw permite que las representaciones se adapten a la tarea final, pero obliga a recalcular las comparisons y puede alterar la feature distribution que corresponde a la solución explícita anterior.
+\end{importantbox}
+
+\teachervoice{00:49:09--00:51:35, el ponente explica los 100M tokens de BabyLM como una developmentally plausible exposure, y dice que congelar los vectors mejora a la vez la velocidad de entrenamiento y la estabilidad de la caché, mientras que el thaw final cambia un costo adicional por calidad final.}
+
+\subsection{How fast: una comparación headline debe desglosar sus condiciones}
+
+La slide pone juntos el dato aproximado de unas 100 horas de GPT-2 en 8 A100 y el avance del medium PLM en una antigua Titan V, de unos 18 tokens/hour. Ambos no están estrictamente emparejados en context, vocabulary, implementation, calidad objetivo ni proceso de datos, por lo que solo pueden leerse como motivation y no como un benchmark justo.
+
+\lecturefigure{slide-19-plm-training-speed.jpg}{Referencia aproximada de la clase sobre la velocidad de entrenamiento de PLM}{Grabación oficial de Stanford Online 00:53:21}
+
+Una contabilidad de tiempo más completa debería escribirse como
+\[
+T_{\text{total}}=T_{\text{stats}}+T_{\text{cache}}
++T_{\text{backprop}}+T_{\text{rebuild}}+T_{\text{eval}},
+\]
+en lugar de reportar solo el loop principal de entrenamiento. Aunque las estadísticas explícitas y la cache se calculen en la etapa de preprocesamiento de datos, siguen siendo un costo del sistema de entrenamiento.
+
+\begin{warningbox}{No difundir «32 veces más capacidad, por lo tanto 32 veces más velocidad»}
+El GPU theoretical throughput, la model FLOPs utilization, el memory bandwidth, el batch size y la kernel maturity modifican el wall-clock. La proporción de hardware de la slide de la clase no sustituye a un profiler ni a una matched implementation.
+\end{warningbox}
+
+\teachervoice{00:52:48--00:54:10, el ponente usa GPT-2/A100 como referencia intuitiva; las notas deben conservar su carácter de rough comparison y no reescribirla como un speedup riguroso.}
+
+\subsection{Qué puede hacer un small PLM: distinguir primero fit de transfer}
+
+Al momento de la clase, el equipo había hecho stress tests principalmente hasta cerca de 1B tokens, y muchos experimentos usaron solo de cientos de miles a decenas de millones de tokens. Que un modelo pequeño reduzca rápido la loss de entrenamiento indica que la inicialización es estable; pero la pregunta de fondo es si puede aprender reglas transferibles a partir de application data, y no solo memorizar las muestras locales.
+
+\lecturefigure{slide-20-small-plm-capabilities.jpg}{La pregunta central de investigación del small PLM: ¿puede aprender directamente de los datos de la aplicación?}{Grabación oficial de Stanford Online 00:54:16}
+
+\begin{warningbox}{Small-data fit no equivale a general language ability}
+Una PPL muy baja en el conjunto de entrenamiento puede deberse a memorization. Para juzgar si el modelo aprendió una directive semantics robusta se necesitan, como mínimo, pruebas con held-out users, formulaciones no vistas, ASR con ruido, entradas ajenas a la tarea y deriva temporal.
+\end{warningbox}
+
+\teachervoice{00:41:57--00:42:33, Williams distingue por iniciativa propia entre «aprender muy rápido unos cuantos miles de tokens» y «convertirse en un modelo de lenguaje capaz de hablar de forma amplia»; lo primero es una observación, lo segundo no queda demostrado por los resultados con pocos datos.}
+
+\teachervoice{00:54:16--00:55:21, el ponente plantea la application-only transfer from scratch como una pregunta abierta, no como una capacidad ya resuelta.}
+
+\subsection{Resumen de la sección}
+
+Las configuraciones PLM van desde un tiny controller hasta un language model mediano, pero cada nivel depende de un vocabulario, un context, unos datos y un hardware distintos. El relato de entrenamiento que de verdad puede reproducirse es warm--freeze--thaw; un headline de velocidad solo tiene sentido de ingeniería si contabiliza por completo statistics, cache y evaluation.

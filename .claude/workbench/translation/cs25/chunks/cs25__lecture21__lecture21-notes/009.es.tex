@@ -1,0 +1,57 @@
+\section{Long Context: Quadratic Complexity es solo el primer nivel del problema}
+
+A medida que crece la context length, la attention enfrenta a la vez el problema del cómputo y el de la activation memory: $QK^\top$ tiene $n^2$ scores, y los valores intermedios del softmax también deben leerse y escribirse. El curso divide los métodos de long-context en patrones fijos locales/dispersos, content-based sparse routing, linear/factored approximation y external memory/retrieval; la verdadera dificultad es si la estructura del algoritmo puede mapearse al hardware.
+
+\subsection{Dos tipos de cuello de botella: Compute y Attention-logit Memory}
+
+Los términos principales de la attention estándar son:
+\[
+\operatorname{FLOPs}_{\mathrm{score/value}}\approx 4n^2d_hH,
+\qquad \operatorname{Memory}_{\mathrm{logits}}=O(Hn^2).
+\]
+donde $n$ es la sequence length, $d_h$ es la head dimension y $H$ es el head count. Aunque el total de FLOPs todavía sea aceptable, materializar todos los logits puede agotar antes la HBM; lo esencial de FlashAttention es precisamente evitar escribir una y otra vez la score matrix completa de vuelta en la memoria de la GPU.
+
+\lecturefigure{slide-31-evolution-attention-challenges.jpg}{La evolución de la attention enfrenta dos problemas: quadratic compute y memory-bound}{Diapositiva V031 recuperada de la grabación oficial; 00:40:27}
+
+\begin{knowledgebox}{Lectura de la figura: los dos problemas no pueden resumirse con una misma cifra}
+El diagrama de arquitectura de la izquierda señala la attention, y el texto enumera quadratic complexity y memory bound. Primero hay que distinguir la cantidad de cómputo, la capacidad de activation, el memory bandwidth y la kernel utilization; un método con FLOPs lineales que genere gather/scatter irregulares puede seguir siendo más lento que un dense tiled kernel.
+\end{knowledgebox}
+
+\subsection{Local, Sparse, Routing y LSH Patterns}
+
+Una window fija limita a $w$ los vecinos candidatos de cada token, y la complejidad baja de $O(n^2d)$ a $O(nwd)$. Un local pattern de varias capas puede propagar la información paso a paso; los strided/global tokens establecen conexiones entre regiones; routing/LSH encuentra de forma aproximada, según el contenido, los tokens con alta similitud, e intenta conservar las aristas que de verdad tienen peso en la full attention.
+
+\lecturefigure{slide-32-long-context-patterns.jpg}{Attention pattern local, sparse, routing y LSH}{Diapositiva V032 recuperada de la grabación oficial; 00:44:48}
+
+\begin{knowledgebox}{Lectura de la figura: el grafo de conexiones determina el diámetro de propagación de la información}
+Primero observa los nonzero blocks de cada pattern y luego pregúntate cuántas capas necesitan dos tokens lejanos para comunicarse. La local window es regular y amigable con el kernel, pero las rutas de largo alcance se alargan; routing/LSH es más content-aware, pero introduce clustering, sorting y memory access irregular. Una misma proporción de dispersión no implica la misma velocidad.
+\end{knowledgebox}
+
+\teachervoice{El ponente recuerda la sparse attention para imágenes y música y plantea una observación importante: la mayoría de las capas pueden ser locales, y solo unas pocas capas posteriores asumen el verdadero long-distance modeling. La content-based sparsity tiene un fuerte atractivo teórico, pero el memory movement suele consumir los FLOP savings.}
+
+\subsection{Linear, Factored y External Memory}
+
+Otro grupo de métodos cambia la attention factorization o introduce memory. La linear attention usa kernel features para reasociar $\operatorname{softmax}(QK^\top)V$; la factored attention descompone la interaction bidimensional o de secuencias largas; Memorizing Transformer o retrieval colocan parte del historial en un store externo y lo leen según la query.
+
+\lecturefigure{slide-33-long-context-methods.jpg}{Rutas linear, factored y retrieval/memory}{Diapositiva V033 recuperada de la grabación oficial; 00:44:54}
+
+\begin{knowledgebox}{Términos clave: qué capa modifica cada método de long-context}
+\begin{tabularx}{\textwidth}{@{}L{0.22\textwidth}X X@{}}
+\toprule
+Ruta & Mecanismo central & Riesgo principal \\
+\midrule
+Local/fixed sparse & Un pequeño número de attention edges predefinidas & Puede omitir aristas lejanas relevantes por su contenido \\
+Routing/LSH sparse & Agrupamiento por contenido o búsqueda de vecinos cercanos & Acceso irregular a memoria, error de aproximación, implementación compleja \\
+Linear/factored & Reescribe o descompone el attention kernel & La expresividad y la numerical stability pueden cambiar \\
+External memory/retrieval & Almacena el historial fuera del modelo y lo lee cuando se necesita & index freshness, retrieval error y latency \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\begin{importantbox}{Long context no equivale a usar el long context de forma efectiva}
+Poder recibir $n$ tokens solo demuestra la capacidad de la interfaz; también hay que evaluar si la información lejana se recupera, si aumenta la interferencia, si la position se extrapola, si la respuesta depende de la evidencia correcta y si la latency/throughput es aceptable.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La long-context attention tiene dos cuellos de botella ortogonales: pairwise compute e intermediate memory. Las rutas local/sparse/routing/linear/memory cambian, respectivamente, el grafo de conexiones, la forma de aproximación o el lugar de almacenamiento; cualquier conclusión sobre complejidad debe seguir indagando en el kernel y en el hardware mapping.

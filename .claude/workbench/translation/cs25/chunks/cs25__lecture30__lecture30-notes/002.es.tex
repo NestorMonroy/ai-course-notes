@@ -1,0 +1,71 @@
+\section{De la attention estándar a SAFFU: qué paso se modifica exactamente}
+
+Para entender el mecanismo alternativo, primero hay que descomponer la self-attention estándar en cuatro pasos: «proyección de la representación», «similitud», «normalización» y «agregación ponderada». El ponente no niega el valor de la Q/K projection estándar; lo que plantea es: cuando las entradas ya se encuentran en el mismo espacio de baja dimensión, ¿puede aplicarse directamente una transformación aprendible a la propia matriz de comparación, para reducir las proyecciones adicionales y los parámetros aleatorios?
+
+\subsection{Forma estándar: primero proyectar, después comparar}
+
+Sean los hidden states de una secuencia $X\in\mathbb{R}^{L\times d}$; la attention estándar de una sola cabeza se escribe como
+\[
+Q=XW_q,\qquad K=XW_k,\qquad V=XW_v,
+\]
+\[
+A_{\text{std}}=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_a}}+M\right),
+\qquad H=A_{\text{std}}V.
+\]
+Aquí $L$ es el número de tokens, $d$ es la dimensión de entrada, $d_a$ es la attention dimension y $M$ es la máscara causal o de padding. La tarea de $W_q,W_k$ no es simplemente «calcular la similitud», sino transformar primero la entrada a un espacio de comparación más adecuado para la tarea de predicción en cuestión.
+
+\begin{knowledgebox}{Por qué la proyección suele ser útil}
+Cuando query y key provienen de modalidades distintas, de dimensiones distintas o de roles semánticos distintos, la cross-attention debe llevarlas primero a un espacio comparable. Incluso en la self-attention, la proyección permite que distintas heads aprendan similitudes bilineales distintas. La ganancia de eficiencia del mecanismo alternativo proviene de reducir este paso, pero al mismo tiempo renuncia a una parte de la libertad de representación.
+\end{knowledgebox}
+
+\teachervoice{00:02:54--00:05:06, el ponente describe la attention estándar como re-dimensionalization: Q/K cambian el espacio de representación para que el dot product pueda producir pesos útiles para la tarea; la forma alternativa, en cambio, aprende directamente cómo interpretar la comparación entre los vectores existentes.}
+
+\subsection{Definición de SAFFU: transformar directamente la comparison matrix}
+
+SAFFU supone que los vectores de entrada ya se encuentran en un mismo espacio comparable. Primero se calcula la matriz de comparación original $C=XX^\top$ y luego se transforma la comparación con una matriz aprendible $W$, con lo que se obtiene
+\[
+A_{\text{saffu}}=\operatorname{softmax}(XWX^\top+M),
+\qquad H=A_{\text{saffu}}X.
+\]
+Aquí $W\in\mathbb{R}^{d\times d}$ define directamente una bilinear form (forma bilineal). Si $W=I$, el modelo se reduce al dot product en el espacio original; en general, $W$ puede rotar, escalar o recombinar las interacciones entre dimensiones, pero no proyecta query y key por separado en dos espacios independientes.
+
+\lecturefigure{slide-02-saffu-definition.jpg}{Definición, supuestos y restricciones de representación de SAFFU}{Video oficial de Stanford Online 00:06:00}
+
+\begin{importantbox}{Relación algebraica entre la attention estándar y SAFFU}
+Puesto que
+\[
+QK^\top=XW_qW_k^\top X^\top,
+\]
+si se denota $W=W_qW_k^\top$, ambas formas pueden ponerse en correspondencia en la forma bilineal del score. La diferencia está en la parametrización: la forma estándar descompone $W$ en dos projections, mientras que SAFFU trabaja directamente con la matriz combinada y deriva a partir de ella una inicialización explícita. La parametrización directa no es automáticamente más potente ni automáticamente más estable.
+\end{importantbox}
+
+\begin{warningbox}{«Sin Q/K» no equivale a sin transformación matricial}
+SAFFU sigue teniendo $W$ y sigue aprendiendo cómo debe modificarse la comparación entre tokens. Lo que elimina es la parametrización con dos projections independientes y la representación intermedia, no convierte la attention en un promedio sin parámetros.
+\end{warningbox}
+
+\teachervoice{00:05:15--00:05:43, Williams afirma explícitamente que el mecanismo alternativo y la projection tradicional pueden usarse al mismo tiempo; en esta clase se retira temporalmente la projection para aislar y estudiar el propio mecanismo comparison-to-weight.}
+
+\subsection{General design: de la comparación y la agregación a la salida}
+
+El diagrama de la arquitectura usa $W$ para la attention comparison transform, $U$ para la transformación decoder/feed-forward aplicada al hidden state agregado y $O$ para el mapeo de salida de la capa superior. Al leer la figura, no hay que llamar a los tres «parámetros de attention»: $W$ determina los pesos de las posiciones, $U$ modifica las features agregadas y $O$ mapea el hidden state al objetivo de predicción.
+
+\lecturefigure{slide-03-general-saffu-design.jpg}{General SAFFU encoder-decoder: reparto de funciones entre $W$, $U$ y el mapeo de salida}{Video oficial de Stanford Online 00:07:38}
+
+Para la $m$-ésima muestra, sea la context matrix $X_m\in\mathbb{R}^{K\times d}$ y elíjase la fila query $x_{m,h}$; entonces puede escribirse
+\[
+a_m=\operatorname{softmax}(x_{m,h}WX_m^\top),
+\]
+\[
+h_m=a_mX_mU,\qquad \hat y_m=\operatorname{softmax}(h_mO).
+\]
+$K$ es el número de features/tokens en el context, $a_m\in\mathbb{R}^{K}$ es la attention distribution, y $U$ y $O$ se encargan, respectivamente, de la transformación oculta y de la salida final de clasificación o de modelado de lenguaje.
+
+\begin{knowledgebox}{Qué significa exactamente near-shallow}
+El modelo puede seguir teniendo varias capas. Near-shallow significa que algunas representaciones y pairwise comparisons de las capas inferiores pueden determinarse de antemano, almacenarse en caché o inicializarse explícitamente de forma local, de modo que el aprendizaje en línea ocurra sobre todo en un número menor de parámetros de las capas superiores. Describe las dependencias de cómputo y las rutas de actualización, no simplemente un número de depth.
+\end{knowledgebox}
+
+\teachervoice{00:05:43--00:07:10, el ponente relaciona la reducción de projections y de parámetros aleatorios con near-shallow, pero reconoce al mismo tiempo que este diseño depende más de que los vectores de entrada tengan la misma dimensión y estén bien organizados; no es un reemplazo incondicional.}
+
+\subsection{Resumen de la sección}
+
+La modificación central de SAFFU es parametrizar directamente $XWX^\top$ e incorporar esta forma a una inicialización explícita. La projection de la attention estándar es más flexible; el atractivo de SAFFU proviene de tener menos parámetros aleatorios independientes, valores iniciales que pueden derivarse y comparaciones que potencialmente pueden almacenarse en caché. Las ganancias que se presentan más adelante deben leerse junto con estas restricciones.

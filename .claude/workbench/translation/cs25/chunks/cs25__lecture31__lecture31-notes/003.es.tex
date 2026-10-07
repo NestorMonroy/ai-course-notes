@@ -1,0 +1,102 @@
+\section{Arquitectura Transformer y sistemas de entrenamiento: los recursos marcan el límite de las capacidades}
+
+Antes de que aparecieran los modelos multimodales, la base de lenguaje tenía que entrenarse de forma estable. La tesis central del ponente es que muchas de las mejoras clave de los LLM modernos no son redes completamente nuevas, sino ajustes continuos al decoder path, la normalization, la KV memory, el parameter routing y la distributed execution. Entender estos términos es requisito para entender después los VLM de high-resolution y el video scaling.
+
+\subsection{Términos clave de la recipe decoder-only moderna}
+
+La sección anterior explicó cómo el objective, la scale y el alignment desplazan el cuello de botella de la investigación; esta sección va un paso más allá y pregunta: una vez que el LLM decoder-only se convierte en la base común, ¿qué partes del grafo de cómputo modificaron realmente los equipos de ingeniería, y qué ganó cada cambio en estabilidad, capacidad o inference memory? La siguiente slide reúne en una sola página las architecture updates más comunes. Al leer la figura no basta con contar nombres: hay que distinguir si cada una actúa sobre el residual path, la position, el KV sharing, el MLP o el routing.
+
+\lecturefigure{slide-06-transformer-architecture.jpg}{Actualizaciones comunes del Transformer moderno: decoder-only, pre-norm, RoPE, GQA, GLU y MoE}{Grabación oficial de Stanford Online 00:16:10}
+
+La causal self-attention estándar es
+\[
+Q=XW_Q,\quad K=XW_K,\quad V=XW_V,\qquad
+\operatorname{Attn}(X)=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_h}}+M\right)V,
+\]
+donde $M$ es la causal mask. GQA (Grouped-Query Attention) hace que varios grupos de query heads compartan menos key/value heads; su efecto principal es reducir la KV cache, no reducir todos los FLOPs de attention.
+
+\begin{knowledgebox}{Glosario denso: cada término resuelve un cuello de botella distinto}
+\begin{tabularx}{\textwidth}{L{0.17\textwidth} L{0.30\textwidth} X}
+\toprule
+Término & Mecanismo central & Relación con el curso \\
+\midrule
+Decoder-only & Un solo causal generation path & Facilita escalar el preentrenamiento y unificar la interfaz \\
+Pre-norm & LayerNorm antes de cada subcapa & Mejora la estabilidad del entrenamiento con residuales profundos \\
+RoPE & Codifica la posición relativa rotando $Q,K$ & Da estructura posicional para contexto largo y extrapolación \\
+GQA & Varias query heads comparten KV heads & Reduce la KV cache en inference \\
+SwiGLU/GLU & Sustituye la activación del MLP común por una multiplicación con compuerta & Cambia la capacidad y la optimización del feed-forward \\
+MoE & Cada token activa solo una parte de los experts & Aumenta los parámetros totales sin descontrolar el active compute \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\teachervoice{00:13:18--00:17:45, el ponente enfatiza que la mayoría de estas mejoras se acumularon durante mucho tiempo y no surgieron de golpe como un «nuevo Transformer». Bromea con que hay muy poca architecture innovation, pero eso no significa que cada cambio sea irrelevante.}
+
+\subsection{DeepSpeed y ZeRO: primero calcular cuánta memoria de GPU ocupa cada parámetro}
+
+La primera lección de los sistemas de entrenamiento no es memorizar ZeRO-1/2/3, sino hacer resource accounting. Con AdamW en precisión mixta, cada parámetro suele requerir el parameter y el gradient en FP16/BF16, además del master weight, el first moment $m$ y el second moment $v$ en FP32. El número aproximado de bytes es
+\[
+B_{\text{per-param}}\approx 2_{\theta}+2_g+4_{\theta_{32}}+4_m+4_v=16\ \text{bytes}.
+\]
+Con mil millones de parámetros, solo estos states ocupan unos 16 GB, sin contar activation, temporary buffers, fragmentation ni el communication workspace.
+
+\lecturefigure{slide-07-deepspeed.jpg}{DeepSpeed: optimizer states, activation checkpointing y fragmentación con ZeRO}{Grabación oficial de Stanford Online 00:19:30}
+
+\begin{importantbox}{Primera definición: sharding, optimizer state y activation checkpointing}
+\textbf{Sharding (fragmentación)} consiste en repartir entre distintos data-parallel ranks un tipo de estado que antes se replicaba en cada GPU; el \textbf{optimizer state} son los $m,v$ de Adam/AdamW y los habituales master weights en FP32; el \textbf{activation checkpointing} guarda solo una parte de las forward activations y recalcula el resto durante el backward, lo cual no es lo mismo que el model checkpointing, que guarda el archivo del modelo.
+\end{importantbox}
+
+ZeRO-1 fragmenta el optimizer state, ZeRO-2 fragmenta además los gradients y ZeRO-3 fragmenta también los parameters. Si el data-parallel world size es $p$, en el caso ideal la memoria ocupada por los estados se reduce aproximadamente en $1/p$, pero a cambio aparecen collectives (primitivas de comunicación entre varias GPU) como all-gather y reduce-scatter.
+
+\begin{lstlisting}[caption={Lista de cálculo de memoria de GPU para entrenamiento en precisión mixta}]
+bytes = parameter_low_precision
+bytes += gradient_low_precision
+bytes += master_parameter_fp32
+bytes += adam_first_moment_fp32
+bytes += adam_second_moment_fp32
+bytes += saved_activations_or_recompute_budget
+bytes += communication_and_kernel_workspace
+report(bytes_per_rank, sharding_stage, world_size)
+\end{lstlisting}
+
+\teachervoice{00:17:45--00:21:13, el ponente señala en particular que la mayor parte de la memoria de GPU suele provenir de los Adam states, y que el costo del activation checkpointing es el recálculo en el backward. Presentar el «ahorro de memoria» como una optimización gratuita omite un hecho del sistema.}
+
+\subsection{Megatron: qué divide la tensor parallelism y qué divide la pipeline parallelism}
+
+ZeRO fragmenta los estados a lo largo de los data-parallel ranks; la tensor parallelism (TP) de Megatron divide las hidden dimensions/heads dentro de una capa, y la pipeline parallelism (PP) divide en stages a lo largo de la profundidad de las capas. Ambas actúan sobre dimensiones distintas y también tienen patrones de comunicación distintos.
+
+\lecturefigure{slide-08-megatron.jpg}{Megatron: cómo dividen el modelo la tensor parallel y la pipeline parallel}{Grabación oficial de Stanford Online 00:21:13}
+
+Si la capa lineal $Y=XW$ se divide por columnas, $W=[W_1,\ldots,W_p]$, cada rank calcula $Y_i=XW_i$ y después puede requerirse un all-gather; si se divide por filas, los resultados locales necesitan un all-reduce para sumarse. La utilización de la PP depende del número de micro-batches $m$ y del número de stages $p$; la bubble fraction ingenua puede escribirse aproximadamente como
+\[
+\rho_{\text{bubble}}\approx \frac{p-1}{m+p-1}.
+\]
+Las planificaciones de tipo interleaving, 1F1B y ZeroBubble reducen el tiempo ocioso, pero aumentan la complejidad de la programación y las restricciones de comunicación.
+
+\begin{knowledgebox}{Las collectives no son una «sincronización» difusa}
+\textbf{All-reduce} agrega los datos y devuelve el resultado a cada rank; \textbf{reduce-scatter} agrega y cada rank conserva solo su fragmento; \textbf{all-gather} reúne todos los fragmentos; \textbf{broadcast} envía desde un rank a todos los ranks. Las diferencias de rendimiento entre distintos esquemas de sharding/parallelism suelen deberse a la frecuencia de estas operaciones, al tamaño de los mensajes y a su correspondencia con la topología.
+\end{knowledgebox}
+
+\teachervoice{00:20:00--00:22:50, el ponente resume el entrenamiento de modelos muy grandes como engineering work y, con la broma de que «el MLP no importa, lo que importa es ML6», enfatiza que sin systems knowledge los FLOPs teóricos de la arquitectura no se convierten en un entrenamiento efectivo.}
+
+\subsection{Long context: la full attention sigue pagando una complejidad cuadrática}
+
+La slide de contexto largo compara la estructura explícita de retrieval/rehearsal del antiguo CogLTX con la full-attention context parallelism de 2024. Lossless significa que no se modifica el attention pattern mediante sparse attention, no que el cálculo no tenga costo.
+
+\lecturefigure{slide-09-long-context.jpg}{Lossless 128K: context parallel, Ring Attention y Ulysses}{Grabación oficial de Stanford Online 00:24:27}
+
+Para una sequence length $n$ y una head dimension $d_h$, el cálculo principal de la score matrix completa es
+\[
+\mathcal{O}(n^2d_h),
+\]
+y su almacenamiento explícito en una sola GPU también puede llegar a $\mathcal{O}(n^2)$. La context parallelism reparte la sequence entre $p$ ranks y reduce la activation local a cerca de $\mathcal{O}(nd/p)$, pero obliga a rotar o intercambiar bloques de $K,V$ y a manejar el causal load imbalance.
+
+\begin{warningbox}{El costo oculto del contexto largo es el prefill}
+En la sesión de preguntas y respuestas, el ponente divide la inference en prefill y decode. Con documentos largos a menudo solo se genera una respuesta corta, pero el prefill tiene que leer y procesar todo el context, lo que puede tardar desde unos segundos hasta un minuto. Una ventana más larga no es «memory gratuita»: también aumenta la latency, la KV cache, la communication y la interferencia de información irrelevante.
+\end{warningbox}
+
+\teachervoice{01:08:10--01:10:30, el ponente acepta que en ciertos escenarios de comprensión de documentos se pague un prefill más largo a cambio de una respuesta corta, pero no afirma que todas las aplicaciones interactivas puedan tolerar esa latency.}
+
+\subsection{Resumen de la sección}
+
+La recipe moderna de los LLM incluye a la vez architecture updates y distributed systems. ZeRO divide los estados, la TP divide los tensores dentro de la capa, la PP divide las capas y la context parallelism divide la secuencia; cada reducción de memoria por GPU se paga con collectives, recálculo, bubble o latency. Estas rutas de sistema volverán a aparecer en las high-resolution images y en el video.

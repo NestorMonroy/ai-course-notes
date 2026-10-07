@@ -1,0 +1,75 @@
+\section{Adaptar el retriever a un generator congelado}
+
+Contar con un retriever potente no es el final: el relevance score genérico no necesariamente equivale a la usefulness para un generator concreto. En clase se usan RePlug e in-context RALM para mostrar dos rutas intermedias: mantener congelado el generator y aprovechar su likelihood o la loss de la tarea final para entrenar el retriever/reranker.
+
+\subsection{Contextualizing the Retriever for the Generator}
+
+La diapositiva de arquitectura marca con una llama el retrieval side: el objetivo es que el query encoder y el retriever encuentren documentos «que permitan a este generator responder mejor», y no solo documentos semánticamente similares en sentido genérico. Si el generator es una black-box API al estilo de GPT-4, la interfaz de entrenamiento queda limitada por la log-probability visible y por el costo de las llamadas.
+
+\lecturefigure{slide-18-contextualizing-retriever-for-generator.jpg}{Optimizar el retrieval side para un frozen generator}{Video de la clase de Stanford 00:25:24}
+
+\begin{knowledgebox}{Tres generator access level}
+\begin{tabularx}{\textwidth}{L{0.22\textwidth}>{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+Nivel de acceso & Señal disponible & Alcance entrenable \\
+\midrule
+Text-only API & Texto final, posiblemente un evaluador & Búsqueda de caja negra, optimización de preferencias, reranker externo \\
+Log-probability API & Likelihood de la respuesta correcta; perplexity (la exponencial de la entropía cruzada; puede entenderse como el número efectivo de candidatos por token; cuanto más baja, mejor) & Generator-aware retriever al estilo RePlug \\
+Full weights & Gradientes, hidden states, attention & Joint retriever--generator training \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{RePlug: supervisar el retriever con la likelihood del modelo de lenguaje}
+
+RePlug normaliza los retrieval scores de los top-$k$ documentos y luego entrega cada documento por separado al frozen LM para observar la likelihood de la continuation correcta. El objetivo de entrenamiento acerca la retriever distribution a la generator utility distribution, por lo que no hace falta retropropagar hacia el generator.
+
+\lecturefigure{slide-19-replug.jpg}{RePlug alinea la retrieval distribution con la likelihood del frozen LM}{Video de la clase de Stanford 00:26:42}
+
+\begin{importantbox}{La distribution matching de RePlug}
+Sea la probabilidad que el retriever asigna a un documento
+\[
+p_R(d_i\mid x)=\operatorname{softmax}(s_R(x,d_i)),
+\]
+y sea $p_G(d_i\mid x,y)$ la puntuación normalizada que el frozen LM asigna al objetivo $y$ condicionado al documento $d_i$. El entrenamiento puede minimizar
+\[
+\mathcal{L}_{\text{RePlug}}=D_{\mathrm{KL}}\!\left(p_G(\cdot\mid x,y)\,\|\,p_R(\cdot\mid x)\right).
+\]
+El retriever aprende qué documento reduce la perplexity del LM, mientras los parámetros del generator permanecen sin cambios.
+\end{importantbox}
+
+\teachervoice{Kiela califica la idea de RePlug como «super simple» y aplicable a muchos generator, siempre que se pueda obtener la perplexity o la token likelihood. Lo esencial es entrenar el dense encoder, no modificar el LM de caja negra.}
+
+\subsection{In-Context RALM: recuperación de candidatos con BM25 y ordenamiento fino con un learned reranker}
+
+La slide de In-Context RALM muestra un frozen RAG más sencillo: primero se usa BM25 para encontrar candidatos y se colocan los documentos en el context; después se entrena un reranker para que los documentos mejor clasificados aumenten más la probabilidad que el LM congelado asigna a los token objetivo. El stop-gradient impide que se actualicen los parámetros del LM, y el gradiente solo llega a la rank function.
+
+\lecturefigure{slide-20-in-context-ralm.jpg}{In-Context RALM con BM25 más un trained reranker}{Video de la clase de Stanford 00:26:48}
+
+\begin{knowledgebox}{Lectura de la figura: reparto de tareas entre recall y precision}
+BM25 amplía el conjunto de candidatos a bajo costo, y el reranker aplica sobre un conjunto más pequeño un cross-encoder o un task-aware score más costosos. Así se conserva el exact lexical recall y, al mismo tiempo, el orden final se acerca al generator objective; pero si BM25 no recupera un documento clave, el reranker no puede compensarlo.
+\end{knowledgebox}
+
+\subsection{El pipeline explícito de tres etapas Retrieve--Rerank--Generate}
+
+El último diagrama de arquitectura añade un reranker verde entre el retriever y el context. Este componente adicional permite controlar de forma independiente la recall depth, la reranking depth y el final context size, pero también introduce nuevos problemas de calibration y latency.
+
+\lecturefigure{slide-21-retrieve-rerank.jpg}{Arquitectura de tres etapas documents--retriever--reranker--generator}{Video de la clase de Stanford 00:28:39}
+
+\begin{importantbox}{No confundir los tres tamaños de conjunto}
+Sea $N$ el tamaño del corpus inicial; el retriever devuelve $k_r$ candidatos y el reranker conserva $k_c$ context chunks. Por lo general,
+\[
+N\gg k_r\ge k_c.
+\]
+Un $k_r$ demasiado pequeño perjudica el recall, y uno demasiado grande aumenta el reranking cost; un $k_c$ demasiado grande aumenta el costo del prompt y el riesgo de Lost-in-the-Middle, y uno demasiado pequeño puede dejar fuera evidencia.
+\end{importantbox}
+
+\begin{warningbox}{La puntuación del reranker sigue sin ser confiabilidad factual}
+El reranker mide la query/task relevance; no determina por sí mismo si la fuente es autorizada, si está desactualizada o si fue contaminada por prompt injection. Un production corpus requiere además source policy, metadata filters y control de acceso.
+\end{warningbox}
+
+\teachervoice{En clase se describe esta etapa como un avance «slowly progressing» hacia sistemas mejor adaptados a la tarea de generación: sin tocar todavía el generator, se introducen gradients en el retrieval pipeline mediante BM25, un dense retriever o un BERT reranker.}
+
+\subsection{Resumen de la sección}
+
+Tanto RePlug como in-context RALM aprenden el retrieval side con un generator congelado. El primero alinea el retriever con la likelihood distribution del LM; el segundo combina el recall de BM25 con un learned reranker. Ambos constituyen una capa intermedia importante entre el frozen RAG y el fully joint training.

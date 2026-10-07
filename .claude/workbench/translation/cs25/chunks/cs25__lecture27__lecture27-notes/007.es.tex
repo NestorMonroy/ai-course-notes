@@ -1,0 +1,87 @@
+\section{Transformación en cuatro pasos: reescribir de forma continua un Encoder-decoder como Decoder-only}
+
+La sección anterior presentó los diagramas estáticos de las arquitecturas; esta sección desarrolla la derivación central de Hyung Won. El punto de partida es un encoder-decoder estándar y el de llegada, un decoder-only; cada paso elimina una sola diferencia y actualiza la tabla comparativa. El valor didáctico de la derivación no está en recomendar una implementación concreta, sino en reformular la afirmación «las arquitecturas son distintas» como cuatro hipótesis que pueden probarse por separado.
+
+\subsection{Punto de partida: cuatro tipos de diferencias}
+
+Esta subsección fija primero las dimensiones de comparación: la cross-attention adicional, si los parámetros del encoder y del decoder están separados, en qué capa se conecta target-to-input y si la self-attention de la entrada es bidireccional. Cada paso posterior modifica solo uno de estos elementos, para no mezclar varios cambios en una misma ablation.
+
+\lecturefigure{hyung-slide-040.jpg}{Punto de partida de la transformación: comparación lado a lado de un encoder-decoder estándar y un decoder-only}{Hyung Won Chung official deck, p.~40}
+
+\begin{importantbox}{Cuatro hipótesis comprobables}
+\begin{enumerate}
+  \item ¿La entrada y el objetivo necesitan attention roles independientes?
+  \item ¿La entrada y el objetivo necesitan parámetros independientes?
+  \item ¿Cada capa del decoder solo puede leer la capa final del encoder?
+  \item ¿La entrada debe usar necesariamente bidirectional attention?
+\end{enumerate}
+Solo al separarlas puede saberse de qué elemento de la estructura proviene una diferencia de desempeño.
+\end{importantbox}
+
+\subsection{Paso uno: compartir los parámetros de cross-attention y self-attention}
+
+Tanto la cross-attention como la self-attention usan query, key, value y output projection; la diferencia principal es de dónde provienen los tensores de entrada. Por ello, el primer paso no elimina ninguna conexión, sino que hace que ambos roles compartan los parámetros de proyección, de modo que un solo attention module se encargue a la vez de la interacción dentro de la secuencia y entre secuencias.
+
+\lecturefigure{hyung-slide-041.jpg}{Paso uno: compartir los parámetros de cross-attention y self-attention}{Hyung Won Chung official deck, p.~41}
+
+Si originalmente se tienen $W_Q^{\mathrm{self}},W_K^{\mathrm{self}},W_V^{\mathrm{self}}$ y $W_Q^{\mathrm{cross}},W_K^{\mathrm{cross}},W_V^{\mathrm{cross}}$, compartir parámetros equivale a imponer la restricción
+\[
+W_{\bullet}^{\mathrm{self}}=W_{\bullet}^{\mathrm{cross}},
+\quad \bullet\in\{Q,K,V,O\}.
+\]
+Aquí $Q,K,V,O$ representan, respectivamente, query, key, value y output projection. Las fuentes de las conexiones pueden seguir siendo distintas, pero el modelo ya no puede conservar transformaciones lineales completamente independientes para los dos roles.
+
+\lecturefigure{hyung-slide-042.jpg}{Comparación tras el paso uno: la cross-attention independiente se convierte en una self-attention que cumple ambos roles}{Hyung Won Chung official deck, p.~42}
+
+\begin{knowledgebox}{Lectura de la figura: compartir parámetros no equivale a compartir entradas}
+Lo que cambia en la tabla es la module identity, no la visibilidad. El decoder todavía puede aplicar masks distintas a su propio historial y a las representaciones del encoder; lo único que coincide son las matrices de proyección. Si en un experimento se cambian a la vez la mask y los parámetros, es difícil determinar si la mejora proviene de compartir representaciones o del patrón de conexión.
+\end{knowledgebox}
+
+\subsection{Paso dos: compartir los parámetros del encoder y del decoder}
+
+El primer paso unifica los attention roles; el segundo unifica los dos stacks. Si tanto la entrada como el objetivo son simplemente token sequences, usar parámetros completamente independientes equivale a suponer que ambos tipos de secuencia requieren espacios de representación distintos. Compartir parámetros, en cambio, exige que un mismo conjunto de layers procese ambas, y deja que el contexto y la mask expresen la diferencia. Por eso esta subsección no solo compara el número de parámetros, sino también dos decisiones de modelado: si la diferencia de roles debe escribirse en los pesos o expresarse dinámicamente según la secuencia.
+
+\lecturefigure{hyung-slide-044.jpg}{Paso dos: compartir los parámetros de las layers del encoder y del decoder}{Hyung Won Chung official deck, p.~44}
+
+\lecturefigure{hyung-slide-045.jpg}{Comparación tras el paso dos: los separate parameters se convierten en shared parameters}{Hyung Won Chung official deck, p.~45}
+
+\begin{warningbox}{Compartir parámetros es una suposición a priori más débil sobre la tarea, y también puede causar interferencia}
+Compartir reduce los parámetros y favorece la reutilización de conocimiento entre idiomas y entre roles, pero cuando las distribuciones de la entrada y del objetivo difieren mucho, también puede generar competencia por la capacidad. La pregunta correcta no es si «compartir siempre es más avanzado», sino si la tarea actual todavía requiere especialización y si el beneficio de esa especialización se mantiene al aumentar la capacidad total.
+\end{warningbox}
+
+\teachervoice{La explicación de 00:55:17--00:55:41 es muy directa: un decoder-only tiene un solo stack, así que comparte parámetros de forma natural. Hyung Won usa este contraste para cuestionar si la separación del encoder-decoder sigue siendo necesaria, no para afirmar que compartir no tenga costo.}
+
+\subsection{Paso tres: alinear las representaciones de la misma capa del decoder y del encoder}
+
+La cross-attention estándar suele hacer que cada decoder layer lea la capa final del encoder. En cambio, la self-attention de misma capa del decoder-only hace que la capa $\ell$ lea las representaciones de los tokens del prefijo en esa misma capa. El tercer paso cambia la conexión a una layer-aligned, de modo que la granularidad de las representaciones se acerque a la de un solo stack.
+
+\lecturefigure{hyung-slide-047.jpg}{Paso tres: decoder layer $\ell$ attends to encoder layer $\ell$}{Hyung Won Chung official deck, p.~47}
+
+\lecturefigure{hyung-slide-048.jpg}{Comparación tras el paso tres: la final-layer cross-attention se convierte en una conexión entre capas del mismo nivel}{Hyung Won Chung official deck, p.~48}
+
+\begin{knowledgebox}{Lectura de la figura: por qué el layer index puede representar la granularity}
+Las redes profundas suelen presentar representaciones jerárquicas: las capas inferiores tienden a capturar la forma local y las superiores, la semántica abstracta. Si la primera capa del decoder solo puede leer la capa final del encoder, tiene que recuperar información de bajo nivel a partir de una representación muy abstracta; la conexión entre capas del mismo nivel permite que cada etapa lea entradas de granularidad similar. Esta explicación es una intuición de diseño; si realmente se forma un cuello de botella aún debe comprobarse con ablations a distintas profundidades.
+\end{knowledgebox}
+
+\subsection{Paso cuatro: cambiar la self-attention del encoder a causal}
+
+Los tres primeros pasos ya unificaron el module, los parámetros y las conexiones entre capas; la principal diferencia restante es si la secuencia de entrada tiene visibilidad bidireccional interna. Al cambiar la mask del encoder a causal, los tokens anteriores ya no leen los posteriores; si se concatenan la entrada y el objetivo, el grafo de cómputo de los dos stacks se aproxima al de un único stack decoder-only.
+
+\lecturefigure{hyung-slide-050.jpg}{Paso cuatro: cambiar la bidirectional self-attention del encoder a causal}{Hyung Won Chung official deck, p.~50}
+
+\lecturefigure{hyung-slide-051.jpg}{Tabla de diferencias tras completar los cuatro pasos: entre ambas arquitecturas solo quedan pequeñas diferencias de implementación}{Hyung Won Chung official deck, p.~51}
+
+\begin{lstlisting}[caption={Pseudocódigo conceptual de la architecture transformation en cuatro pasos}]
+model = encoder_decoder()
+share(model.cross_attention, model.self_attention)
+share(model.encoder_layers, model.decoder_layers)
+connect_decoder_layer_to_matching_encoder_layer(model)
+set_encoder_mask(model, mode="causal")
+concatenate_input_and_target(model)
+\end{lstlisting}
+
+\teachervoice{En 00:56:45--00:57:09, Hyung Won sostiene que, tras completar los cuatro pasos, la diferencia entre ambas arquitecturas con la misma tarea y los mismos datos podría ser menor que el ruido de repetir el entrenamiento. Se trata de un juicio empírico, no de un teorema formal presentado en el curso; una verificación real aún requiere controlar el número de parámetros, la inicialización, el presupuesto de entrenamiento y el orden de los datos.}
+
+\subsection{Resumen de la sección}
+
+La transformación en cuatro pasos reduce las etiquetas de arquitectura a cuatro hipótesis locales: attention role, separación de parámetros, conexiones entre capas y direccionalidad de la entrada. Todas pueden probarse por separado, y el valor de cada una puede cambiar con la escala. La siguiente sección explicará, una por una, por qué estas estructuras eran razonables en la traducción automática y en las primeras tareas, y por qué deben reconsiderarse en los modelos de lenguaje de propósito general, el diálogo de varios turnos y las redes más profundas.

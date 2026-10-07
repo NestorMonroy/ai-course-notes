@@ -1,0 +1,89 @@
+\section{Warm start explícito de softmax: de la matriz de coocurrencias a los parámetros}
+
+Esta sección es el núcleo matemático de la clase. El objetivo no es afirmar que toda neural network tiene una solución exacta en forma cerrada, sino mostrar que, para non-negative features y una single layer con activación softmax, se puede obtener un buen valor inicial aproximado a partir de los outer products de entrada y salida; después, esa idea se extiende a varios componentes de SAFFU.
+
+\subsection{La generalized co-occurrence no se limita a conteos en ventanas de palabras}
+
+Sea $H\in\mathbb{R}_{\ge 0}^{M\times D}$ la feature matrix de entrada de $M$ muestras, y sea el objetivo una distribución one-hot o de probabilidad $Y\in\mathbb{R}_{\ge 0}^{M\times N}$. La coocurrencia generalizada se define como
+\[
+F(H,Y)=\sum_{m=1}^{M}H_{m,:}\otimes Y_{m,:}=H^\top Y,
+\]
+donde $F_{j,i}$ acumula la intensidad con la que la $j$-ésima feature de entrada y el $i$-ésimo target de salida aparecen juntos. Puede provenir del token context, de los píxeles de una imagen, de las salidas de una capa oculta o de cualquier otra feature no negativa; no tiene que ser una tabla de frecuencias de palabras con una ventana de radio tradicional.
+
+\lecturefigure{slide-07-softmax-cooccurrences.jpg}{Softmax y generalized co-occurrence: fórmula de inicialización explícita}{Grabación oficial de Stanford Online 00:19:13}
+
+Para un softmax decoder $U\in\mathbb{R}^{D\times N}$, la forma aproximada que presenta la slide puede escribirse como
+\[
+U_{j,i}\approx \log\!\bigl(F(H,Y)_{j,i}+\epsilon\bigr)
+-\frac{K-1}{K}\log\!\left(\sum_{d=1}^{D}F(H,Y)_{d,i}+\epsilon\right),
+\]
+donde $K$ es el priming number y $\epsilon>0$ evita tomar numéricamente el logarithm de cero. El primer término conserva la asociación feature--target; el segundo normaliza por columna de salida los target de alta frecuencia.
+
+\begin{importantbox}{Intuición de la fórmula: el log invierte aproximadamente el softmax}
+El softmax usa exponentials para convertir los logits en probabilidades; la solución explícita toma el log de la intensidad de coocurrencia, lo que equivale a regresar de la escala de probabilidad a la escala de logit. La column translation no cambia la estructura relativa del softmax dentro de una misma columna de salida, pero sí compensa la frecuencia global de los distintos target.
+\end{importantbox}
+
+\begin{warningbox}{Esta no es la solución óptima exacta para cualquier layer}
+Los supuestos principales son: features no negativas, activation softmax, estadísticos que puedan estimarse de forma estable y una norm de entrada que pueda describirse con $K$. La composition de varias capas, ReLU/GELU, las negative features y los attention hidden targets requieren derivaciones adicionales.
+\end{warningbox}
+
+\teachervoice{00:15:55--00:18:09: el ponente subraya que aquí la co-occurrence es la outer-product sum de inputs y outputs arbitrarios, no limitada a las ventanas tradicionales de NLP; el término relacionado con $K$ expresa de forma aproximada la corrección que el número de context/feature introduce en la probabilidad condicional.}
+
+\subsection{Priming number: aproximación del número de features y de la norm}
+
+Si cada vector de entrada tiene exactamente $K$-norm, es decir, $\|H_{m,:}\|_1=K$, $K$ puede entrar directamente en la normalización. En la práctica, las features continuas rara vez cumplen una norm uniforme; la clase y el artículo usan el promedio
+\[
+\widehat K=\frac{1}{M}\sum_{m=1}^{M}\|H_{m,:}\|_1
+\]
+como aproximación. Esta estimación muestra que la solución explícita sigue necesitando una data-dependent calibration; no es una inicialización universal totalmente libre de hiperparámetros.
+
+\begin{knowledgebox}{Cómo verificar la aproximación del priming number}
+Como mínimo, hay que reportar la distribución de $\|H_m\|_1$, su media y varianza, la proporción de valores cero, el lugar donde se añade $\epsilon$ y la sensibilidad de la validation loss a distintos valores de $K$. Con un solo promedio no es posible saber si una heavy-tail o los outlier rompen la aproximación.
+\end{knowledgebox}
+
+\teachervoice{00:31:20--00:32:15: Williams explica que el priming number para features no unitarias puede estimarse con la norm promedio de la entrada, y reconoce que a la slide le falta la figura correspondiente; la evidencia completa debe verificarse en el artículo.}
+
+\subsection{De una sola capa a SAFFU: la dificultad está en los hidden targets}
+
+En el feed-forward decoder, la entrada $H$ y el target $Y$ están definidos explícitamente, así que $F(H,Y)$ se puede calcular directamente. La attention, en cambio, no tiene etiquetas explícitas que le indiquen al modelo «a qué posición debe prestar atención». La extensión que propone el equipo consiste en derivar primero un hidden target: hacer que la representación que produce la attention se acerque lo más posible a la entrada que espera la capa superior $U$, y luego inicializar capa por capa, de abajo hacia arriba.
+
+Si se simplifica la notación como
+\[
+X\xrightarrow{W} A\xrightarrow{} Z=AX
+\xrightarrow{U} H\xrightarrow{O}\hat Y,
+\]
+el orden del warm start es: estabilizar $X$; estimar los attention targets a partir de lo que requiere la capa superior e inicializar $W$; inicializar $U$ con $Z$ y los label embeddings; por último, inicializar $O$ con $H$ y el $Y$ real.
+
+\begin{warningbox}{Un local fit no equivale a un compositional optimum}
+La inicialización explícita capa por capa solo aprovecha inputs/targets locales. La backpropagation, mediante la chain rule, propaga los efectos de orden superior de la tarea final sobre todas las capas; por eso, después del warm start todavía puede hacer falta optimización iterativa. Lo que sostiene la clase es «un mejor punto de partida», no que «la composition se haya resuelto en forma cerrada».
+\end{warningbox}
+
+\teachervoice{00:18:13--00:20:57: el ponente define la dificultad de la attention como la ausencia de un target vector directo; el equipo construye los hidden targets analizando lo que esperan las capas superiores y, con ayuda de los bit-cipher label embeddings, reduce los objetivos intermedios a una dimensión manejable.}
+
+\subsection{Procedimiento ejecutable: acumular estadísticos a partir de parámetros en cero}
+
+La slide 8 condensa la teoría en un warm-start procedure. En términos de ingeniería, lo más importante no es que la fórmula parezca «closed form», sino que solo requiere una forward-style accumulation: recorrer los datos, acumular outer products y luego aplicar la normalización y la log transform.
+
+\lecturefigure{slide-08-nonrandom-feedforward-init.jpg}{Pasos de cálculo de la non-random feed-forward initialization}{Grabación oficial de Stanford Online 00:21:16}
+
+\begin{lstlisting}[caption={Pseudocódigo shape-first del warm start explícito de una softmax layer}]
+F = zeros(feature_dim, target_dim)
+for features, targets in dataset:
+    assert all(features >= 0) and all(targets >= 0)
+    F += features.T @ targets
+
+K_hat = mean_l1_norm(dataset.features)
+column_mass = F.sum(axis=0, keepdims=True)
+weights = log(F + eps) - ((K_hat - 1) / K_hat) * log(column_mass + eps)
+return weights
+\end{lstlisting}
+
+\begin{knowledgebox}{Por qué es fácil de paralelizar}
+Cada worker puede acumular de forma independiente su $F_r=H_r^\top Y_r$ local y, al final, se suma $F=\sum_rF_r$. Esto se parece a la agregación de sufficient statistics y no exige sincronizar la gradient trajectory completa después de cada mini-batch. Aun así, la memoria, el rango numérico y el almacenamiento disperso requieren diseño de ingeniería.
+\end{knowledgebox}
+
+\teachervoice{00:21:15--00:22:43: Williams recurre a «todos los parámetros parten de zero» para subrayar que el método no es aleatorio: se recorren los datos acumulando los outer products de entrada y salida, y después la normalization y el logarithm dan el valor inicial.}
+
+\subsection{Resumen de la sección}
+
+La conclusión reproducible más sólida del warm start explícito es la siguiente: bajo las condiciones específicas de softmax y features no negativas, se puede calcular una data-informed initialization mediante la generalized log-co-occurrence. Extenderla a SAFFU requiere hidden targets y composition capa por capa; la fórmula de una sola capa no puede generalizarse sin condiciones a todos los módulos de un Transformer moderno.

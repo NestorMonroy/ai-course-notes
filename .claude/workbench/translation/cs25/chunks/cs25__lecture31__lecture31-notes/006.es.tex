@@ -1,0 +1,113 @@
+\section{CogVLM, CogAgent y GLM-4V: separar las rutas de parámetros o comprimir la entrada}
+
+Esta sección analiza en conjunto los modelos de comprensión visual que presentó el equipo del ponente. Lo importante no es comparar nombres de modelos, sino observar tres cuellos de botella: si la image alignment sobrescribe la capacidad lingüística, cómo controla una high-resolution screenshot el token cost y si los benchmarks de OCR/grounding pueden representar a un GUI agent real.
+
+\subsection{CogVLM: los vision experts evitan sobrescribir el language path}
+
+La motivación de CogVLM es la siguiente: si todos los image-text alignment gradients actualizan los LLM parameters originales, el comportamiento lingüístico básico puede quedar sobrescrito. El modelo agrega experts independientes de attention/MLP para los tokens visuales y conserva la ruta original de los text tokens. Puede abstraerse como
+\[
+h'_{i}=h_i+\begin{cases}
+F_{\text{vision}}(h_i), & i\in\mathcal{I}_{\text{image}},\\
+F_{\text{text}}(h_i), & i\in\mathcal{I}_{\text{text}}.
+\end{cases}
+\]
+
+\lecturefigure{slide-15-cogvlm-architecture.jpg}{CogVLM: los vision experts separan las rutas de parámetros visuales y lingüísticos}{Grabación oficial de Stanford Online 00:38:44}
+
+\begin{importantbox}{Cómo debe verificarse que se «conserva el comportamiento lingüístico»}
+Conservar el text expert en la estructura solo aporta una hipótesis sobre el mecanismo. Una verificación real exige comparar, antes y después del multimodal tuning, la language-only perplexity, el instruction following, el reasoning, la safety y las domain tasks; no se puede afirmar que no hay olvido solo porque los parámetros no se comparten por completo.
+\end{importantbox}
+
+\teachervoice{00:37:25--00:39:27, el ponente formula explícitamente el objetivo de diseño de CogVLM como keep all language behavior. Las notas conservan ese objetivo, pero no lo elevan a una conclusión que no ha pasado por pruebas completas de regresión lingüística.}
+
+\subsection{Página de resultados de CogVLM: ante el gráfico de radar, primero el protocol y después el área}
+
+La slide de resultados resume image captioning, grounding, VQA y VLM benchmarks generales, y ofrece los enlaces de código abierto. Al leer la figura, conviene confirmar primero la metric, el model size, la input resolution, el prompting y el test split de cada eje, y luego comparar cada rubro, en lugar de comparar solo el área que cubre el gráfico de radar.
+
+\lecturefigure{slide-16-cogvlm-benchmarks.jpg}{Resumen de benchmarks de CogVLM al momento de la clase e información de código abierto}{Grabación oficial de Stanford Online 00:39:27}
+
+\begin{warningbox}{Una benchmark table no equivale a production robustness}
+VQA accuracy, caption score, grounding IoU y LLaVA-Bench miden problemas distintos; de ellos no se deducen directamente la GUI reliability, la cola larga del OCR, la tasa de alucinaciones, la adversarial robustness ni la tasa de éxito en tareas reales de usuarios. El número de descargas también indica solo adoption, no correctness.
+\end{warningbox}
+
+\subsection{CogAgent: por qué es necesaria una rama auxiliar de alta resolución}
+
+Una screenshot de una página web contiene mucho texto pequeño, icons y relaciones de coordenadas. Si la resolución aumenta $s$ veces y el patch size no cambia, el número de tokens bidimensionales crece aproximadamente $s^2$ veces; el full attention cost puede acercarse incluso a $s^4$ veces. CogAgent usa una cross-attention high-resolution branch para que las características de alta resolución no tengan que expandirse todas al LLM hidden width.
+
+\lecturefigure{slide-17-cogagent-architecture.jpg}{CogAgent: se agrega una high-resolution cross-attention branch para GUI/OCR}{Grabación oficial de Stanford Online 00:40:13}
+
+Si los language tokens de baja resolución son $H_l\in\mathbb{R}^{n\times d}$ y las features de alta resolución son $H_h\in\mathbb{R}^{m\times d_h}$, la rama auxiliar puede escribirse como
+\[
+\widetilde H_l=H_l+\operatorname{CrossAttn}(H_lW_Q,H_hW_K,H_hW_V),
+\]
+cuyo objetivo es que las $m$ features de grano fino se consulten, en lugar de que todas se conviertan en LLM sequence tokens equivalentes.
+
+\teachervoice{01:15:00--01:16:15, en la sesión de Q\&A el ponente distingue directamente CogAgent de CogVLM: el primero se obtiene del segundo mediante fine-tune/extensión, está orientado específicamente a la high-resolution web screen y usa una cross-attention más ligera para controlar el costo.}
+
+\subsection{Web trace: el modelo produce una grounded action, no la frase «sabe usar el navegador»}
+
+La tarea de ejemplo pide buscar el best paper de CVPR 2023. La slide muestra una trace de varios pasos: comprender la screenshot, ubicar el cuadro de búsqueda, escribir la query, leer los resultados y seguir haciendo clic. Una action suele requerir un type y coordinates/text, por ejemplo
+\[
+a_t=(\text{action\_type},x_t,y_t,\text{text}_t),
+\qquad
+p(a_t\mid I_t,g,h_{<t}).
+\]
+
+\lecturefigure{slide-18-cogagent-web-demo.jpg}{CogAgent web navigation: de la screenshot a la action sequence}{Grabación oficial de Stanford Online 00:41:19}
+
+\begin{lstlisting}[caption={Action schema mínimo con capacidad de auditoría para un GUI agent}]
+observation = capture_screenshot()
+action = model.predict(goal, observation, history)
+validate(action.type, action.coordinates, action.text)
+execute_in_sandbox(action)
+record(observation, action, result, failure_reason)
+stop_only_when(goal_is_verified)
+\end{lstlisting}
+
+\begin{warningbox}{Una sola trace exitosa no estima la confiabilidad}
+Un GUI agent real también requiere medir repeated trials, layout shift, small-text OCR, unexpected popups, permission boundary, irreversible actions y recovery. La demo de la clase demuestra que la interfaz es viable, no que la autonomous browsing ya sea robusta.
+\end{warningbox}
+
+\subsection{Vary: ampliar el vision vocabulary al servicio del OCR}
+
+Vary combina distintas features visuales en un vision vocabulary más rico, con el objetivo de compensar las carencias de las CLIP features generales ante los detalles de document/OCR. Puede abstraerse como
+\[
+Z=\operatorname{Project}\!\left([f_{\text{general}}(I);f_{\text{ocr}}(I)]\right),
+\]
+donde los dos encoders tienen inductive biases distintos y, tras combinarse, se conectan al LLM.
+
+\lecturefigure{slide-19-vary.jpg}{Vary: ensemble de vision features para ampliar el vocabulario visual}{Grabación oficial de Stanford Online 00:41:46}
+
+\begin{knowledgebox}{El vision vocabulary no es un vocabulario discreto de palabras}
+Aquí, vocabulary se refiere a los patrones de features visuales que pueden expresarse: layout, small text, objects, regions y estructura del documento. Agregar un encoder especializado puede mejorar el OCR, pero también aumenta los costos de entrenamiento, despliegue, feature alignment y mantenimiento.
+\end{knowledgebox}
+
+\subsection{GLM-4V: stride convolution simple y mixed training}
+
+La estructura de GLM-4V que se mostró en clase vuelve a un LLaVA-style path más sencillo y solo sustituye el projector por una stride convolution para comprimir el feature map de alta resolución. Si el feature map de entrada es de $H\times W$ y el stride es $s$, el número de tokens baja aproximadamente de $HW$ a
+\[
+n_v\approx \frac{H}{s}\frac{W}{s}.
+\]
+Después, los datos de text/image se someten a mixed training para reducir el daño que el entrenamiento multimodal causa al language behavior.
+
+\lecturefigure{slide-20-glm4v-architecture.jpg}{GLM-4V tal como se mostró en clase: stride convolution y text-image mixed training}{Grabación oficial de Stanford Online 00:42:34}
+
+\teachervoice{00:41:46--00:43:00, el ponente señala deliberadamente que el modelo más reciente usa, de hecho, una architecture más simple. Este ejemplo respalda su data thesis: un bridge más complejo no produce automáticamente un sistema final más fuerte.}
+
+\subsection{Tabla de resultados de GLM-4V: cada columna responde una pregunta distinta}
+
+En la tabla aparecen a la vez MMBench, MME, MMMU, MathVista, MMVet, DocVQA, OCRBench, entre otros. Cubren capacidades distintas, como general perception, knowledge/reasoning, math/diagram y document OCR, por lo que no se puede calcular una «puntuación total» sin definición.
+
+\lecturefigure{slide-21-glm4v-results.jpg}{Tabla de resultados de GLM-4V en varios benchmarks al momento de la clase}{Grabación oficial de Stanford Online 00:43:00}
+
+\begin{knowledgebox}{Orden para leer una tabla de benchmarks multimodales}
+Primero confirma el model/version y la resolución de entrada; después confirma zero-shot/few-shot, el prompt, el test split y la metric; luego compara por familia de tareas, en lugar de promediar directamente entre columnas. Si un modelo es fuerte en OCR pero débil en MMMU, la conclusión es que su distribución de capacidades es distinta, no simplemente «cuál es más inteligente».
+\end{knowledgebox}
+
+\begin{warningbox}{El GLM-4V de la clase no debe mezclarse con versiones posteriores}
+Esta slide es anterior a los technical reports estables posteriores. Las notas solo registran la architecture y la table mostradas en ese momento, y no usan las capacidades de los GLM-4V/GLM-4.1V posteriores para demostrar retroactivamente las de la versión de 2024.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+CogVLM usa experts para separar las rutas de parámetros, CogAgent usa high-resolution cross attention para controlar el costo de GUI/OCR, Vary amplía las features visuales y GLM-4V usa stride convolution para comprimir la entrada. Todos responden la misma pregunta: cómo llevar los detalles visuales al LLM y, al mismo tiempo, controlar el olvido, el número de tokens y el costo del sistema.

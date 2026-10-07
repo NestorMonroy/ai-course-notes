@@ -1,0 +1,97 @@
+\section{Mecanismo de Sparse MoE: cómo el router selecciona y combina los experts}
+
+La sección anterior confirmó que el objeto que se reemplaza es el MLP; en esta sección se aborda el mecanismo de SMoE propiamente dicho. Lo esencial no es copiar ocho veces la red, sino establecer un token-to-expert routing: el router produce un score para cada token, selecciona los top-$k$, normaliza los scores seleccionados y después suma ponderadamente las salidas de varios experts. Todo el proceso debe ser diferenciable, paralelizable y balanceable.
+
+\subsection{MoE no es un concepto nuevo: de la sparsely-gated layer al Switch Transformer}
+
+El curso presenta primero la trayectoria de la literatura y advierte al lector que no confunda el éxito de Mixtral con la primera aparición del concepto de MoE. En 2017, el MoE con compuertas dispersas ya usaba una gating network para seleccionar subredes; el Switch Transformer avanzó en la discusión de data/model/expert parallelism y del entrenamiento disperso a gran escala. Mixtral, por su parte, lleva estas ideas a un modelo decoder-only de alta calidad con pesos abiertos y aporta routing evidence que puede analizarse.
+
+\lecturefigure{slide-05-moe-history.jpg}{Referencias históricas de Mixture of Experts: compuertas dispersas y Switch Transformer}{Video oficial de Stanford Online 00:07:49}
+
+\lecturefigure{slide-06-moe-layer-references.jpg}{Fuentes bibliográficas directas de la Sparse MoE layer}{Video oficial de Stanford Online 00:08:02}
+
+\begin{knowledgebox}{Términos clave: parallelism no es solo «varias GPU»}
+\begin{tabularx}{\textwidth}{L{0.19\textwidth} L{0.27\textwidth} X}
+\toprule
+Modalidad & Objeto que se divide & Comunicación principal \\
+\midrule
+Data parallelism & Distintos shards del lote; el modelo se replica & gradient all-reduce \\
+Tensor/model parallelism & Matrices de una sola capa o la hidden dimension & all-reduce / all-gather \\
+Expert parallelism & Distintos experts colocados en distintos ranks & token all-to-all dispatch / combine \\
+Pipeline parallelism & Distintas capas colocadas en distintos stages & activation send/receive \\
+\bottomrule
+\end{tabularx}
+Las collectives son primitivas de comunicación colectiva entre varias GPU, por ejemplo all-reduce, all-gather, reduce-scatter y all-to-all. La comunicación más representativa de MoE es all-to-all: cada GPU envía los tokens a la GPU que aloja el expert de destino y, tras el cálculo, devuelve los resultados.
+\end{knowledgebox}
+
+\teachervoice{00:07:01--00:08:24, Albert repite que MoE es «not new». Recomienda en especial la discusión sobre parallelism del Switch Transformer y sitúa a Mixtral dentro de la genealogía continua de la sparsely-gated layer de 2017.}
+
+\subsection{Top-two routing: de los logits a la weighted expert output}
+
+Para una token representation $x\in\mathbb{R}^{d}$, el router usa la matriz $W_r\in\mathbb{R}^{E\times d}$ para producir $E$ expert logits:
+\[
+z=W_rx.
+\]
+Sea $S_k(x)$ el conjunto de los $k$ expert index con los valores más altos de $z$; Mixtral usa $E=8,k=2$. La normalización se hace solo sobre el conjunto seleccionado:
+\[
+g_i(x)=
+\begin{cases}
+\dfrac{\exp(z_i)}{\sum_{j\in S_k(x)}\exp(z_j)}, & i\in S_k(x),\\[0.8em]
+0, & \text{otherwise}.
+\end{cases}
+\]
+La salida final del MLP de MoE es
+\[
+y=\sum_{i=1}^{E}g_i(x)\,\operatorname{Expert}_i(x).
+\]
+Estos tres pasos responden, respectivamente, a «puntuar», «seleccionar» y «combinar». Sparse significa que solo se ejecutan $k$ experts, no que los pesos restantes desaparezcan del modelo.
+
+\lecturefigure{slide-07-moe-layer-diagram.jpg}{El router selecciona experts para cada token y combina sus salidas}{Video oficial de Stanford Online 00:08:19}
+
+\begin{importantbox}{Semántica algorítmica del top-$k$ routing}
+Cada token se enruta de forma independiente; tokens adyacentes de una misma secuencia pueden seleccionar experts distintos; un mismo expert recibe simultáneamente tokens provenientes de muchas secuencias. La implementación debe reordenar los tokens por expert, hacer el dispatch entre GPU, ejecutar por lotes los expert MLP y después aplicar un inverse-permute para restaurar el orden original.
+\end{importantbox}
+
+\begin{lstlisting}[caption={Pseudocódigo mínimo del top-two token routing}]
+router_logits = hidden @ router_weight.T
+expert_ids = topk(router_logits, k=2)
+gates = softmax(gather(router_logits, expert_ids), dim=-1)
+expert_inputs = dispatch_by_expert(hidden, expert_ids)
+expert_outputs = run_selected_experts(expert_inputs)
+output = combine_and_restore_order(expert_outputs, gates)
+\end{lstlisting}
+
+\teachervoice{00:08:24--00:09:18, el ponente lo desglosa oralmente en el mismo orden: el input entra primero al router, el router selecciona los top two y asigna gating weights, cada expert procesa de forma independiente y luego se hace la suma ponderada con esos weights.}
+
+\subsection{Página de fórmulas y tabla de parámetros: cómo leer \texorpdfstring{$E=8$, $k=2$}{E=8, k=2} y las shared parts}
+
+La página de fórmulas reúne en una misma slide el mecanismo y la configuración del modelo. Al leer la tabla hay que distinguir \texttt{num\_experts=8} de \texttt{top\_k\_experts=2}: el primero determina la capacidad disponible en cada capa; el segundo, la ruta activa de un token. Attention, embedding, router y residual structure son shared parameters y no se multiplican simplemente por ocho según el número de experts.
+
+\lecturefigure{slide-08-moe-equation-table.jpg}{Fórmula del top-two routing de Mixtral y tabla de parámetros del modelo}{Video oficial de Stanford Online 00:09:27}
+
+Si se denota con $P_s$ el shared parameter de cada capa, con $P_e$ los parámetros de un solo expert MLP y con $N$ el número de capas, los parámetros totales y activos aproximados son
+\begin{align*}
+P_{\text{total}} &\approx P_{\text{embed}}+N(P_s+E P_e),\\
+P_{\text{active}} &\approx P_{\text{embed}}+N(P_s+k P_e).
+\end{align*}
+Por lo tanto, el $8\times 7\mathrm{B}$ del nombre del modelo no es ni el total exacto de parámetros ni los parámetros activados por token; las shared parts hacen que la simple multiplicación no sea exacta.
+
+\begin{warningbox}{Lo «disperso» ocurre en la ruta de ejecución, no en la existencia en almacenamiento}
+Los experts no seleccionados no se ejecutan para el token actual, pero siguen formando parte del checkpoint y, por lo general, deben permanecer residentes en la HBM de la GPU, la DRAM de la CPU u otro nivel de memoria. La resident memory la determinan los total parameters; los MLP FLOPs por token se acercan más a lo que determinan los active parameters.
+\end{warningbox}
+
+\subsection{Mixtral 8x7B: la convergencia formal de capacidad y ruta activa}
+
+Ahora puede leerse la slide completa del modelo. Mixtral hereda el attention block de Mistral 7B, cada capa tiene ocho SwiGLU experts y cada token selecciona dos. Las cifras release-time que da el curso son de aproximadamente 46.7B total parameters y 12.9B active parameters; corresponden, respectivamente, a la capacidad y residencia en memoria y a la ruta de ejecución por token, y no son intercambiables.
+
+\lecturefigure{slide-09-mixtral-8x7b.jpg}{Estructura del modelo Mixtral 8x7B, tabla de parámetros y resumen de capacidades al momento del lanzamiento}{Video oficial de Stanford Online 00:10:26}
+
+\begin{importantbox}{Una descripción precisa de Mixtral}
+Mixtral 8x7B es un SMoE decoder-only con «attention y router compartidos, ocho expert MLP por capa y activación top-two por token». No es una votación entre ocho modelos 7B independientes, ni un dense model que solo ocupe memoria para 13B de pesos.
+\end{importantbox}
+
+\teachervoice{00:09:38--00:10:17, Albert usa la active path para explicar la cost-performance frontier y enumera además las características de entonces: soporte multilingüe, 32K context, Apache 2.0 y los benchmark claim. Estas notas las conservan como evidencia release-time de 2024, no como especificaciones actuales del producto.}
+
+\subsection{Resumen de la sección}
+
+La estructura matemática de Sparse MoE es breve: router logits, top-$k$ mask, selected softmax y expert weighted sum; lo verdaderamente difícil es llevar este algoritmo a nivel de token a varias GPU y mantener el balance de carga. La descomposición entre parámetros totales y activos es la base común de todas las discusiones posteriores sobre myth, rendimiento y despliegue.

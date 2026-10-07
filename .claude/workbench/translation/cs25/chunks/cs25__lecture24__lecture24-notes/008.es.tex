@@ -1,0 +1,82 @@
+\section{Multi-Agent Systems: el paralelismo no vuelve al sistema automáticamente más inteligente}
+
+La clase pasa de un solo agent a múltiples agents; las motivaciones principales son la parallel execution, la task decomposition y la specialization. Este cambio se parece al paso de un solo hilo a múltiples hilos: puede reducir la wall-clock latency y ampliar la escala de procesamiento, pero también introduce problemas de comunicación, sincronización, estado compartido y acumulación de errores.
+
+\subsection{De un solo Agent a un Autonomous AI System}
+
+La slide de Multi-Agent System usa un agent de nivel superior y varios agents de nivel inferior para representar la asignación de tareas. La figura es sencilla, pero contiene decisiones de arquitectura fundamentales: quién posee el objetivo global, quién puede crear subtareas, si los workers comparten memory, quién verifica los resultados y si, ante una falla, se reintenta localmente o se replanifica de forma global. Esta sección primero hace explícitas estas decisiones implícitas y después analiza qué ahorra realmente la paralelización.
+
+\lecturefigure{slide-55-multi-agent-system.jpg}{Multi-Agent System formado por un manager y varios workers}{Video de la clase de Stanford 00:43:00}
+
+\begin{knowledgebox}{Lectura de la figura: la estructura de árbol implica un plano de control y un plano de ejecución}
+El manager pertenece al control plane y se encarga de la decomposition, el routing, el budget y la aggregation; los workers pertenecen al execution plane y llaman a sus propias herramientas para completar bounded tasks. Si cada worker puede crear nuevos workers sin límite, el sistema pierde su tope de recursos y sus límites de responsabilidad.
+\end{knowledgebox}
+
+\teachervoice{El ponente dice que, aunque un solo agent alcance una tasa de éxito muy alta, solo puede hacer una cosa a la vez, de forma secuencial; el beneficio directo de múltiples agents es, ante todo, la parallelization, no un aumento de la calidad del razonamiento surgido de la nada.}
+
+\subsection{Por qué Multi-Agent: paralelismo, escala y especialización}
+
+La slide Why Multi-Agent enumera parallelization unlock, task specialization, collaboration y agent-to-agent communication. Con el ejemplo de una búsqueda de muebles en Craigslist, varios workers pueden contactar candidatos en paralelo y luego el manager agrega los resultados; otro ejemplo es que un agent de spreadsheet, uno de Slack y uno de browser se encargan cada uno del dominio de herramientas que conocen.
+
+\lecturefigure{slide-56-why-multi-agent.jpg}{Motivaciones de Multi-Agent: paralelización, especialización y colaboración}{Video de la clase de Stanford 00:45:39}
+
+\begin{importantbox}{Beneficio del paralelismo y costo en confiabilidad}
+Si $n$ subtareas independientes tardan $\sum_i T_i$ en serie, el tiempo ideal en paralelo se aproxima a
+\[
+T_{parallel}\approx \max_i T_i+T_{route}+T_{sync}+T_{aggregate}.
+\]
+Cuando el costo de comunicación y agregación es demasiado alto, el paralelismo no necesariamente es más rápido. Si la tarea exige que los $n$ resultados sean correctos y la tasa de éxito de cada uno es $p$, bajo la aproximación de independencia la tasa de éxito de extremo a extremo es $p^n$; cuantas más subtareas haya, más importantes son la verificación y el reintento local.
+\end{importantbox}
+
+\begin{warningbox}{La Specialization también genera deuda de interfaces}
+Los agents especializados pueden reducir la complejidad del prompt y de las herramientas, pero el manager debe conocer las capacidades, el schema de entrada, los permisos y los modos de falla de cada worker. Un «chat grupal de expertos» sin un contract claro tiende a producir trabajo duplicado, desplazamiento de responsabilidades y confianza mutua en resultados erróneos.
+\end{warningbox}
+
+\subsection{Communication Protocol: los mensajes deben llevar el estado}
+
+La slide de Communication overview muestra al user, al manager y a los worker agents. La clase llama a la communication el mayor desafío y plantea un protocol estándar que exprese request, final response, success/failure, retry y security. El valor del protocolo no es solo unificar el formato, sino lograr que el estado de la tarea sea legible por máquina y susceptible de auditoría.
+
+\lecturefigure{slide-57-agent-communication-overview.jpg}{Estructura de comunicación entre user, manager y workers}{Video de la clase de Stanford 00:47:30}
+
+\begin{knowledgebox}{Campos mínimos de un Agent message}
+Un mensaje confiable debe incluir al menos \texttt{task\_id}, \texttt{parent\_id}, el objetivo, la fuente de la entrada, las herramientas permitidas, el deadline, el budget, el expected output schema, el status y la evidence. El texto libre puede explicar la intención, pero no sustituye un machine-checkable contract.
+\end{knowledgebox}
+
+\teachervoice{El ponente compara la agent communication con la miscommunication en las organizaciones humanas y anticipa que surgirán protocolos estándar para expresar éxito, falla, reintento e información de seguridad. Lo importante es reducir la pérdida de información, no que los agents hablen más como personas.}
+
+\subsection{Manager--Worker: reporte de éxito y repetición explícita}
+
+La slide Task muestra al manager asignando tareas a los agents y recibiendo actualizaciones de estado; la página siguiente muestra que, cuando un worker devuelve un resultado erróneo, el manager envía un re-do. En conjunto, ambas páginas muestran que la multi-agent reliability depende de las state transitions, no de difundir una tarea una sola vez y esperar cualquier respuesta en lenguaje natural.
+
+\lecturefigure{slide-58-agent-communication-task.jpg}{El manager asigna tareas y recibe el estado de los workers}{Video de la clase de Stanford 00:49:00}
+
+\begin{knowledgebox}{Lectura de la figura: el Manager debe mantener el authoritative task state}
+Cada subtarea necesita estados como queued, running, blocked, failed y verified. El «done» de un worker es solo una declaración; el manager también debe comprobar el output schema y la evidence; de lo contrario, una completion errónea contaminará la aggregation posterior.
+\end{knowledgebox}
+
+\lecturefigure{slide-59-agent-communication-redo.jpg}{Una tarea errónea provoca la instrucción re-do del manager}{Video de la clase de Stanford 00:49:51}
+
+\begin{knowledgebox}{Lectura de la figura: el reintento debe cambiar las condiciones, no repetirse mecánicamente}
+Un re-do eficaz debe incluir la failure reason, las restricciones corregidas, el presupuesto restante y el número máximo de intentos. Si la entrada, las herramientas y la estrategia no cambian, los retry ilimitados solo amplifican el costo; al superar el umbral, se debe escalar al usuario o cambiar de worker.
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Protocolo manager--worker con verificación y reintentos limitados}]
+def run_subtask(task, workers, retry_limit=2):
+    attempt = 0
+    feedback = None
+    while attempt <= retry_limit:
+        worker = route(task, workers, feedback)
+        report = worker.execute(task, feedback)
+        verdict = verify_schema_evidence_and_constraints(report, task)
+        if verdict.ok:
+            return mark_verified(report)
+        feedback = verdict.failure_reason
+        attempt += 1
+    return escalate_to_manager_or_user(task, feedback)
+\end{lstlisting}
+
+\teachervoice{La clase usa un re-do message very concrete para mostrar que un sistema multi-agent no termina con arrancar varios modelos al mismo tiempo: el manager debe saber si un worker se equivocó y reinyectar la información de corrección en el flujo. La sincronización y la comunicación son en sí mismas capacidades centrales.}
+
+\subsection{Resumen de la sección}
+
+Los principales beneficios de multi-agent provienen de la parallelization, la task decomposition y la specialization; sus principales costos provienen del routing, la communication, la synchronization, la aggregation y la compound failure. Un sistema manager--worker debe usar estado estructurado, evidence-based verification, reintentos limitados y rutas de escalamiento.

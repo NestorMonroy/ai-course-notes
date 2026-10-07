@@ -1,0 +1,122 @@
+\section{Síntesis de ingeniería de la sesión de Q\&A: cuándo vale la pena MoE y cuándo dense es más honesto}
+
+La sesión de Q\&A posterior a la exposición principal ocupa más de la mitad de la grabación y aporta las condiciones de despliegue que las slides no desarrollan. Esta sección no acumula las respuestas en el orden de las preguntas, sino que las reorganiza según la causalidad del sistema: edge/cloud memory, expert parallel communication, throughput por lote, domain adaptation, RAG, modular experts, gradient flow y larger expert counts.
+
+\subsection{Edge versus cloud: la ejecución dispersa no equivale a residencia dispersa}
+
+En un memory-constrained edge device, un dense model suele ser la opción más directa, porque MoE sigue necesitando almacenar todos los experts. Si todos los pesos residen en la GPU, la resident memory se aproxima a los total parameters; si solo residen en la CPU, la GPU ahorra memoria, pero hay que transferirlos con frecuencia. El centralized serving cuenta con múltiples tarjetas, alto ancho de banda y lotes grandes, y por eso le resulta más fácil convertir la ejecución dispersa en ganancias de throughput.
+
+\begin{importantbox}{La primera pregunta al elegir para edge}
+Primero hay que preguntar si el dispositivo puede alojar los total weights, no solo cuántos active parameters hay. Un MoE con 12.9B activos aún puede requerir almacenar alrededor de 46.7B parámetros. Si una sola máquina solo puede alojar un dense de 7B, no se puede suponer que, por usar top-two, Mixtral ocupe también el equivalente a 13B.
+\end{importantbox}
+
+\teachervoice{00:31:45--00:33:10, Albert corrige a la persona que preguntó en la sala: en edge, un dense model puede ser más adecuado, porque la sparse inference sigue teniendo que cargar todos los experts; la ventaja de cost/performance de MoE corresponde mejor al serving centralizado.}
+
+\subsection{Tamaño de lote y throughput: por qué un tráfico alto tiende a amortizar la complejidad}
+
+Con lotes pequeños, los distintos experts reciben pocos tokens y de forma desigual, y es difícil amortizar el all-to-all y el kernel launch; un lote grande permite agrupar más tokens en expert GEMM de mayor tamaño, lo que eleva la arithmetic intensity. Puede representarse con un modelo simplificado de throughput:
+\[
+\operatorname{throughput}\approx \frac{T}{\max_i t_{\text{expert},i}+t_{\text{dispatch}}+t_{\text{combine}}}.
+\]
+Aumentar $T$ solo ayuda si los lotes de cada expert crecen y el imbalance se mantiene bajo control; si el expert más demandado aumenta su demanda en la misma proporción, la tail sigue determinada por él.
+
+\begin{knowledgebox}{Leer métricas del sistema: la latency promedio no basta}
+Reporte simultáneamente tokens/s, time-to-first-token, inter-token latency, P50/P95/P99, tamaño de lote por expert, all-to-all bytes y HBM occupancy. MoE puede aumentar el aggregate throughput y, al mismo tiempo, empeorar la latency de una solicitud individual o la tail.
+\end{knowledgebox}
+
+\teachervoice{00:42:47--00:43:33 y 00:54:56--00:56:17, el ponente enfatiza dos veces el use case: los lotes grandes y el high-volume serving muestran mejor el throughput de MoE; los entornos de pequeña escala y con memoria de GPU limitada cargan con más complejidad.}
+
+\subsection{Communication topology: comunicarse entre nodes es más caro que entre GPU}
+
+El costo del expert parallelism no depende solo de los bytes, sino también de la topology. Las GPU de un mismo node pueden comunicarse por NVLink/NVSwitch, mientras que entre nodes la comunicación pasa por InfiniBand/Ethernet y el network stack. Si un expert se distribuye a su vez en varias tarjetas con tensor parallel, el token dispatch y las collectives internas del expert se suman.
+
+\begin{warningbox}{Más experts no siempre significa más velocidad}
+Aumentar $E$ ofrece más routing choices, pero reduce el lote de cada expert, fragmenta más la placement y complica la metadata y la communication. Si los experts se reparten entre nodes, la latencia de red puede anular la ganancia del cómputo disperso.
+\end{warningbox}
+
+\teachervoice{00:40:43--00:41:36, Albert señala que la comunicación GPU-to-GPU ya es costosa y la node-to-node lo es aún más; el costo de comunicación depende del token routing y de la colocación en el hardware, y cómo seguir escalando sigue siendo un problema abierto.}
+
+\subsection{Memory, offload y la dense-equivalent heuristic}
+
+La sesión de Q\&A ofrece tres juicios que se confunden con facilidad. Primero, la naive resident memory se acerca a la proporción de pesos 46.7B/7B; segundo, el CPU offload ahorra HBM de la GPU, pero aumenta la transferencia de parámetros; tercero, estimar la dense-equivalent capability con $\sqrt{P_{\text{active}}P_{\text{total}}}$ solo puede ser una rule of thumb aproximada.
+
+La heuristic de la media geométrica es
+\[
+P_{\text{equiv}}\approx \sqrt{P_{\text{active}}P_{\text{total}}},
+\]
+pero la capacidad también depende de los training tokens, la data quality, el optimizer, el router balance y la architecture. No sustituye un controlled scaling experiment con el mismo presupuesto de entrenamiento.
+
+\teachervoice{00:50:42--00:52:42, el ponente dice que, cuando todo reside en la memoria de la GPU, la memory se acerca más a la total parameter ratio; el CPU offload pierde eficiencia de transferencia; la media geométrica sirve como rule of thumb, pero solo si los tokens de entrenamiento, la calidad y otras condiciones son comparables.}
+
+\subsection{Knowledge versus reasoning: una benchmark category no es una sonda del mecanismo}
+
+Alguien del público preguntó por qué Mixtral tiene mejor reasoning, y la respuesta de Albert fue mesurada: en los benchmarks de matemáticas, el modelo puede estar razonando de verdad o puede haber memorizado lemmas o patrones que luego invoca; la frontera entre knowledge y reasoning es difusa de por sí. Por eso, una puntuación más alta no demuestra que MoE haya aprendido un nuevo algoritmo interno, y mucho menos que attention/MLP se hayan separado por funciones.
+
+\begin{warningbox}{Las etiquetas de capacidad no sustituyen la evidencia del proceso}
+Para estudiar el reasoning mechanism hay que incorporar out-of-distribution composition, intermediate trace, counterfactual perturbation y memorization control. Basarse solo en que el nombre del benchmark contiene «reasoning» no permite determinar el proceso de cómputo.
+\end{warningbox}
+
+\teachervoice{00:53:26--00:54:41, el ponente considera que la ganancia de knowledge de Mixtral es clara, pero que la knowledge induzca mejoras en reasoning es muy speculative; los propios benchmarks difícilmente distinguen entre recall y reasoning.}
+
+\subsection{Domain adaptation, RAG y modular experts son tres ejes independientes}
+
+MoE aumenta la model capacity, el preentrenamiento continuado/fine-tuning cambia la domain distribution y RAG recupera evidencia externa durante la inference. Los tres pueden combinarse, pero no se sustituyen entre sí. Un medical dense model entrenado con datos especializados puede superar a un MoE general; un MoE también puede conectarse a RAG; insertar un nuevo medical expert en un checkpoint exige además entrenar el router para que aprenda cuándo usarlo.
+
+\begin{knowledgebox}{Diferencias entre los tres ejes}
+\begin{tabularx}{\textwidth}{L{0.18\textwidth} L{0.27\textwidth} X}
+\toprule
+Mecanismo & Qué cambia & Qué no resuelve automáticamente \\
+\midrule
+MoE & Capacidad de parámetros y token execution path & Actualización del conocimiento externo, domain label explícito \\
+Domain tuning & Adaptación de los pesos a la distribución de datos objetivo & Hechos en tiempo real, provenance de la recuperación \\
+RAG & Inference-time context/evidence & Capacidad de parámetros interna del modelo y routing balance \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\teachervoice{00:43:50--00:44:40, Albert dice que es difícil que un modelo general supere a uno con preentrenamiento/fine-tuning especializado de domain, y que los experts de Mixtral no son medical/coding experts explícitos. 00:59:02--00:59:43, explica además que RAG se combina de forma ortogonal con dense/MoE.}
+
+\subsection{Expert swapping: que sea factible no significa que sea plug-and-play}
+
+Si se sustituye un expert, los logits originales del router no corresponden al behavior del nuevo expert. Aunque la tensor shape coincida, el modelo no sabe cuándo enrutar los medical tokens al nuevo módulo, y además pueden alterarse las residual statistics. Como mínimo se necesita adaptation del router/nuevo expert, y verificar si la carga y la capacidad de los demás experts se degradan.
+
+\begin{lstlisting}[caption={Flujo mínimo de validación tras sustituir un expert}]
+load_base_moe_checkpoint()
+replace_one_expert_with_domain_module()
+freeze_or_partially_train_shared_attention()
+train_router_and_new_expert_on_mixed_data()
+measure_load_balance_and_general_capability()
+run_domain_eval_and_out_of_domain_regression()
+\end{lstlisting}
+
+\teachervoice{00:59:43--01:00:54, el ponente considera que el expert swapping tiene potencial de investigación, pero exige explícitamente seguir entrenando las gating layers para que el router aprenda en qué momento debe invocarse el nuevo domain expert.}
+
+\subsection{Gradient flow y training cost: \texorpdfstring{top-$k$}{top-k} sigue siendo optimizable de extremo a extremo}
+
+Al final, la sesión de Q\&A corrige otro malentendido: aunque el router produce una selection top-$k$ discreta, las operaciones de gating y de los experts en la ruta seleccionada siguen siendo diferenciables, y el modelo puede entrenarse de extremo a extremo. En sentido estricto, la frontera de top-$k$ es por tramos/no suave, pero en la práctica la optimización propaga gradientes hacia los experts seleccionados en ese momento y se combina con load-balancing objectives.
+
+El costo de entrenamiento puede resumirse como
+\[
+C_{\text{train}}\approx C_{\text{active forward/backward}}+C_{\text{router}}+C_{\text{communication}}+C_{\text{balance}}.
+\]
+Por lo general se acerca más al de un dense model del mismo active-size que al de un dense model del tamaño total (total-size), pero la extra communication y el almacenamiento de optimizer/state siguen presentes.
+
+\begin{knowledgebox}{El optimizer state se sigue cobrando según los parámetros entrenados}
+Adam/AdamW mantiene, para cada parámetro entrenable, el primer momento $m$ y el segundo momento $v$, además del parameter y el gradient. Si se entrenan todos los expert weights, el optimizer state depende de los total trainable parameters, no solo del active path del token actual; el entrenamiento distribuido suele requerir state sharding para reducir la memoria por tarjeta.
+\end{knowledgebox}
+
+\teachervoice{01:01:10--01:02:08, Albert dice que la routing path es differentiable de extremo a extremo y que el cómputo de entrenamiento se parece aproximadamente al de un active model de 13B, aunque además hay que asumir communication adicional.}
+
+\subsection{Más experts: crece el espacio de elección y también la dificultad de servicio}
+
+Aumentar el número de experts a 64/128 da al router un espacio de elección más fino y puede volver a los experts más especializados; pero el lote de cada expert se reduce, la placement abarca más nodes, el all-to-all se complica e incluso un solo expert podría no caber en una GPU. Los proveedores de modelos pueden ocultar esa complejidad con infraestructura especializada; los usuarios que despliegan por su cuenta tienen que enfrentarla.
+
+\begin{importantbox}{Cuatro preguntas antes de aumentar $E$}
+¿Cada expert es lo bastante grande para aprender features útiles? ¿Cuántos tokens recibe cada expert en cada step? ¿Los experts se reparten entre nodes? ¿El serving volume basta para formar GEMM grandes? Si estas preguntas no tienen respuesta afirmativa, más experts podrían solo aumentar el orchestration cost.
+\end{importantbox}
+
+\teachervoice{01:02:26--01:04:14, el ponente considera que más experts resultan muy atractivos para la investigación, pero vuelven más difíciles el multi-node serving y la communication; para una sola GPU, prefiere dense o un heavily quantized MoE, y juzga que Mixtral 8x7B cuantizado sigue siendo práctico.}
+
+\subsection{Resumen de la sección}
+
+La sesión de Q\&A convierte la exposición algorítmica de las slides en condiciones de despliegue: MoE es más adecuado para entornos con suficiente resident memory, interconnect y serving volume; en edge y con lotes pequeños no necesariamente compensa. Domain tuning, RAG y MoE son ortogonales entre sí; el expert swapping requiere router adaptation; el compute de entrenamiento se acerca al del active path, pero el optimizer state, la communication y el load balancing se siguen cobrando según el sistema más completo.

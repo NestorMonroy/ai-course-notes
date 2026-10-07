@@ -1,0 +1,109 @@
+\section{Cuatro myths: del nombre del modelo a la contabilidad del sistema}
+
+La parte de mayor valor didáctico de la clase es el desmontaje sucesivo de cuatro errores intuitivos. Cada uno confunde, respectivamente, expert identity, total parameters, active compute y semantic specialization. Esta sección ofrece para cada uno una explicación alternativa que puede calcularse, e incorpora lo que se dijo en la sesión de Q\&A sobre memory, communication y throughput.
+
+\subsection{Myth 1: Mixtral solo tiene ocho experts globales}
+
+La sección anterior ya explicó que Mixtral introduce experts dispersos únicamente en la ruta MLP de cada capa; aquí se corrige primero la imagen de roles globales que sugiere el nombre «8x7B». Al leer el diagrama de estructura siguiente, conviene distinguir primero entre «cuántos MLP seleccionables hay en cada capa» y «cuántas identidades rastreables entre capas tiene el modelo completo», y solo después juzgar si el número de un expert puede tener contenido semántico. «8x7B» invita a imaginar ocho expertos que atraviesan todas las capas, pero en realidad cada Transformer layer tiene ocho expert MLP; el expert 0 de capas distintas no comparte identity. Con $N=32$ capas, la estructura contiene $32\times 8=256$ layer-local expert modules.
+
+\lecturefigure{slide-14-myth-eight-experts.jpg}{Myth 1: cada capa tiene ocho experts, no ocho experts globales}{Grabación oficial de Stanford Online 00:15:12}
+
+Dentro de una misma capa, las expert labels tienen permutation symmetry. Para cualquier expert permutation $\pi$, si se permutan a la vez los expert weights y los output channels del router, la función no cambia:
+\[
+\sum_i g_i(x)E_i(x)=\sum_i g_{\pi(i)}'(x)E_{\pi(i)}'(x).
+\]
+Por lo tanto, «expert 3» solo tiene sentido con un checkpoint, una layer y un labeling fijos; no se pueden comparar los números entre capas ni entre runs de entrenamiento.
+
+\teachervoice{00:14:15--00:15:09, Albert señala que el nombre del modelo puede inducir a error: hay ocho expertos por capa y su numeración dentro de la capa es permutable; en total hay muchos layer-local experts, no ocho roles permanentes.}
+
+\begin{warningbox}{No rastrees el número de un expert entre capas}
+El expert 3 de la layer 15 y el expert 3 de la layer 31 no tienen continuidad semántica intrínseca. Para estudiar «la evolución de un mismo expert», primero hay que definir un alignment comparable, en lugar de comparar solo índices de arreglo.
+\end{warningbox}
+
+\subsection{Myth 2: \texorpdfstring{$8\times 7\mathrm{B}=56\mathrm{B}$}{8 x 7B = 56B} es el número exacto de parámetros}
+
+La multiplicación directa ignora los shared embeddings, la attention, la normalization y el router. La clase da aproximadamente 46.7B total parameters y 12.9B active parameters. Lo que realmente hay que recordar no son las cifras decimales, sino la decomposition: los parámetros totales cuentan todos los expert weights; los parámetros activos cuentan solo los dos experts que eligió el token actual, más las shared parts que siempre se ejecutan.
+
+\lecturefigure{slide-15-myth-56b.jpg}{Myth 2: la shared attention hace que el total de parámetros no sea simplemente 56B}{Grabación oficial de Stanford Online 00:15:37}
+
+Se define la expert fraction
+\[
+\rho=\frac{kP_e}{P_s+kP_e},
+\]
+que expresa la proporción de la ruta activa que corresponde a los expert MLP. Aunque $k/E=1/4$, la razón active/total global no es exactamente un cuarto, porque los shared parameters aparecen tanto en el numerador como en el denominador.
+
+\begin{importantbox}{Formato mínimo completo para reportar el número de parámetros}
+Hay que reportar al menos, de forma conjunta: total parameters, active parameters per token, number of experts $E$, top-$k$, la configuración de la shared attention y la precisión. Escribir solo «13B-class» oculta que 46.7B de pesos deben permanecer en memoria; escribir solo «47B model» oculta la ejecución dispersa por token.
+\end{importantbox}
+
+\teachervoice{00:15:09--00:15:41, el ponente corrige la cifra de 56B: la attention y el gating son compartidos, y el total es de aproximadamente 46.7B; cada token ve unos 12.9B active parameters, no 14B.}
+
+\subsection{Myth 3: el cost es proporcional a los active parameters}
+
+Si el modelo se ejecuta secuencialmente en una sola tarjeta, los active parameters son un proxy importante de los FLOPs; pero en cuanto los experts se reparten mediante sharding entre varias tarjetas, los tokens deben reordenarse y enviarse según la decisión del router. Sharding (particionamiento) significa colocar los expert weights en distintos devices, de modo que cada tarjeta ya no replique todos los experts; ahorra almacenamiento por tarjeta, pero introduce dispatch/combine communication.
+
+\lecturefigure{slide-16-myth-cost-active.jpg}{Myth 3: los active parameters no representan todo el serving cost}{Grabación oficial de Stanford Online 00:16:42}
+
+Si un lote tiene $T$ tokens y el expert $i$ recibe $n_i$ tokens, la carga uniforme ideal es $T k/E$. Se define el imbalance ratio
+\[
+I=\frac{\max_i n_i}{Tk/E}.
+\]
+$I=1$ indica la distribución más uniforme; $I>1$ indica que el expert más ocupado supera el promedio. El step paralelo suele quedar determinado por $\max_i n_i$, de modo que unos pocos puntos calientes pueden dejar a los demás devices esperando sin trabajo.
+
+\begin{knowledgebox}{Primer uso: expert parallel all-to-all}
+La expert parallelism reparte los experts entre ranks. El dispatch all-to-all envía primero cada token al rank donde está su expert de destino; tras el cálculo del expert, el combine all-to-all devuelve la salida al rank original. La comunicación entre nodes suele ser más lenta que el GPU interconnect dentro de un mismo node, por lo que la topology y el placement modifican la latency.
+\end{knowledgebox}
+
+\teachervoice{00:15:41--00:16:49, Albert rechaza explícitamente vincular el cost con el active parameter count. El routing dinámico exige enviar tokens y no permite fijar las rutas de antemano, por lo que el serving real tiene un costo de comunicación adicional respecto de un dense model con el mismo active-size.}
+
+\subsection{Inference load balance: el expert más lento determina cuándo termina la ronda}
+
+El balanceo de carga no es solo una training auxiliary loss. En inference, la prompt distribution real puede inclinar al router hacia unos pocos experts y producir un straggler. Aunque la cantidad promedio de cálculo sea correcta, basta con que la queue de un expert sea demasiado larga para que la fase de combine de todo el lote tenga que esperar a que termine.
+
+\lecturefigure{slide-17-inference-load-balance.jpg}{Problema abierto: cómo balancear las expert loads en inference}{Grabación oficial de Stanford Online 00:17:36}
+
+La capacity suele expresarse como
+\[
+C=\left\lceil \alpha\frac{Tk}{E}\right\rceil,
+\]
+donde $\alpha\ge 1$ es el capacity factor. Si un expert recibe más de $C$ tokens, puede hacer drop, reroute o diferir su procesamiento; cada estrategia implica un intercambio entre quality, latency y determinism.
+
+\begin{warningbox}{Una distribución uniforme en entrenamiento no garantiza una distribución uniforme en producción}
+La router distribution sobre la training data puede ser casi uniforme y, aun así, los prompts de producción pueden concentrarse en ciertos patrones. En producción conviene registrar el per-expert token count, el queue time, la drop/reroute rate y la tail latency, en lugar de mirar solo el promedio de tokens/expert.
+\end{warningbox}
+
+\teachervoice{00:16:49--00:17:36, el ponente describe la inference load balance como un problema de esperar al expert más lento y menciona exploraciones como capacity-aware neighbor routing y mixture of depths.}
+
+\subsection{Compressing SMoEs: cuantización, offload y sparsification no son lo mismo}
+
+La clase presenta la compresión como una open question, no como una recipe ya resuelta. La quantization (cuantización) reduce el número de bits de cada weight; el CPU offload traslada parte de los experts de la HBM de la GPU a la DRAM de la CPU y los transfiere cuando se necesitan; la sparsification intenta eliminar o poner en cero los pesos poco importantes dentro de cada expert. Las tres optimizan recursos distintos y tienen costos distintos.
+
+\lecturefigure{slide-18-compressing-smoe.jpg}{Problema abierto: ¿se puede comprimir una SMoE a una memoria mínima?}{Grabación oficial de Stanford Online 00:19:07}
+
+Si los total parameters son $P$ y cada parámetro ocupa $b$ bits, la cota inferior ideal del almacenamiento de pesos es
+\[
+M_{\text{weights}}=\frac{Pb}{8}\ \text{bytes}.
+\]
+En la práctica hay que sumar scale/zero-point, KV cache, activation workspace, router buffers y framework metadata. El offload, por su parte, añade un tiempo de transferencia aproximado
+\[
+t_{\text{transfer}}\approx \frac{M_{\text{moved}}}{B_{\text{CPU--GPU}}},
+\]
+donde $B_{\text{CPU--GPU}}$ es el ancho de banda efectivo de la interconexión.
+
+\begin{knowledgebox}{Términos clave: tres tipos de compresión}
+\begin{tabularx}{\textwidth}{L{0.18\textwidth} L{0.24\textwidth} X}
+\toprule
+Método & Ahorro principal & Riesgo principal \\
+\midrule
+Quantization & bytes por weight & pérdida de precisión, dequant kernel, scale overhead \\
+Offload & GPU resident memory & PCIe/NVLink transfer, cache miss, tail latency \\
+Sparsification & nonzero weights/FLOPs efectivos & kernels irregulares, degradación de calidad, reentrenamiento \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\teachervoice{00:17:36--00:19:15, Albert cita conjeturas optimistas de la comunidad sobre la compresión extrema, pero reconoce que, al momento de la clase, aún no había visto resultados convincentes de extreme SMoE sparsification; se trata de una agenda de investigación, no de un compromiso de lanzamiento.}
+
+\subsection{Resumen de la sección}
+
+Los cuatro myths comparten un mismo origen: tomar el nombre por el modelo del sistema. La alternativa correcta es la siguiente: los experts son layer-local y permutables; los total parameters y los active parameters deben separarse; el serving cost incluye además communication e imbalance; la semantic domain specialization no es necesaria ni queda demostrada por los diagramas de routing. El load balance y la compression, por su parte, llevan estos conceptos a las restricciones reales del hardware.

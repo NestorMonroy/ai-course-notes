@@ -1,0 +1,114 @@
+\section{Context, multi-context y near-shallow caching}
+
+La primera mitad de la clase responde «cómo arrancan los parámetros»; esta sección responde «cómo repetir menos cómputo». El curso sostiene que hay un desajuste entre un context fijo muy largo, el document packing y los datos de longitud variable; la forma matricial de SAFFU permite elegir subbloques de parámetros según la context length y, combinada con un frozen embedding, almacenar en caché las pairwise comparisons de la capa inferior.
+
+\subsection{Una ventana larga no contiene automáticamente más información útil}
+
+Con una context window fija $K_{\max}$, el attention cost es aproximadamente
+\[
+C_{\text{attn}}=\Theta(BK_{\max}^{2}d),
+\]
+donde $B$ es el tamaño de lote y $d$ es la hidden dimension. Si la mayoría de los documentos tienen longitud $K_m\ll K_{\max}$, los padding tokens siguen ocupando posiciones en la matriz. Una ventana más larga aumenta la capacidad, pero no garantiza que cada ejemplo aporte realmente más context relevante.
+
+\lecturefigure{slide-11-longer-contexts.jpg}{Una ventana larga es un límite de ingeniería arbitrario; no significa que cada ejemplo necesite el mismo context}{Grabación oficial de Stanford Online 00:34:22}
+
+\begin{knowledgebox}{Context tiene al menos tres significados}
+\textbf{Block context} es el número fijo de tokens que el modelo recibe de una vez; \textbf{document context} es el texto anterior y posterior realmente relevante dentro del mismo documento; \textbf{linguistic/radial context} es la vecindad estadística alrededor del token objetivo. Llamar context a los tres oculta las diferencias entre padding, packing y los supuestos de modelado.
+\end{knowledgebox}
+
+\teachervoice{00:32:20--00:34:55, Williams considera que una ventana más larga aumenta notablemente el costo, pero no aporta necesariamente más información; la context complexity debería determinarse por la información que contienen los datos, no por un único block size.}
+
+\subsection{Multi-context SAFFU: ramas de parámetros para distintas longitudes}
+
+La sección anterior mostró que una ventana máxima fija hace que los ejemplos cortos paguen quadratic work inútil; la respuesta del multi-context design no es forzar todos los documentos dentro del mismo block, sino que el modelo elija, según la longitud del ejemplo, la rama más pequeña que lo contenga. Al leer el diagrama de arquitectura, compare primero el context width de cada branch y dónde se comparten parámetros; después observe cómo convergen en el mismo espacio de salida. El curso asigna $W_b,U_b$ a distintos context widths $b\in\mathcal B$ y al final los proyecta a una salida compartida. Si la longitud del ejemplo es $K_m$, se elige la rama más pequeña que cumpla $b\ge K_m$, lo que puede escribirse como
+\[
+b^*(m)=\min\{b\in\mathcal B:b\ge K_m\},
+\]
+\[
+\hat y_m=\operatorname{softmax}\!\left(
+\operatorname{softmax}(x_{m,h}W_{b^*}X_m^\top)X_mU_{b^*}O
+\right).
+\]
+
+\lecturefigure{slide-12-multicontext-design.jpg}{Multi-context SAFFU: elección de rama según el context width}{Grabación oficial de Stanford Online 00:36:29}
+
+\begin{importantbox}{Beneficio y costo de las ramas dinámicas}
+El beneficio es que los ejemplos cortos no pagan el quadratic cost completo de la ventana más larga; el costo es mantener varios conjuntos de parámetros o parámetros fraccionables, construir lotes según la longitud y asegurar que las salidas de las distintas ramas caigan en espacios de representación compatibles.
+\end{importantbox}
+
+\begin{lstlisting}[caption={Pseudocódigo de agrupación en lotes según la longitud con dynamic context}]
+lengths = measure_document_lengths(dataset)
+buckets = bucket_by_supported_context(lengths, widths=[128, 256, 512, 1024])
+
+for width, batch in buckets:
+    x = pad_only_to(batch, width)
+    weights = saffu_parameters.for_width(width)
+    loss = language_model_loss(x, weights)
+    update_trainable_layers(loss)
+\end{lstlisting}
+
+\teachervoice{00:34:55--00:37:34, el ponente explica que lo esencial de la multi-context branch es que la modified attention matrix permite tomar un subconjunto de parámetros según la longitud; la proyección Q/K estándar de baja dimensión no corresponde de forma natural a este tipo de fraccionamiento.}
+
+\subsection{Embedding brittleness: una codificación única no equivale a una representación relacionada}
+
+La unicidad del bit-cipher hace reproducible la inicialización, pero que dos palabras compartan algunos bits no equivale necesariamente a que estén relacionadas semánticamente. El curso propone mejorar el embedding con radial co-occurrence: contar coocurrencias en distintos radios alrededor del token y luego agregar esas correlaciones sobre el deterministic code.
+
+\lecturefigure{slide-13-embedding-brittleness.jpg}{De la bit identity al radial co-occurrence embedding}{Grabación oficial de Stanford Online 00:37:34}
+
+La matriz de coocurrencia del radius $r$ puede denotarse $B^{(r)}$; una forma abstracta de agregación es
+\[
+E_i=\operatorname{normalize}\!\left(
+\operatorname{concat}_{r\in\mathcal R}
+\sum_j B^{(r)}_{i,j}e_j
+\right).
+\]
+Aquí $e_j$ es el bit-cipher identity vector, y solo $E_i$ absorbe las relaciones estadísticas locales. La aggregation y el weighting del artículo real deben reproducirse según su implementación; esta fórmula no los sustituye.
+
+\begin{warningbox}{No confunda un «bit interpretable» con un eje semántico}
+La regla de encendido de cada bit la determina el algoritmo de codificación y no tiene por qué corresponder a conceptos humanos como noun, tense o sentiment. Si se forma o no un significado debe verificarse con probing, nearest neighbors y tareas posteriores.
+\end{warningbox}
+
+\teachervoice{00:37:34--00:39:41, el ponente señala que la naive bit assignment, aunque estable, no elimina la embedding brittleness; se necesitan estadísticas como la radial co-occurrence para volver a introducir la correlación en la representación.}
+
+\subsection{Caching comparisons: la condición esencial de la ganancia de velocidad}
+
+Si la embedding matrix $E$ es fija, las context comparisons de la primera capa
+\[
+C_{i,j}=e_i^\top e_j
+\]
+dependen solo de las token identities y pueden precalcularse fuera de línea en una lookup table. Durante el entrenamiento o la inferencia, $C$ se lee directamente a partir de los token IDs y después se aplican $W$ y softmax. Así se ahorran dot products repetidos, pero no el weighting, la aggregation ni la red de las capas superiores.
+
+\lecturefigure{slide-14-caching-vector-comparisons.jpg}{Almacenamiento en caché de las vector comparisons de la primera capa tras congelar el embedding}{Grabación oficial de Stanford Online 00:39:41}
+
+\begin{importantbox}{Cache invalidation rule}
+En cuanto el embedding se actualiza a $E'\neq E$, la caché anterior $C=EE^\top$ deja de ser igual a $E'E'^\top$. Por ello, durante el entrenamiento hay que congelar el embedding o reconstruir la cache periódicamente, e incluir el costo de reconstrucción en el tiempo total de entrenamiento.
+\end{importantbox}
+
+\begin{knowledgebox}{No se puede omitir la jerarquía de memoria}
+La comparison table completa de $V\times V$ puede ser mucho mayor que el propio embedding; no debe suponerse que reside entera en memoria. La implementación requiere caché dispersa o por bloques, gather por lote, o almacenar en caché solo los pares de alta frecuencia. La CPU DRAM (Dynamic Random-Access Memory, memoria principal) tiene más capacidad pero mayor latencia; la GPU HBM (High Bandwidth Memory, memoria de video de alto ancho de banda) es más rápida pero más cara; la SRAM en chip (Static Random-Access Memory, caché/memoria compartida) es la más rápida pero la más pequeña.
+\end{knowledgebox}
+
+\teachervoice{00:39:41--00:41:48, Williams describe la caché como el principal ahorro de costo del enfoque near-shallow: cuando el embedding no se actualiza, las comparisons de la capa inferior pueden precalcularse; en cuanto los vectors se descongelan (thaw) y se actualizan, el supuesto de la caché deja de valer.}
+
+\subsection{Packing y dynamic context: una técnica de eficiencia no es un context model}
+
+Packing coloca varios documentos cortos en un mismo block largo y usa una mask para impedir la attention entre documentos. Reduce el padding y el número de lotes, pero sigue construyendo una quadratic matrix de longitud $K_{\max}$. Dynamic context, en cambio, envía los documentos cortos a una branch más corta, con un costo aproximado de
+\[
+C_{\text{dynamic}}\propto \sum_{m=1}^{B}K_m^2d,
+\qquad
+C_{\text{fixed}}\propto BK_{\max}^2d.
+\]
+
+\lecturefigure{slide-15-packing-contexts.jpg}{Compromisos entre packing, padding y context dinámico}{Grabación oficial de Stanford Online 00:42:14}
+
+\begin{warningbox}{El curso no presenta un matched packing benchmark}
+Que dynamic context sea más rápido depende de la kernel efficiency, la bucket fragmentation, el tamaño de lote, la mask implementation y el hardware. En la sesión de Q\&A el ponente dijo explícitamente que aún no lo ha comparado directamente con el oracle packing en modelos grandes; por lo tanto, aquí solo cabe conservar el análisis del mecanismo y el juicio de investigación.
+\end{warningbox}
+
+\teachervoice{00:42:38--00:45:55, el ponente considera que packing llena la ventana con documentos no relacionados: es una organización del context eficiente pero no fiel; la dynamic length batching hace que los documentos cortos usen solo un subconjunto más pequeño de parámetros.}
+
+\teachervoice{01:16:20--01:19:00, en la sesión de Q\&A reconoce además que no se realizó una matched large-model comparison; la ganancia relativa de packing frente a dynamic blocks todavía requiere experimentos específicos.}
+
+\subsection{Resumen de la sección}
+
+La eficiencia near-shallow proviene de dos cosas: reducir el quadratic work inútil según la longitud real y reutilizar las comparisons de la capa inferior cuando el embedding es fijo. Ninguna es una optimización gratuita: las ramas dinámicas aumentan la complejidad del modelo y de la formación de lotes, y la caché introduce problemas de capacidad e invalidación.

@@ -1,0 +1,128 @@
+\section{Voyager: Code-as-Action, Memory y Automatic Curriculum}
+
+MineCLIP conecta la semántica con la policy de bajo nivel mediante la reward, pero la exploración abierta de horizon largo todavía requiere una action representation más componible. Voyager opta por \term{code-as-action (el código como acción)}: el LLM no emite instrucciones de teclado cuadro por cuadro, sino que genera programas en JavaScript que llaman a la API de Minecraft. Los programas pueden incluir bucles, condicionales, manejo de errores y llamadas a skills existentes, con lo que comprimen secuencias largas de acciones en unidades simbólicas ejecutables y verificables.
+
+\subsection{Por qué aplicar «stringify» al video y al mundo}
+
+Los videos de internet contienen comportamientos abundantes, pero carecen de action labels limpias; el problema inverso de pasar de píxeles a control continuo suele tener múltiples soluciones. El curso usa «stringify» para expresar una estrategia de interfaz: convertir el estado del entorno, el inventory, los errores y las API disponibles en contexto de lenguaje o código, para que el LLM razone en el token space, donde es más fuerte, y después las herramientas ejecuten y devuelvan resultados reales.
+
+\lecturefigure{slide-26-stringify-video.jpg}{De trayectorias visuales a una interfaz simbólica que un modelo de lenguaje puede procesar}{Diapositiva V026 recuperada de la grabación oficial; 00:21:39}
+
+\begin{knowledgebox}{Lectura de la figura: la stringification es ingeniería de interfaces, no una conversión de información sin pérdida}
+La figura pasa del video dinámico a módulos de texto o simbólicos. La conversión debe elegir qué state se expone al modelo, cómo se describen las relaciones espaciales y qué action se encapsulan como API. Mejora la legibilidad y la componibilidad, pero puede perder información fina de geometría, temporalidad y contacto; por ello se adapta mejor a skills de Minecraft de alto nivel y no debe considerarse directamente una respuesta general para todo el control de bajo nivel de robots.
+\end{knowledgebox}
+
+\lecturefigure{slide-27-mineflayer-javascript.jpg}{La Mineflayer JavaScript API proporciona una interfaz de control ejecutable para Minecraft}{Diapositiva V027 recuperada de la grabación oficial; 00:22:15}
+
+Mineflayer encapsula la navegación, la recolección, la fabricación y la interacción como llamadas de programa. Al leer la figura, primero se observan los parámetros de las funciones y los nombres de los objetos, y después cómo se devuelven los resultados de ejecución; la API permite probar y reutilizar el código, y también establece una safety boundary. Al mismo tiempo, la calidad del encapsulamiento determina el techo de capacidad: los detalles que la API no expone no los puede recuperar el LLM solo con un prompt más ingenioso.
+
+\teachervoice{El ponente señala que el video es muy rico en información, pero no tiene action labels; por eso Voyager no intenta recuperar directamente las operaciones de teclado de cada cuadro, sino que aprovecha la symbolic interface de Mineflayer. Esta decisión conecta «entender el objetivo» con «ejecutar el programa», y además permite que el syntax error, el runtime error y el task progress se conviertan en retroalimentación legible para el modelo.}
+
+\subsection{Voyager Data Flow e Iterative Prompting}
+
+Voyager no termina después de que un solo prompt genera un fragmento de código. Mantiene el state actual, el objetivo, las skills disponibles y la retroalimentación de ejecución, y le pide repetidamente al actor que genere o revise programas; el environment, a su vez, restringe al modelo con el estado real, los errores y el progress. Aquí, el \term{critic (crítico)} es el módulo que determina si la tarea se completó, dónde falló y qué dirección de mejora seguir; no se limita a dar una opinión de estilo.
+
+\lecturefigure{slide-28-voyager-data-flow.jpg}{Flujo de datos de Voyager entre curriculum, code action, environment y memory}{Diapositiva V028 recuperada de la grabación oficial; 00:23:12}
+
+\begin{knowledgebox}{Lectura de la figura: seguir cuatro tipos de estado a lo largo del ciclo cerrado}
+El curriculum produce una task; el actor lee la observation y las relevant skills y genera code; el environment ejecuta y devuelve el world state y los error; el critic evalúa el progress; las skills exitosas se escriben en la library. Lo importante no es cuántas llamadas a GPT-4 hay, sino si los cuatro tipos de estado (task, execution, evaluation y memory) forman un ciclo cerrado.
+\end{knowledgebox}
+
+\lecturefigure{slide-29-code-as-action.jpg}{GPT-4 genera programas ejecutables para controlar un embodied agent}{Diapositiva V029 recuperada de la grabación oficial; 00:23:27}
+
+Esta diapositiva sustituye los action tokens tradicionales por programas completos. Primero se observan las llamadas a funciones, los bucles y las verificaciones en la salida del actor, y después el comportamiento de largo plazo del agent en el mundo; el código comprime cientos de pasos de acción en una sola skill, pero también introduce riesgos de software como prompt injection, bucles infinitos, llamadas destructivas y dependency errors, por lo que debe ejecutarse dentro de un sandbox y con una API allowlist.
+
+\lecturefigure{slide-30-iterative-prompting.jpg}{La retroalimentación del entorno, los errores de ejecución y la autoverificación impulsan la iteración del código}{Diapositiva V030 recuperada de la grabación oficial; 00:24:09}
+
+\begin{warningbox}{Iterative prompting no significa que los errores desaparezcan solos}
+La retroalimentación solo es útil cuando es observable, atribuible y llega a tiempo. Si falta el environment state, el critic se equivoca o el programa altera el mundo de forma irrecuperable, el siguiente prompt puede seguir parchando sobre una premisa errónea. El sistema debe limitar el retry budget, conservar el execution trace y someter a aprobación por separado las action irreversibles.
+\end{warningbox}
+
+\begin{lstlisting}[caption={Ciclo conceptual de Voyager: generación de código, retroalimentación de ejecución y skill memory}]
+task = curriculum.propose(agent_state, skill_library)
+while retry_budget > 0:
+    skills = skill_library.retrieve(task, agent_state)
+    program = actor.write_code(task, agent_state, skills)
+    result = sandbox.execute(program, allowed_api=mineflayer_api)
+    verdict = critic.check(task, result, agent_state)
+    if verdict.success:
+        skill_library.store(task, program, result.preconditions)
+        break
+    agent_state = result.updated_state
+    actor.reflect(verdict.feedback, result.errors)
+    retry_budget -= 1
+\end{lstlisting}
+
+\teachervoice{En clase se describe Voyager como una no-gradient architecture: en tiempo de ejecución no se actualizan los parámetros del modelo, sino que el comportamiento mejora mediante el prompt, la retroalimentación de ejecución y la memory externa. Aquí el «learning» ocurre principalmente en la skill library y en el curriculum state, y no debe confundirse con un neural-network weight update.}
+
+\subsection{Critic y Skill Library: convertir un éxito aislado en una capacidad reutilizable}
+
+Si cada tarea partiera de un prompt en blanco, la exploración abierta pagaría repetidamente el mismo costo. La \term{skill library (biblioteca de habilidades)} es una executable memory persistente: guarda los programas exitosos, su propósito, sus precondiciones y sus descripciones para la recuperación, de modo que las tareas posteriores puedan combinar habilidades anteriores. El critic, por su parte, convierte la environment evidence en juicios de finalización y señales de revisión, y evita que un código se escriba en la memory solo porque «parece correcto».
+
+\lecturefigure{slide-31-critic-self-reflection.jpg}{El critic genera self-reflection a partir del avance de la tarea}{Diapositiva V031 recuperada de la grabación oficial; 00:24:45}
+
+\begin{knowledgebox}{Lectura de la figura: el critic debe citar estados verificables}
+Un feedback eficaz debe indicar qué objeto falta, por qué la posición actual no cumple la condición y en qué paso falló la ejecución, en lugar de decir vagamente «try again». Primero se revisa qué environment observation cita el verdict y después si la sugerencia puede cambiar el siguiente programa. El propio critic también puede alucinar, por lo que conviene que el success lo determinen conjuntamente un state predicate y un juicio semántico.
+\end{knowledgebox}
+
+\lecturefigure{slide-32-skill-library-overview.jpg}{La skill library hace persistentes executable procedures cada vez más complejos}{Diapositiva V032 recuperada de la grabación oficial; 00:25:27}
+
+El valor de la biblioteca de habilidades proviene de la compositionality: las habilidades tempranas de recolección, fabricación y navegación pueden ser invocadas por tareas de nivel superior. Al leer la figura, primero se revisa si la granularidad de las habilidades es lo bastante estable y después las dependencias entre skills; si son demasiado finas, el prompt se infla; si son demasiado gruesas, resulta difícil reutilizarlas. Cada skill necesita además precondiciones, side effects y failure modes, no solo un nombre de función.
+
+Para una task query $q$, una skill description $d_i$ y el estado actual $x$, una regla de recuperación simplificada es:
+\[
+i^*=\arg\max_i\left[\operatorname{sim}(E(q,x),E(d_i))
+-\lambda\,\operatorname{cost}(i,x)\right].
+\]
+Donde $E$ es el embedding encoder, $\operatorname{sim}$ mide la relevancia semántica entre la tarea y la habilidad, $\operatorname{cost}(i,x)$ representa el costo en recursos o el riesgo de invocar la habilidad en el estado actual, $\lambda$ controla el equilibrio entre relevancia y costo, e $i^*$ es la skill recuperada. Usar solo la similitud semántica puede recuperar programas de nombre parecido cuyas precondiciones no se cumplen.
+
+\lecturefigure{slide-33-retrieve-old-skills.jpg}{Recuperar y combinar skills anteriores para completar tareas nuevas más complejas}{Diapositiva V033 recuperada de la grabación oficial; 00:26:36}
+
+Esta diapositiva muestra la ruta retrieve--compose: una tarea nueva activa primero programas anteriores relevantes y luego el actor genera la lógica de composición. Primero se verifica si las habilidades anteriores realmente se invocan y después se comparan los costos en tokens, errores y tiempo entre generar desde cero y reutilizar. Esto respalda que la external memory puede acumular competence, pero no demuestra que los programas sigan siendo confiables cuando cambia la versión del entorno; la library necesita regression tests y mecanismos de invalidación.
+
+\teachervoice{El ponente enfatiza que la skill library hace que Voyager no sea una «demo de ChatGPT de un solo uso». El código exitoso se guarda y se recupera en tareas más difíciles, de modo que el sistema logra un crecimiento de capacidad a largo plazo sin actualizar pesos. La idea más transferible aquí es almacenar la agent memory como un artifact ejecutable y verificable, en lugar de guardar solo resúmenes en lenguaje natural.}
+
+\subsection{Automatic Curriculum: quién decide qué aprender a continuación}
+
+Un mundo abierto no tiene un orden fijo de niveles, por lo que también se necesita un \term{automatic curriculum (currículo automático)}: a partir del inventory actual, las habilidades desbloqueadas, el historial de exploración y la novelty, propone la siguiente tarea «factible ahora, pero aún no completada». Controla a la vez la dificultad y la dirección de la exploración; si la tarea es demasiado difícil, se desperdician llamadas, y si es demasiado fácil, no se amplían las capacidades.
+
+\lecturefigure{slide-34-automatic-curriculum.jpg}{El automatic curriculum amplía las capacidades a lo largo del árbol tecnológico de Minecraft}{Diapositiva V034 recuperada de la grabación oficial; 00:27:18}
+
+\begin{knowledgebox}{Lectura de la figura: el curriculum es una task policy}
+La figura va de los recursos básicos a los objetos avanzados y muestra que las tareas tienen dependencias previas. Primero se observan el inventory actual y las unlocked skills, y después si las tareas candidatas conducen a estados nuevos; un buen curriculum no persigue simplemente la reward más alta, sino que busca el equilibrio entre feasibility, novelty, usefulness y risk.
+\end{knowledgebox}
+
+\lecturefigure{slide-35-proposed-next-task.jpg}{El curriculum propone, según el estado, una siguiente tarea factible y novedosa}{Diapositiva V035 recuperada de la grabación oficial; 00:28:30}
+
+La selección de tareas puede abstraerse así:
+\[
+\tau_{k+1}=\arg\max_{\tau\in\mathcal{C}(x_k)}
+\bigl[\alpha F(\tau\mid x_k)+\beta N(\tau\mid M_k)+\eta U(\tau)-\rho R(\tau)\bigr].
+\]
+Donde $\mathcal{C}(x_k)$ es el conjunto de tareas candidatas en el estado actual $x_k$, $F$ es la feasibility, $N$ es la novelty respecto de la memory $M_k$, $U$ es el valor de reutilización futura, $R$ es el riesgo o el costo esperado, y $\alpha,\beta,\eta,\rho$ son pesos. El Voyager real usa una LLM proposal; la fórmula sirve para mostrar las dimensiones de evaluación y no significa que el sistema calcule explícitamente estos escalares.
+
+\subsection{Resultados del ciclo cerrado: velocidad en el árbol tecnológico y cobertura del mapa}
+
+Solo al ensamblar curriculum, actor, critic y skill library se convierte Voyager en un sistema de exploración abierta. Las diapositivas de resultados miden por separado el progress en el árbol tecnológico y la spatial exploration; el primero se aproxima al desbloqueo de habilidades y recursos, y la segunda a la cobertura del mapa. Ambos tipos de métricas son complementarios, pero los dos son solo proxies dentro de Minecraft.
+
+\lecturefigure{slide-36-voyager-all-pieces.jpg}{El curriculum, el prompting y la skill library de Voyager forman un ciclo cerrado}{Diapositiva V036 recuperada de la grabación oficial; 00:29:03}
+
+\begin{importantbox}{El ciclo cerrado mínimo de Voyager}
+El curriculum propone tareas, el actor escribe código, el environment devuelve evidencia de ejecución, el critic evalúa el avance, los programas exitosos entran en la skill library y la nueva memory, a su vez, modifica la siguiente tarea y el siguiente fragmento de código. Si falta cualquier eslabón, el sistema degenera en exploración sin dirección, generación de un solo uso, ejecución no verificable o una demo incapaz de acumular.
+\end{importantbox}
+
+\lecturefigure{slide-37-open-ended-exploration-results.jpg}{Curvas de progreso de Voyager en las métricas de árbol tecnológico y de exploración abierta}{Diapositiva V037 recuperada de la grabación oficial; 00:30:21}
+
+\begin{knowledgebox}{Lectura de la figura: primero el presupuesto del eje horizontal, después el significado de las curvas}
+El eje horizontal representa el presupuesto de iteraciones o de exploración, y el eje vertical corresponde a objetos desbloqueados, hitos o task progress; primero se compara la velocidad de ascenso de Voyager y de las baselines con el mismo presupuesto, y después la meseta final. Las curvas respaldan que el ciclo memory/curriculum/code es más eficiente en Minecraft; no respaldan que «el modelo paramétrico ya adquirió inteligencia general» ni una extrapolación directa a robots reales.
+\end{knowledgebox}
+
+\lecturefigure{slide-38-map-coverage.jpg}{La comparación de cobertura del mapa muestra el alcance espacial de la exploración abierta}{Diapositiva V038 recuperada de la grabación oficial; 00:31:06}
+
+Los colores y las regiones del mapa representan las trayectorias de exploración o el área cubierta por distintos agents. Primero se compara el área alcanzable y después se verifica que no se trate solo de una caminata aleatoria; solo en combinación con la finalización de tareas y la obtención de recursos se puede juzgar si la exploración es útil. Una mayor cobertura respalda que el agent visita activamente más estados, pero no indica que cada región se haya comprendido ni que haya aprendido un modelo causal de largo plazo.
+
+\teachervoice{Al presentar los resultados, el ponente enfatiza que Voyager desbloquea la technology tree más rápido y explora un mapa más grande; al mismo tiempo, esto sigue siendo progress en Minecraft. Es importante situar las métricas dentro de los límites del entorno: la cobertura del mapa y la cantidad de objetos son proxies de exploración abierta, no una medición completa de la general intelligence.}
+
+\subsection{Resumen de la sección}
+
+Voyager usa code-as-action para comprimir comportamientos largos en programas ejecutables, los revisa repetidamente con el environment feedback y el critic, acumula executable memory con la skill library y decide la siguiente tarea con el automatic curriculum. Muestra una arquitectura de mejora continua que no requiere actualizar los pesos del modelo, pero su capacidad sigue limitada por la API, el critic, la memory hygiene, la task proposal y las métricas de Minecraft.

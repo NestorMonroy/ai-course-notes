@@ -1,0 +1,99 @@
+\section{Síntesis y ampliación}
+
+Lo que más vale la pena trasladar de esta clase a otros modelos no es un conjunto de cifras de Mixtral, sino un método de auditoría: primero confirmar el dense baseline y luego describir con claridad el routing algorithm; reportar a la vez total/active/resident; incluir en el costo la communication y el load balance; y, por último, usar routing statistics e intervention para comprobar si los «experts» tienen de verdad una división de trabajo interpretable.
+
+\subsection{Quince conclusiones centrales}
+
+Las siguientes conclusiones se organizan en tres niveles: estructura, sistema e interpretación, para no tomar el nombre del modelo como respuesta.
+
+\begin{enumerate}
+  \item Mixtral conserva la attention de Mistral 7B y solo sustituye el MLP de cada capa por top-two-of-eight experts.
+  \item GQA reduce los KV heads y la KV cache; SWA limita el attention neighborhood de cada capa.
+  \item El Router puntúa cada token de forma independiente, elige el top-$k$, normaliza y combina con pesos los expert outputs.
+  \item Cada capa tiene ocho experts; la numeración de los experts es permutable dentro de la capa y no tiene una identidad natural entre capas.
+  \item Total parameters, active parameters y resident memory son tres magnitudes distintas.
+  \item Los active parameters aproximan sobre todo el per-token compute; no representan la latency completa ni el dollar cost.
+  \item El expert parallelism requiere un all-to-all de tokens, y la topology entre nodes puede convertirse en el cuello de botella.
+  \item El load imbalance hace que el expert más ocupado determine la tail del step paralelo.
+  \item Con lotes grandes y alto tráfico es más fácil agrandar los GEMM de cada expert y diluir el dispatch overhead.
+  \item La MLP-knowledge hypothesis es sugerente desde el punto de vista experimental, pero no es un teorema de localización funcional.
+  \item Los benchmarks de 2024 muestran que las mayores ganancias están en tareas knowledge-heavy, pero no prueban un nuevo reasoning algorithm.
+  \item El discrete routing ofrece una señal que puede contabilizarse, pero la routing frequency no es una explicación semántica ni causal.
+  \item Unos domain experts nítidos pueden dejar ociosos a otros experts y reducir el aprovechamiento.
+  \item La expert ablation es una intervention importante, pero debe registrar la layer, la gate normalization y el tratamiento del overflow.
+  \item MoE, domain tuning y RAG son ejes distintos y combinables; el expert swapping además requiere router adaptation.
+\end{enumerate}
+
+\subsection{Una tabla que enlaza estructura, entrenamiento y serving}
+
+Para convertir los conceptos en revisiones de ingeniería, la tabla siguiente indica, para cada etapa, las variables que más conviene observar y los errores de juicio más comunes.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{L{0.16\textwidth} L{0.27\textwidth} X}
+\toprule
+Etapa & Magnitudes clave observadas & Error de juicio común \\
+\midrule
+Architecture & $E,k$, shared/expert params, GQA/SWA & Estimar el número de parámetros a partir del nombre del modelo \\
+Training & tokens/expert, aux loss, gradient, optimizer state & Calcular la memoria solo con los active params \\
+Placement & expert sharding, node topology, HBM & Suponer que los experts no activados no necesitan residir en memoria \\
+Serving & lote, all-to-all, imbalance, tail latency & Usar FLOPs en lugar del cost real \\
+Interpretation & routing stats, ablation, counterfactual & Ponerle directamente una etiqueta de domain a cada expert \\
+Evaluation & task setup, ejes active/total, history date & Tomar el plot de 2024 como ranking actual \\
+\bottomrule
+\end{tabularx}
+\caption{Marco mínimo de auditoría de MoE, desde la arquitectura hasta la interpretación.}
+\end{table}
+
+\subsection{MoE release checklist para la práctica}
+
+La siguiente checklist sirve para revisar artículos, model cards o releases internos; su objetivo principal es evitar que solo se muestre el parameter headline.
+
+\begin{lstlisting}[caption={Sparse MoE release checklist}]
+report_total_and_active_parameters()
+report_expert_count_topk_and_shared_modules()
+report_weight_precision_and_resident_memory()
+report_tokens_per_expert_and_load_imbalance()
+report_expert_parallel_topology_and_all_to_all_cost()
+compare_against_dense_models_at_compute_and_memory_budgets()
+publish_routing_analysis_with_causal_controls()
+document_quantization_offload_and_failure_cases()
+\end{lstlisting}
+
+\begin{warningbox}{Al ver «13B active», pregunte de inmediato}
+¿Cuántos parámetros totales tiene el checkpoint? ¿Dónde están alojados todos los experts: en una sola tarjeta, en un solo node o repartidos entre nodes? ¿De qué tamaño es el lote? ¿Cuál es la P99 latency? ¿Hay token drop/reroute? Sin esta información, el active parameter headline solo describe una ruta de cómputo parcial.
+\end{warningbox}
+
+\subsection{Preguntas de autoevaluación}
+
+Estas preguntas sirven para comprobar si de verdad se dominan las tres cuentas y la routing evidence.
+
+\begin{enumerate}
+  \item ¿Por qué Mixtral no es un ensemble de ocho modelos 7B independientes?
+  \item ¿Qué recurso reduce GQA y cuál reduce SWA?
+  \item Escriba el proceso del top-two routing, desde los logits hasta la weighted sum.
+  \item ¿Por qué $8\times 7\mathrm{B}$ no es el valor exacto de los total ni de los active parameters?
+  \item ¿Por qué los active parameters no permiten predecir directamente la serving latency?
+  \item ¿Qué hace el expert parallel all-to-all en cada una de las dos fases, dispatch y combine?
+  \item ¿Por qué el expert más lento controla el tiempo de finalización de un lote?
+  \item ¿En qué se diferencian quantization, offload y sparsification?
+  \item ¿Qué puede probar un domain routing histogram y qué no?
+  \item ¿Por qué unos experts dedicados solo a código pueden reducir el aprovechamiento global?
+  \item ¿Qué variables de control debe registrar una expert ablation?
+  \item ¿Por qué RAG y MoE no son alternativas entre sí?
+  \item ¿Por qué, tras sustituir un expert, todavía hay que entrenar el router?
+  \item ¿En qué condiciones más experts podrían, por el contrario, reducir el throughput?
+\end{enumerate}
+
+\subsection{Lecturas adicionales}
+
+\begin{itemize}
+  \item Jiang et al., \href{https://arxiv.org/abs/2401.04088}{\emph{Mixtral of Experts}}: artículo principal sobre la estructura del modelo, su desempeño y el routing analysis.
+  \item Jiang et al., \href{https://arxiv.org/abs/2310.06825}{\emph{Mistral 7B}}: GQA, SWA y el dense baseline.
+  \item Shazeer et al., \href{https://arxiv.org/abs/1701.06538}{\emph{Outrageously Large Neural Networks}}: la sparsely-gated MoE layer.
+  \item Fedus et al., \href{https://arxiv.org/abs/2101.03961}{\emph{Switch Transformers}}: entrenamiento disperso a gran escala y parallelism.
+  \item Al leer estos artículos, registre también total/active parameters, precision, hardware, lote y communication; no se limite a extraer el benchmark headline.
+\end{itemize}
+
+\end{document}

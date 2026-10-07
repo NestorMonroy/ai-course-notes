@@ -1,0 +1,90 @@
+\section{Diffusion y Transformer: cambia la función objetivo, pero la experiencia de sistemas se sigue reutilizando}
+
+Diffusion no predice la imagen siguiendo el orden de los tokens, sino que aprende un vector field de eliminación de ruido en varios noise levels. Así, cada paso procesa la latent completa, y la GPU utilization suele ser mejor que la de autoregressive decoding con lote de tamaño uno. Después, DiT volvió a cambiar el denoiser de U-Net a Transformer, lo que muestra que «el cambio de objective» no significa que Transformer quede fuera.
+
+\subsection{DDPM: forward agrega ruido, reverse aprende a eliminarlo}
+
+El autoregressive model de la sección anterior tiene que generar en serie a lo largo de la image-token sequence. En esta sección cambia el planteamiento del problema: ya no se pregunta «cuál es el siguiente token», sino «dado cierto noise level, cómo llevar la noisy latent completa hacia una dirección más limpia». Al leer las fórmulas hay que distinguir a la vez la forward corruption, definida por una persona, y el reverse denoising que aprende el modelo.
+
+Se definen el noise schedule $\beta_t$, $\alpha_t=1-\beta_t$ y $\bar\alpha_t=\prod_{s=1}^{t}\alpha_s$. El forward process admite un muestreo en forma cerrada:
+\[
+q(x_t\mid x_0)=\mathcal{N}\!\left(\sqrt{\bar\alpha_t}x_0,(1-\bar\alpha_t)I\right),
+\quad
+x_t=\sqrt{\bar\alpha_t}x_0+\sqrt{1-\bar\alpha_t}\epsilon.
+\]
+El modelo suele predecir $\epsilon$:
+\[
+\mathcal{L}_{\text{simple}}=\mathbb{E}_{x_0,t,\epsilon}
+\left[\|\epsilon-\epsilon_\theta(x_t,t,c)\|_2^2\right],
+\]
+donde $c$ es la text condition.
+
+\lecturefigure{slide-24-diffusion-ddpm.jpg}{DDPM: noise schedule, denoising network y cálculo en paralelo de la imagen completa}{Video oficial de Stanford Online 00:52:11}
+
+\begin{knowledgebox}{Por qué diffusion aprovecha más fácilmente toda la GPU}
+Cada denoising step actualiza al mismo tiempo la latent completa, con matrices grandes y un alto grado de paralelismo. Cuando el lote es muy pequeño, un autoregressive image model produce un solo token por paso, y es difícil amortizar el kernel launch y el memory movement. Diffusion sigue necesitando muchos steps, pero el aprovechamiento del hardware en cada paso suele ser mejor.
+\end{knowledgebox}
+
+\teachervoice{01:12:30--01:15:00, en la sesión de Q\&A el ponente se niega a formular la conclusión como «imposible»: un autoregressive model lo bastante grande también puede generar imágenes de alta calidad. De lo que está más seguro es de la practical disadvantage que causan la sequential latency y las relaciones de larga distancia en dos dimensiones.}
+
+\subsection{Relay Diffusion: al cambiar de resolución no basta con copiar el mismo ruido independiente}
+
+Un mismo nominal noise level produce un grado de desenfoque visual distinto en cada resolution, porque la señal de las imágenes naturales tiene correlación espacial, mientras que el standard Gaussian noise suele ser independiente por pixel. Relay Diffusion usa correlated/block noise para ajustar la escala, de modo que las coarse-to-fine stages sean más coherentes en frecuencia y en SNR.
+
+\lecturefigure{slide-25-relay-diffusion.jpg}{Relay Diffusion: desacoplar el noise schedule, la network y la resolution}{Video oficial de Stanford Online 00:54:49}
+
+Si el block size es $k$, el noise de alta resolución puede escribirse como el sobremuestreo del noise de baja resolución más un residual:
+\[
+\epsilon_h=U_k(\epsilon_l)+\lambda\epsilon_{\text{res}},
+\]
+y con $\lambda$ se ajusta la variance de cada banda de frecuencia, para que la signal-to-noise ratio de la coarse stage y la de la fine stage sean más comparables. No se trata de un simple resize image, sino de redefinir el stochastic path entre resoluciones.
+
+\begin{warningbox}{La «alineación de SNR» depende del schedule y del data spectrum}
+La eficacia del block-correlated noise debe comprobarse con la resolution, el latent encoder, el noise schedule y los datos de entrenamiento concretos. Ofrece una explicación del mecanismo, pero no implica que toda coarse-to-fine diffusion pueda reutilizar directamente los mismos hiperparámetros.
+\end{warningbox}
+
+\teachervoice{00:52:11--00:55:16, el ponente enfatiza que, con el mismo noise independiente, la baja y la alta resolución no tienen la misma dificultad perceptual; lo esencial de Relay es desacoplar la resolution del schedule.}
+
+\subsection{CogView3: el scale-up y la distillation forman parte del sistema}
+
+Relay Diffusion resuelve el schedule entre resoluciones. Para convertir este mecanismo en un text-to-image system utilizable, también hay que ampliar al mismo tiempo el modelo y los datos, y comprimir el costoso teacher sampling en menos steps. CogView3 es precisamente esa extensión sistemática, y en la slide informa la velocidad de generación de imágenes de $1024\!\times\!1024$ del distilled model. Toda cifra de velocidad debe ir ligada al hardware, la implementación, el sampling step, el lote y la configuración de calidad.
+
+\lecturefigure{slide-26-cogview3.jpg}{CogView3: ampliar Relay Diffusion y acelerarlo mediante distillation}{Video oficial de Stanford Online 00:55:16}
+
+\begin{importantbox}{El objetivo de la distillation no es solo reducir parámetros}
+La diffusion distillation suele comprimir una teacher trajectory de muchos pasos en menos sampling steps. Lo que realmente se optimiza es el tradeoff entre end-to-end latency y quality; aun sin cambiar la cantidad de parámetros, puede acelerarse mucho al reducir las function evaluations.
+\end{importantbox}
+
+\subsection{DiT: sustituir el denoiser por un Transformer}
+
+DiT trata los latent patches como tokens e incorpora la timestep/class condition mediante adaptive LayerNorm. Si la normalization ordinaria es $\operatorname{LN}(h)$, adaLN puede escribirse como
+\[
+\operatorname{adaLN}(h;c)=\gamma(c)\odot\operatorname{LN}(h)+\beta(c),
+\]
+donde $c$ se obtiene del timestep y del embedding de la condición. Así, cada capa puede ajustar la feature scale y el shift según el noise level.
+
+\lecturefigure{slide-27-diffusion-transformer.jpg}{DiT: Transformer blocks y adaptive normalization en lugar de U-Net}{Video oficial de Stanford Online 00:57:02}
+
+\begin{knowledgebox}{Diferencia entre AdaLN y cross attention}
+Con cross attention, los image tokens consultan un conjunto de condition tokens; adaLN, en cambio, comprime la condition en scale/shift/gate para cada capa. La primera conserva la alineación a nivel de token; la segunda se parece más a una modulación global. Un sistema real puede usar ambas a la vez.
+\end{knowledgebox}
+
+\teachervoice{00:55:16--00:57:43, el ponente observa que la entrada del timestep es solo una condition muy pequeña y, sin embargo, puede pasar por un MLP grande para generar los parámetros de modulación de cada capa; lo considera un diseño de ingeniería que todavía admite simplificación.}
+
+\subsection{Stable Diffusion 3 y MM-DiT: reaparecen los text/image experts}
+
+MM-DiT mantiene parameter paths separados para los text tokens y los image tokens, y luego los hace interactuar mediante attention. Puede abstraerse como
+\[
+Q_t=H_tW_Q^{(t)},\quad Q_i=H_iW_Q^{(i)},
+\]
+mientras que la joint attention intercambia información sobre $K,V$ concatenados. La idea que comparte con CogVLM son las modality-specific transformations; la diferencia es que la tarea es diffusion denoising y no autoregressive response.
+
+\lecturefigure{slide-28-stable-diffusion3-mmdit.jpg}{Stable Diffusion 3: los text/image expert paths de MM-DiT}{Video oficial de Stanford Online 00:57:43}
+
+\begin{warningbox}{Nombres de módulo parecidos no implican el mismo problema de entrenamiento}
+Los vision experts de CogVLM sirven al image-conditioned language modeling; los modality paths de MM-DiT sirven al rectified flow/diffusion denoising. Separar los parámetros es un patrón de diseño compartido, pero la loss, la sequence, la condition y la evaluation son completamente distintas.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Diffusion se impuso en la practical image generation, sobre todo gracias al paralelismo sobre la imagen completa, a la latent continua y a una vía de modelado espacial más adecuada. Relay se ocupa del noise entre resoluciones, la distillation reduce los sampling steps, y DiT/MM-DiT devuelven el Transformer al denoiser. La función objetivo y la vía de sistemas determinan juntas la eficiencia final.

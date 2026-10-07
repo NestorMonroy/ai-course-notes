@@ -1,0 +1,95 @@
+\section{Multi-Agent Systems: paralelizar es fácil; la comunicación y la corrección de errores son más difíciles}
+
+La trayectoria larga de un solo agent puede ser lenta y difícilmente abarca tareas complejas. Un multi-agent system intenta repartir la tarea entre varios specialized worker y después consolidar los resultados mediante un manager. Lo más valioso de la clase no es «abrir más modelos», sino la secuencia de diagramas progresivos que muestra delegation, verification, conflict y redo.
+
+\subsection{Por qué se necesitan varios agents}
+
+La paralelización puede reducir el wall-clock time de las subtareas independientes, y la specialization permite que distintos worker usen herramientas o prompts diferentes. Esto supone que la tarea pueda descomponerse correctamente, que los resultados puedan combinarse y que el shared state no se sobrescriba de forma cruzada. Las dos diapositivas siguientes presentan primero la forma del sistema y después enumeran los beneficios del paralelismo y la specialization; solo entonces se aborda el costo del protocolo.
+
+\lecturefigure{slide-096.jpg}{Varios autonomous agent forman un sistema colaborativo}{Diapositivas oficiales de CS25 V4, página 96}
+
+\lecturefigure{slide-097.jpg}{Parallelization, specialization y la motivación de multi-agent}{Diapositivas oficiales de CS25 V4, página 97}
+
+\begin{importantbox}{Límite superior de la ganancia por paralelismo}
+Si la proporción paralelizable de la tarea es $p$, la aceleración ideal con $n$ worker está limitada por la Amdahl's law:
+\[
+\operatorname{Speedup}(n)=\frac{1}{(1-p)+p/n}.
+\]
+Los costos de descomposición, comunicación, verificación y combinación hacen que la aceleración real sea menor. El valor de un sistema multi-agent debe comprobarse con end-to-end latency, cost y success rate, no medirse por el número de agents.
+\end{importantbox}
+
+\teachervoice{El docente enfatiza que los beneficios directos de multi-agent son la parallelization y los specialized workers, pero de inmediato desplaza el foco hacia la communication: el lenguaje natural es ambiguo, y los agents también pueden malinterpretarse entre sí, igual que las personas.}
+
+\subsection{Hierarchy y message protocol}
+
+La clase propone una manager--worker hierarchy: el usuario conversa con el manager, el manager asigna tareas y mantiene el estado global, y los worker atienden objetivos locales. La jerarquía reduce las interfaces que enfrenta el usuario, pero concentra en el manager la descomposición correcta y la sincronización del estado. Las tres diapositivas siguientes van de la jerarquía abstracta al message y al state; al leer las figuras, conviene buscar primero la ownership y la version boundary.
+
+\lecturefigure{slide-098.jpg}{Estructura jerárquica de comunicación entre manager y worker}{Diapositivas oficiales de CS25 V4, página 98}
+
+\lecturefigure{slide-099.jpg}{Ambigüedad y problemas de sincronización en la natural-language communication}{Diapositivas oficiales de CS25 V4, página 99}
+
+\begin{importantbox}{Un typed message es más fácil de verificar que el texto libre}
+Una worker request debe incluir al menos
+\[
+m=(\texttt{task\_id},\texttt{goal},\texttt{inputs},\texttt{constraints},\texttt{deadline},\texttt{expected\_artifact}).
+\]
+El mensaje de respuesta debe incluir status, artifact, evidence, error y side effect. El lenguaje natural puede conservarse en el campo explanation, pero la información de control esencial debe estar estructurada.
+\end{importantbox}
+
+\lecturefigure{slide-100.jpg}{Diagrama inicial de comunicación entre el manager state y el worker state}{Diapositivas oficiales de CS25 V4, página 100}
+
+\begin{knowledgebox}{Lectura de la figura: lo que debe sincronizarse es el state, no solo el historial de conversación}
+El manager debe conocer la versión de la tarea, la instantánea de las entradas, las action que el worker ya ejecutó y la ubicación de los productos. Si dos worker trabajan sobre snapshots distintos, puede que no sea posible combinarlos aunque al final ambos textos «digan que terminaron». La versión del estado y la ownership importan más que la fluidez de la redacción.
+\end{knowledgebox}
+
+\subsection{Verification: una declaración de finalización no puede tomarse directamente como un hecho}
+
+El cambio central del progressive diagram es la incorporación del verify step. Que un worker responda «done» es solo una claim; el manager o un verifier independiente debe revisar el artifact, las pruebas, el estado del entorno o evidencia externa. Los dos retained state siguientes muestran, respectivamente, una verification normal y un conflicto con la claim; lo importante es cómo el canal de evidencia modifica el flujo de control.
+
+\lecturefigure{slide-103.jpg}{El manager aplica verification a la declaración de finalización del worker}{Diapositivas oficiales de CS25 V4, página 103}
+
+\begin{importantbox}{Verification contract}
+Para el producto $a$ de un worker y la especificación $c$, el verifier produce
+\[
+v=V(a,c,e)\in\{\texttt{pass},\texttt{fail},\texttt{unknown}\},
+\]
+donde $e$ es la evidencia de pruebas, registros, archivos, páginas o del entorno. \texttt{unknown} es importante: cuando la evidencia es insuficiente, no debe forzarse a pass.
+\end{importantbox}
+
+\lecturefigure{slide-104.jpg}{Scenario 1: la claim del worker entra en conflicto con el resultado de la verificación}{Diapositivas oficiales de CS25 V4, página 104}
+
+\begin{warningbox}{El conflict handling no debe reducirse a «preguntarle otra vez al mismo modelo»}
+Si el verifier usa solo el mismo contexto, el mismo modelo y la misma suposición errónea, la revisión puede repetir el error original. Una verificación más sólida debe cambiar el canal de evidencia: ejecutar pruebas, leer el estado real, usar otra tool, revisar el checksum o exigir una proof ejecutable.
+\end{warningbox}
+
+\subsection{Correction y redo path}
+
+El diagrama de estado final incorpora el re-do: el manager envía al worker la causa del fallo y el context actualizado, y el worker vuelve a ejecutar la tarea. Una recovery eficaz debe distinguir entre transient failure, bad plan, permission error y side effects irreversibles.
+
+\lecturefigure{slide-107.jpg}{Scenario 2: tras un fallo de verificación, se devuelve el context y se vuelve a ejecutar}{Diapositivas oficiales de CS25 V4, página 107}
+
+\begin{lstlisting}[caption={Protocolo estructurado de verification y redo entre manager y worker}]
+def run_task(manager, worker, verifier, task, max_attempts=3):
+    context = manager.snapshot(task)
+    for attempt in range(max_attempts):
+        result = worker.execute(task, context=context)
+        verdict = verifier.check(task.spec, result.artifact)
+        if verdict.status == "pass":
+            return manager.commit(result)
+        context = manager.revise_context(
+            previous=context,
+            evidence=verdict.evidence,
+            error=verdict.reason,
+        )
+    raise TaskFailed(task.id, context)
+\end{lstlisting}
+
+\begin{warningbox}{Antes del redo, determina si la action puede repetirse}
+Enviar correos, hacer pagos, borrar archivos y enviar formularios pueden no ser operaciones idempotent. La recovery requiere un action ID, un side-effect log, una deduplication key y un compensation plan; de lo contrario, «volver a ejecutar» convierte un solo error en side effects duplicados.
+\end{warningbox}
+
+\teachervoice{En clase se usa el progressive diagram para explicar que el manager no puede confiar en la declaración de finalización del worker y debe verificarla; si el resultado es incorrecto, debe devolver el failure context y repetir la tarea. Este ciclo cerrado se acerca más a un sistema real que el lema de la «colaboración automática entre múltiples agents».}
+
+\subsection{Resumen de la sección}
+
+Los beneficios de un multi-agent system provienen del paralelismo y la specialization; los riesgos principales provienen de la descomposición, la comunicación, el estado compartido, la verificación y los side effects. Una manager--worker hierarchy solo resulta más confiable que un único agent cuando se acompaña de un typed protocol, evidence-based verification, versioned state y bounded redo.

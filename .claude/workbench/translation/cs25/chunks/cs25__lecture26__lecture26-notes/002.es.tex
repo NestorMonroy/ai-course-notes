@@ -1,0 +1,127 @@
+\section{Attention y Transformer: cómo se selecciona y combina la información}
+
+La sección anterior responde «por qué se llegó al Transformer»; esta sección responde «qué hace exactamente». La clase parte de seq2seq, pasa a Q/K/V y luego distingue entre self-attention, multi-head attention y cross-attention. Entender estas diferencias permite ubicar más adelante la interfaz de los LLM decoder-only, de encoder--decoder, de retrieval y de la memoria de un agent.
+
+\subsection{El cuello de botella de seq2seq: un solo state carga con demasiado}
+
+Los primeros modelos sequence-to-sequence (de secuencia a secuencia) usaban un encoder para comprimir la entrada en un estado oculto, a partir del cual un decoder generaba la salida paso a paso. Al aumentar la longitud, un único vector debe conservar al mismo tiempo el significado de las palabras, el orden y las dependencias lejanas, y el cuello de botella de información se vuelve cada vez más evidente. Las dos diapositivas siguientes muestran primero el recurrent path y después la vía de lectura directa que agrega attention; lo que conviene comparar es desde dónde fluye la información hacia el decoder.
+
+\lecturefigure{slide-019.jpg}{Un RNN seq2seq transmite la información de la secuencia mediante el recurrent state}{slide deck oficial de CS25 V4, página 19}
+
+\begin{importantbox}{Recurrent update}
+El RNN más simple puede escribirse como
+\[
+h_t=\phi(W_xx_t+W_hh_{t-1}+b),\qquad y_t=W_oh_t.
+\]
+$x_t$ es la $t$-ésima entrada, $h_t$ es el estado oculto, $W_x,W_h,W_o$ son matrices aprendibles y $\phi$ es una función no lineal. Cada paso depende de $h_{t-1}$, por lo que la dimensión temporal difícilmente puede paralelizarse por completo; además, en secuencias largas el gradiente debe atravesar muchos recurrent steps.
+\end{importantbox}
+
+\lecturefigure{slide-020.jpg}{Attention permite que el decoder acceda directamente a varios encoder states}{slide deck oficial de CS25 V4, página 20}
+
+\begin{knowledgebox}{Lectura de la figura: lo que cambia attention es la vía de la información}
+Sin attention, el decoder depende principalmente del encoder state final; con attention, cada posición de salida puede asignar una puntuación a todas las posiciones de entrada y calcular una suma ponderada. El modelo ya no está obligado a comprimir la oración completa en un cuello de botella fijo, sino que vuelve a leer la entrada según lo que requiera la generación en curso.
+\end{knowledgebox}
+
+\subsection{Q, K, V: consulta, índice y contenido}
+
+En la clase se usa una analogía con un library system para explicar Query, Key y Value. El lector formula una consulta, el índice del catálogo funciona como key y el contenido del libro funciona como value. El modelo primero compara la query con cada key para medir su relevancia y después combina los value correspondientes mediante pesos. Al leer la figura hay que separar «qué libro se encontró» de «qué se extrae del libro», lo que corresponde precisamente a los dos pasos de key matching y value aggregation.
+
+\lecturefigure{slide-021.jpg}{La library analogy explica Query, Key y Value}{slide deck oficial de CS25 V4, página 21}
+
+\begin{importantbox}{Scaled dot-product attention}
+Sean $Q\in\mathbb{R}^{n_q\times d_k}$, $K\in\mathbb{R}^{n_k\times d_k}$ y $V\in\mathbb{R}^{n_k\times d_v}$; attention se define como
+\[
+\operatorname{Attention}(Q,K,V)=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}+M\right)V.
+\]
+$QK^\top$ da la puntuación de coincidencia entre cada query y cada key; $\sqrt{d_k}$ controla la escala del producto punto; $M$ es una mask opcional; softmax convierte las puntuaciones en pesos y, al final, se calcula una suma ponderada sobre $V$. Query determina «qué se busca ahora», Key determina «si soy relevante» y Value determina «qué contenido aporto cuando soy relevante».
+\end{importantbox}
+
+\begin{warningbox}{Un attention weight no es una explicación completa}
+Los pesos muestran cómo cierta cabeza de cierta capa mezcla los value, pero la salida pasa además por la value projection, el residual, el MLP y las capas posteriores. No se puede afirmar, con base en un solo attention map, «por qué» el modelo tomó una decisión, y mucho menos interpretar un peso alto directamente como contribución causal.
+\end{warningbox}
+
+\lecturefigure{slide-022.jpg}{Los attention weights combinan varios value en un context vector}{slide deck oficial de CS25 V4, página 22}
+
+\begin{lstlisting}[caption={Pseudocódigo didáctico de scaled dot-product attention}]
+def attention(query, key, value, mask=None):
+    scores = query @ key.transpose(-1, -2)
+    scores = scores / sqrt(key.shape[-1])
+    if mask is not None:
+        scores = scores + mask
+    weights = softmax(scores, dim=-1)
+    return weights @ value, weights
+\end{lstlisting}
+
+\teachervoice{El ponente enfatiza que se trata de un «soft match»: una query no tiene que elegir un solo value, sino que puede tomar información de varias posiciones. Esta propiedad distingue a attention de la coincidencia exacta de una base de datos y explica también por qué puede expresar relaciones lingüísticas difusas y composicionales.}
+
+\subsection{Self-attention y Multi-head attention}
+
+Self-attention (autoatención) hace que una misma secuencia produzca a la vez $Q$, $K$ y $V$. Cada token puede leer otros tokens según su contenido; un causal decoder usa una mask para impedir la lectura de posiciones futuras. Multi-head attention (atención multicabeza), por su parte, permite que varios subespacios aprendan en paralelo distintos patrones de coincidencia. Las tres diapositivas siguientes avanzan nivel por nivel, de la conexión de una sola cabeza al block completo y a la visualización multicabeza: primero se observa el origen de la información y después la projection y la fusión.
+
+\lecturefigure{slide-023.jpg}{Self-attention establece conexiones basadas en el contenido dentro de una misma secuencia}{slide deck oficial de CS25 V4, página 23}
+
+\begin{knowledgebox}{Concepto previo: tres masks comunes en self-attention}
+\begin{tabularx}{\textwidth}{L{0.23\textwidth} X}
+\toprule
+Forma & Flujo de información permitido \\
+\midrule
+Bidirectional & Cada posición puede leer toda la entrada; es típico del encoder. \\
+Causal & La posición $t$ solo puede leer los token $\le t$; es típico del autoregressive decoder. \\
+Block/sparse & Solo se permiten bloques locales, token globales o conexiones predefinidas; se usa para reducir el costo en secuencias largas. \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\lecturefigure{slide-024.jpg}{Un Transformer block apila multi-head attention y una red feedforward}{slide deck oficial de CS25 V4, página 24}
+
+\begin{importantbox}{Multi-head attention}
+La $i$-ésima head primero realiza una proyección independiente:
+\[
+\operatorname{head}_i=\operatorname{Attention}(QW_i^Q,KW_i^K,VW_i^V),
+\]
+y después todas las head se concatenan y se proyecta la salida:
+\[
+\operatorname{MHA}(Q,K,V)=\operatorname{Concat}(\operatorname{head}_1,\ldots,\operatorname{head}_h)W^O.
+\]
+$h$ es el número de head, $W_i^Q,W_i^K,W_i^V$ son las proyecciones de cada head y $W^O$ se encarga de la fusión. Tener varias cabezas no garantiza que cada head corresponda automáticamente a un significado claro, pero sí aumenta los subespacios de representación en paralelo.
+\end{importantbox}
+
+\lecturefigure{slide-025.jpg}{Distintas attention heads pueden aprender distintas relaciones posicionales}{slide deck oficial de CS25 V4, página 25}
+
+\begin{warningbox}{«Una head se encarga de una regla gramatical» es solo una observación, no un contrato de interfaz}
+Algunas head muestran patrones de posición, de correferencia o sintácticos, pero el entrenamiento no exige que una head desempeñe permanentemente un papel fijo. Tras una poda, un reentrenamiento o un cambio de modelo, los patrones pueden cambiar. El diseño de ingeniería no puede depender de que una head con cierto número conserve necesariamente cierto tipo de conocimiento.
+\end{warningbox}
+
+\subsection{Cross-attention: cómo se alinean dos secuencias}
+
+Cross-attention (atención cruzada) toma la query y los key/value de fuentes distintas. En traducción automática, el decoder produce la query y los encoder hidden states aportan los key y value; la generación aumentada por recuperación, los modelos de visión y lenguaje y las arquitecturas encoder--decoder también usan interfaces similares.
+
+\lecturefigure{slide-026.jpg}{Self-attention y cross-attention en traducción automática}{slide deck oficial de CS25 V4, página 26}
+
+\begin{knowledgebox}{Glosario: no hay que confundir los tres tipos de attention}
+\begin{tabularx}{\textwidth}{L{0.22\textwidth} L{0.25\textwidth} X}
+\toprule
+Tipo & Origen de Q/K/V & Uso principal \\
+\midrule
+Self-attention & La misma secuencia & Establecer dependencias dentro de la secuencia. \\
+Causal self-attention & La misma secuencia, con mask del futuro & Generación autorregresiva. \\
+Cross-attention & Q proviene del decoder/una modalidad; K/V provienen del encoder/otra modalidad & Generación condicionada y fusión entre modalidades y entre secuencias. \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{En qué supera el Transformer al RNN}
+
+La última diapositiva de comparación resume sus ventajas en acceso a larga distancia, entrenamiento estable y cómputo en paralelo. Hay que añadir una limitación: la score matrix de la dense self-attention estándar es de $n\times n$, por lo que el aumento de la longitud de la secuencia implica un costo cuadrático de cómputo y de memoria. Al leer esta tabla conviene comparar a la vez el dependency path, los sequential steps y el resource cost, para no quedarse solo con «el Transformer es mejor».
+
+\lecturefigure{slide-027.jpg}{Comparación del entrenamiento y del modelado de dependencias entre RNN y Transformer}{slide deck oficial de CS25 V4, página 27}
+
+\begin{importantbox}{El intercambio entre complejidad y paralelismo}
+Para una secuencia de longitud $n$ y dimensión oculta $d$, el cálculo principal de los score en dense attention es de aproximadamente $O(n^2d)$, y la attention matrix ocupa $O(n^2)$; en un RNN, cada paso cuesta aproximadamente $O(d^2)$ y el cómputo total crece linealmente con $n$, pero debe ejecutarse en orden temporal. El Transformer cambia más emparejamientos globales por paralelismo en el entrenamiento y rutas de información cortas.
+\end{importantbox}
+
+\teachervoice{En la clase se considera el GPU parallelism una causa importante del éxito del Transformer. Una arquitectura no solo debe tener buena capacidad expresiva, sino también ajustarse al rendimiento del hardware; este es además el punto de partida de los problemas posteriores de scale, costo y concentración de la investigación.}
+
+\subsection{Resumen de la sección}
+
+Attention, mediante una ponderación basada en el contenido, permite al modelo leer la información según la necesite. La autoatención procesa las relaciones dentro de la secuencia, la atención cruzada conecta fuentes distintas y el mecanismo multicabeza ofrece varios subespacios de representación. Así, el Transformer se libra del recurrent bottleneck, pero introduce el costo cuadrático en secuencias largas y problemas de interpretabilidad más complejos.

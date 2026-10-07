@@ -1,0 +1,96 @@
+\section{Tres tipos de Transformer: a partir de la base común de los sequence models}
+
+La sección anterior explicó por qué conviene estudiar la estructura; esta sección primero deja clara la estructura. Encoder-decoder, encoder-only y decoder-only no son tres invenciones sin relación entre sí: las tres convierten una entrada discreta en una secuencia de vectores y después usan attention para modelar las interacciones entre los elementos. Las diferencias provienen sobre todo de si los parámetros se comparten, de cómo la attention mask limita el alcance visible y de cómo se entrena y se usa la salida.
+
+\subsection{La interfaz de tarea de las tres arquitecturas}
+
+Esta sección comienza con el panorama general y después entra paso a paso en las figuras. Encoder-decoder asigna dos stacks, uno para la entrada y otro para la salida; encoder-only comprime la entrada en una representación y por lo común necesita un task-specific head; decoder-only concatena la entrada y el objetivo y genera token por token en un solo causal stack. Cada interfaz supone implícitamente un tipo distinto de tarea.
+
+\lecturefigure{hyung-slide-017.jpg}{Las tres arquitecturas del Transformer: encoder-decoder, encoder-only y decoder-only}{Hyung Won Chung official deck, p.~17}
+
+\begin{knowledgebox}{Glosario: qué problema resuelve cada arquitectura}
+\begin{tabularx}{\textwidth}{L{0.22\textwidth} X}
+\toprule
+Arquitectura & Mecanismo central y relación con el curso \\
+\midrule
+Encoder-decoder & El encoder codifica la entrada de forma bidireccional; el decoder genera el objetivo mediante causal self-attention y cross-attention. Es adecuada para sequence-to-sequence explícito. \\
+Encoder-only & Interacción bidireccional sobre toda la secuencia; la salida suele usarse para clasificación, recuperación o token labeling. Para generar una secuencia se necesita un mecanismo de generación adicional. \\
+Decoder-only & La entrada y las salidas previas están en la misma secuencia causal; comparte parámetros y tiene una interfaz unificada, por lo que se adapta de forma natural a la autoregressive generation y a la continuación en varios turnos. \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{De caracteres a una secuencia de vectores, y de ahí a la interaction}
+
+Antes de clasificar las arquitecturas hay que entender el pipeline común. Primero, el tokenizer convierte el texto en token IDs; después, la embedding table asigna a cada ID un vector de dimensión $d_{\text{model}}$; por último, el sequence model hace que las distintas posiciones intercambien información según el attention pattern. El modelo procesa una secuencia de vectores, no directamente el «significado de las palabras».
+
+\lecturefigure{hyung-slide-018.jpg}{La secuencia de caracteres sin procesar es el punto de partida del pipeline del Transformer}{Hyung Won Chung official deck, p.~18}
+
+\lecturefigure{hyung-slide-021.jpg}{Pipeline completo: tokenización, embedding y sequence model}{Hyung Won Chung official deck, p.~21}
+
+Si el token ID es $i_t$ y la embedding matrix es $E\in\mathbb{R}^{V\times d}$, entonces
+\[
+h_t^{(0)}=E[i_t]+p_t.
+\]
+Aquí $V$ es el tamaño del vocabulario, $d$ es la hidden dimension, $E[i_t]$ es el vector del token número $i_t$, $p_t$ es la representación de posición y $h_t^{(0)}$ es el estado que entra en la primera capa. La tokenización determina la longitud de la secuencia y los límites de segmentación; el embedding determina la representación continua inicial. Ambos influyen en el costo del cómputo posterior.
+
+\teachervoice{Entre 00:46:35 y 00:47:50, Hyung Won primero define el Transformer como un sequence model: los elementos de entrada pueden ser palabras, imágenes u otros objetos, y lo central es modelar la interaction entre los elementos. Este orden evita separar la fórmula de attention de la interfaz de datos.}
+
+\subsection{Encoder-decoder: tres papeles de la attention}
+
+Pasamos ahora al Transformer original. Al leer la figura, primero hay que separar los tres flujos de información: la self-attention bidireccional dentro del encoder, la self-attention causal dentro del decoder y la cross-attention con la que el decoder consulta la representación del encoder. Cada arista corresponde a un permiso de «qué posición puede leer qué posición».
+
+\lecturefigure{hyung-slide-022.jpg}{Arquitectura encoder-decoder completa y los tres papeles de la attention}{Hyung Won Chung official deck, p.~22}
+
+\begin{importantbox}{Self-attention y cross-attention}
+Dados una query $Q$, una key $K$ y un value $V$, la scaled dot-product attention es
+\[
+\operatorname{Attn}(Q,K,V)=\operatorname{softmax}\!\left(\frac{QK^{\top}}{\sqrt{d_k}}+M\right)V.
+\]
+Aquí $d_k$ es la dimensión de la key y $M$ es la máscara de visibilidad. En la self-attention, $Q,K,V$ provienen de la misma secuencia; en la cross-attention, $Q$ proviene del decoder y $K,V$ provienen de la salida del encoder.
+\end{importantbox}
+
+\lecturefigure{hyung-slide-023.jpg}{El encoder usa bidirectional self-attention para modelar la entrada completa}{Hyung Won Chung official deck, p.~23}
+
+La bidirectional attention (atención bidireccional) permite que cualquier posición de la entrada lea cualquier otra posición. Si la longitud de la secuencia es $n$, la máscara de visibilidad puede escribirse como $M_{ij}=0$; no hay ocultamiento del futuro. Es adecuada para una entrada que se da completa de una vez, porque todos los tokens se conocen al codificar; pero también implica que un cambio al final de la entrada afecta la representación de todas las posiciones anteriores.
+
+\lecturefigure{hyung-slide-025.jpg}{El decoder usa causal self-attention y solo lee la posición actual y el historial a su izquierda}{Hyung Won Chung official deck, p.~25}
+
+La causal attention (atención causal) usa una máscara triangular superior para impedir la lectura del futuro:
+\[
+M_{ij}=\begin{cases}
+0,&j\le i,\\
+-\infty,&j>i.
+\end{cases}
+\]
+Aquí $i$ es la posición de la query actual y $j$ es la posición de la key que se lee. Después del softmax, el peso de las posiciones futuras se vuelve cero; por eso, durante el entrenamiento todas las posiciones pueden calcularse en paralelo y, durante la inferencia, se mantiene la condición autoregressive.
+
+\lecturefigure{hyung-slide-027.jpg}{La cross-attention conecta las posiciones del objetivo en el decoder con la representación de la entrada en el encoder}{Hyung Won Chung official deck, p.~27}
+
+\lecturefigure{hyung-slide-028.jpg}{Construcción final del encoder-decoder: la entrada se codifica de forma bidireccional y el objetivo se genera de forma causal}{Hyung Won Chung official deck, p.~28}
+
+\begin{knowledgebox}{Lectura de la figura: cómo fluye una ruta de traducción automática}
+La entrada ``That is good'' primero interactúa de forma bidireccional dentro del encoder y forma una representación contextualizada de cada token de origen. Al generar ``Das ist gut'', el decoder solo puede leer el prefijo del objetivo ya generado y, al mismo tiempo, accede a la última capa del encoder mediante cross-attention. La figura respalda una estructura de permisos de información; no indica que los pesos de attention equivalgan por naturaleza a una explicación como alineación.
+\end{knowledgebox}
+
+\subsection{Diferencias clave entre encoder-only y decoder-only}
+
+La sección anterior usó dos stacks; esta sección examina los dos extremos. Encoder-only produce una representación bidireccional global; para clasificar, suele leer un token especial y añadir una task-specific layer. Decoder-only, en cambio, unifica la entrada y la salida en una sola secuencia y usa el mismo conjunto de parámetros y causal self-attention tanto para comprender el contexto como para generar.
+
+\lecturefigure{hyung-slide-032.jpg}{Forma completa de encoder-only: representación bidireccional, tokens especiales y cabeza de tarea}{Hyung Won Chung official deck, p.~32}
+
+\begin{warningbox}{Encoder-only no significa «no puede producir ninguna secuencia»}
+Esta diapositiva se refiere a la interfaz por omisión: un solo encoder stack no trae integrada una autoregressive generation path. Encima de él puede agregarse un decoder, un span head, un rellenado iterativo de huecos u otro mecanismo de generación; el costo es que el sistema deja de ser la estructura encoder-only mínima de la figura. El curso compara los supuestos integrados, no la capacidad absoluta en un sentido lógico.
+\end{warningbox}
+
+\lecturefigure{hyung-slide-037.jpg}{Forma completa de decoder-only: entrada y objetivo concatenados, parámetros compartidos y causal attention}{Hyung Won Chung official deck, p.~37}
+
+La interfaz unificada de decoder-only puede escribirse como
+\[
+p(y\mid x)=\prod_{t=1}^{|y|}p(y_t\mid x,y_{<t}).
+\]
+Aquí $x$ es la secuencia de tokens de entrada, $y$ es la secuencia objetivo y $y_{<t}$ es el prefijo del objetivo ya generado. La entrada y el objetivo usan el mismo stack, pero el loss por lo común puede calcularse solo en las posiciones del objetivo. «Compartir parámetros» no significa que el modelo no pueda distinguir los papeles, porque la posición, los tokens separadores y el propio contexto siguen aportando condiciones.
+
+\subsection{Resumen de la sección}
+
+Los tres tipos de Transformer comparten la base de tokenización, embedding, attention y MLP; las diferencias principales son la visibilidad de la información, la agrupación de los parámetros y la interfaz de tarea. Una vez comprendidas estas diferencias, la siguiente sección ya no trata encoder-decoder y decoder-only como categorías inconmensurables, sino que transforma de manera continua la primera en la segunda mediante cuatro operaciones, con lo que se pone al descubierto el verdadero sesgo inductivo.
