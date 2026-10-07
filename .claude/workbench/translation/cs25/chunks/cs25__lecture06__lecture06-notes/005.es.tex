@@ -1,0 +1,76 @@
+\section{Perceiver IO: convertir la output query en una interfaz de tareas general}
+
+El Perceiver original funciona bien con salidas compactas, como en la clasificación, pero la reconstrucción de imágenes, las secuencias de lenguaje y el optical flow requieren grandes cantidades de outputs estructurados. Perceiver IO agrega una decoder cross-attention después del latent processor: cada output query lee de los latents la información relacionada con su propia tarea, posición o modalidad.
+
+\subsection{Primero, unificar las heterogeneous inputs}
+
+Las raw features de distintas modalidades pueden diferir en dimensión y en semántica. Un token de video puede contener RGB, $(x,y,t)$ y un modality tag; un token de audio puede contener amplitud, tiempo y un modality tag. Mediante proyección, padding o concatenación, y codificación de posición y modalidad, se integran en un único input array, al que después aplica cross-attend el mismo latent set.
+
+\lecturefigure{slide-16-featurizing-multimodality.jpg}{Caracterización multimodal: contenido, posición, tiempo y modality tag forman un arreglo de entrada unificado.}{Stanford Online, video oficial actual, 00:33:50--00:40:31.}
+
+\begin{knowledgebox}{Explicación del concepto: ver los datos como una tabla}
+Cada fila es un elemento de entrada y cada columna es una característica de contenido o de metadatos. El número de filas puede variar según la modalidad y la resolución; el número de columnas se unifica mediante proyección. Esta perspectiva sirve para cualquier arreglo finito, pero no resuelve por sí sola los valores faltantes, las distintas frecuencias de muestreo, la alineación temporal ni el desequilibrio entre modalidades.
+\end{knowledgebox}
+
+\teachervoice{En la sesión de Q\&A del final, el ponente dijo directamente: Perceiver trata, en efecto, cualquier entrada como tabular data. Aquí, «tabla» se refiere a una interfaz de arreglo unificada; no equivale a los modelos tradicionales para tablas CSV pequeñas, ni implica que las columnas categóricas, los valores faltantes y la estructura causal no requieran un tratamiento específico.}
+
+\subsection{Basic Perceiver y Perceiver IO}
+
+Esta sección compara lado a lado dos interfaces de salida de un mismo latent processor. Basic Perceiver codifica una entrada grande, procesa los latents y luego produce una salida compacta con average pooling y una head de clasificación. Es adecuado para la clasificación de ImageNet, pero no puede expresar de forma natural «un vector por cada píxel» ni «una predicción de token por cada posición de byte».
+
+\lecturefigure{slide-17-basic-perceiver-architecture.jpg}{Basic Perceiver: encode scales with input, process independent of input, compact readout.}{Stanford Online, video oficial actual, 00:40:32--00:41:33.}
+
+Perceiver IO agrega un output query array $Y_q\in\mathbb{R}^{O\times d}$, que consulta los processed latents $Z$:
+
+\[
+Y=\operatorname{softmax}\!\left(\frac{(Y_qW_Q)(ZW_K)^\top}{\sqrt{d_k}}\right)(ZW_V).
+\]
+
+Aquí, $O$ es el número de elementos de salida; $Y_q$ codifica la posición, la tarea o la modalidad de la salida, y $Z$ es el latent array. El costo de la decoder cross-attention es de alrededor de $\mathcal{O}(ONd)$, de modo que la entrada puede ser muy grande, pero una salida enorme sigue implicando un costo lineal en $O$.
+
+\lecturefigure{slide-18-perceiver-io-architecture.jpg}{Perceiver IO: cross-attention de entrada, latent processing y decoder de output queries.}{Stanford Online, video oficial actual, 00:41:34--00:41:55.}
+
+\begin{importantbox}{La output query es una «pregunta», no un marcador vacío}
+La query puede contener coordenadas, modalidad, ID de tarea o etiquetas semánticas. El decoder responde: «Para esta posición o tarea de salida, ¿qué debe leerse de los latents compartidos?». Distintas queries pueden decodificar un mismo latent state en píxeles de imagen, clases, etiquetas de texto o vectores de flujo óptico.
+\end{importantbox}
+
+\subsection{Construir las queries: la posición determina la topología de salida}
+
+Para convertir la output query abstracta en una interfaz de tarea concreta, esta sección examina primero el autoencoding de imágenes: se crea una query con posición bidimensional para cada píxel objetivo. El modelo no necesita conservar el mismo número de slots en el latent workspace; basta con que, al decodificar, cada posición de salida lea el latent compartido. El orden de la salida puede recuperarse mediante las query coordinates.
+
+\lecturefigure{slide-19-constructing-output-queries.jpg}{Output queries para el autoencoding de imágenes: cada posición de píxel consulta el latent compartido.}{Stanford Online, video oficial actual, 00:42:04--00:42:59.}
+
+\begin{lstlisting}[caption={Pseudocódigo conceptual de la construcción de output queries por tarea.}]
+def build_queries(task, positions, modalities):
+    queries = []
+    for position, modality in zip(positions, modalities):
+        query = concat(
+            task_embedding(task),
+            modality_embedding(modality),
+            fourier_position(position),
+        )
+        queries.append(query)
+    return stack(queries)
+\end{lstlisting}
+
+El autoencoding multimodal puede usar queries de modality/task distintas para cada salida: video, audio, label, etcétera. La entrada y la salida pueden tener números de elementos diferentes; algunas modalidades incluso producen una sola clase, mientras que otras producen una cuadrícula de alta resolución.
+
+\lecturefigure{slide-20-multimodal-query-construction.jpg}{Query de salida multimodal: decodifica salidas de distintos tamaños según modality, task y position.}{Stanford Online, video oficial actual, 00:43:00--00:43:05.}
+
+\begin{knowledgebox}{Lectura de la figura: lo que se comparte es el latent, no todos los parámetros de las decoder heads}
+Distintas queries acceden al mismo processed latent state, pero la projection final, la loss y los canales de salida pueden variar según la tarea. Una architecture interface unificada no exige que los logits de clasificación y los píxeles RGB usen exactamente la misma head numérica.
+\end{knowledgebox}
+
+\subsection{ImageNet refinements: una arquitectura general no implica hiperparámetros fijos}
+
+La tabla de ImageNet de Perceiver IO muestra varios ajustes de entrenamiento y del modelo, como redes más profundas, clipping y cutmix/mixup. Esto recuerda que la interfaz central encode/process/decode es reutilizable, pero obtener resultados sólidos sigue requiriendo una recipe de entrenamiento para la tarea: no debe interpretarse «pocos supuestos del dominio» como «sin necesidad de ajustar hiperparámetros».
+
+\lecturefigure{slide-21-imagenet-results.jpg}{Configuración y resultados de Perceiver IO en ImageNet.}{Stanford Online, video oficial actual, 00:43:06--00:43:43.}
+
+\begin{warningbox}{La comparación de arquitecturas debe usar la misma recipe de entrenamiento}
+Si Perceiver usa un entrenamiento más largo, aumento de datos o una regularización distinta y el baseline no, los resultados no pueden atribuirse solo al latent bottleneck. El reporte debe separar architecture, optimization, augmentation y compute.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Perceiver IO decodifica un latent state compacto en cualquier salida estructurada mediante output queries. Separa la escala de la entrada, del procesamiento y de la salida, pero el decoder sigue creciendo linealmente con el output count, y las queries específicas de cada tarea y la recipe de entrenamiento siguen siendo decisiones de diseño necesarias.

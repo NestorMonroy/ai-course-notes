@@ -1,0 +1,83 @@
+\section{Fast Autoregressive Training: por qué el decoder puede entrenarse en paralelo}
+
+En la inferencia, un modelo generativo tiene que desplegar la salida token por token, pero el entrenamiento no necesita reproducir ese proceso en serie. Lo esencial del Transformer decoder es desplazar a la derecha toda la target sequence real antes de pasarla al modelo, y usar una causal mask para garantizar que cada posición solo vea el pasado. Así, la next-token loss de todas las posiciones se calcula en una sola pasada hacia adelante en paralelo.
+
+\lecturefigure{slide-05-decoder-transition.jpg}{Transición entre el Transformer decoder y el fast autoregressive decoding.}{Video oficial de Stanford Online 00:03:28--00:04:07.}
+
+Dada la entrada $x$ y la secuencia de salida $y_{1:T}$, la autoregressive factorization es
+\[
+p(y_{1:T}\mid x)=\prod_{t=1}^{T}p(y_t\mid y_{<t},x).
+\]
+
+\begin{itemize}
+  \item $T$: longitud de la salida;
+  \item $y_{<t}$: el prefix anterior a la posición $t$;
+  \item en la inferencia hay que obtener primero $y_{t-1}$ para poder construir la condición del paso siguiente;
+  \item en el entrenamiento ya se tiene la gold sequence completa, así que todos los prefixes correctos pueden construirse a la vez.
+\end{itemize}
+
+\lecturefigure{slide-06-sequence-generation.jpg}{Generación de secuencias: el objetivo del entrenamiento es aprender la correspondencia condicional entre la secuencia de entrada y la secuencia de salida.}{Video oficial de Stanford Online 00:04:08--00:05:19.}
+
+\subsection{Teacher Forcing: entrenar cada posición con el gold prefix}
+
+Teacher forcing (forzado por el maestro) consiste en darle al decoder, durante el entrenamiento, los tokens históricos reales y no las muestras que generó el propio modelo. Si la entrada desplazada a la derecha es $\tilde y=(\langle\mathrm{BOS}\rangle,y_1,\ldots,y_{T-1})$, una sola forward produce los logits de todas las posiciones y permite calcular
+\[
+\mathcal{L}_{\mathrm{TF}}
+=-\sum_{t=1}^{T}\log p_{\theta}(y_t\mid y_{<t},x).
+\]
+
+\begin{itemize}
+  \item $\theta$: parámetros del modelo;
+  \item $p_{\theta}(y_t\mid y_{<t},x)$: probabilidad del $t$-ésimo target dado el prefix correcto;
+  \item el hidden state de cada $t$ puede calcularse en paralelo, pero la dimensión de la secuencia sigue teniendo costo de attention y de memory;
+  \item las condiciones del entrenamiento difieren de las de la generación libre, lo que produce exposure bias, pero eso no afecta la corrección del entrenamiento en paralelo.
+\end{itemize}
+
+\lecturefigure{slide-07-autoregressive-decoding.jpg}{La inferencia genera paso a paso; el entrenamiento, en cambio, puede recibir de una vez la target sequence correcta completa.}{Video oficial de Stanford Online 00:05:20--00:06:03.}
+
+\teachervoice{Gomez dice que este detalle es «algo subtle, pero con un impacto enorme en la velocidad de entrenamiento». Aunque al principio del entrenamiento el modelo genere tokens sin sentido, sigue aprendiendo cada next-token conditional sobre el prefix correcto; precisamente esta supervisión en paralelo es lo que hace posible entrenar Transformers a gran escala.}
+
+\lecturefigure{slide-08-teacher-forcing.jpg}{El problema central de teacher forcing: ¿cómo predecir todas las posiciones en una sola llamada al decoder sin filtrar la respuesta?}{Video oficial de Stanford Online 00:06:04--00:06:33.}
+
+\begin{lstlisting}[caption={Pasos conceptuales de entrenamiento con teacher forcing y causal mask.}]
+def autoregressive_training(source, target, model):
+    decoder_input = shift_right(target, bos_token=True)
+    causal_mask = upper_triangle_is_blocked(len(target))
+    logits = model(source, decoder_input, causal_mask=causal_mask)
+    return cross_entropy(logits, target)
+\end{lstlisting}
+
+\subsection{Causal Mask: paralelizar no significa permitir ver el futuro}
+
+La subsección anterior explicó por qué la gold sequence permite obtener supervisión en paralelo; esta subsección añade la condición necesaria para que la técnica funcione: el grafo de cómputo de cada posición debe seguir siendo coherente con la autoregressive factorization. Si se entregara el target completo directamente a la self-attention, la posición $t$ podría leer $y_t$ o tokens futuros, y la tarea de entrenamiento se reduciría a copiar la respuesta; por eso, al leer la fórmula siguiente conviene revisar a la vez «qué posiciones son visibles» y «si se conserva la multiplicación de matrices en paralelo». La causal mask fija en menos infinito el triángulo superior estricto de los attention logits:
+\[
+C_{ij}=\begin{cases}
+0, & j\le i,\\
+-\infty, & j>i,
+\end{cases}
+\qquad
+A=\operatorname{softmax}\!\left(\frac{QK^{\top}}{\sqrt{d_k}}+C\right).
+\]
+
+\begin{itemize}
+  \item $i$: posición de la query actual;
+  \item $j$: posición de key/value que se lee;
+  \item las posiciones futuras con $j>i$ quedan con peso cero después de la softmax;
+  \item la mask conserva el cálculo matricial en paralelo y, al mismo tiempo, mantiene la frontera de información de la autoregressive conditional.
+\end{itemize}
+
+\lecturefigure{slide-09-causal-mask.jpg}{Causal mask completa: cada posición solo puede leer su propio valor y el prefix a su izquierda.}{Video oficial de Stanford Online 00:12:36--00:13:04.}
+
+\begin{knowledgebox}{Lectura de la figura: qué representa la matriz en blanco y negro}
+El eje horizontal puede entenderse como las posiciones de key/value y el eje vertical como las posiciones de query. La región permitida forma un triángulo inferior; la región futura enmascarada no participa en la normalización. El valor de la mask en la figura no está en ahorrar cómputo, sino en impedir la target leakage, de modo que el entrenamiento en paralelo siga siendo equivalente a la next-token likelihood correcta.
+\end{knowledgebox}
+
+\begin{warningbox}{No confundir el paralelismo del entrenamiento con la decodificación en inferencia}
+Teacher forcing hace que todas las posiciones se procesen en paralelo durante el entrenamiento, pero la autoregressive inference ordinaria sigue requiriendo un muestreo paso a paso, porque la entrada del paso siguiente depende del token que el modelo acaba de generar. Técnicas como KV cache y speculative decoding optimizan el costo de la inferencia, pero no forman parte de teacher forcing.
+\end{warningbox}
+
+\teachervoice{El ponente insiste en que «no se puede espiar hacia adelante»: ya pusimos la respuesta correcta en la decoder input; sin causal mask, un error de cero no significa que el modelo haya aprendido a generar, solo que descubrió una fuga de datos.}
+
+\subsection{Resumen de la sección}
+
+La autoregressive likelihood se sigue descomponiendo en el tiempo; teacher forcing solo aprovecha los targets conocidos para construir en paralelo todos los prefixes correctos. La causal mask es la condición necesaria para mantener la frontera de información: logra a la vez el «entrenamiento en paralelo» y que «el futuro no sea visible».

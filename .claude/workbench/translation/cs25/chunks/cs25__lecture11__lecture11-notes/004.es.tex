@@ -1,0 +1,78 @@
+\section{Attention como fase de comunicación sobre un grafo}
+
+Las fórmulas suelen escribir la attention como una multiplicación de matrices, lo que oculta con facilidad lo que realmente hace. Esta sección adopta la explicación de Karpathy: cada token es un node del grafo y cada node guarda un private state; la attention decide, según el estado actual, qué información recoger y de cuáles vecinos permitidos; la MLP, en cambio, calcula de forma independiente dentro de cada node. Por ello, el bloque Transformer alterna communication y computation.
+
+\subsection{Alternancia entre communication y computation}
+
+Sean las token states de la capa $\ell$ la matriz $X^{(\ell)}\in\mathbb R^{T\times d}$. Un bloque pre-norm puede escribirse como
+
+\[
+\widetilde X^{(\ell)}=X^{(\ell)}+\operatorname{Attn}(\operatorname{LN}(X^{(\ell)})),
+\]
+\[
+X^{(\ell+1)}=\widetilde X^{(\ell)}+\operatorname{MLP}(\operatorname{LN}(\widetilde X^{(\ell)})).
+\]
+
+Aquí, $T$ es el número de tokens, $d$ es la residual width y $\operatorname{LN}$ es LayerNorm. La primera ecuación permite que los tokens intercambien información; la segunda hace que cada token aplique, con los mismos parámetros, una transformación no lineal a la información recogida.
+
+\lecturefigure{slide-29-attention-communication-phase.jpg}{La attention es data-dependent communication; la MLP es la computation independiente de cada node.}{Video oficial de Stanford Online, 00:22:32--00:23:32.}
+
+\begin{importantbox}{Abstracción central: primero enrutar, luego calcular}
+La attention responde «de qué nodes debe leer el node actual y cuánto»; la MLP responde «cómo transformar localmente la información una vez obtenida». La connectivity mask establece qué aristas existen y los attention weights determinan qué tan fuerte es cada una en ese momento. No deben confundirse: un causal graph fijo puede producir intensidades de mensaje que dependen de los datos.
+\end{importantbox}
+
+\subsection{Q/K/V: direccionamiento, coincidencia y transmisión}
+
+La subsección anterior solo identificó la attention como la «fase de comunicación»; esta responde además cómo una ronda de comunicación determina el emisor y el contenido. Lo esencial es proyectar un mismo node state en tres papeles: la query expresa la necesidad actual, la key ofrece una dirección con la cual comparar y el value lleva la información que realmente se agrega. Con los papeles separados, el modelo puede usar un tipo de rasgo para decidir «si debe leer» y otro para decidir «qué lee». A partir del estado $X$, las proyecciones lineales dan
+
+\[
+Q=XW_Q,\qquad K=XW_K,\qquad V=XW_V,
+\]
+
+y se calcula la scaled dot-product attention:
+
+\[
+\operatorname{Attn}(Q,K,V)=
+\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}+M\right)V.
+\]
+
+Aquí, $Q$ indica qué busca cada node, $K$ indica cómo puede compararse cada node, $V$ indica el contenido que realmente se transmite, $d_k$ es la dimensión de key/query y $M$ es la connectivity mask. Dividir entre $\sqrt{d_k}$ sirve para controlar la dot-product variance y evitar que la softmax se sature prematuramente al crecer la dimensión.
+
+\lecturefigure{slide-30-attention-code-and-graph.jpg}{Pseudocódigo de Python y grafo dirigido: una ronda de attention message-passing.}{Video oficial de Stanford Online, 00:23:32--00:25:35.}
+
+\begin{knowledgebox}{Lectura de la figura: recorrer la ruta completa de un node destino}
+Primero se toma la query del node destino; luego se reúnen las keys de todos los nodes origen con aristas de entrada permitidas; el dot product da una affinity sin normalizar; la softmax la convierte en pesos que suman 1; por último, se suman ponderadamente los values de los nodes origen, y el resultado es la actualización del node destino. La estructura del grafo le dice al modelo «a quién puede preguntar», Q/K le dicen «a quién debe preguntar ahora» y V le dice «cuál es el contenido de la respuesta».
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Expresión matricial mínima de la attention de una sola cabeza; una implementación real también requiere las dimensiones de lote/head y dropout.}]
+def attention(x, Wq, Wk, Wv, mask):
+    q = x @ Wq                  # [T, dk]
+    k = x @ Wk                  # [T, dk]
+    v = x @ Wv                  # [T, dv]
+    scores = q @ k.T / sqrt(k.shape[-1])
+    scores = scores.masked_fill(mask == 0, -inf)
+    weights = softmax(scores, dim=-1)
+    return weights @ v          # [T, dv]
+\end{lstlisting}
+
+\subsection{Heads en paralelo, layers en serie; self y cross solo difieren en la fuente de información}
+
+La multi-head attention ejecuta $H$ veces la attention en paralelo con parámetros distintos:
+
+\[
+\operatorname{MHA}(X)=\operatorname{Concat}(\text{head}_1,\ldots,\text{head}_H)W_O.
+\]
+
+Cada head puede aprender una compatibility y un value subspace distintos; las layers, en cambio, se apilan en serie, de modo que la representación recogida en una ronda se convierte en la entrada de comunicación de la siguiente. En la self-attention, $Q,K,V$ provienen del mismo conjunto de states; en la cross-attention, la query proviene del decoder y la key/value del encoder. La operación matemática es la misma; lo que cambia es la memory source.
+
+\lecturefigure{slide-31-parallel-communication-and-compute.jpg}{Comunicación en paralelo y cálculo punto a punto: la connectivity del encoder, del causal decoder y de la cross-attention.}{Video oficial de Stanford Online, 00:25:35--00:31:00.}
+
+\begin{knowledgebox}{Lectura de la figura: tres tipos de connectivity}
+La encoder self-attention suele permitir que todos los tokens se comuniquen entre sí por pares; el causal decoder solo permite que la posición $t$ lea los tokens $\le t$, lo que forma un grafo triangular inferior; el modelo encoder--decoder además permite que las decoder queries lean todas las keys/values del encoder. Tener varias cabezas no cambia el conjunto de aristas permitidas; solo aprende, sobre ese mismo conjunto de aristas, varios juegos de reglas de enrutamiento en paralelo.
+\end{knowledgebox}
+
+\teachervoice{Alguien preguntó la diferencia entre heads y layers, y la respuesta de Karpathy fue muy práctica: «heads es copy-paste in parallel, layers es copy-paste in series». También admitió que la analogía del grafo se le había ocurrido esa misma mañana; por eso la trata como un modelo didáctico y considera el nanoGPT de la sección siguiente como la evidencia ejecutable.}
+
+\subsection{Resumen de la sección}
+
+La attention puede entenderse como data-dependent message passing sobre un grafo dirigido: la mask define las aristas por las que se puede comunicar, Q/K producen la affinity, la softmax normaliza y V transmite el contenido; después, la MLP calcula de forma independiente dentro de cada node. Las heads aportan subespacios de relaciones en paralelo, las layers aportan profundidad de razonamiento en serie, y la self/cross attention solo difieren en la fuente de las key/value.

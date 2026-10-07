@@ -1,0 +1,67 @@
+\section{Entrenamiento estable: precisión, inicialización, regularización y balanceo de carga}
+
+La sección anterior enumeró la pila de estabilidad; esta sección explica, uno por uno, por qué cada elemento es necesario. La inestabilidad de los modelos dispersos no se debe solo a la gran cantidad de parámetros, sino también a una cadena de decisiones de enrutamiento discretas: una pequeña variación numérica en los router logits puede cambiar el argmax, y entonces el token entra en un expert completamente distinto. Por ello, el error no es solo un ligero desplazamiento del valor de salida, sino un salto en la ruta de cómputo.
+
+\subsection{Selective precision: elevar a float32 solo la pequeña parte sensible}
+
+Para entrenar modelos grandes suele usarse bfloat16, que reduce la memoria de GPU y acelera la multiplicación de matrices; sin embargo, la softmax dentro del router depende de la función exponencial. Si el redondeo de los logits altera el orden de las probabilidades, la ruta top-1 cambia. La decisión de Switch no es devolver toda la red a float32, sino elevar la precisión solo del cómputo local del router y luego regresar el resultado a la red principal de baja precisión.
+
+\lecturefigure{slide-09-selective-precision.jpg}{Selective precision: el router usa float32, mientras que el resto conserva la tasa de procesamiento de bfloat16.}{Video oficial de Stanford Online 00:08:50--00:10:21.}
+
+\[
+\operatorname{softmax}(z)_i=\frac{e^{z_i}}{\sum_j e^{z_j}}.
+\]
+
+Aquí, $z_i$ es el router logit del $i$-ésimo expert; la exponencial $e^{z_i}$ amplifica las diferencias de entrada; el denominador normaliza las puntuaciones de todos los experts. Si el error de baja precisión cambia cuál $z_i$ es el máximo, cambia la elección discreta del expert; por eso el router necesita más protección de precisión local que una rama residual continua ordinaria.
+
+\teachervoice{El criterio de ingeniería que da el expositor es que usar float32 en el router es una operación prácticamente gratuita: no implica comunicación entre dispositivos, su costo de cómputo es mínimo en comparación con las multiplicaciones de matrices de la FFN y las sparse layers no aparecen en todas las capas; por ello, la diferencia de tasa de procesamiento en la tabla queda dentro del ruido de medición.}
+
+\begin{warningbox}{Selective precision no significa «la precisión mixta es segura automáticamente»}
+Que el entrenamiento en baja precisión sea estable depende de las operaciones sensibles. En la softmax, la normalización, las acumulaciones y el ordenamiento del enrutamiento hay que revisar desbordamientos, subdesbordamientos, empates y cambios del argmax; no puede suponerse que todas las rutas de control toleran bfloat16 solo porque las grandes multiplicaciones de matrices sí lo hacen.
+\end{warningbox}
+
+\subsection{Inicialización más pequeña: controlar primero el rango dinámico del enrutamiento y de los experts}
+
+Al inicio del entrenamiento, los experts todavía no han formado una división del trabajo estable, y el router también cambia con rapidez. Si la inicialización produce activaciones y logits demasiado grandes, la softmax se satura prematuramente; unos cuantos experts reciben más tokens y gradientes, lo que refuerza aún más el desequilibrio. Reducir la escala de inicialización hace que la red parta de una región más suave y da oportunidad de que el balanceo de carga y la loss de la tarea principal moldeen juntos el comportamiento.
+
+\lecturefigure{slide-10-reduced-initialization-scale.jpg}{Reducir la escala de inicialización puede mejorar la estabilidad y la calidad de los modelos sparse expert.}{Video oficial de Stanford Online 00:10:22--00:10:51.}
+
+\teachervoice{Esta diapositiva conserva una lección práctica muy valiosa: la causa raíz de un sistema complejo no necesariamente requiere una corrección compleja. Los autores observaron que la inicialización estándar es más sensible en los sparse experts y que simplemente reducir la escala mejoró notablemente la calidad; conviene diagnosticar primero la magnitud, la saturación y la distribución de los gradientes antes de apilar algoritmos nuevos.}
+
+\begin{knowledgebox}{Qué es la «escala de inicialización»}
+La escala de inicialización determina la magnitud típica de los pesos al comenzar el entrenamiento y, con ello, influye en las activaciones, los router logits y los gradientes. Si es demasiado pequeña, la señal puede quedar débil; si es demasiado grande, puede provocar saturación, concentración de rutas o explosión de gradientes. La conclusión aquí es una calibración empírica para esta arquitectura y esta configuración de entrenamiento; no implica que todos los MoE deban adoptar incondicionalmente la misma constante de escalamiento.
+\end{knowledgebox}
+
+\subsection{Expert dropout: cuanto mayor es la capacidad de parámetros, más fácil es el sobreajuste en tareas posteriores}
+
+Los datos de preentrenamiento son enormes, pero tareas posteriores como SuperGLUE pueden tener solo decenas de miles de ejemplos. El conjunto total de parámetros de un sparse model es muy grande; aunque cada token pase por un solo expert, el modelo puede memorizar rápidamente los datos pequeños durante el fine-tuning. Por eso la clase aumenta el dropout de las capas de expert, en lugar de trasladar sin cambios la regularización del T5 denso.
+
+\lecturefigure{slide-11-higher-regularization-fine-tuning.jpg}{Aumentar el dropout de las capas de expert mitiga el sobreajuste del sparse model en datos pequeños de tareas posteriores.}{Video oficial de Stanford Online 00:10:52--00:12:47.}
+
+\begin{knowledgebox}{Lectura de la figura: no buscar un único «dropout óptimo global»}
+La tabla compara varias tareas posteriores, cuyos tamaños de datos y niveles de ruido difieren. Primero hay que ver si el sparse model necesita más regularización que el dense baseline y después si el punto óptimo coincide entre tareas. Si el dropout óptimo varía según la tarea, la conclusión debe ser «se necesita más regularización y hay que ajustarla», no anunciar una constante universal.
+\end{knowledgebox}
+
+\subsection{Load-balancing loss: alinear la masa de probabilidad con el número real de tokens}
+
+Si solo se optimiza la loss de modelado del lenguaje, el router puede enviar una gran cantidad de tokens a unos cuantos experts. Esto no solo reduce la división del trabajo, sino que también sobrecarga algunos dispositivos mientras otros quedan ociosos. Switch usa una loss auxiliar para que la «proporción realmente enviada» y la «probabilidad promedio del router» sean más uniformes entre los experts.
+
+\[
+\mathcal{L}_{\text{aux}}=\alpha E\sum_{i=1}^{E} f_iP_i.
+\]
+
+Aquí, $\alpha$ es el peso de la loss auxiliar; $E$ es el número de experts; $f_i$ es la proporción de tokens del lote que realmente se enrutan al $i$-ésimo expert; $P_i$ es la probabilidad promedio del router para ese expert. Si tanto el tráfico como la probabilidad se concentran en los mismos pocos experts, el producto interno crece; la optimización conjunta impulsa un uso más equilibrado.
+
+\lecturefigure{slide-12-load-balance-loss.jpg}{Balanceo de carga diferenciable: restringe a la vez la proporción discreta de tokens y la probabilidad promedio del router.}{Video oficial de Stanford Online 00:12:48--00:13:29.}
+
+\begin{importantbox}{El balanceo de carga no es un término de regularización decorativo}
+Conecta el objetivo de aprendizaje con la ejecución en hardware. Con la carga equilibrada, cada expert puede recibir lotes de tokens de tamaño similar, lo que facilita usar una dense matrix multiplication eficiente; el desequilibrio, en cambio, provoca overflow, padding, esperas y una menor utilización de los dispositivos.
+\end{importantbox}
+
+\begin{warningbox}{Equilibrio no significa que todos los experts deban aprender lo mismo}
+El objetivo es que la carga sea aproximadamente uniforme, no que las salidas sean idénticas. Un peso de balanceo demasiado fuerte puede suprimir una specialization significativa; uno demasiado débil produce experts sobrecargados. En la práctica, deben monitorearse a la vez la loss principal, la aux loss, el expert token histogram, la overflow rate y la router entropy.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Selective precision protege el enrutamiento discreto; una inicialización más pequeña evita la saturación temprana; un expert dropout más fuerte atiende el sobreajuste en tareas posteriores, y la load-balancing loss restringe el enrutamiento aprendible para que produzca lotes casi equilibrados que el hardware pueda ejecutar.

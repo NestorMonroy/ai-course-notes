@@ -1,0 +1,64 @@
+\section{Ejecución distribuida: cómo se combinan Data, Model y Expert Parallelism}
+
+Las curvas anteriores muestran que expert parallelism funciona; esta sección responde además a la pregunta «¿dónde se colocan realmente los pesos?». La escalabilidad de MoE proviene de repartir los expertos entre dispositivos y, al mismo tiempo, dejar que los token se desplacen entre dispositivos según el enrutamiento; esto puede superponerse con la replicación de muestras de data parallel y con la partición de tensores de model parallel. El verdadero objeto de diseño no es una capa aislada, sino los datos, los pesos y el token movement sobre la malla de dispositivos.
+
+\lecturefigure{slide-24-contextualizing-parallelism.jpg}{Cómo colocan los pesos en la malla de dispositivos data, model y expert parallelism.}{Video oficial de Stanford Online 00:36:26--00:41:35.}
+
+\begin{knowledgebox}{Lectura de la figura: primero pregunta «qué se replica, qué se parte y qué se mueve»}
+Data parallelism replica los pesos y mueve estadísticas de gradientes; model parallelism parte un mismo peso y mueve activaciones intermedias o sumas parciales; expert parallelism hace que cada tarjeta tenga experts distintos y mueve los token a su dispositivo de destino. Los colores de las casillas de la figura indican a quién pertenecen los pesos, no que los token permanezcan siempre en la tarjeta original.
+\end{knowledgebox}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Recursos y patrones de comunicación de los tres tipos de paralelismo.}
+\begin{tabularx}{\textwidth}{L{0.19\textwidth}L{0.23\textwidth}X X}
+\toprule
+Modalidad & Objeto que se parte o se replica & Comunicación principal & Objetivo principal \\
+\midrule
+Data parallel & Modelo replicado, batch partido & all-reduce / reduce-scatter de gradientes & Aumentar el rendimiento y el batch global \\
+Model parallel & Parámetros de una capa o dimensiones del tensor partidos & all-gather, reduce-scatter o activaciones punto a punto & Hacer caber un solo modelo dense \\
+Expert parallel & experts partidos, dispatch dinámico de token & all-to-all de token y combine de resultados & Ampliar el conjunto de parámetros condicionales \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{importantbox}{Qué son las collectives}
+Las collectives son primitivas de comunicación colectiva entre varios dispositivos, como all-reduce, reduce-scatter, all-gather y all-to-all. En MoE, lo decisivo suele ser all-to-all: cada dispositivo envía sus token locales a los demás dispositivos según el expert de destino y, después de ejecutar el expert, devuelve los resultados a su posición original en la secuencia.
+\end{importantbox}
+
+\subsection{De T5-Base a Switch-C: los parámetros de diseño no se reducen al número de experts}
+
+La tabla de diseño de modelos modifica a la vez el dense hidden size, el número de capas, los heads, el número de experts, la frecuencia de las sparse layers y la disposición del paralelismo. El total de parámetros puede crecer hasta el billón, pero el active path solo incluye el expert seleccionado. Al comparar modelos hay que igualar los FLOPs por token y el hardware de entrenamiento; de lo contrario, «el mismo cómputo» puede significar solo una aritmética teórica parecida, mientras que la comunicación real es distinta.
+
+\lecturefigure{slide-25-design-choices-switch-models.jpg}{Dimensiones dense, número de experts, cantidad de parámetros y diseño de cómputo de la familia de modelos Switch.}{Video oficial de Stanford Online 00:41:36--00:43:21.}
+
+Un cálculo simplificado permite expresar la diferencia entre parámetros totales y parámetros activos:
+
+\[
+P_{\text{total}}=P_{\text{shared}}+E\,P_{\text{expert}},
+\qquad
+P_{\text{active/token}}\approx P_{\text{shared}}+kP_{\text{expert}}.
+\]
+
+Aquí, $P_{\text{shared}}$ son los parámetros compartidos, como attention, embedding y capas dense; $P_{\text{expert}}$ son los parámetros de un solo expert; $E$ es el número total de experts; $k$ es el número de experts elegidos por token, que en Switch suele ser 1. Aumentar $E$ incrementa rápidamente el total de parámetros, pero la parte de experts activos solo crece con $k$.
+
+\begin{warningbox}{El optimizer state sigue creciendo con el total de parámetros}
+Adam/AdamW mantiene para cada parámetro un momento de primer orden $m$ y un momento de segundo orden $v$; este optimizer state, junto con los pesos, los gradientes y los checkpoint, depende del total de parámetros. Aunque cada token active un solo expert, durante el entrenamiento sigue siendo necesario almacenar y actualizar el enorme conjunto de parámetros al que se accede.
+\end{warningbox}
+
+\subsection{«Los parámetros guardan conocimiento, los FLOPs hacen razonamiento» es solo una hipótesis por verificar}
+
+El ponente plantea una intuición: más parámetros podrían ser más adecuados para almacenar knowledge, mientras que más active compute podría ser más adecuado para reasoning. Lo importante es que de inmediato la califica como «mostly unsubstantiated theory». Esta frase debe convertirse en una pregunta experimental: una vez fijados la upstream quality, los active FLOPs o los datos, ¿mejoran los parámetros dispersos adicionales, de forma independiente, las tareas factuales, composicionales y de razonamiento?
+
+\lecturefigure{slide-26-parameters-knowledge-compute-reasoning.jpg}{Hipótesis acotada del ponente: los parámetros podrían inclinarse hacia la capacidad de conocimiento y los FLOPs hacia el razonamiento.}{Video oficial de Stanford Online 00:43:22--00:43:57.}
+
+\teachervoice{Lo que más vale conservar aquí de la teacher voice no es un eslogan, sino la «etiqueta de incertidumbre». El ponente dice por iniciativa propia que es mostly unsubstantiated theory; por lo tanto, las notas no pueden elevarla a ley comprobada, y mucho menos afirmar con base en ella que los modelos dispersos memorizan mejor por naturaleza y que los modelos dense razonan mejor por naturaleza.}
+
+\begin{importantbox}{Diseño experimental falsable}
+Elige un conjunto de tareas knowledge-heavy, reasoning-heavy y mixtas, y controla por separado la upstream loss, los active FLOPs, el total de parámetros, los token de entrenamiento y el aumento por recuperación; después compara dense y sparse. Solo cuando se controlan estos factores de confusión es posible discutir el efecto independiente de la capacidad de parámetros y de la profundidad de cómputo.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+MoE distribuye los parámetros condicionales mediante expert parallelism y lo combina con data/model parallelism. Los parámetros totales y los parámetros activos deben contabilizarse por separado; «los parámetros sirven para el conocimiento, el cómputo sirve para el razonamiento» es, en esta clase, una hipótesis de investigación, no una conclusión.

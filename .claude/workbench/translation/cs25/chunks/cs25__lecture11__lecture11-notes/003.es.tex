@@ -1,0 +1,77 @@
+\section{La cadena histórica de problemas de la attention: de la ventana fija a la memoria direccionable}
+
+Esta sección parte de la pregunta «¿cómo depende el siguiente token del contexto?». El MLP de ventana fija solo puede ver una vecindad limitada; las RNN/LSTM pueden procesar secuencias de longitud variable, pero comprimen la oración fuente en un único estado final; la Bahdanau attention permite que el decoder haga un direccionamiento diferenciable sobre todos los encoder states; el Transformer eleva después ese direccionamiento a primitiva principal de comunicación en cada capa.
+
+\lecturefigure{slide-23-where-transformer-came-from.jpg}{Transición del problema: ¿de dónde viene el Transformer?}{Video oficial de Stanford Online 00:15:09--00:15:15.}
+
+Esta diapositiva de transición nos recuerda que no conviene memorizar los componentes a partir del diagrama de la arquitectura de 2017. El orden histórico revela qué corrige cada paso: el modelado de lenguaje aporta el objetivo probabilístico, seq2seq aporta entradas y salidas de longitud variable, el soft alignment atenúa el cuello de botella del vector fijo, la autoatención acorta el camino de información entre dos tokens cualesquiera, y las conexiones residuales y la normalización hacen que el apilamiento profundo sea optimizable.
+
+\subsection{2003: el modelo de lenguaje probabilístico neuronal}
+
+Dada una secuencia de tokens $x_{1:T}$, el modelo de lenguaje aprende la descomposición autorregresiva de la probabilidad conjunta:
+
+\[
+p(x_{1:T})=\prod_{t=1}^{T}p(x_t\mid x_{<t}).
+\]
+
+Aquí, $x_t$ denota el $t$-ésimo token y $x_{<t}$ el contexto que lo precede. El modelo de Bengio et al. de 2003 usa una ventana de longitud fija: concatena los embedding de varias palabras y los introduce en un MLP, que produce la distribución de probabilidad de la siguiente palabra. Ya contiene el núcleo de «representación compartida + predictor neuronal», pero la longitud del contexto queda fijada por la ventana.
+
+\lecturefigure{slide-24-neural-probabilistic-language-model.jpg}{2003 neural probabilistic language model: tres palabras predicen la cuarta.}{Video oficial de Stanford Online 00:15:12--00:15:43.}
+
+\begin{knowledgebox}{Lectura de la figura: el embedding resuelve la interfaz con símbolos discretos}
+El ID de una palabra no tiene, por sí mismo, significado de distancia. La embedding table asigna a cada palabra un vector aprendible; los vectores dentro de la ventana pasan por un MLP compartido que produce vocabulary logits, y la softmax los convierte en probabilidades. El modelo puede aprender que «palabras similares usan representaciones similares en la tarea de predicción», pero las dependencias que exceden la ventana no entran directamente en la predicción actual.
+\end{knowledgebox}
+
+\subsection{2014 seq2seq: secuencias de longitud variable y el cuello de botella del vector fijo}
+
+La traducción automática exige que tanto la entrada como la salida tengan longitud variable. El seq2seq clásico usa un encoder LSTM que lee la oración fuente palabra por palabra, toma el último estado oculto como context y luego un decoder LSTM genera la oración destino palabra por palabra. Si se denotan los encoder states como $\mathbf h_1,\ldots,\mathbf h_S$, la interfaz más simple es
+
+\[
+\mathbf c=\mathbf h_S,
+\]
+
+donde $S$ es la longitud de la secuencia fuente y $\mathbf c$ es el único context vector que se pasa al decoder. Toda la información de la fuente debe atravesar este canal estrecho, y en oraciones largas los detalles locales se pierden con facilidad.
+
+\lecturefigure{slide-25-seq2seq-2014.jpg}{2014 seq2seq: el encoder LSTM comprime la oración fuente de longitud variable en un context, y el decoder genera después la oración destino.}{Video oficial de Stanford Online 00:15:43--00:17:02.}
+
+\begin{warningbox}{El encoder bottleneck no se reduce a que «la dimensión del vector sea necesariamente insuficiente»}
+En teoría, un vector real de alta dimensión puede codificar mucha información, pero el entrenamiento debe aprender a comprimir de forma estable todos los detalles relevantes, propagarlos a lo largo de caminos temporales largos y permitir que el decoder los recupere. El cuello de botella real proviene de la capacidad limitada, la dificultad de optimización, los caminos largos y la interfaz de resumen único. El valor de la attention está en permitir que el decoder acceda directamente a múltiples estados de la fuente, no en demostrar que un solo vector sea matemáticamente incapaz de representar una oración.
+\end{warningbox}
+
+\subsection{Bahdanau attention: cada posición de salida hace una búsqueda suave en la secuencia fuente}
+
+El context fijo de la subsección anterior es el mismo para todas las posiciones de salida, por lo que no puede expresar «qué parte de la oración fuente se necesita principalmente al generar esta palabra». La Bahdanau attention convierte esta interfaz en una consulta paso a paso: cada vez que el decoder avanza un paso, vuelve a comparar el estado de generación actual con todos los encoder states y combina un context que sirve solo a la palabra destino actual. Para el paso destino $t$, el alignment model compara primero el estado anterior del decoder $\mathbf s_{t-1}$ con cada encoder state $\mathbf h_s$:
+
+\[
+e_{t,s}=a(\mathbf s_{t-1},\mathbf h_s),\qquad
+\alpha_{t,s}=\frac{\exp(e_{t,s})}{\sum_{j=1}^{S}\exp(e_{t,j})},
+\]
+\[
+\mathbf c_t=\sum_{s=1}^{S}\alpha_{t,s}\mathbf h_s.
+\]
+
+Aquí, $a$ es una compatibility function aprendible, $\alpha_{t,s}$ es el peso normalizado de la posición fuente $s$ y $\mathbf c_t$ es el context dinámico del paso destino actual. El resumen fijo se sustituye por una «memory que puede volver a direccionarse en cada paso».
+
+\lecturefigure{slide-26-neural-machine-translation-2014.jpg}{Bahdanau alignment: el decoder realiza una soft search sobre los encoder states para cada palabra destino.}{Video oficial de Stanford Online 00:17:02--00:18:32.}
+
+\begin{knowledgebox}{Lectura de la figura: primero el camino de la información, después el mapa de calor}
+El encoder sigue produciendo $\mathbf h_s$ de forma secuencial, pero el decoder ya no recibe solo el último estado. Cada paso destino calcula un conjunto de $\alpha_{t,s}$ según lo que necesita en ese momento; las posiciones de peso alto en el mapa de calor indican una lectura de información más intensa. Los pesos pueden ofrecer pistas de alignment, pero no equivalen automáticamente a una explicación humana ni a una atribución causal.
+\end{knowledgebox}
+
+\lecturefigure{slide-27-bahdanau-attention-history.jpg}{Historia oral de la attention: la intuición del alineamiento en traducción, la ponderación con softmax y el proceso de nombrarla.}{Video oficial de Stanford Online 00:18:32--00:20:11.}
+
+\teachervoice{Karpathy relata que le preguntó por correo a Dzmitry Bahdanau: como hablante no nativo de inglés, alineaba mentalmente una y otra vez la oración fuente con la oración destino, y eso inspiró la soft search; según cuenta, el mecanismo funcionó al primer intento; el nombre «attention», más afortunado, provino de una sugerencia de Yoshua Bengio para la versión final. Estas notas conservan esta atribución, pero no amplían un recuerdo personal hasta convertirlo en una priority history completa.}
+
+\subsection{2017 Transformer: convertir la attention en un paquete arquitectónico completo}
+
+El Transformer elimina la recurrent computation, pero no puede quedarse solo con una softmax. Como la attention no tiene noción de orden sobre el conjunto de entrada, es necesario inyectar la position; como la red debe apilarse, se necesitan una residual pathway y normalization; como cada posición requiere además una transformación no lineal, hay que añadir un position-wise MLP; como distintas relaciones pueden modelarse en paralelo, se usan multiple heads; y el decoder debe, además, usar una mask para no leer el futuro.
+
+\lecturefigure{slide-28-transformer-full-package.jpg}{El «paquete completo» del Transformer de 2017: attention, posición, conexiones residuales, normalización, MLP y múltiples cabezas.}{Video oficial de Stanford Online 00:20:11--00:22:31.}
+
+\begin{knowledgebox}{Lectura de la figura: qué partes cambiaron después y cuáles se conservaron}
+Karpathy señala que el post-norm original suele sustituirse por pre-norm, y que la posición sinusoidal absoluta dio lugar a esquemas relative/rotary, entre otros; pero el residual stream, la attention, la feed-forward hidden dimension ampliada unas cuatro veces, las múltiples cabezas y los block repetidos se han conservado durante mucho tiempo. La «resiliencia» de la arquitectura es un hecho empírico, no una demostración de que los hiperparámetros originales sean óptimos a cualquier escala.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El modelo de lenguaje neuronal define el objetivo probabilístico next-token; seq2seq resuelve la entrada y salida de longitud variable, pero genera un context bottleneck único; la Bahdanau attention permite que el decoder lea los estados de la fuente según lo necesite; el Transformer convierte esa lectura en el mecanismo de comunicación troncal y, con posición, conexiones residuales, normalización, MLP, heads y masks, forma un package entrenable. La siguiente sección reinterpreta este mecanismo como paso de mensajes en grafos.

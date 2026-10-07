@@ -1,0 +1,43 @@
+\section{Switch Layer: por qué simplificar top-2 a top-1}
+
+Con la definición general de MoE establecida, esta sección pasa a las restricciones concretas de Switch Transformer. No sustituye todas las operaciones del Transformer por expertos: conserva la self-attention e inserta Switch layers solo en algunas posiciones de FFN. Así aprovecha que las FFN concentran una gran cantidad de parámetros en los modelos grandes, y al mismo tiempo evita volver dinámicas la estructura de atención, las rutas residuales y todas las capas.
+
+\lecturefigure{slide-07-switch-transformer-layer.jpg}{Switch layer: el router elige un FFN expert para cada token.}{Video oficial de Stanford Online 00:05:38--00:07:21.}
+
+La regla top-1 de Switch es:
+
+\[
+i^*(x)=\arg\max_{i\in\{1,\ldots,E\}}p_i(x),
+\qquad
+y(x)=p_{i^*}(x)E_{i^*}(x).
+\]
+
+Aquí, $i^*(x)$ es el índice del expert con la probabilidad más alta del router; $p_{i^*}(x)$ es el peso de gate que se conserva; $E_{i^*}(x)$ es el único expert que se ejecuta; $y(x)$ es la salida de la capa. En comparación con top-2, top-1 reduce de dos a una las evaluaciones de expert FFN por token y disminuye el volumen de datos de dispatch.
+
+\begin{lstlisting}[caption={Pseudocódigo conceptual del enrutamiento top-1 de Switch.}]
+def switch_layer(tokens, router, experts):
+    logits = router(tokens)
+    probs = softmax(logits, axis=-1)
+    expert_id = argmax(probs, axis=-1)
+    gate = gather(probs, expert_id)
+    output = dispatch_to_one_expert(tokens, expert_id, experts)
+    return gate * output
+\end{lstlisting}
+
+\begin{importantbox}{top-1 es una decisión de diseño de sistemas, no solo la eliminación de un término matemático}
+Quitar una ruta de expert cambia a la vez los FLOPs de las FFN, la comunicación de tokens, el capacity buffer, el entrenamiento del router y el comportamiento ante desbordamientos. Por eso el valor de top-1 debe evaluarse con time-to-quality y con la eficiencia en hardware, y no solo comparando la loss con el mismo número de pasos.
+\end{importantbox}
+
+\teachervoice{Barret Zoph aclara en particular que los modelos reales suelen colocar una sparse layer solo cada dos o cada cuatro capas. El cálculo del router en float32 también ocupa una proporción mínima. Dicho de otro modo, el «Switch Transformer» sigue teniendo una gran cantidad de estructura de Transformer dense convencional.}
+
+Cambiar top-2 por top-1 no basta. La clase resume el sistema utilizable en cuatro mecanismos de control: router selective precision, una escala de inicialización más pequeña, una regularización de fine-tuning más fuerte en las capas de expert y un balanceo de carga diferenciable. Cada uno atiende, respectivamente, los errores numéricos, la magnitud inicial de las activaciones, el sobreajuste en tareas posteriores y el aprovechamiento del hardware.
+
+\lecturefigure{slide-08-improved-training-methodology.jpg}{Los cuatro tipos de mejoras de entrenamiento de Switch Transformer.}{Video oficial de Stanford Online 00:07:22--00:08:49.}
+
+\begin{knowledgebox}{Lectura de la figura: de qué se encarga cada una de las cuatro mejoras}
+Selective precision se encarga de la estabilidad numérica del router; reduced initialization scale, de la magnitud de las activaciones y los gradientes al inicio del entrenamiento; higher regularization, del sobreajuste que produce una gran capacidad de parámetros con pocos datos; load-balancing loss, de que los tokens formen lotes de expert de tamaño aproximadamente igual. No son cuatro variantes de un mismo truco, sino que cubren cuatro niveles: numérico, de optimización, de generalización y de sistemas.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La Switch layer sustituye solo algunas FFN y usa top-1 routing. La solución realmente utilizable es «enrutamiento simple más cuatro tipos de mecanismos de control», no un argmax aislado.

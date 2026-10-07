@@ -30,6 +30,10 @@ for (( n = from; n >= to; n-- )); do
     echo "pool_proxy_loop: lote $n ($(date -u +%FT%TZ))" >&2
     # Sin --compile: el sparse-checkout trae sólo los .tex y .srt de estos lotes;
     # compilar exige sus figuras y se hace después, con ellas en disco.
+    # Lo que un reinicio dejó en disco sin recoger se escribe antes de pedir
+    # nada al modelo (recover_pool_results.py).
+    batch=$(gawk -F'\t' -v n="$n" '$1 == n {print $2}' "$PLAN")
+    [[ -n "$batch" ]] && python3 "$HERE/recover_pool_results.py" "$batch"
     bash "$HERE/translate_wave.sh" --from "$n" --to "$n" --jobs 1
     echo "pool_proxy_loop: lote $n salió $?" >&2
 done

@@ -1,0 +1,93 @@
+\section{Optical Flow: decodificar campos de movimiento densos con Output Queries}
+
+La salida del lenguaje sigue siendo una secuencia unidimensional; el optical flow, en cambio, exige predecir un vector de movimiento bidimensional para cada píxel, por lo que es un caso sólido para evaluar el structured output scaling. El modelo recibe dos fotogramas y produce un dense vector field; los datos de entrenamiento son limitados y las anotaciones reales son costosas, por lo que la synthetic-to-real transfer y el inductive bias resultan especialmente decisivos.
+
+\subsection{Tarea y métricas}
+
+El optical flow $F(x,y)=(u(x,y),v(x,y))$ describe el desplazamiento horizontal y vertical de cada píxel del primer fotograma al segundo. El end-point error (EPE) que se usa con frecuencia es:
+
+\[
+\operatorname{EPE}=\frac{1}{HW}\sum_{x,y}\sqrt{(u-\hat u)^2+(v-\hat v)^2}.
+\]
+
+Donde $H,W$ son el alto y el ancho de la imagen; $(u,v)$ es el flow de ground truth; $(\hat u,\hat v)$ es la predicción; mientras menor sea el EPE, mejor. La rueda de color suele usar el hue para indicar la dirección y la saturación o el brillo para indicar la magnitud de la velocidad.
+
+\lecturefigure{slide-28-optical-flow-definition.jpg}{Optical flow: predecir un vector de movimiento bidimensional para cada píxel de fotogramas contiguos.}{Video oficial actual de Stanford Online 00:48:44--00:49:15.}
+
+\begin{knowledgebox}{Lectura de la figura: el color del flujo óptico no es la categoría del objeto}
+Colores similares indican direcciones y velocidades de movimiento similares, no categorías semánticas. Un color uniforme dentro de un objeto indica que el campo de movimiento es suave; los cambios bruscos en los bordes pueden corresponder a oclusiones, cambios de profundidad o movimientos independientes.
+\end{knowledgebox}
+
+\subsection{Transfer protocol: entrenar solo con AutoFlow}
+
+Esta sección fija primero el protocolo de datos y después revisa la clasificación de los modelos. La clase subraya que no existen datos reales de dense flow a gran escala. El modelo se entrena con escenas sintéticas de AutoFlow y luego se evalúa, sin fine-tune, en Sintel clean/final y en KITTI. Así se mide la transfer entre dominios renderizados y de conducción real, y no el ajuste a cada benchmark.
+
+\lecturefigure{slide-29-optical-flow-transfer-task.jpg}{Optical-flow transfer: entrenamiento con AutoFlow y evaluación en Sintel/KITTI sin fine-tuning.}{Video oficial actual de Stanford Online 00:49:16--00:50:05.}
+
+\begin{warningbox}{El EPE de distintos conjuntos de datos no se puede combinar en una sola cifra}
+Sintel clean/final usan distintos niveles de complejidad de renderizado, y KITTI proviene de escenas de conducción con restricciones de LiDAR disperso. Deben reportarse tres columnas por separado; el promedio no puede tomarse como una calidad unificada en el mundo real.
+\end{warningbox}
+
+\teachervoice{En la sesión de Q\&A se explicó el ground truth: Sintel es una película CGI abierta, por lo que la correspondencia de píxeles puede calcularse a partir del estado de la escena; KITTI estima la correspondencia con la profundidad de LiDAR y el movimiento de la cámara. Las anotaciones de dense optical flow son muy costosas, y esa es la razón por la que el synthetic training es necesario.}
+
+\subsection{Comparación con RAFT: por qué sorprende el sesgo débil}
+
+RAFT construye explícitamente un all-pairs correlation volume y actualiza el flow de forma iterativa mediante gather multiescala o local. Es decir, incorpora en la arquitectura la estructura de correspondencia del optical flow. Perceiver IO, en cambio, codifica las características de los dos fotogramas en el input array, las procesa con un latent bottleneck y luego decodifica el flow con una output query por píxel.
+
+\lecturefigure{slide-30-raft-comparison.jpg}{El correlation volume y la actualización iterativa local de RAFT: un inductive bias fuerte para optical flow.}{Video oficial actual de Stanford Online 00:50:06--00:50:31.}
+
+El ponente esperaba que Perceiver IO, por su sesgo débil, sobreajustara los synthetic data o no lograra aprender la correspondence. En la práctica, el modelo obtuvo resultados competitivos «out of the box», lo que indica que una gran cantidad de datos y la attention pueden aprender parte de la estructura de correspondencia; sin embargo, esto no significa que su velocidad o su eficiencia con pocos datos superen a las de RAFT.
+
+\lecturefigure{slide-31-perceiver-io-optical-flow.jpg}{Optical flow con Perceiver IO: entrada de dos fotogramas, latent processor y flow queries por píxel.}{Video oficial actual de Stanford Online 00:50:48--00:51:13.}
+
+\teachervoice{Lo más importante de esta diapositiva es que el experimento corrigió la expectativa previa de los autores: esperaban que un inductive bias débil produjera un sobreajuste severo, y encontraron que el modelo funcionaba directamente. Una conclusión de calidad debe formularse como «se transfiere mejor de lo esperado», y no como «los sesgos de dominio ya no hacen falta».}
+
+\begin{importantbox}{Cómo se traslada el optical flow a Perceiver IO}
+Las input rows codifican los píxeles de los dos fotogramas, su posición y el ID del fotograma; los latents reúnen la información global entre fotogramas; se crea una output query para cada píxel objetivo; el decoder produce dos canales $(\hat u,\hat v)$. El cambio de tarea se refleja sobre todo en las tags de entrada, las output queries y la loss.
+\end{importantbox}
+
+\subsection{Resultados cuantitativos y cualitativos}
+
+La tabla de resultados compara el EPE de PWCNet, RAFT y Perceiver IO en Sintel clean/final y en KITTI. Al leer la tabla hay que confirmar primero si todos los modelos se entrenaron solo con AutoFlow y si se aplicó fine-tuning sobre el benchmark; la clase indica explícitamente que aquí no se aplica fine-tune, para evitar el sobreajuste a conjuntos de prueba pequeños.
+
+\lecturefigure{slide-32-optical-flow-results.jpg}{Comparación del EPE en Sintel clean/final y KITTI tras el entrenamiento con AutoFlow.}{Video oficial actual de Stanford Online 00:51:14--00:51:37.}
+
+\begin{knowledgebox}{Lectura de la tabla: un EPE menor es mejor, pero el error promedio no basta}
+También deben revisarse los bordes de movimiento, los objetos pequeños, el movimiento rápido, las oclusiones y las regiones sin textura. Cuando dos modelos tienen un EPE parecido, la distribución de sus errores y su estabilidad pueden ser completamente distintas; las aplicaciones reales también requieren latency y confianza.
+\end{knowledgebox}
+
+El primer grupo de figuras cualitativas incluye a una persona bailando y movimientos rápidos de manos y objetos. Si el vector field en color es continuo dentro de un mismo objeto en movimiento y cambia en los bordes, el modelo captura el movimiento por regiones; los huecos resaltados o el ruido de color señalan oclusiones y fallas en los detalles.
+
+\lecturefigure{slide-33-qualitative-optical-flow-animals.jpg}{Ejemplo uno de optical flow en escenas reales: personas y movimiento local rápido.}{Video oficial actual de Stanford Online 00:51:38--00:51:49.}
+
+El segundo grupo muestra movimiento rápido a distancia y ampliaciones locales. Los objetivos pequeños ocupan pocos pixels, lo que constituye una prueba exigente para el latent bottleneck: la compresión global debe conservar la motion evidence débil y pequeña, pero decisiva para la tarea, para que la decoder query pueda reconstruirla.
+
+\lecturefigure{slide-34-qualitative-optical-flow-skater.jpg}{Ejemplo dos de optical flow en escenas reales: objetivos pequeños, larga distancia y ampliación local.}{Video oficial actual de Stanford Online 00:51:50--00:52:19.}
+
+\begin{warningbox}{Las figuras cualitativas no sustituyen al benchmark}
+Los videos públicos suelen seleccionar casos fáciles de leer, y la rueda de color puede ocultar diferencias numéricas pequeñas. Deben combinarse el EPE sobre el conjunto de prueba completo, las failure slices, la confianza y la consistencia temporal del video, en lugar de concluir a partir de unos cuantos flow maps vistosos.
+\end{warningbox}
+
+\subsection{Very large outputs y multimodal autoencoding}
+
+Perceiver IO puede construir queries para cada fotograma, cada píxel y cada canal de un video, de modo que el número de salidas puede llegar a millones. La entrada se comprime primero en unos pocos latents y luego se decodifica con un gran número de queries; esto equivale a usar el latent como representación comprimida compartida. El costo de salida sigue siendo $\mathcal{O}(ON)$, por lo que el decoder query batching y la memoria son problemas prácticos de ingeniería.
+
+\lecturefigure{slide-35-decoding-very-large-outputs.jpg}{Decodificar arreglos de salida de video muy grandes a partir de un latent state fijo.}{Video oficial actual de Stanford Online 00:52:20--00:53:05.}
+
+Si el valor máximo de la imagen reconstruida es $I_{\max}$ y el error cuadrático medio es MSE, el PSNR se define como:
+
+\[
+\operatorname{PSNR}=10\log_{10}\left(\frac{I_{\max}^2}{\operatorname{MSE}}\right).
+\]
+
+Donde un PSNR más alto indica un menor error por píxel; no corresponde por completo a la calidad perceptual. La tabla reporta a la vez el compression ratio, el PSNR de video/audio y la exactitud de clasificación, para observar cómo se degradan la reconstrucción y las tareas semánticas al reducir el número de latents.
+
+\lecturefigure{slide-36-quantitative-autoencoding.jpg}{Razón de compresión, PSNR de video/audio y top-5 accuracy del multimodal autoencoding.}{Video oficial actual de Stanford Online 00:53:06--00:56:13.}
+
+\begin{knowledgebox}{Lectura de la tabla: la razón de compresión es una prueba de esfuerzo del cuello de botella compartido}
+Reducir los latents aumenta el compression ratio, pero puede empeorar la reconstrucción de píxeles y audio; la exactitud de clasificación puede bajar más despacio, porque las tareas semánticas no necesitan conservar todos los detalles. Esto revela que la latent representation tiene necesidades de información distintas según la tarea.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El optical flow muestra que Perceiver IO puede decodificar salidas estructuradas por píxel y obtener resultados competitivos en la synthetic-to-real transfer. El EPE, el flow cualitativo, el costo de las output queries y el compression tradeoff deben interpretarse en conjunto; el éxito de un sesgo débil no implica que los modelos especializados con sesgo fuerte pierdan su valor.

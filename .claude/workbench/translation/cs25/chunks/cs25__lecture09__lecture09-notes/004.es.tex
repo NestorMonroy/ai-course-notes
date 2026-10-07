@@ -1,0 +1,66 @@
+\section{Raw Audio Synthesis: la siguiente sample como problema de clasificación}
+
+El primer trabajo elige la representación más difícil y también la más directa: no calcula antes un spectrogram ni aprende antes un codec, sino que predice de forma autorregresiva la siguiente sample cuantizada al nivel de la waveform. La ventaja es que el objetivo es claro y la aplicación es general; la desventaja es que hay que hacer decenas de miles de predicciones por segundo y que los errores se van retroalimentando en el context posterior. Esta sección establece primero una definición rigurosa de la tarea y después examina si el Transformer realmente «vence» a WaveNet.
+
+\lecturefigure{slide-14-audio-transformer-paper-title.jpg}{Primer trabajo: modelar la raw audio generation con una Transformer architecture.}{Video oficial de Stanford Online 00:13:10--00:14:27; Verma y Chafe, arXiv:2106.16036.}
+
+\subsection{Por qué un waveform generator es un componente de uso general}
+
+Los generadores del tipo WaveNet no sirven solo para reproducir sonido directamente. Siempre que un sistema anterior produzca algún tipo de condition, el generador puede funcionar como vocodificador, eliminador de ruido, decoder de separación de fuentes, compensador de pérdida de paquetes o etapa final de una transformación de audio, y convertir una latent/spectral representation de vuelta en una waveform en el dominio del tiempo. Por eso, mejorar el next-sample model significa algo más que un demo de generación musical.
+
+\lecturefigure{slide-15-raw-audio-synthesis-background.jpg}{Contexto de aplicación de la raw synthesis: speech, music, denoising, transforms, vocoders, etc.}{Video oficial de Stanford Online 00:13:12--00:14:30.}
+
+\teachervoice{El ponente llama a WaveNet el «core building block» de muchos sistemas. Esta frase le recuerda al lector que el generador suele ser el decoder de un pipeline grande; al comparar generators por separado, hay que indicar si la condition, los datos y el front-end son los mismos.}
+
+\subsection{Por qué la tarea es difícil: longitud, causalidad y sensibilidad al error}
+
+La waveform cuantizada se denota $x_1,\ldots,x_T$, con cada $x_t\in\{0,\ldots,255\}$. Un causal autoregressive model descompone la distribución conjunta como
+\[
+p(x_{1:T})=\prod_{t=1}^{T}p(x_t\mid x_{<t}).
+\]
+El entrenamiento suele minimizar la entropía cruzada
+\[
+\mathcal{L}_{\mathrm{NLL}}
+=-\sum_{t=1}^{T}\log p_\theta(x_t\mid x_{<t}).
+\]
+Aquí $T$ es el número de samples, $x_{<t}$ son las muestras anteriores y $p_\theta$ entrega probabilidades sobre 256 clases. Durante la generación, el modelo muestrea o selecciona $x_t$ y luego lo devuelve al context; por eso, un error local puede alterar la distribución de las entradas futuras.
+
+\lecturefigure{slide-16-raw-audio-synthesis-difficulty.jpg}{Dificultades de la raw audio generation: dependencias locales y globales, secuencias extremadamente largas, líneas base WaveNet/SampleRNN.}{Video oficial de Stanford Online 00:14:30--00:16:24.}
+
+\begin{importantbox}{Por qué diez segundos son 160,000 decisiones}
+A 16 kHz, diez segundos de waveform tienen $16\,000\times10=160,000$ samples. Con cuantización de 8 bits, cada paso es una 256-way classification. Aunque la precisión de cada paso sea muy alta, el rollout autorregresivo requiere 160,000 predicciones condicionales; esto es una forma de propagación de errores completamente distinta de la de generar unas cuantas decenas de tokens de texto.
+\end{importantbox}
+
+\teachervoice{Verma explica la sensibilidad perceptual con la idea de que «el ojo quizá no note un pixel, pero el oído detecta enseguida una desviación de unas cuantas samples». Es una intuición, no una ley psicoacústica rigurosa, pero señala con precisión que la relación entre la next-sample metric y la calidad audible es compleja.}
+
+\subsection{Preguntas del artículo y comparación controlada}
+
+El artículo plantea dos preguntas: con los mismos datos y un número de parámetros similar, ¿puede un causal Transformer predecir la next sample mejor que el WaveNet clásico?; y si el context de la full attention resulta demasiado costoso, ¿se puede usar como condition un historial más largo y comprimido? La primera pregunta compara arquitecturas; la segunda compara diseños de context. Ninguna de las dos es un veredicto general de «cualquier Transformer contra cualquier WaveNet».
+
+\lecturefigure{slide-17-paper-contributions.jpg}{Aportaciones del artículo: comparación controlada, conditional raw-audio Transformer e interfaz de generación de uso general.}{Video oficial de Stanford Online 00:16:24--00:17:11.}
+
+\lecturefigure{slide-18-dataset-and-setup.jpg}{Datos y objetivo: unas 840 grabaciones de piano, 56 horas, 16 kHz, 8-bit quantization, 100 ms de context.}{Video oficial de Stanford Online 00:17:12--00:18:14.}
+
+A 16 kHz, 100 ms corresponden a $1\,600$ samples. El artículo usa grabaciones reales de piano, con distintos artistas, condiciones de grabación y estructuras mono/polyphonic; esto hace que los datos sean más complejos que un sonido sintético único, pero también limita las conclusiones a esa distribución. La Top-5 metric se define como
+\[
+\mathrm{Acc}_{5}
+=\frac{1}{T}\sum_{t=1}^{T}
+\mathbf{1}\!\left[x_t\in\operatorname{Top5}\bigl(p_\theta(\cdot\mid x_{<t})\bigr)\right].
+\]
+Verifica si el valor real cae entre las cinco clases de mayor probabilidad, no si el sonido generado es natural.
+
+\begin{lstlisting}[caption={Cálculo de la next-sample top-5 accuracy de una waveform cuantizada.}]
+def top5_next_sample_accuracy(model, contexts, targets):
+    logits = model(contexts)          # [batch, 256]
+    top5 = logits.topk(k=5, dim=-1).indices
+    hits = (top5 == targets[:, None]).any(dim=-1)
+    return hits.float().mean()
+\end{lstlisting}
+
+\begin{warningbox}{La top-5 accuracy no es una calificación de calidad auditiva}
+Este indicador sirve para comparar la local predictive distribution dentro de una misma tarea y evita depender solo de la negative log-likelihood, que es difícil de interpretar de forma intuitiva; pero ignora la estrategia de muestreo, la estructura musical de largo alcance, la coherencia de fase, el error acumulado y la human preference. Todas las menciones posteriores de «74\% a 85\%» se refieren únicamente a este indicador experimental.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La raw synthesis plantea la waveform directamente como un problema autorregresivo de 256 clases; a cambio gana generalidad, pero carga con una longitud extrema y con la retroalimentación de errores. Una comparación justa exige fijar los datos, el context y el indicador; la next-sample accuracy aporta evidencia local, pero no basta por sí sola para demostrar una generación de alta fidelidad.

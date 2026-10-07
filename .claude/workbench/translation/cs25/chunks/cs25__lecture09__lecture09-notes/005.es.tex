@@ -1,0 +1,83 @@
+\section{Transformer frente a WaveNet: direccionamiento adaptativo y Context Conditioning}
+
+Una vez definida con claridad la tarea, la diferencia de arquitectura puede concretarse. WaveNet establece de antemano, mediante dilated causal convolutions, qué offsets del historial se combinan; el Transformer asigna pesos dinámicamente a la entrada actual mediante query--key scores. El primero tiene un sesgo inductivo fuerte, local y multiescala, y un cómputo lineal sobre la secuencia; el segundo direcciona con más flexibilidad, pero con un pairwise cost más alto. El conditional design del artículo busca precisamente un compromiso de ingeniería entre ambos.
+
+\subsection{Cómo predice la waveform un Causal Transformer}
+
+Cada sample cuantizado se busca primero en una tabla para obtener su embedding; después se le suma la codificación posicional y pasa por varias capas de autoatención causal y módulos de propagación hacia adelante; la causal mask garantiza que la posición $t$ solo lea $<t$. La linear layer final produce 256 logits. La estructura multicabeza permite que distintas heads atiendan vecindades periódicas, la envolvente reciente o un context más lejano, pero «poder atender» no significa que el entrenamiento aprenda necesariamente esa división del trabajo interpretable.
+
+\lecturefigure{slide-19-autoregressive-transformer-architecture.jpg}{Causal raw-audio Transformer: sample embedding, masked attention, feed-forward y 256-way output.}{Video oficial de Stanford Online, 00:18:15--00:19:31.}
+
+\begin{knowledgebox}{Lectura de la figura: diferencia entre dilation fija y learned attention}
+El edge pattern de WaveNet lo determinan el kernel size y el dilation schedule; entradas distintas comparten la misma topología. En el Transformer, en teoría, todas las posiciones permitidas pueden conectarse, y los pesos reales los determina el contenido. La flexibilidad amplía la function class, pero también aumenta la necesidad de datos, la dificultad de optimización y el costo $O(n^2)$; no basta con enumerar las ventajas.
+\end{knowledgebox}
+
+\subsection{Por qué puede ser más flexible que un WaveNet fijo}
+
+El ponente describe la attention como la capacidad de asignar «weightage» a cualquier posición del historial de la waveform. Para una señal aproximadamente periódica, esto significa que el modelo puede buscar directamente las muestras relacionadas con la fase, el tono o el estado de ejecución actuales, sin esperar a que la información se propague por un dilation tree fijo. Por otro lado, la translation equivariance y el bias local de la convolución son muy valiosos para el audio; si hace falta un adaptive routing global debe decidirlo el objetivo de datos y de latency.
+
+\lecturefigure{slide-20-why-better-than-wavenet.jpg}{Comparación intuitiva: la attention aprende un routing dependiente del contenido; WaveNet usa una dilated topology fija.}{Video oficial de Stanford Online, 00:19:32--00:20:09.}
+
+\teachervoice{El ponente dice que el Transformer puede asignar pesos a cualquier parte de la waveform; este es un representational argument, no la tabla de resultados en sí. Una lectura de calidad reconoce primero la diferencia de capacity y después usa experimentos controlados para juzgar si el entrenamiento realmente la aprovecha.}
+
+\subsection{El Quadratic bottleneck obliga a jerarquizar el Context}
+
+Para un local context de 100 ms, $n=1\,600$, y la attention matrix de una sola head ya tiene $2.56$ millones de entradas; si el context se amplía a un segundo, el tamaño de la matriz se multiplica por cien. Ampliar directamente la raw-sample window se vuelve inviable muy pronto; por eso el artículo comprime primero el historial lejano en una condition y deja que el local predictor procese los samples de alta resolución.
+
+\lecturefigure{slide-21-quadratic-bottleneck.jpg}{Cuello de botella principal: la memory/compute de la raw-sample attention es $O(n^2)$.}{Video oficial de Stanford Online, 00:20:10--00:20:17.}
+
+\lecturefigure{slide-22-conditioned-transformer.jpg}{Conditioned Transformer: un context summary adicional amplía el historial visible.}{Video oficial de Stanford Online, 00:20:18--00:20:59.}
+
+Formalmente, se denota la ventana reciente de alta resolución como $x_{t-L:t-1}$ y el historial más lejano como $x_{t-R:t-L-1}$. Primero un compresor $g$ produce
+\[
+c_t=g(x_{t-R:t-L-1}),
+\]
+y después se predice
+\[
+p(x_t\mid x_{t-L:t-1},c_t).
+\]
+La ruta local conserva el sample detail y la condition path transporta la estructura más lenta. Si el compresor es demasiado débil, pierde información; si es demasiado pesado, traslada el costo a otra red. El valor aquí está en repartir de forma explícita el trabajo entre escalas temporales distintas.
+
+\lecturefigure{slide-23-context-conditioning-architecture.jpg}{Context conditioning architecture: el historial amplio se comprime primero y luego se inyecta en el autoregressive Transformer local.}{Video oficial de Stanford Online, 00:21:00--00:22:07.}
+
+\begin{importantbox}{El patrón común de lo multiescala}
+Raw context conditioning, WaveNet dilation, VQ hierarchy, pooling y wavelet hacen lo mismo: conservar alta resolución para lo cercano y representar lo lejano con menor ancho de banda. La diferencia está en si la compresión ocurre sobre samples, latent codes o intermediate embeddings.
+\end{importantbox}
+
+\teachervoice{En clase, «conditioning on the context itself» puede entenderse fácilmente como un eslogan místico. El mecanismo real consiste en submuestrear o codificar el historial más lejano como side information, para evitar que todos los raw samples hagan full attention entre sí.}
+
+\subsection{Tabla de resultados: cuánto mejora la predicción local}
+
+Ya se explicaron la architecture capacity y el context design; solo en esta sección se pasa a la empirical evidence. Al leer la tabla conviene fijar primero tres cosas: todos los modelos predicen el 8-bit next sample sobre los mismos datos de piano, la evaluación es siempre top-5 accuracy y las cifras no incluyen pruebas de escucha subjetivas. Después se comparan por separado WaveNet frente a un Transformer de tamaño equivalente, el 3-layer model conditioned frente al unconditioned y el efecto de aumentar la profundidad. Solo dentro de este límite controlado tiene un significado preciso decir «cuál es mejor».
+
+El artículo reporta, con el mismo next-sample setup: vanilla WaveNet, 74\%; stacked WaveNet, 76\%; 3-layer Transformer, 80\%; con la wider-context condition, 82\%; y los Transformer más profundos de 6/8 capas alcanzan 84\%/85\%. Estas cifras respaldan que «con estos datos y esta métrica, la Transformer family es más fuerte», y muestran que la context condition aporta unos 2 puntos porcentuales a igual profundidad.
+
+\lecturefigure{slide-24-controlled-results.jpg}{Resultados controlados: top-5 accuracy de WaveNet, de Transformer de distintas profundidades y del conditioned model.}{Video oficial de Stanford Online, 00:22:08--00:22:35; tabla de arXiv:2106.16036.}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Raw-audio next-sample top-5 accuracy (configuración del artículo).}
+\begin{tabular}{lr}
+\toprule
+Modelo & Accuracy \\
+\midrule
+Vanilla WaveNet $(d=2,N=10,F=128)$ & 74\% \\
+Stacked WaveNet $(d=2,N=30,F=128)$ & 76\% \\
+3-layer Transformer $(H=4,E=128)$ & 80\% \\
+Conditioned 3-layer Transformer & 82\% \\
+Large 6-layer Transformer $(H=8,E=128)$ & 84\% \\
+Large 8-layer Transformer $(H=8,E=128)$ & 85\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\teachervoice{La diapositiva de resultados dice «Adieu WaveNet? Seems like it.», lo que refleja el tono entusiasta del ponente en clase; aun así, lo que compara sigue siendo el mismo next-sample benchmark. Las notas conservan el tono, pero deben conservar también los límites del benchmark.}
+
+\begin{warningbox}{Cómo no debe leerse «Adieu WaveNet?»}
+No demuestra que la convolución haya quedado obsoleta para el raw audio: los datos son grabaciones de piano, la métrica es teacher-forced next-sample top-5 accuracy, y no se comparan attention eficiente moderna, velocidad de generación en paralelo, pruebas de escucha subjetivas, distintas frecuencias de muestreo ni latencia de despliegue. La conclusión más prudente es esta: en esta configuración controlada, la adaptive attention y los modelos más profundos mejoraron la predicción local.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La ventaja del Transformer proviene del direccionamiento dependiente de la entrada; la de WaveNet, del bias multiescala fijo y de una complejidad más favorable. El Conditioning comprime el historial lejano y lo inyecta en el predictor local, lo que equivale a una asignación explícita de ancho de banda entre el raw detail y el long context.

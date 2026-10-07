@@ -1,0 +1,97 @@
+\section{Entrenamiento: Masked Reconstruction, Settling y Consensus Distillation}
+
+El mecanismo de representación solo funciona si el objective permite aprender las islands correctas. La clase presenta dos tipos de signal complementarios. El primero, como en BERT, oculta patches de la entrada y hace que el sistema los reconstruya tras varias settling iterations. El segundo acerca las bottom-up/top-down predictions a un consensus embedding que fusiona información del vecindario y del tiempo, para favorecer la formación de regiones localmente coherentes.
+
+\subsection{Masked reconstruction y BPTT}
+
+Dadas una imagen $I$ y una mask $M$, se eliminan algunos patches de la entrada. El sistema ejecuta unos $T\approx10$ recurrent steps y después predice el contenido faltante desde el nivel más bajo. La loss de reconstrucción se retropropaga a través del time y de la hierarchy, por lo que la hypothesis de alto nivel, la evidence de bajo nivel y el lateral agreement pueden recibir gradient.
+
+\lecturefigure{slide-27-deep-end-to-end-training.jpg}{Deep end-to-end training: aplicar mask a la entrada, settle, reconstruir y retropropagar a través del tiempo.}{Video oficial de Stanford Online 00:44:46--00:45:43.}
+
+\[
+\mathcal L_{\mathrm{rec}}=
+\sum_{x\in M}
+\ell\!\left(D\!\left(\mathbf e_{x,0}^{(T)}\right),I_x\right).
+\]
+
+Donde $M$ son las masked locations, $I_x$ es el patch real, $D$ es el decoder que reconstruye la entrada a partir del embedding del nivel más bajo, $T$ son los settling steps y $\ell$ puede ser una pixel, feature o distribution loss. La clase no fija una forma única; lo importante es que el error recorra el recurrent inference path.
+
+\begin{warningbox}{«Train like BERT» no significa que la optimization sea igual de sencilla}
+La mask prediction de BERT recorre principalmente un forward graph de profundidad fija; GLOM, en cambio, debe hacer BPTT a través del settling time, de los levels superiores e inferiores, de las attention neighborhoods y de las shared prediction nets. La estabilidad del gradiente, la memory, la truncation, el fixed point y los early-exit criteria son problemas de ingeniería adicionales.
+\end{warningbox}
+
+\subsection{El consensus embedding como teacher}
+
+El target que resulta de mezclar las cuatro entradas se denomina \term{consensus embedding}. Si cada uno de los predictors bottom-up y top-down solo ve un tipo de source, pueden entrenarse para aproximar el consensus, que ya fusiona la información de los vecindarios similares, del instante anterior y de otro nivel. Como la lateral attention ya favorece los nearby similar states, aproximarse al consensus impulsa indirectamente la island formation.
+
+\lecturefigure{slide-28-consensus-and-distillation.jpg}{Las redes de predicción se acercan al consensus: una perspectiva de online co-distillation.}{Video oficial de Stanford Online 00:45:44--00:47:11.}
+
+\begin{knowledgebox}{Lectura de la figura: el teacher no es una etiqueta, sino un estado fusionado}
+Las nets bottom-up y top-down dan cada una su prediction; el historial del mismo nivel, la attention del vecindario y la información de las otras direcciones forman en conjunto el consensus. El entrenamiento acerca cada prediction de una sola fuente a este target fusionado, de modo que distintas columns pueden intercambiar conocimiento. Al leer la figura deben tenerse presentes dos limitaciones: el consensus depende del propio modelo actual y puede derivar; y si todos los peers comparten el mismo sesgo, la co-distillation reforzará el error en lugar de corregirlo.
+\end{knowledgebox}
+
+Sea $\mathbf c_{x,\ell}^{(t)}$ un stop-gradient teacher; puede escribirse:
+
+\[
+\mathcal L_{\mathrm{cons}}=
+\sum_{x,\ell,t}
+\left\|
+f_{\mathrm{bu}}^{\ell}\!\left(\mathbf e_{x,\ell-1}^{(t)}\right)
+-\operatorname{sg}\!\left(\mathbf c_{x,\ell}^{(t)}\right)
+\right\|_2^2
++
+\left\|
+f_{\mathrm{td}}^{\ell}\!\left(\mathbf e_{x,\ell+1}^{(t)},x\right)
+-\operatorname{sg}\!\left(\mathbf c_{x,\ell}^{(t)}\right)
+\right\|_2^2.
+\]
+
+Donde $\operatorname{sg}$ denota stop-gradient, que evita que teacher y student deriven arbitrariamente a la vez por la misma ruta; los dos términos entrenan, respectivamente, el predictor bottom-up y el top-down. El artículo también analiza una biological variant sin weight sharing completo; la figura de la clase se inclina más por un modelo compartido orientado a la ingeniería.
+
+\subsection{Weight sharing y brain plausibility}
+
+Un sistema de ingeniería puede copiar los mismos weights bottom-up/top-down en todas las posiciones; el cerebro no necesariamente comparte pesos de forma exacta. El artículo de GLOM propone la co-distillation: los local models de distintas posiciones, aunque sus parámetros difieran ligeramente, pueden intercambiar conocimiento mediante un consensus común. Esta idea explica cómo la «compartición funcional aproximada» puede prescindir del exact parameter tying, pero introduce problemas de teacher quality y de coordination.
+
+\lecturefigure{slide-29-shared-weights.jpg}{En ingeniería pueden compartirse los pesos entre columns; en el cerebro puede compartirse el conocimiento mediante consensus/co-distillation.}{Video oficial de Stanford Online 00:47:22--00:48:51.}
+
+\begin{knowledgebox}{Términos clave de distillation}
+\begin{tabularx}{\textwidth}{L{0.22\textwidth}L{0.30\textwidth}X}
+\toprule
+Término & De dónde proviene el teacher & Papel en esta clase \\
+\midrule
+knowledge distillation & Salida de un modelo grande preentrenado o de un ensemble & Transmitir el soft target al student \\
+online distillation & Los peers/ensemble en entrenamiento generan el target al momento & Sincronizar el conocimiento de varios modelos o fragmentos \\
+co-distillation & Los peers son teachers entre sí, o el consensus del ensemble enseña a todos los peers & Acercar los predictors de distintas columns a un target común island-compatible \\
+consensus & Estado que fusiona información temporal, bottom-up, top-down y lateral & No es ground truth; puede amplificar errores comunes \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Pseudocódigo didáctico de masked reconstruction y consensus training}]
+def train_step(image, mask, steps=10):
+    visible = apply_mask(image, mask)
+    state = initialize_columns(visible)
+
+    consensus_targets = []
+    for _ in range(steps):
+        state, consensus = glom_step_all_levels(state)
+        consensus_targets.append(stop_gradient(consensus))
+
+    reconstruction = decode_lowest_level(state)
+    reconstruction_loss = loss_on_masked_patches(reconstruction, image, mask)
+
+    consensus_loss = 0.0
+    for target in consensus_targets:
+        consensus_loss += prediction_to_consensus_loss(state, target)
+
+    total_loss = reconstruction_loss + CONSENSUS_WEIGHT * consensus_loss
+    total_loss.backward()  # backpropagation through settling time
+\end{lstlisting}
+
+\begin{warningbox}{El consensus también puede equivocarse colectivamente}
+Si la evidence inicial está sesgada, la attention es demasiado aguda o el vecindario cruza fronteras reales, todos los predictors pueden converger hacia un consensus erróneo. Un sistema confiable necesita source weighting, uncertainty, boundary diagnostics, curriculum o alternative hypotheses; no puede tomar «todos coinciden» por «todos aciertan».
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La propuesta de entrenamiento combina el error externo que aporta la masked reconstruction con la señal estructural interna que aporta la consensus distillation. Muestra cómo pueden optimizarse las islands, pero también expone la parte de ingeniería más difícil de GLOM: el recurrent BPTT, el teacher drift, el collapse, la fuga a través de las fronteras y la settling stability.

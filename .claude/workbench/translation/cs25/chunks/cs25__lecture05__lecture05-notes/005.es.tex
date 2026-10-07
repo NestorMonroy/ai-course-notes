@@ -1,0 +1,68 @@
+\section{La compilación estática frente al enrutamiento dinámico: Capacity Factor y Token Dropping}
+
+Hasta ahora parece que el router puede decidir libremente cuántos tokens recibe cada expert; sin embargo, XLA, Mesh TensorFlow y los kernels de los aceleradores prefieren tensor shapes estáticas. El sistema debe reservar un número fijo de espacios para cada expert antes de la ejecución, lo que convierte el enrutamiento dinámico en un problema de planificación de capacidad.
+
+\lecturefigure{slide-13-static-graph-dynamic-architecture.jpg}{La contradicción: el grafo compilado de forma estática necesita formas fijas, mientras que el router produce una asignación dinámica de tokens.}{Video oficial de Stanford Online, 00:13:30--00:14:37.}
+
+Si un routing group tiene $T$ tokens, $E$ experts y un capacity factor $\gamma$, la capacidad suele escribirse así:
+
+\[
+C=\left\lceil \gamma\frac{T}{E}\right\rceil.
+\]
+
+Aquí, $C$ es el número de espacios para tokens que se reserva a cada expert; $T/E$ es el número promedio de tokens con un equilibrio perfecto, y $\gamma$ es el factor de capacidad. Con $\gamma=1$ casi no hay margen adicional; con $\gamma>1$ disminuye el overflow, pero aumentan el buffer, la comunicación y el posible cómputo de padding.
+
+\begin{importantbox}{El compromiso triple del capacity factor}
+Al aumentar $\gamma$, el token dropping suele disminuir, pero suben el límite de transferencia entre dispositivos, el buffer de recepción y el límite del lote de la FFN. Al reducir $\gamma$, el sistema resulta más barato, pero exige un router mejor equilibrado y obliga a aceptar que algunos tokens omitan el cómputo del expert.
+\end{importantbox}
+
+\lecturefigure{slide-14-expert-capacity-factor.jpg}{Capacity factor de 1.0 y de 1.5: los espacios adicionales reducen el overflow, pero elevan el costo del sistema.}{Video oficial de Stanford Online, 00:14:38--00:15:55.}
+
+\begin{knowledgebox}{Lectura de la figura: primero cuente los tokens, luego los espacios}
+En la figura izquierda, los espacios de cada expert solo cubren el reparto ideal, y los tokens que exceden la capacidad de los experts más solicitados se descartan; la figura derecha agrega cerca de un 50\% de margen y se procesan más tokens. Al compararlas no basta con preguntar «¿se descartan tokens?»; también hay que preguntar cuánta memoria del acelerador, cuánto ancho de banda de comunicación y cuánto límite de multiplicación de matrices se asignaron a esos espacios vacíos.
+\end{knowledgebox}
+
+A continuación se muestra un capacity-aware dispatch conceptual. Una implementación real reordena los tokens por dispositivo y los intercambia mediante collective communication; aquí solo se muestra la lógica de control de capacidad.
+
+\begin{lstlisting}[caption={Pseudocódigo de top-1 dispatch con expert capacity.}]
+def capacity_dispatch(tokens, expert_id, expert_count, capacity):
+    slots = [[] for _ in range(expert_count)]
+    residual = zeros_like(tokens)
+    for token, target in zip(tokens, expert_id):
+        if len(slots[target]) < capacity:
+            slots[target].append(token)
+        else:
+            residual[token.index] = token  # expert path is skipped
+    expert_outputs = run_batched_experts(slots)
+    return combine(expert_outputs) + residual
+\end{lstlisting}
+
+\subsection{Por qué «No Token Left Behind» no funcionó}
+
+Intuitivamente, descartar tokens parecería perjudicar siempre la calidad. Los autores probaron un enrutamiento en varias etapas: si el expert top-1 ya está lleno, el token se envía a la segunda o tercera opción hasta que obtenga un espacio. Sin embargo, el experimento no mostró mejoras e incluso pudo empeorar los resultados. Una explicación es que el router ya expresó «a dónde quiere ir este token»; forzar el uso de un expert de menor rango no es necesariamente mejor que omitir la subcapa de ese expert, porque la ruta residual conserva la representación del token.
+
+\lecturefigure{slide-15-no-token-left-behind.jpg}{No Token Left Behind: esquema de varias etapas que sigue enrutando los tokens en overflow hacia experts subóptimos.}{Video oficial de Stanford Online, 00:15:56--00:18:18.}
+
+\teachervoice{El ponente lo calificó expresamente como un resultado negativo sorprendente: el equipo era optimista y suponía que «garantizar que no se descarten tokens» sería mejor, pero el modelo resultó bastante robusto al token dropping, y el cómputo erróneo de un expert subóptimo podía incluso ser perjudicial. Unas buenas notas de clase deben conservar este tipo de intuiciones refutadas por los experimentos, en lugar de dejar solo la receta final exitosa.}
+
+\begin{warningbox}{Un dropped token no desaparece de la red}
+En un Switch block, el token en overflow suele omitir la FFN del expert, pero puede seguir propagándose por la residual connection. Entender el dropping como «eliminar tokens de entrada» lleva a una lectura muy equivocada del experimento; lo que realmente falta es la transformación del expert en esa capa.
+\end{warningbox}
+
+\subsection{La sparsity no es lo mismo que la adaptive computation}
+
+En la sesión de Q\&A, un estudiante preguntó si, dado que distintos tokens pasan por distintos experts, eso equivale a que distintos tokens usen distinta cantidad de cómputo. La distinción que dieron los dos ponentes fue la siguiente: esta clase estudia principalmente \textbf{parámetros distintos con una cantidad de cómputo similar}; la adaptive computation pone el énfasis en que distintos tokens usen distinto número de pasos o distintos FLOPs. Esto último es más difícil en aceleradores SPMD (Single Program Multiple Data), porque los dispositivos esperan que las muestras de un lote ejecuten un programa con las mismas reglas.
+
+\teachervoice{Irwan Bello explicó que la sparsity y la adaptive computation están relacionadas, pero son independientes: la primera consiste principalmente en que cada muestra use parámetros distintos; la segunda, en que cada muestra use una cantidad de cómputo distinta. La estrategia de investigación de Barret Zoph fue primero trasladar el LSTM MoE existente al Transformer y estabilizarlo, para después avanzar gradualmente hacia un cómputo dinámico más general.}
+
+La receta final combina top-1, selective precision, una inicialización más pequeña, expert dropout, load balance y capacity control. Ninguna implementación que reproduzca solo uno de estos componentes debería afirmar que reproduce el comportamiento de entrenamiento del Switch Transformer.
+
+\lecturefigure{slide-16-putting-it-all-together.jpg}{La receta completa de Switch: top-1 routing más estabilidad, regularización y control de carga.}{Video oficial de Stanford Online, 00:25:32--00:27:07.}
+
+\begin{importantbox}{Lista de verificación para auditar la implementación}
+Registre la frecuencia de las sparse layers, el número de experts, el capacity factor, la overflow rate, el peso de la aux-loss, la router precision, el escalamiento de la inicialización, el expert dropout, la comunicación del dispatch y el tiempo por paso. Sin estos campos, la etiqueta «top-1 MoE» por sí sola no permite explicar las diferencias entre resultados.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La compilación estática exige asignar de antemano la expert capacity. El capacity factor intercambia costo del sistema por menos overflow; los experimentos muestran que un dropping razonable puede ser mejor que forzar el envío de tokens a experts subóptimos. La sparsity sigue cambiando principalmente la ruta de los parámetros y no equivale a resolver por completo la adaptive computation.

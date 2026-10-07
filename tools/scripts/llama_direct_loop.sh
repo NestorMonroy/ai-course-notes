@@ -45,6 +45,10 @@ for (( round = 1; round <= max_rounds; round++ )); do
             exit 4
         fi
         echo "llama_direct_loop: vuelta $round, lote $n ($(date -u +%FT%TZ))" >&2
+        # Lo que un reinicio dejó en disco sin recoger se escribe antes de pedir
+        # nada al modelo (recover_pool_results.py).
+        batch=$(gawk -F'\t' -v n="$n" '$1 == n {print $2}' "$PLAN")
+        [[ -n "$batch" ]] && python3 "$HERE/recover_pool_results.py" "$batch"
         bash "$HERE/translate_wave.sh" --from "$n" --to "$n" --jobs 1 --compile
         echo "llama_direct_loop: lote $n salió $? ($(translated_count) fragmentos traducidos)" >&2
     done

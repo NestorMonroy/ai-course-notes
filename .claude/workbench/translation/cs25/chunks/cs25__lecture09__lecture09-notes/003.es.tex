@@ -1,0 +1,90 @@
+\section{De la waveform al spectrogram: primero se decide qué ve el modelo}
+
+El sonido es, ante todo, una amplitud que varía en el tiempo, no una imagen bidimensional ni un vocabulario discreto por naturaleza. Antes de entregárselo al modelo, se puede conservar la raw waveform o proyectarla sobre sinusoidal bases, perceptual filterbanks o learned features. Cada transformación responde dos preguntas: qué variaciones deben considerarse cercanas y qué detalles pueden comprimirse. Entender estas decisiones es el conocimiento previo más importante para comprender los tres trabajos que siguen.
+
+\subsection{Frecuencia de muestreo y longitud de la secuencia}
+
+Sea $x(t)$ la señal continua, $f_s$ la frecuencia de muestreo y $T$ la duración observada en segundos; la longitud de la secuencia discreta es
+\[
+n=f_sT.
+\]
+Aquí $n$ es el número de samples. Con $f_s=16\,000\ \mathrm{Hz}$, un segundo tiene $16\,000$ posiciones y diez segundos tienen $160\,000$ posiciones. Si cada posición calcula attention con todas las posiciones anteriores, el número de scores de una sola capa es aproximadamente
+\[
+N_{\mathrm{pair}}\approx \frac{n(n+1)}{2}=O(n^2).
+\]
+Una señal de diez segundos produce alrededor de $1.28\times10^{10}$ causal pairs, y eso sin contar heads, layers, lote ni activation memory.
+
+\begin{importantbox}{Restricción fundamental}
+En audio, la «secuencia larga» no es un adjetivo abstracto: la determina directamente la frecuencia de muestreo. Toda solución ejecutable tiene que elegir entre ventanas locales, submuestreo, patches, attention dispersa, latent code o modelos de secuencia alternativos.
+\end{importantbox}
+
+\subsection{Fourier basis y análisis de corto plazo}
+
+La Fourier transform discreta representa una ventana de longitud $N$ como coeficientes complejos de distintas frecuencias:
+\[
+X[k]=\sum_{n=0}^{N-1}x[n]e^{-j2\pi kn/N},
+\qquad k=0,\ldots,N-1.
+\]
+Aquí $x[n]$ es el $n$-ésimo sample, $k$ es el bin de frecuencia y el número complejo $X[k]$ contiene a la vez magnitude y phase. Los sonidos reales suelen ser no estacionarios, por lo que no basta con aplicar una sola transform a toda la señal; la short-time Fourier transform (STFT) usa una ventana $w[n]$ para repetir el análisis en distintos cuadros temporales $m$:
+\[
+X[m,k]=\sum_n x[n]w[n-mH]e^{-j2\pi kn/N},
+\]
+donde $H$ es el hop size. El spectrogram suele graficarse como
+\[
+S[m,k]=|X[m,k]|^2
+\quad\text{o}\quad \log(|X[m,k]|+\epsilon).
+\]
+El eje temporal corresponde a $m$, el eje de frecuencia a $k$ y el color a la energía. Cuanto más larga es la ventana, más fina es la resolución en frecuencia, pero peor la localización en el tiempo; con ventanas más cortas ocurre lo contrario.
+
+\lecturefigure{slide-08-spectrogram-overview.jpg}{Spectrogram: tras aplicar ventanas a la waveform, los espectros de corto plazo se apilan a lo largo del tiempo.}{Video oficial de Stanford Online 00:06:20--00:10:58.}
+
+\begin{knowledgebox}{Lectura de la figura: cuatro pasos de la waveform a la imagen bidimensional}
+Primero se cortan ventanas superpuestas sobre el eje horizontal; después se aplica la Fourier transform a cada ventana; luego se toma la magnitude o la power; por último, las ventanas contiguas se ordenan en el tiempo. La textura de la imagen permite usar modelos vision-like, pero si no se registran la phase, la función de ventana y el hop size, la imagen bidimensional no permite reconstruir sin pérdida la waveform original.
+\end{knowledgebox}
+
+\teachervoice{El ponente dice a propósito «batches» y luego se corrige a «windowing»: quienes vienen del aprendizaje automático suelen tratar la STFT como una caja negra de preprocesamiento, mientras que la perspectiva del procesamiento de señales exige precisar la longitud de la ventana, el traslape y la basis.}
+
+\subsection{Representaciones fijas, representaciones perceptuales y learned front end}
+
+Los Fourier bins están espaciados uniformemente, pero la percepción de la frecuencia en el oído humano no es lineal; los filterbanks mel y constant-Q redistribuyen las bandas para afinar las frecuencias bajas o hacer más estable el harmonic spacing en la música. La raw waveform conserva toda la información de muestreo, pero expone al modelo a la secuencia más larga. El learned front end, en cambio, deja que la pérdida de la tarea determine los filtros, y puede producir representaciones intermedias entre el DSP clásico y las características de caja negra.
+
+\lecturefigure{slide-09-audio-representations.jpg}{Audio representations: spectrogram, filterbank, raw waveform y learned features.}{Video oficial de Stanford Online 00:10:58--00:12:50.}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Principales compromisos de las representaciones de audio más comunes.}
+\begin{tabularx}{\textwidth}{L{0.19\textwidth}L{0.22\textwidth}L{0.22\textwidth}X}
+\toprule
+Representación & Ventajas & Principal pérdida/sesgo & Efecto en el Transformer \\
+\midrule
+Raw waveform & Conserva el detalle a nivel de muestra y la phase & Secuencias larguísimas; oscilaciones locales complejas & Requiere context local, compresión o attention eficiente. \\
+STFT magnitude & Estructura tiempo-frecuencia intuitiva; herramientas maduras & Compromiso entre resolución temporal y frecuencial; la phase suele omitirse & Puede tokenizarse por frame/patch, con una reducción notable de la longitud. \\
+Mel / constant-Q & Más cercana a la percepción o a la estructura musical & Bandas definidas de antemano; puede perder detalles relevantes para la tarea & Da al modelo un inductive bias más fuerte y menos grados de libertad. \\
+Learned filterbank & Se adapta a la tarea & Requiere datos y regularización; la interpretabilidad no está garantizada & El front end y el Transformer pueden optimizarse juntos de extremo a extremo. \\
+Discrete codebook & Produce directamente un vocabulario finito & Error de cuantización/reconstrucción; colapso del libro de códigos & Permite usar objetivos de modelado de lenguaje y token dependencies de largo alcance. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Un mismo sonido contiene varias escalas temporales a la vez}
+
+La clase usa una animación rápida que acerca la misma waveform de un segundo a cien milisegundos, diez milisegundos y un milisegundo. Esta secuencia no es un efecto visual: un segundo puede contener ritmo o eventos, cien milisegundos se acercan a fonemas o transitorios, en diez milisegundos se aprecia la periodicidad y un milisegundo cubre solo unas cuantas oscilaciones de alta frecuencia. Una sola ventana o un solo receptive field difícilmente ofrece la mejor resolución para todas estas estructuras a la vez.
+
+\lecturefigure{slide-10-waveform-100ms.jpg}{Unos 100 ms: empiezan a verse la envolvente local, los transitorios y la estructura a nivel de fonemas cortos.}{Video oficial de Stanford Online 00:11:50--00:11:53.}
+
+\lecturefigure{slide-11-waveform-1ms.jpg}{Alrededor de 1 ms: cubre solo unas cuantas oscilaciones rápidas; sirve para observar la estructura local de alta frecuencia.}{Video oficial de Stanford Online 00:11:54--00:11:55.}
+
+\lecturefigure{slide-12-waveform-10ms.jpg}{Unos 10 ms: la periodicidad y la estructura local de la frecuencia fundamental se reconocen con más facilidad.}{Video oficial de Stanford Online 00:11:56--00:11:57.}
+
+\lecturefigure{slide-13-waveform-1s.jpg}{Alrededor de 1 s: predominan la envolvente de los eventos y las estructuras más lentas del habla o la música.}{Video oficial de Stanford Online 00:11:58--00:12:53.}
+
+\begin{knowledgebox}{Lectura de la figura: multiescala no significa «poner más imágenes»}
+Las cuatro figuras sustentan una conclusión de modelado: el detalle de alta frecuencia requiere ventanas cortas, y la semántica y el ritmo requieren context largo. WaveNet usa dilation para construir un receptive field multiescala; el conditioned Transformer comprime el context lejano; wavelet/pooling reduce la resolución temporal en las capas intermedias; y la hierarchical VQ construye varios niveles de escala temporal en el token space.
+\end{knowledgebox}
+
+\teachervoice{El ponente alterna repetidamente la waveform entre varias escalas para que el lector «vea» el problema de representación: el modelo tiene que distinguir las oscilaciones locales y, al mismo tiempo, entender estructuras que ocurrieron varios segundos antes. Los tres trabajos que siguen abordan este conflicto en distintos puntos.}
+
+\subsection{Resumen de la sección}
+
+La waveform, el spectrogram, el filterbank y el discrete code no son formatos de entrada equivalentes. Cambian la longitud de la secuencia, la reversibilidad, la resolución tiempo-frecuencia y el sesgo inductivo. La primera decisión de arquitectura de un Audio Transformer suele tomarse antes de la attention.

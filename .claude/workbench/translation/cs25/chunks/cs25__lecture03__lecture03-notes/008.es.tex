@@ -1,0 +1,85 @@
+\section{Scaling ViT: los modelos más grandes requieren un nuevo régimen de entrenamiento}
+
+La segunda parte de la conferencia trata de further scaling. El objetivo no es simplemente aumentar los parámetros, sino encontrar una shape que quepa en el hardware, diseñar una learning-rate schedule lo bastante larga y estable, aplicar una regularization adecuada a la cabeza de la tarea y observar al mismo tiempo el SOTA, la few-shot sample efficiency y la scaling law. Scale es una lupa de la recipe: los problemas de optimización que en un modelo pequeño pasan inadvertidos se convierten en el cuello de botella de un modelo grande.
+
+\subsection{Lista de problemas de la segunda etapa}
+
+La diapositiva separadora presenta al equipo y las líneas de investigación de Scaling ViT, y recuerda que los resultados posteriores provienen de la colaboración entre modelo, entrenamiento y evaluación, no de una extrapolación directa del artículo original de ViT. Al leer este grupo de figuras conviene tratar «¿cabe el modelo?», «¿se entrenó el tiempo suficiente?» y «¿la cabeza para la tarea posterior sobreajusta?» como tres problemas independientes.
+
+\lecturefigure{slide-26-further-scaling-divider.jpg}{Further scaling up ViTs introduce la forma del modelo, el calendario de entrenamiento y la regularización para tareas posteriores.}{Video oficial 52:32.}
+
+\begin{knowledgebox}{Lectura de la figura: la diapositiva del equipo también es provenance}
+Esta diapositiva no tiene curvas, pero delimita que la evidencia posterior pertenece al trabajo Scaling Vision Transformers. Se conserva para no mezclar resultados de distintos artículos como si fueran un mismo experimento, y para recordar al lector que consulte el dataset, el compute, la model family y el appendix del artículo original, en lugar de copiar conclusiones solo a partir de las capturas de la clase.
+\end{knowledgebox}
+
+\subsection{Scale model: dónde colocar los parámetros}
+
+Al ampliar el modelo se puede aumentar la depth, la hidden width, la MLP width, las heads o usar patches más finos. Aun con un número de parámetros similar, distintas configuraciones pueden diferir enormemente en TPU/GPU memory y en matrix shape. El equipo partió de la memory feasibility y después buscó las estructuras con mejor rendimiento.
+
+\lecturefigure{slide-27-scaling-model-build.jpg}{Al seguir escalando ViT, las dimensiones del modelo y las restricciones de memoria del hardware determinan juntas las configuraciones viables.}{Video oficial 1:00:08.}
+
+\begin{knowledgebox}{Lectura de la figura: los círculos rojos son variables de diseño restringidas}
+La figura señala el bloque Transformer, las attention heads y las dimensiones de la MLP, para mostrar que scaling no es un único slider. Con memory fija, aumentar las layers obliga a guardar más activation; aumentar la width agranda las matrices y el optimizer state; reducir el patch aumenta los tokens. Aquí, \term{optimizer state} se refiere a los estados de actualización que Adam/AdamW guarda por cada parámetro, como el primer momento $m$ y el segundo momento $v$, que a menudo ocupan más memoria de entrenamiento que los propios parámetros. \term{activation checkpointing} (puntos de control de activaciones) guarda solo una parte de las forward activations y recalcula las demás durante el backward, con lo que intercambia compute adicional por memory; es distinto del training checkpoint que guarda los pesos del modelo. \term{sharding} (fragmentación), por su parte, divide parámetros, gradientes, optimizer state o activation entre varios dispositivos, de modo que estos estados ya no se replican completos en cada rank, pero introduce \term{collectives} (comunicación colectiva entre varios dispositivos), como all-reduce, reduce-scatter, all-gather y broadcast, que sirven para agregar o redistribuir los tensores de cada rank. El entrenamiento con baja precisión también puede desplazar el límite de lo viable, aunque exige atender el rango numérico y la precisión de acumulación.
+\end{knowledgebox}
+
+\lecturefigure{slide-28-model-shape-search.jpg}{Las regiones viables para distintos layer count y MLP width muestran cómo la memoria limita la shape search.}{Video oficial 1:00:48.}
+
+\begin{knowledgebox}{Lectura de la figura: distinguir primero lo inviable, lo viable y lo óptimo}
+Cada panel corresponde a una depth distinta, y los bloques de color indican las regiones que caben o su rendimiento. Las zonas blancas o truncadas suelen ser inviables por memory, lo cual no equivale a una precisión baja. La mejor shape es resultado conjunto del hardware, el lote, el parallelism y la metric objetivo; al cambiar de accelerator o de sequence length, el punto óptimo puede desplazarse.
+\end{knowledgebox}
+
+\subsection{Scale training: de una schedule finita a un calendario aproximadamente infinito}
+
+Los modelos grandes necesitan más pasos de optimización para entrar en el intervalo donde muestran su ventaja. Si se fija de antemano una schedule corta, al terminar el entrenamiento el modelo aún mejora con rapidez, y la comparación favorece sistemáticamente a los modelos pequeños. La llamada schedule «infinite» no significa entrenar literalmente sin fin, sino construir una learning-rate rule extensible que no requiera conocer de antemano el número final de pasos, de manera que el checkpoint siga siendo utilizable en varios puntos de presupuesto.
+
+\lecturefigure{slide-29-infinite-lr-schedules.jpg}{Comportamiento de distintas learning-rate schedules al prolongarse con los pasos de entrenamiento.}{Video oficial 1:00:56.}
+
+\begin{knowledgebox}{Lectura de la figura: la schedule debe desacoplarse del momento de detención}
+El cosine decay tradicional requiere conocer de antemano el número total de pasos; si se prolonga el entrenamiento sobre la marcha, la tasa de aprendizaje puede haber decaído ya demasiado. Una schedule extensible permite a los investigadores comparar checkpoints con distintos compute budgets sin volver a entrenar para cada punto final. La calidad de una curva depende además de la validation loss, la stability y la transfer final, no solo de la forma de la tasa de aprendizaje.
+\end{knowledgebox}
+
+\teachervoice{El «be patient» de Lucas se convierte aquí en un diseño de entrenamiento concreto: si un modelo grande necesita más tiempo para mostrar su ventaja, no puede evaluarse con una schedule corta diseñada para modelos pequeños. Nota de clase: las reglas de early stopping también forman parte de la comparación entre modelos.}
+
+\subsection{Head weight decay: los datos escasos de la tarea posterior requieren regularización local}
+
+El backbone preentrenado es muy grande, pero la classifier head de una tarea few-shot solo ve unas cuantas muestras y puede convertirse fácilmente en la vía de entrada del sobreajuste. Aplicar un weight decay distinto a la head puede cambiar el bias-variance tradeoff en el régimen de pocas muestras; una regularization uniforme no necesariamente conviene a la vez al backbone y a una head recién inicializada.
+
+\lecturefigure{slide-30-head-weight-decay.jpg}{Efecto del head weight decay en la búsqueda en malla few-shot y en las curvas de entrenamiento.}{Video oficial 1:01:00.}
+
+\begin{knowledgebox}{Lectura de la figura: observar si la región óptima es estable}
+El mapa de calor de la izquierda muestra combinaciones de label budget y weight decay; las curvas de la derecha comparan recipes. Con pocas muestras, una regularización más fuerte puede ser más importante; al aumentar las muestras, el valor óptimo cambia. Si el decay óptimo se elige solo sobre el test set, se produce selection leakage; debe usarse un validation protocol o una regla fijada de antemano.
+\end{knowledgebox}
+
+\subsection{Resultados: SOTA, sample efficiency y scaling law por separado}
+
+El modelo ampliado debe validarse en tres dimensiones: si mejora el rendimiento absoluto, si la transferencia con pocas muestras es más eficaz y si el rendimiento sigue una tendencia predecible con el compute. Corresponden, respectivamente, a la frontier, al adaptation cost y al planning value, y no pueden sustituirse por un único ImageNet top-1.
+
+\lecturefigure{slide-31-new-sota.jpg}{El ViT ampliado obtiene nuevos resultados en ImageNet, en desplazamiento de distribución y en métricas como VTAB.}{Video oficial 1:01:56; Zhai et al. 2021.}
+
+\begin{knowledgebox}{Lectura de la figura: cada columna de la tabla es un compromiso distinto}
+ImageNet mide la clasificación habitual; ImageNet-V2 pone a prueba el cambio de distribución tras un nuevo muestreo; ReaL corrige el problema de las etiquetas múltiples; ObjectNet acentúa el shift de pose y fondo; VTAB mide la transferencia a múltiples tareas. Que un modelo mejore en todas las columnas es más convincente que una mejora solo en el ImageNet original; aun así, no puede extrapolarse a detection, video ni open-world reliability.
+\end{knowledgebox}
+
+\lecturefigure{slide-32-sample-efficiency.jpg}{Los ViT más grandes muestran curvas de sample-efficiency distintas en condiciones de 10-shot, few-shot y full fine-tuning.}{Video oficial 1:02:40.}
+
+\begin{knowledgebox}{Lectura de la figura: el eje horizontal son las muestras de la tarea posterior; la separación entre curvas es el valor de la representación}
+Cuando hay muy pocas muestras, una mejor representation debería reducir la tasa de error; al aumentar las muestras, todos los modelos pueden converger, pero a distinta velocidad. Si el modelo grande solo aventaja con full-data, su ventaja no se debe necesariamente a la representación para pocas muestras; solo si también aventaja en 10-shot respalda mejor el objetivo original de hacer el kick-start de nuevas tareas.
+\end{knowledgebox}
+
+\lecturefigure{slide-33-vit-scaling-laws.jpg}{La relación entre el error de ViT y el compute/tamaño del modelo muestra un intervalo aproximadamente de ley de potencias.}{Video oficial 1:02:52.}
+
+\begin{importantbox}{Forma habitual de la scaling law}
+Dentro de un intervalo experimental limitado, puede usarse
+\[
+E(C)=E_{\infty}+aC^{-\alpha}
+\]
+para ajustar el error $E$ frente al compute $C$; $E_{\infty}$ es el término irreducible o de saturación, $a$ es el coeficiente de escala y $\alpha$ es el exponent empírico. La ley de potencias facilita planificar el presupuesto, pero no es una ley natural: el agotamiento de datos, el distribution shift, un cambio de optimizer o el metric ceiling pueden provocar un punto de inflexión.
+\end{importantbox}
+
+\begin{warningbox}{Antes de extrapolar hay que verificar tres cosas}
+Si el intervalo de ajuste abarca suficientes órdenes de magnitud; si distintas model families comparten el exponent; si todos los entrenamientos están cerca de su recipe óptima. Si los modelos pequeños están subentrenados y los grandes están bien entrenados, la scaling law aparente puede incorporar una optimization gap. Al extrapolar a un compute cien veces mayor que no se ha probado, deben reportarse el intervalo y la incertidumbre.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Scaling ViT descompone el problema de la escala en shape feasibility, schedule extensibility, head regularization, rendimiento absoluto, sample efficiency y scaling law. Un modelo más grande solo representa un avance creíble cuando su entrenamiento es maduro, su adaptación es estable y varias clases de evaluación mejoran a la vez.

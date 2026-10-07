@@ -1,0 +1,62 @@
+\section{Perceiver: comprimir una entrada grande en un latent workspace pequeño}
+
+Esta sección entra en el núcleo de Perceiver. En lugar de aplicar self-attention repetidamente sobre todos los raw inputs, mantiene $N$ learned latents, con $N\ll M$. Una sola cross-attention permite que las latent queries lean información de la entrada grande, y la self-attention profunda posterior ocurre solo dentro del latent array pequeño.
+
+\lecturefigure{slide-08-perceiver-title.jpg}{Perceiver: amplía el Transformer mediante iterative attention, al tiempo que conserva supuestos de dominio débiles.}{Video oficial actual de Stanford Online 00:09:42--00:10:39.}
+
+\subsection{Por qué la self-attention sobre raw inputs resulta inviable}
+
+En una imagen de alta resolución, si cada píxel es un token, $M=224\times224=50{,}176$ y los attention scores ya suman unos 2,500 millones de elementos; en video, esto se multiplica además por el número de cuadros. ViT reduce $M$ mediante patching, pero el tamaño de patch y la convolución bidimensional se convierten en decisiones específicas para imágenes. Perceiver opta por conservar la entrada de grano fino y, en cambio, controla la escala del procesamiento profundo con el número de latents.
+
+\lecturefigure{slide-09-self-attention-scales-poorly.jpg}{La self-attention es muy expresiva, pero la entrada a nivel de píxel de una imagen provoca un costo cuadrático de cómputo y memoria.}{Video oficial actual de Stanford Online 00:10:40--00:16:15.}
+
+\begin{warningbox}{Condición del scaling lineal en la entrada}
+Que Perceiver sea lineal en la longitud de la entrada solo se cumple cuando el número de latents $N$ es fijo o crece muy despacio. Si, para obtener más capacidad, $N$ crece en proporción a $M$, el término $MN$ de la cross-attention y el término $N^2$ de la latent self-attention vuelven a encarecerse.
+\end{warningbox}
+
+\subsection{Cross-attention: leer $M$ inputs con $N$ queries}
+
+Sea la entrada $X\in\mathbb{R}^{M\times d_x}$ y el latent array $Z\in\mathbb{R}^{N\times d_z}$. La cross-attention genera la query a partir de los latents y la key/value a partir del input:
+
+\[
+Q=ZW_Q,\qquad K=XW_K,\qquad V=XW_V,
+\qquad
+Z'=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right)V.
+\]
+
+Aquí, $QK^\top$ tiene forma $N\times M$; $M$ es la longitud de la entrada grande y $N$ es el número, menor, de latents. El costo de la cross-attention es del orden de $\mathcal{O}(MNd)$, lineal en $M$ si $N$ es fijo; después, el costo de la latent self-attention es del orden de $\mathcal{O}(N^2d)$.
+
+\lecturefigure{slide-10-cross-attention-linear-scaling.jpg}{La cross-attention lee un input array grande con un query array pequeño, de modo que el término de escala de la entrada pasa de $M^2$ a $MN$.}{Video oficial actual de Stanford Online 00:16:16--00:18:59.}
+
+\begin{importantbox}{La triple función del latent bottleneck}
+Es a la vez un cuello de botella de cómputo, una interfaz de compresión de información y un sistema de coordenadas interno independiente de la modalidad. Sin importar el tamaño de la entrada ni la dimensión de sus características, todo se escribe primero, mediante cross-attention, en latents de ancho fijo; la profundidad del modelo se invierte principalmente en el latent processing y no en la pairwise attention sobre el raw input.
+\end{importantbox}
+
+\begin{knowledgebox}{Lectura de la figura: hay que separar los tres módulos de complejidad}
+La proyección de la entrada y la agregación de values son lineales en $M$; el attention map es $N\times M$; el latent Transformer es $N\times N$. Por eso no basta con decir «todo es lineal»: cuando los latents son muchos o hay muchos decoder outputs, los demás términos vuelven a ser el cuello de botella.
+\end{knowledgebox}
+
+\subsection{Perceiver completo: Encode, Process, Readout}
+
+El Perceiver original usa un learned latent array que hace cross-attend sobre la entrada y luego repite self-attention/MLP sobre los latents; al final completa la clasificación mediante pooling o un readout compacto. Los latents pueden verse como learned queries o como registros de trabajo compartidos; no son regiones fijas de la entrada, ni se garantiza que cada latent corresponda a un objeto interpretable.
+
+\lecturefigure{slide-11-perceiver-architecture.jpg}{Perceiver original: cross-attention sobre la entrada, latent Transformer repetido y salida compacta.}{Video oficial actual de Stanford Online 00:19:00--00:21:41.}
+
+\begin{lstlisting}[caption={Pseudocódigo conceptual de encode/process/readout en Perceiver.}]
+def perceiver(inputs, latents, repeats):
+    latents = cross_attention(query=latents, key=inputs, value=inputs)
+    for _ in range(repeats):
+        latents = latent_self_attention(latents)
+        latents = latent_mlp(latents)
+    return task_readout(latents)
+\end{lstlisting}
+
+\teachervoice{El ponente explica que los latents se inicializan aleatoriamente y se aprenden, de forma parecida a un learned recurrent state; algunos de los módulos repetidos pueden compartir pesos. La cross-attention de la figura también incluye residual y MLP; no debe dibujarse erróneamente como un $QK^\top V$ desnudo.}
+
+\begin{warningbox}{Los latents no garantizan una compresión sin pérdida}
+$N\ll M$ significa que el modelo debe comprimir la información relevante para la tarea en un workspace limitado. Si la tarea exige conservar todos los detalles, el cuello de botella puede limitar la calidad; Perceiver IO mejora la capacidad de lectura mediante task-specific output queries, pero no recupera automáticamente la información perdida durante la codificación.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Perceiver usa $N$ learned latents para leer información de $M$ entradas, con lo que traslada el procesamiento profundo de $M^2$ a $MN+N^2$. El scaling lineal en la entrada depende de que el número de latents esté acotado y de que el latent bottleneck alcance para contener la información de la tarea.

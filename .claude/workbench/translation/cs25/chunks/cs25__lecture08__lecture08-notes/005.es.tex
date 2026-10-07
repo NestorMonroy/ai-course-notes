@@ -1,0 +1,86 @@
+\section{QK y OV Circuits: qué reglas aprende realmente un modelo de una capa}
+
+La sección anterior solo trató $A^h$ como una matriz dada; ahora hay que explicar cómo se produce el pattern. Con la row-vector convention, se define
+\[
+W_{QK}^h=W_Q^h(W_K^h)^{\top},
+\qquad
+A^h=\operatorname{softmax}\!\left(XW_{QK}^hX^{\top}+M_{\mathrm{causal}}\right).
+\]
+
+\begin{itemize}
+  \item $W_{QK}^h$: determina la compatibility entre destination/query y source/key;
+  \item $W_{OV}^h$: determina en qué se mapea el source residual al escribirse;
+  \item $M_{\mathrm{causal}}$: enmascara las positions futuras;
+  \item la función de una head debe describir a la vez el routing y el writing.
+\end{itemize}
+
+\lecturefigure{slide-17-attention-pattern-qk.jpg}{Cálculo del attention pattern: el QK circuit mapea token/residual pairs a routing scores.}{Video oficial de Stanford Online 00:20:08--00:20:39.}
+
+\subsection{Proyectar QK/OV al vocabulary space}
+
+Si se ignora la contextual residual contribution, pueden definirse token-space matrices efectivas:
+\[
+M_{QK}^h=W_EW_{QK}^hW_E^{\top},
+\qquad
+M_{OV}^h=W_EW_{OV}^hW_U.
+\]
+
+\begin{itemize}
+  \item $M_{QK}^h[a,b]$: preferencia relativa del destination token $a$ por el source token $b$;
+  \item $M_{OV}^h[b,c]$: logit effect sobre el output token $c$ después de leer el source token $b$;
+  \item ambas matrices son vocabulary-sized y, por lo general, enormes;
+  \item el positional embedding y el prior-layer residual hacen que el score real vaya más allá de un token lookup puro.
+\end{itemize}
+
+\lecturefigure{slide-18-vocabulary-square-matrices.jpg}{Una vez plegadas, QK y OV son vocabulary-sized square matrices.}{Video oficial de Stanford Online 00:20:40--00:24:29.}
+
+\lecturefigure{slide-19-qk-ov-circuits.jpg}{Las dos mitades de una head: QK conecta source/destination; OV conecta attended token/output token.}{Video oficial de Stanford Online 00:24:30--00:24:45.}
+
+\begin{knowledgebox}{Lectura de la figura: no reducir a dos los cuatro roles de token}
+El source token es el contenido de la posición que se lee; el destination token es la posición que se está actualizando; el out token es el token de predicción que se promueve o se suprime después de que la head escribe; el next token final lo determinan, además, otros paths de manera conjunta. QK conecta principalmente los dos primeros; OV conecta principalmente source y out.
+\end{knowledgebox}
+
+\teachervoice{La intuición del ponente es que OV recibe de forma más directa la output loss supervision: decide en qué logits escribir; QK se entrena de manera indirecta a través de «a dónde debe ir a buscar información». Esta distinción ayuda a leer la dense matrix, pero no significa que QK sea completamente unsupervised.}
+
+\subsection{Skip Trigram: la regla básica de una head de una capa}
+
+Una one-layer attention head solo puede elegir posiciones a partir de la destination representation actual y de las source representations candidatas, y luego usa el source token para determinar el output. Por ello forma de manera natural una skip-trigram rule:
+\[
+(\text{source token},\ \text{destination token})
+\longrightarrow \text{out token}.
+\]
+Por ejemplo, si la destination ve «looks», QK puede favorecer un «perfect» anterior, y OV después promueve «perfect» o alguna completion relacionada.
+
+\lecturefigure{slide-20-skip-trigram-examples.jpg}{La combinación de QK/OV forma example skip trigrams.}{Video oficial de Stanford Online 00:24:46--00:25:05.}
+
+\lecturefigure{slide-21-qk-source-destination.jpg}{El QK circuit vincula explícitamente el source token con el destination token.}{Video oficial de Stanford Online 00:25:06--00:27:47.}
+
+\begin{importantbox}{Por qué se llama skip trigram}
+Un trigram ordinario depende de dos tokens pasados consecutivos; aquí, source y destination pueden estar muy separados, y lo que hay entre ellos se «salta» («skip»). La regla sigue usando solo dos token identities para determinar el tercer output, por lo que su capacidad expresiva es limitada.
+\end{importantbox}
+
+\subsection{Una capacidad expresiva limitada produce bugs que desde fuera parecen muy extraños}
+
+El modelo quiere aprovechar el context de larga distancia, pero solo dispone de la interfaz del par source/destination token. Puede aprender reglas que estadísticamente suelen ser útiles, pero que carecen de condiciones más ricas; por ejemplo, tras ver un rare technical token, promover a ciegas un token repetido en varias posiciones posibles. Cuando el mismo pair debería producir completions distintas en contextos distintos, la one-layer head no puede distinguirlos.
+
+\lecturefigure{slide-22-correct-skip-trigrams.jpg}{Los skip trigrams «correctos» que aprende el modelo y las reglas restringidas.}{Video oficial de Stanford Online 00:27:48--00:32:33.}
+
+\lecturefigure{slide-23-qk-ov-composition-patterns.jpg}{La pattern family que puede expresar un modelo de una capa: source/destination matching y output mapping.}{Video oficial de Stanford Online 00:32:34--00:32:57.}
+
+\lecturefigure{slide-24-positional-circuits.jpg}{Algunas heads codifican principalmente positional relations, y no token pairs puramente semánticos.}{Video oficial de Stanford Online 00:32:58--00:33:31.}
+
+\begin{knowledgebox}{Lectura de la figura: Primarily Positional no equivale a «sin significado»}
+Las local/previous-token/offset heads pueden trasladar, para heads posteriores, etiquetas de posición, el estado de una frase o información de adyacencia. Vistas por separado, su marginal effect sobre los logits puede ser pequeño, pero en la composition de varias capas pueden convertirse en un upstream component clave.
+\end{knowledgebox}
+
+\subsection{Los límites del comportamiento de un one-layer model}
+
+Los attention-only models de una capa sí adquieren un poco de ICL: la magnitud que se dio en clase es de aproximadamente $0.1$ nats, frente a unos $0.4$ nats de los modelos de dos capas; además, no experimentan la sharp phase change descrita antes. Esta diferencia sugiere que las skip-trigram rules de una sola head no bastan para lograr una pattern completion más potente; se necesita composition de varias capas.
+
+\lecturefigure{slide-25-one-layer-summary.jpg}{One-layer summary: QK/OV son interpretables, los skip trigrams son útiles pero limitados y, una vez fijado el pattern, el comportamiento es lineal.}{Video oficial de Stanford Online 00:33:32--00:33:57.}
+
+\teachervoice{Olah dice que los Transformers «desperately want» usar long context, porque la información lejana reduce mucho la entropy; el modelo de una capa está limitado por su arquitectura y solo puede perseguir ese objetivo con reglas burdas que fácilmente producen bugs.}
+
+\subsection{Resumen de la sección}
+
+El QK circuit determina el source/destination routing, y el OV circuit determina cómo el attended token escribe en los output logits. Por ello, un modelo de una capa puede leerse como skip-trigram rules y positional rules; estas rules pueden aprovechar un context largo, pero carecen de la capacidad de construir dinámicamente un richer match a partir del texto anterior.

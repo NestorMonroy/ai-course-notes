@@ -1,0 +1,68 @@
+\section{Self-Consistency: cambiar presupuesto de muestreo por confiabilidad}
+
+Una sola CoT todavía puede tomar una dirección equivocada desde el principio. Self-consistency no le pide al modelo que corrija la misma reasoning path; en cambio, muestrea varias rutas con una temperature distinta de cero y luego vota sobre la final answer. Si la respuesta correcta puede alcanzarse por varias rutas válidas y las rutas erróneas están más dispersas, el majority vote mejora la confiabilidad.
+
+\subsection{De una sola ruta a la marginalización de la respuesta}
+
+Sea $z$ la reasoning path y $a$ la final answer. Idealmente se querría comparar
+\[
+p(a\mid q)=\sum_z p(a,z\mid q),
+\]
+pero no es posible enumerar todas las $z$. Self-consistency muestrea del modelo $M$ rutas $z^{(1)},\ldots,z^{(M)}$, extrae las respuestas correspondientes $a^{(m)}$ y aproxima la respuesta más probable con el conteo empírico de votos:
+\[
+\hat a=\arg\max_a \sum_{m=1}^{M}\mathbf{1}\!\left[a^{(m)}=a\right].
+\]
+Esto se acerca más a hacer marginalization sobre la respuesta que a elegir el texto individual de mayor probabilidad.
+
+\lecturefigure{slide-31.jpg}{Self-consistency: muestrear varias rutas de CoT y votar por mayoría sobre la respuesta final}{Diapositiva 31 del material oficial del curso; Wang et al., ICLR 2023}
+
+\begin{knowledgebox}{Lectura de la figura: la diversidad de rutas y la coincidencia de respuestas deben darse a la vez}
+En la figura, un mismo problema produce varias derivaciones en lenguaje natural; algunas rutas son erróneas, pero la respuesta correcta se repite en distintas derivaciones válidas. Si la temperature es demasiado baja, todas las muestras son casi idénticas y el voto no aporta información nueva; si es demasiado alta, las rutas pierden las restricciones de la tarea y aumenta el ruido en las respuestas. La ganancia de Self-consistency proviene de un conjunto de muestras relacionadas, pero no idénticas.
+\end{knowledgebox}
+
+La temperature $T$ ajusta la next-token distribution:
+\[
+p_T(x_i)=\frac{\exp(\ell_i/T)}{\sum_j\exp(\ell_j/T)},
+\]
+donde $\ell_i$ es el logit del token. Con $T\to 0$ se aproxima a greedy decoding; una $T$ mayor aumenta la probabilidad de tokens poco probables y la diversity de las rutas. No es una simple «perilla de exactitud»: debe ajustarse junto con el sample count, la answer extraction y la task difficulty.
+
+\begin{lstlisting}[caption={Marco mínimo de implementación de Self-consistency}]
+from collections import Counter
+
+def self_consistent_answer(model, prompt, samples=16, temperature=0.7):
+    answers = []
+    for _ in range(samples):
+        trace = model.generate(prompt, temperature=temperature)
+        answers.append(extract_final_answer(trace))
+    return Counter(answers).most_common(1)[0][0]
+\end{lstlisting}
+
+\subsection{Resultados: por qué un recurso sencillo produce una ganancia grande}
+
+El material del curso compara greedy CoT con self-consistency en varios reasoning benchmarks. En clase se destaca el ejemplo de GSM8K, que pasa de alrededor de 56 a 74, para mostrar que el inference-time sampling puede lograr ganancias del mismo orden que las mejoras de entrenamiento; el costo es que cada problema requiere generar varias reasoning traces largas.
+
+\lecturefigure{slide-32.jpg}{Self-consistency mejora el rendimiento de CoT en varios benchmarks}{Diapositiva 32 del material oficial del curso; Wang et al., 2022}
+
+\begin{knowledgebox}{Lectura de la figura: detrás de la mejora de Accuracy hay un inference cost multiplicado}
+Cada grupo de barras compara greedy CoT con self-consistency. El aumento en el eje vertical indica que el voto filtró una parte de los errores a nivel de ruta, pero la comparación también debería incluir los generated tokens, la latency y el API cost. La configuración mostrada en clase podría muestrear unas 40 rutas; el expositor señala además que en muchos dataset unas 16 ya bastan para obtener buenas ganancias, y que el presupuesto óptimo varía según la tarea.
+\end{knowledgebox}
+
+\begin{warningbox}{El voto mayoritario requiere que «los errores no estén muy correlacionados»}
+Si el modelo malinterpreta sistemáticamente un concepto en cierto tipo de problema, muestrear 100 rutas puede producir 100 respuestas erróneas parecidas. Self-consistency es más adecuada para los stochastic errors a nivel de ruta que para conocimiento faltante, una definición equivocada del problema o un answer extractor contaminado. Al ponerla en producción conviene trazar la curva accuracy--cost, en lugar de reportar solo el resultado con el mayor número de muestras.
+\end{warningbox}
+
+\teachervoice{Un estudiante pregunta cuántas chain se necesitan; el expositor responde que depende del dataset y que con unas 16 suelen verse ganancias. Después explica la temperature como elegir al azar el siguiente token a partir de la learned distribution, en lugar de tomar siempre el token de mayor probabilidad. En clase también se aclara que este método aumenta el inference-time compute.}
+
+\subsection{Self-consistency también puede ser emergente}
+
+Si el base model todavía no puede generar una CoT con sentido, muestrear muchas veces solo produce muchas rutas inestables o igualmente erróneas. Por eso la brecha entre self-consistency y greedy CoT también crece con la escala: primero se necesita un path generator suficientemente fuerte para que el voto disponga de una señal correcta aprovechable.
+
+\lecturefigure{slide-33.jpg}{La ganancia de Self-consistency aparece a medida que crece la escala del modelo}{Diapositiva 33 del material oficial del curso; Wang et al., 2022}
+
+\begin{knowledgebox}{Lectura de la figura: dos umbrales superpuestos}
+El primer umbral es si el modelo, mediante CoT, puede generar ocasionalmente rutas completas correctas; el segundo es si la masa de probabilidad de la respuesta correcta basta para formar una plurality entre muestras diversas. Cuando un modelo pequeño no cumple ninguno de los dos, el delta de self-consistency es cercano a cero; solo cuando un modelo grande los supera, el presupuesto de muestreo se convierte en rendimiento.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Self-consistency aproxima la marginalización de la respuesta mediante el muestreo de varias rutas y cambia inference cost por accuracy. La temperature aporta diversity y el majority vote agrega la final answer; el éxito del método depende del base model, la estructura de la tarea, la correlación de los errores y el sample budget, por lo que también tiene un intervalo de eficacia scale-dependent.

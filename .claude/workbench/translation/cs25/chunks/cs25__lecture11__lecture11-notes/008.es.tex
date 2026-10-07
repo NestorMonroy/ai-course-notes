@@ -1,0 +1,99 @@
+\section{Por qué funciona el Transformer: expresividad, optimización, hardware y aprendizaje en contexto}
+
+Antes se explicó «qué puede hacer» el Transformer. Esta sección responde una pregunta más difícil: por qué este package sigue adquiriendo capacidades nuevas al escalarse. La respuesta de Karpathy no atribuye todo a un solo factor, la attention, sino a tres propiedades que se cumplen a la vez: el forward pass es lo bastante expressive, residual/normalization vuelven viable la optimización por gradiente y el shallow-wide graph aprovecha la GPU con eficiencia; finalmente, el next-token training a gran escala produce in-context adaptation.
+
+\lecturefigure{slide-52-what-makes-transformer-effective.jpg}{Pregunta central: ¿qué hace exactamente que el Transformer sea tan eficaz?}{Video oficial de Stanford Online, 00:55:39--00:55:48.}
+
+Esta diapositiva de transición debe leerse en cuatro escalas: en la escala de una capa, la attention enruta la información; en la escala de la profundidad, los residual blocks acumulan cómputo; en la escala del entrenamiento, los datos, los parámetros y el compute crecen juntos; en la escala de la inferencia, el prompt modifica las activations, de modo que un mismo conjunto de weights exhibe conductas de tarea distintas. Cualquier teoría que explique el éxito en una sola escala está incompleta.
+
+\subsection{GPT-3: el few-shot prompt revela el in-context learning}
+
+El artículo de GPT-3 coloca en el prompt la descripción de la tarea y varios input--output examples, y logra mejorar la exactitud en ejemplos nuevos sin actualizar parámetros. Aquí, \term{few-shot learning} significa dar unos pocos ejemplos dentro del context; \term{zero-shot}, dar solo la descripción de la tarea; \term{fine-tuning}, en cambio, actualiza de verdad los weights mediante gradient descent. Los tres no deben confundirse.
+
+\lecturefigure{slide-53-gpt3.jpg}{GPT-3: modelo de lenguaje autorregresivo a gran escala y few-shot evaluation.}{Video oficial de Stanford Online, 00:55:43--00:56:31.}
+
+\begin{knowledgebox}{Lectura de la figura: el título del artículo subestima la cuestión del mecanismo}
+«Language Models are Few-Shot Learners» reporta un fenómeno de conducta: más context examples suelen mejorar el desempeño en la tarea. Karpathy prefiere llamarlo in-context learning o meta-learning, porque el modelo parece adaptarse a la tarea dentro de las activations de un solo forward pass. Un fenómeno no equivale a un mecanismo; en cada tarea concreta influyen además el orden de los ejemplos, el formato, las label words y la contaminación de datos.
+\end{knowledgebox}
+
+\lecturefigure{slide-54-chatgpt.jpg}{ChatGPT como caso público de interacción a principios de 2023.}{Video oficial de Stanford Online, 00:55:43--00:56:31.}
+
+El curso coloca ChatGPT después de GPT-3 para mostrar que la prompt-conditioned behavior ya llegó a productos de uso masivo, no para detallar su entrenamiento. En la sesión de Q\&A, Karpathy dice expresamente que no conoce los internals de ChatGPT. Por eso estas notas se limitan al nivel observable: el usuario especifica la tarea mediante un context en lenguaje natural y el modelo, con pesos fijos, produce una salida condicionada; no se especula sobre parámetros ni implementaciones del sistema que no se han publicado.
+
+\subsection{Scaling laws: la mejora del desempeño es una regularidad empírica, no una promesa ilimitada}
+
+La investigación sobre scaling laws describe con funciones empíricas cómo varía la loss según los parámetros $N$, la cantidad de datos $D$ o el compute $C$; por ejemplo, de forma ilustrativa:
+
+\[
+L(N)\approx L_\infty+aN^{-\alpha},\qquad
+L(D)\approx L_\infty+bD^{-\beta}.
+\]
+
+Aquí, $L_\infty$ aproxima la pérdida irreducible, y $a,b,\alpha,\beta$ se ajustan para una familia de modelos y unos datos específicos. La ley de potencias respalda la estrategia de ingeniería de «escalar de forma predecible», pero no garantiza que todas las capacidades sean monótonas, que todos los datos sean homogéneos ni que el costo siempre sea razonable.
+
+\lecturefigure{slide-55-scaling-laws.jpg}{Scaling laws: escalar el modelo, los datos y el cómputo produce tendencias medibles en la loss.}{Video oficial de Stanford Online, 00:56:31--00:57:14.}
+
+\begin{warningbox}{Lectura de la figura: la extrapolación de las curvas tiene un dominio de validez}
+Primero hay que ver si el eje horizontal representa parameters, tokens o compute, y luego si el eje vertical es la loss de entrenamiento/validación o una downstream metric específica; las curvas distintas no son intercambiables. La ley de potencias proviene de un ajuste dentro del intervalo observado; si cambian la architecture, la data quality, el optimizer, el tokenizer o la evaluation, los coeficientes y los puntos de inflexión pueden cambiar.
+\end{warningbox}
+
+\subsection{Outer loop e inner loop: aprendizaje de parámetros y adaptación al contexto}
+
+En la fase de entrenamiento, el outer loop actualiza los parámetros con SGD:
+
+\[
+\theta_{k+1}=\theta_k-\eta\nabla_\theta \mathcal L(\theta_k;\mathcal B_k).
+\]
+
+En la inferencia, los parámetros $\theta$ están fijos; los prompt examples modifican las activations $H^{(\ell)}$ de cada capa y producen una inner-loop adaptation en el plano de la conducta. Llamarlo «aprender en las activations» es una descripción útil; afirmar que ejecuta un gradient descent literal requiere evidencia adicional sobre el mecanismo.
+
+\lecturefigure{slide-56-in-context-learning.jpg}{In-context learning: al aumentar el número de ejemplos, el desempeño en la tarea mejora sin actualizar parámetros.}{Video oficial de Stanford Online, 00:56:31--00:57:23.}
+
+\begin{knowledgebox}{Lectura de la figura: distinguir tres tipos de cambio}
+El outer loop modifica los weights y afecta de forma persistente todas las entradas futuras; la in-context adaptation modifica los hidden states del forward actual y solo tiene efecto mientras dura el context; la retrieval o el tool use modifican además la entrada externa. Los tres pueden mejorar la respuesta, pero corresponden a vías causales distintas. Llamar «fine-tuning» a cualquier efecto del prompt oculta la conducta del sistema.
+\end{knowledgebox}
+
+\subsection{Chain of thought: más tokens intermedios también son más pasos de cómputo}
+
+El chain-of-thought prompting hace que el modelo genere texto de razonamiento intermedio antes de la respuesta final. En un Transformer autorregresivo, cada token nuevo desencadena un nuevo forward step e incorpora al context lo generado antes; por ello, los tokens intermedios no son solo una explicación, sino que también aportan sequential compute adicional y un scratch space legible. Sin embargo, los pasos legibles pueden contener errores y no deben tomarse automáticamente como una cadena causal interna fiel.
+
+\lecturefigure{slide-57-chain-of-thought.jpg}{Chain-of-thought: inducir pasos de razonamiento intermedios con ejemplos mejora el desempeño en algunas tareas.}{Video oficial de Stanford Online, 00:57:23--00:58:16.}
+
+\begin{warningbox}{Lectura de la figura: la respuesta correcta y la explicación fiel son dos métricas distintas}
+El CoT puede mejorar la exactitud en arithmetic, symbolic o compositional tasks, pero también puede producir racionalizaciones a posteriori. Al evaluarlo, conviene separar al menos la final answer, la step validity, la robustness to prompt perturbation y la hidden reasoning fidelity. En clase se usa para respaldar la idea de que «el context permite configurar el cómputo», no para demostrar que los pasos en lenguaje natural equivalen al algoritmo interno real del modelo.
+\end{warningbox}
+
+\subsection{Las tres propiedades deben cumplirse a la vez}
+
+Karpathy resume finalmente el éxito en tres propiedades: expressive, optimizable y efficient. La capacidad expresiva permite que la combinación attention/MLP implemente sequence functions complejas; la optimizabilidad proviene del residual stream, la normalization, rutas de gradiente más cortas y una inicialización madura; la eficiencia proviene de grandes multiplicaciones de matrices paralelas en la dimensión de los tokens durante el entrenamiento. Si falta cualquiera de ellas, se puede obtener un modelo teóricamente potente que no logra entrenarse, uno entrenable pero demasiado lento, o uno eficiente con capacidad expresiva insuficiente.
+
+\lecturefigure{slide-58-karpathy-tweets-transformer-history.jpg}{Síntesis de alto nivel de Karpathy: el Transformer optimiza a la vez la capacidad expresiva, la optimizabilidad y la eficiencia.}{Video oficial de Stanford Online, 00:58:16--00:58:45.}
+
+\begin{knowledgebox}{Términos clave: qué responde cada propiedad}
+\begin{itemize}
+  \item \term{expressive}: si el forward graph puede representar cómputos complejos y dependientes de los datos;
+  \item \term{optimizable}: si el gradient descent puede encontrar de forma estable parámetros útiles;
+  \item \term{hardware-efficient}: si los operadores principales pueden convertirse en operaciones matriciales masivamente paralelas, en las que la GPU sobresale;
+  \item \term{scalable}: si las tres propiedades anteriores siguen dando beneficios predecibles al aumentar parámetros, datos y dispositivos.
+\end{itemize}
+\end{knowledgebox}
+
+\lecturefigure{slide-59-natural-language-model-history.jpg}{Una relectura de la historia de los modelos de lenguaje natural: arquitectura, escala e interfaz de tarea convergen gradualmente.}{Video oficial de Stanford Online, 00:58:45--00:59:17.}
+
+Este conjunto de tuits de alto nivel es una narrativa condensada del ponente dirigida al público general y no sustituye los detalles de los artículos. Su valor está en reescribir la historia, que deja de ser una «cronología de nombres de modelos» para convertirse en «cómo cambia el grafo de cómputo»: la ventana fija se convierte en recurrent state, el estado único se convierte en memory direccionable, la recurrence serial se convierte en attention paralela y el predictor de una sola tarea, a su vez, muestra runtime task adaptation en context de gran escala.
+
+\subsection{Shallow-wide frente a long-thin: la eficiencia de hardware también es una fuente de capacidad del modelo}
+
+La RNN forma en el tiempo un long-thin graph y debe procesar los tokens uno tras otro; el Transformer, durante el entrenamiento, forma un shallow-wide graph en el que todas las posiciones de una misma capa pueden procesarse en paralelo, y hay pocos hops entre capas desde la supervisión hasta la entrada. El costo $T^2$ de la attention sigue siendo alto, pero la dense matrix multiplication se adapta muy bien a la GPU. Un mayor aprovechamiento del dispositivo permite entrenar modelos más grandes, y en el aprendizaje profundo la escala misma modifica el desempeño alcanzable.
+
+\lecturefigure{slide-60-general-purpose-computer.jpg}{GPT como runtime-reconfigurable computer: el prompt es un programa en lenguaje natural y la completion es la traza de ejecución.}{Video oficial de Stanford Online, 00:59:17--01:01:11.}
+
+\begin{importantbox}{«Computadora de propósito general» es una analogía, no una prueba de capacidad ilimitada}
+Un GPT con weights fijos puede, según el prompt, realizar traducción, clasificación, extracción, conversión de formato o generación en varios pasos, de modo similar a un mismo hardware que carga programas distintos. Sin embargo, el context finito, la precision finita, la distribución de entrenamiento, el muestreo aleatorio y la acumulación de errores limitan la fiabilidad. La analogía resalta la runtime reconfiguration; no garantiza que cualquier programa se ejecute correctamente ni que la salida cumpla una especificación formal.
+\end{importantbox}
+
+\teachervoice{En la sesión de Q\&A, Karpathy compara además: aunque la RNN pueda en principio implementar cualquier programa, su long-thin serial graph puede volverla difícil de optimizar y de paralelizar; el shallow-wide graph, las residual pathways y la LayerNorm del Transformer hacen que la supervisión llegue más rápido a la entrada. La tercera propiedad, la «eficiencia de hardware», suele subestimarse, pero determina qué tan grande es el modelo que realmente puede entrenarse.}
+
+\subsection{Resumen de la sección}
+
+El éxito del Transformer proviene de una package-level synergy: attention/MLP aporta la capacidad expresiva, residual/normalization aporta la optimizabilidad, las operaciones matriciales anchas y paralelas aportan la eficiencia de hardware, y el next-token training a gran escala produce una in-context behavior configurable mediante el prompt. Scaling, few-shot y CoT son evidencia de conducta; el «inner optimizer» y la «computadora de propósito general» siguen siendo modelos explicativos que requieren límites.

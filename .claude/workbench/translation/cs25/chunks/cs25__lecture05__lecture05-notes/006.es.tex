@@ -1,0 +1,85 @@
+\section{Cómo leer los experimentos: Top-1, Top-2, pasos, tiempo y Scaling Law}
+
+Una vez definidas la arquitectura y las restricciones del sistema, lo importante en los experimentos no es buscar una «gráfica de victoria de Switch», sino distinguir en orden la quality per step, la quality per wall-clock, la ganancia en parámetros con FLOPs fijos y los rendimientos marginales decrecientes que provoca la comunicación. Algunos ejes verticales de la conferencia muestran la negative log perplexity; la perplexity ordinaria (PPL) es la exponencial de la entropía cruzada y es mejor cuanto menor sea, mientras que la negative log PPL es mejor cuanto mayor sea.
+
+Si la entropía cruzada promedio por token es $H$, entonces:
+
+\[
+\operatorname{PPL}=e^{H},\qquad -\log(\operatorname{PPL})=-H.
+\]
+
+Aquí, $H$ es la log-verosimilitud negativa promedio por token; la PPL puede entenderse, de forma aproximada, como el «número efectivo de opciones» que enfrenta el modelo, pero no equivale directamente a exactitud factual, capacidad de razonamiento ni calidad en tareas posteriores; $-\log(\operatorname{PPL})$ solo invierte el signo, de modo que un valor mayor representa una loss menor.
+
+\subsection{Top-1 y Top-2: el factor de capacidad modifica el frente de Pareto}
+
+Con capacity alta, Top-2 usa dos experts por token, y la calidad por paso puede ser mejor; pero también aumenta el cómputo de la FFN y la comunicación. Cuando se reduce el capacity factor, Switch top-1 puede alcanzar la calidad objetivo a un costo menor. La conclusión correcta no es que «top-1 sea matemáticamente más potente», sino que, con el hardware y la configuración de capacidad de la conferencia, forma un mejor punto de Pareto en time-to-quality.
+
+\lecturefigure{slide-17-comparison-moe-switch.jpg}{Calidad, velocidad y time-to-quality de MoE top-2 y Switch top-1 con distintos capacity factor.}{Video oficial de Stanford Online 00:27:08--00:28:57.}
+
+\begin{knowledgebox}{Lectura de la figura: el orden de comparación determina la conclusión}
+Primero verifica si el capacity factor es el mismo; después observa la calidad por paso; luego, la speed y el tiempo necesario para alcanzar el mismo umbral de calidad. Si top-2 es mejor en el eje de step y top-1 es más rápido en el eje de time, ambas cosas no se contradicen. Por último, revisa si la capacity baja provoca más dropping y si los autores redistribuyeron el cómputo ahorrado a las capas dense.
+\end{knowledgebox}
+
+\teachervoice{El ponente formula la conclusión como Pareto efficiency: top-2 con capacity alta puede tener mejor step quality, pero top-1 con capacity baja reduce comunicación, cómputo y memoria, por lo que alcanza antes el umbral de calidad. Esta precisión es mucho más exacta que decir simplemente «Switch beats MoE».}
+
+\begin{warningbox}{No trasladar las conclusiones de Pareto de un hardware a otro}
+Distintas interconexiones, batch size, expert placement, kernels y compiladores cambian la proporción que ocupa la comunicación. El time-to-quality del artículo es una medición de un sistema específico; al llevarlo a un clúster de GPU o a un servicio de bajo rendimiento, es necesario volver a hacer el benchmark.
+\end{warningbox}
+
+\subsection{Aumentar los experts: primero los pasos de entrenamiento, después el tiempo real}
+
+Esta sección lee el mismo conjunto de experimentos de escalamiento sobre dos ejes horizontales. Si se fija que cada token active solo unos pocos experts, aumentar el número de experts incrementa los parámetros totales y la capacidad asignable. Por pasos de entrenamiento, más experts suelen reducir la loss más rápido y alcanzar un mejor valor asintótico; pero las curvas se van acercando, lo que indica que el escalamiento de parámetros tiene rendimientos marginales decrecientes.
+
+\lecturefigure{slide-18-scaling-experts-per-training-step.jpg}{Comparación por pasos de entrenamiento: aumentar el número de experts mejora la calidad, pero la ganancia disminuye progresivamente.}{Video oficial de Stanford Online 00:28:58--00:29:43.}
+
+\begin{knowledgebox}{Lectura de la figura: el paso de entrenamiento no es una unidad de costo uniforme}
+Cada paso del eje horizontal puede incluir distintos costos de comunicación y de padding. Que una curva se desplace hacia la izquierda o hacia arriba indica mayor eficiencia por paso de optimización, pero no permite deducir directamente que el entrenamiento sea más rápido. También hay que verificar si, con distinto número de experts, se mantienen el mismo batch, los mismos active FLOPs, el mismo capacity factor y la misma frecuencia de sparse layer.
+\end{knowledgebox}
+
+Al cambiar el eje horizontal a wall-clock, el costo de comunicación entra en la gráfica. Si más experts abarcan más dispositivos, dispatch y combine hacen más lento cada paso; por eso, la «ganancia por paso» debe ser suficiente para compensar que «cada paso sea más lento» antes de convertirse en una ganancia en tiempo real.
+
+\lecturefigure{slide-19-scaling-experts-per-time.jpg}{Comparación por wall-clock: al entrar el costo de comunicación, la ganancia según el número de expertos se reordena.}{Video oficial de Stanford Online 00:29:44--00:30:51.}
+
+\begin{importantbox}{El par mínimo de gráficas en un reporte experimental}
+Como mínimo, reporta al mismo tiempo quality-versus-step y quality-versus-time. La primera diagnostica la optimización y la eficiencia de muestras; la segunda responde si el sistema es realmente más rápido. Si además se agregan quality-versus-FLOPs y el costo, se pueden distinguir las ganancias algorítmicas, las ganancias de hardware y la transferencia de recursos.
+\end{importantbox}
+
+\subsection{Sparse scaling law: con FLOPs fijos, aumentar parámetros sigue aportando ganancia}
+
+La conferencia extiende además la dense scaling law al sparse setting: con FLOPs por token aproximadamente fijos, aumentar los sparsely activated parameters todavía puede mejorar la loss. Las curvas de la figura no descienden linealmente de forma indefinida; conforme aumentan los experts, la ganancia se reduce gradualmente, lo que indica que la capacidad utilizable, la cobertura de datos, el aprendizaje del enrutamiento y la comunicación limitan en conjunto el escalamiento.
+
+\lecturefigure{slide-20-sparse-scaling-laws.jpg}{Curvas empíricas de scaling al aumentar los parámetros dispersos con FLOPs por token fijos.}{Video oficial de Stanford Online 00:30:52--00:31:29.}
+
+\begin{knowledgebox}{Lectura de la figura: FLOPs fijos no equivalen a costo total fijo}
+La mejora en el eje vertical respalda que «los parámetros condicionales tienen valor propio», pero el eje horizontal no incluye por completo el almacenamiento de parámetros, los checkpoint, el optimizer state, el número de dispositivos ni la comunicación. La figura demuestra la tendencia de la loss predicha en la configuración experimental; no demuestra que agregar experts sin límite sea siempre rentable.
+\end{knowledgebox}
+
+\subsection{Expert parallelism, model parallelism y ganancias a pequeña escala}
+
+Expert parallelism coloca distintos experts en distintos dispositivos; model parallelism, en cambio, divide los mismos pesos dense o una dimensión del tensor. Ambos pueden complementarse: el primero amplía el conjunto de parámetros condicionales y el segundo permite que un solo bloque dense también se reparta entre dispositivos. La comparación de la figura muestra que, combinados, todavía pueden seguir mejorando, en lugar de obligar a elegir uno de los dos.
+
+Aquí, sharding (fragmentación) significa dividir los parámetros o tensores a lo largo de alguna dimensión entre distintos dispositivos, de modo que cada dispositivo solo almacene o calcule una parte, en lugar de replicar todos los pesos completos. Expert parallelism puede verse como una disposición particular que usa al expert como unidad natural de fragmentación.
+
+\lecturefigure{slide-21-expert-vs-model-parallelism.jpg}{Comparación de calidad entre expert parallelism y model parallelism, y su relación complementaria.}{Video oficial de Stanford Online 00:31:30--00:32:57.}
+
+\begin{knowledgebox}{Explicación del concepto: parallelism no es una sola cosa}
+\textbf{Data parallelism} replica el modelo, divide las muestras y sincroniza los gradientes; \textbf{model parallelism} divide los parámetros o tensores de una misma capa; \textbf{expert parallelism} hace que distintos dispositivos alojen distintos experts y distribuye los tokens mediante all-to-all. Los tres resuelven cuellos de botella de memoria y cómputo diferentes.
+\end{knowledgebox}
+
+La dispersión tampoco es eficaz solo a escala muy grande. La conferencia muestra que en modelos más pequeños sigue habiendo ganancias consistentes, lo que significa que los investigadores pueden validar primero el router, la capacity y la implementación del sistema a una escala asequible, sin que «entrenar un modelo de un billón de parámetros» sea un requisito previo para usar MoE.
+
+\lecturefigure{slide-22-effective-at-small-scale.jpg}{Switch Transformer sigue mostrando ganancias a menor escala y con distinto número de experts.}{Video oficial de Stanford Online 00:32:58--00:34:03.}
+
+\teachervoice{El docente enfatiza el significado de los resultados a pequeña escala: si un método solo funciona a escalas extremas, es difícil iterar y reproducirlo; observar tendencias consistentes en modelos más pequeños permite al equipo validar primero la implementación y la estabilidad del entrenamiento, y después aumentar el número de dispositivos.}
+
+La última curva advierte que, con un presupuesto de cómputo fijo, seguir aumentando los parámetros termina produciendo rendimientos marginales claramente decrecientes. Las causas posibles incluyen que cada expert reciba menos muestras de entrenamiento efectivas, que al router le cueste aprender particiones confiables, el aumento del almacenamiento de parámetros y de la comunicación, y que los datos mismos no basten para entrenar más grados de libertad.
+
+\lecturefigure{slide-23-parameters-fixed-compute-diminishing-returns.jpg}{Con un presupuesto de cómputo fijo y solo aumentando parámetros, terminan apareciendo rendimientos marginales decrecientes.}{Video oficial de Stanford Online 00:34:04--00:36:25.}
+
+\begin{warningbox}{«Más parámetros, más eficiencia de muestras» también tiene condiciones}
+Con un total de datos fijo, cuantos más expertos haya, menos tokens puede ver realmente cada expert. Si el router asigna de forma muy desigual o algunos expertos permanecen en arranque en frío durante mucho tiempo, los parámetros adicionales se convierten en capacidad sin entrenar. Conviene reportar la expert utilization, el número de tokens por expert y la distribución de uso de cola larga.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Para leer los experimentos de MoE hay que distinguir step, time, FLOPs y costo total del sistema. La ventaja de Top-1 proviene de un compromiso de Pareto con una capacity y un hardware específicos; más experts mejoran la calidad, pero la comunicación, la cobertura de datos y el aprendizaje del enrutamiento producen rendimientos marginales decrecientes.

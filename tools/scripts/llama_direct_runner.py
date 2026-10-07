@@ -27,6 +27,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import translation_loop as loop  # noqa: E402
+
 DEFAULT_URL = "http://127.0.0.1:11500"
 DEFAULT_MODEL = "qwen35-9b-es-mx"
 CONTEXT_TOKENS = 32768
@@ -85,7 +88,13 @@ def cached_result(out_dir: Path, zh: Path) -> dict | None:
                 record = json.loads(result_file.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
-            if "<<<ES" in record.get("result", "") and result_file.stat().st_mtime > corrected_at:
+            if result_file.stat().st_mtime <= corrected_at:
+                continue
+            # Sólo una respuesta que el ciclo aceptaría: marcadores y la misma
+            # estructura de entornos. Reutilizar una rechazada la repetiría
+            # en cada vuelta sin volver a pedirla al modelo.
+            text = loop.extract_translation(record.get("result", "") or "")
+            if text is not None and not loop.structure_problem(zh.read_text(encoding="utf-8"), text):
                 return {**record, "reused_from": str(result_file)}
     return None
 

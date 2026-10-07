@@ -1,0 +1,129 @@
+\section{NPT Architecture: attention alternada entre datapoints y attributes}
+
+Una vez establecido el contrato de entrada, el siguiente paso es decidir a lo largo de qué dimensión opera la attention. NPT primero aplica a cada attribute un embedding sensible al tipo y obtiene un tensor tridimensional; después hace reshape repetidamente entre la «representación de la fila completa» y los «attributes dentro de la fila», y ejecuta de forma alternada Attention Between Datapoints (ABD) y Attention Between Attributes (ABA).
+
+\subsection{Per-Attribute Embedding}
+
+Las distintas columns pueden ser continuous, categorical, position/index o target. NPT no las une a la fuerza en un mismo tipo de token: para cada attribute usa el linear/typed embedding correspondiente y codifica junto con él la mask information.
+
+\lecturefigure{slide-17-per-attribute-embedding.jpg}{Cada attribute se embebe de forma independiente y se forma un tensor de representación de $n\times d\times e$.}{Video oficial de Stanford Online 00:27:16--00:27:43.}
+
+Se denota la representación inicial como
+\[
+H^{(0)}=\operatorname{Embed}(X,M)
+\in\mathbb{R}^{n\times d\times e},
+\]
+donde $e$ es la dimensión del embedding de cada attribute. Para un categorical value puede usarse un learned lookup; para un continuous value, una proyección lineal con parámetros column-specific; el position/type embedding ayuda al modelo a conservar la column identity.
+
+\begin{knowledgebox}{Por qué las rows son intercambiables y las columns no pueden intercambiarse libremente}
+El orden de los datapoints normalmente no tiene significado, por lo que el modelo debe ser equivariant ante una row permutation. Las columns, en cambio, representan variables distintas, como edad, ingreso o etiqueta; intercambiar columns cambia la tarea, a menos que se transformen junto con ellas los column-specific embeddings, la mask y la semántica de la salida.
+\end{knowledgebox}
+
+\subsection{ABD: comprimir una fila completa en un attention token}
+
+ABD necesita comparar datapoints, así que primero aplica flatten a los $d$ attribute embeddings de cada fila para obtener un vector de longitud $h=d\cdot e$. Después, la self-attention opera a lo largo de la dimensión $n$, y cada row puede agregar información de las demás rows.
+
+\lecturefigure{slide-18-flatten-datapoint-attention.jpg}{ABD: tras aplicar flatten a los attributes, se hace self-attention entre los $n$ datapoints.}{Video oficial de Stanford Online 00:27:44--00:29:35.}
+
+\[
+R_{\mathrm{row}}:
+\mathbb{R}^{n\times d\times e}\rightarrow
+\mathbb{R}^{n\times (de)},
+\]
+\[
+\operatorname{ABD}(H)
+=R_{\mathrm{row}}^{-1}\!\left(
+\operatorname{MHSA}(R_{\mathrm{row}}(H))
+\right).
+\]
+
+\begin{itemize}
+  \item $R_{\mathrm{row}}$: concatena los attributes de cada datapoint en una row representation;
+  \item la sequence length de MHSA es aquí $n$, no $d$;
+  \item una ABD layer aprende pairwise row interactions, y varias capas pueden combinarse en higher-order interactions;
+  \item el término dominante de cómputo y memory crece con $n^2$.
+\end{itemize}
+
+\subsection{ABA: reorganizar los attributes dentro de cada fila}
+
+Si solo se usa ABD, la fila completa se trata como un token indivisible y resulta difícil recodificar columns concretas. ABA devuelve el tensor a la forma $n\times d\times e$ y, para cada fila de manera independiente, hace self-attention a lo largo de los $d$ attributes, de modo que el modelo aprende una per-datapoint transformation.
+
+\[
+\operatorname{ABA}(H)
+=\operatorname{stack}_{i=1}^{n}
+\left[\operatorname{MHSA}(H_{i,:,:})\right]
+\in\mathbb{R}^{n\times d\times e}.
+\]
+
+\begin{itemize}
+  \item $H_{i,:,:}$: la attribute sequence de la fila $i$;
+  \item ABA comparte parámetros entre las rows, pero cada fila se calcula de forma independiente;
+  \item aprende attribute interactions y no lee directamente otros datapoints;
+  \item la alternancia entre ABD y ABA hace que «encontrar filas relacionadas» y «transformar la fila actual» se refuercen mutuamente.
+\end{itemize}
+
+\lecturefigure{slide-19-abd-aba-architecture.jpg}{Arquitectura alternada completa: ABD aprende relaciones entre datapoints, ABA aprende transformaciones de una sola fila, y se conserva la row permutation equivariance.}{Video oficial de Stanford Online 00:29:36--00:31:03.}
+
+\begin{importantbox}{Permutation equivariance}
+Sea $P\in\{0,1\}^{n\times n}$ una row permutation matrix; NPT satisface
+\[
+f(PX,PM)=P\,f(X,M).
+\]
+Es decir, permutar las rows de entrada solo permuta de la misma manera las rows de salida, y no debe cambiar el contenido de la predicción de cada datapoint. Equivariance no es lo mismo que invariance: la salida no permanece idéntica, sino que sigue la permutación de la entrada.
+\end{importantbox}
+
+\teachervoice{El ponente enfatiza que ABD y ABA tienen funciones distintas: el primero captura higher-order relationships between datapoints y el segundo se ocupa de las individual datapoint transformations. Llamar a ambos «attention block» hace perder el tensor axis más importante.}
+
+\teachervoice{En la sesión de Q\&A, los autores reconocen que ABA no es un dogma insustituible: la ablation muestra que es útil, pero si el número de attributes es muy grande, puede considerarse reemplazarlo por un compact MLP para reducir el costo de escalar en la attribute dimension.}
+
+\subsection{Sistema de tres etapas y masking objective}
+
+Las dos primeras etapas resuelven «cómo se representa la entrada y cómo se propagan las relaciones»; la tercera determina por qué el modelo aprende a hacer lookup. NPT no entrena primero un classifier ordinario para luego agregar neighbors de forma improvisada durante la inferencia: desde el inicio del entrenamiento se enfrenta una y otra vez a features y targets ocultos, y debe reconstruirlos a partir de las entries visibles.
+
+\lecturefigure{slide-20-three-stage-overview.jpg}{Las tres etapas de NPT: dataset input, datapoint attention y masking-based objective.}{Video oficial de Stanford Online 00:31:04--00:33:33.}
+
+\lecturefigure{slide-21-stochastic-masking-objective.jpg}{Objetivo conjunto de feature masking y target masking.}{Video oficial de Stanford Online 00:33:34--00:33:52.}
+
+Sea $\mathcal{L}_{\mathrm{Targets}}$ la negative log-likelihood o la loss de regresión de los targets con mask, y $\mathcal{L}_{\mathrm{Features}}$ la loss auxiliar de reconstrucción de las feature entries con mask aleatoria:
+\[
+\mathcal{L}_{\mathrm{NPT}}
+=(1-\lambda)\mathcal{L}_{\mathrm{Targets}}
++\lambda\mathcal{L}_{\mathrm{Features}}.
+\]
+
+\begin{itemize}
+  \item $p_{\mathrm{feature}}$: probabilidad de ocultar aleatoriamente feature values durante el entrenamiento;
+  \item $p_{\mathrm{target}}$: probabilidad de ocultar aleatoriamente training targets durante el entrenamiento;
+  \item $\lambda$: equilibrio entre la target loss y la auxiliary feature loss;
+  \item en test time solo se aplican mask y evaluación a los test targets, cuyo valor verdadero no puede exponerse.
+\end{itemize}
+
+\begin{knowledgebox}{Qué hace cada masking term}
+El feature masking hace que el modelo aprenda la estructura de toda la matriz de datos, aumenta la supervision y aporta regularization; en la ablation del artículo, ayudó en ocho de diez tabular datasets. El target masking, por su parte, mantiene visibles parte de las training labels, de modo que otras rows ocultas puedan aprender a leer, emparejar y transformar esas labels.
+\end{knowledgebox}
+
+\teachervoice{La explicación central de Neil Band es que el modelo no necesita memorizar en sus parameters cada training input--output mapping; puede dedicar su capacidad a aprender «cómo aprovechar las demás training features y targets». Es justo aquí donde la learned k-NN intuition deja de ser una metáfora y se convierte en un mecanismo a nivel de objective.}
+
+\begin{lstlisting}[caption={Pseudocódigo conceptual del forward de NPT y de la mask aleatoria.}]
+def npt_step(dataset, train_rows, test_rows, model):
+    mask = sample_feature_masks(dataset)
+    mask |= sample_training_target_masks(train_rows)
+    mask |= all_test_targets(test_rows)
+
+    hidden = per_attribute_embed(dataset, mask)
+    for _ in range(num_blocks):
+        hidden = attention_between_datapoints(hidden)  # ABD
+        hidden = attention_between_attributes(hidden)  # ABA
+    prediction = project_all_attributes(hidden)
+    return masked_entry_loss(prediction, dataset, mask)
+\end{lstlisting}
+
+\begin{warningbox}{La aproximación por minilotes cambia el retrieval set}
+Al usar minilotes aleatorios con datos grandes, una query solo puede leer los datapoints del mismo lote, no todo el conjunto de entrenamiento. Aumentar el tamaño del lote mejora la cobertura de candidatos, pero implica un costo de attention de $O(b^2)$; por ello, el uso de minilotes es un compromiso estadístico y de sistemas, no un cálculo estrictamente equivalente sobre todos los datos.
+\end{warningbox}
+
+\teachervoice{Los autores dan una escala concreta: sin minilotes se pueden manejar alrededor de 8,000 points; un conjunto de datos de 11 million points necesariamente depende de minilotes. También observaron que no hace falta un lote «absurdamente grande» para aprender relaciones entre datapoints, aunque esto sigue siendo una conclusión empírica.}
+
+\subsection{Resumen de la sección}
+
+NPT embebe $(X,M)$ en un tensor de $n\times d\times e$, alterna ABD para procesar las rows y ABA para procesar las columns, y entrena un lookup relacional con un masking objective. La row equivariance, la test-label protection y la quadratic datapoint attention son las tres restricciones firmes para entender la implementación.

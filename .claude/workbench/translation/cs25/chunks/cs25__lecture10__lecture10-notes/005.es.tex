@@ -1,0 +1,107 @@
+\section{El esqueleto de cómputo espaciotemporal de GLOM}
+
+Las secciones anteriores respondieron «por qué se necesita esta representación»; ahora pasamos al mecanismo computable. GLOM guarda un embedding en cada posición espacial y en cada hierarchy level, y actualiza esos estados a lo largo de varios settling steps. Una imagen estática se trata como un video aburrido de fotogramas repetidos, por lo que la temporal recurrence sigue presente; en cambio, la fixation selection, la foveation y la memoria entre fixations de la visión activa real quedan excluidas por ahora.
+
+\lecturefigure{slide-20-first-fixation-disclaimer.jpg}{Alcance de la clase: se ignoran la selección activa de puntos y las fixations múltiples; solo se analiza la primera fixation sobre una imagen nueva.}{Video oficial de Stanford Online 00:30:18--00:34:29.}
+
+\begin{warningbox}{Scope omission: la visión real no es un único forward pass a resolución completa}
+El ojo humano tiene alta resolución en el centro y baja resolución en la periferia, y decide activamente adónde mirar después; el mismo hardware se reutiliza entre fixations. Esta clase congela estos problemas y solo trata el recurrent settling dentro de la first fixation. Si GLOM se extiende a robótica o a video, policy, memory, motion correspondence y latency vuelven a aparecer.
+\end{warningbox}
+
+\subsection{El tensor de estado y sus tres ejes}
+
+La restricción de first fixation respondió «qué ignora por ahora esta clase»; ahora hay que responder «qué guarda realmente el sistema». La distinción más importante es entre hierarchy level y settling time: el primero describe la escala part-whole y el segundo describe el proceso en que la interpretación de una misma entrada se corrige repetidamente; si a ambos se les llama layer, se malinterpretan todas las flechas entre niveles y entre instantes. El estado del sistema puede escribirse como $\mathbf E^{(t)}\in\mathbb R^{|\mathcal X|\times(L+1)\times d}$: eje de posición $x$, eje de hierarchy level $\ell$ y eje de settling time $t$.
+
+\lecturefigure{slide-21-three-adjacent-levels.jpg}{Diagrama de arquitectura de la interacción a lo largo del tiempo entre tres levels adyacentes de una sola column.}{Video oficial de Stanford Online 00:34:30--00:35:13.}
+
+\begin{knowledgebox}{Lectura de la figura: el eje horizontal es time y el vertical es hierarchy}
+Cada columna de cuadros pequeños pertenece a la misma retinal location; de izquierda a derecha están los settling steps consecutivos y de abajo arriba los tres part-whole levels $L-1,L,L+1$. Las flechas azules llevan el nivel inferior del instante anterior al nivel actual, las flechas rojas bajan el nivel superior del instante anterior, las flechas verdes conservan la historia del mismo nivel y las flechas diagonales punteadas representan la lateral interaction con otras columns espaciales. La figura solo dibuja una location, por lo que la spatial neighborhood solo queda completa al combinarla con la siguiente slide.
+\end{knowledgebox}
+
+\teachervoice{El ponente dice que GLOM se diseñó originalmente para video; una imagen estática es solo un «very boring video» en el que todos los fotogramas son iguales. Esta frase explica por qué en la figura aparecen a la vez hierarchy y time, y por qué no deben leerse todas las flechas como network depth ordinaria.}
+
+\subsection{La ecuación de actualización unificada de las cuatro contributions}
+
+El siguiente estado en la posición $x$ y el nivel $\ell$ se compone de cuatro tipos de información: la predicción ascendente desde el nivel inferior, la predicción descendente desde el nivel superior, la temporal persistence del mismo estado y el attention consensus de la vecindad del mismo nivel. Una formulación didáctica es:
+
+\[
+\tilde{\mathbf e}_{x,\ell}^{(t+1)}=
+\lambda_{\mathrm{bu}} f_{\mathrm{bu}}^{\ell}\!\left(\mathbf e_{x,\ell-1}^{(t)}\right)
++\lambda_{\mathrm{td}} f_{\mathrm{td}}^{\ell}\!\left(\mathbf e_{x,\ell+1}^{(t)},x\right)
++\lambda_{\mathrm{self}}\mathbf e_{x,\ell}^{(t)}
++\lambda_{\mathrm{lat}}\mathbf c_{x,\ell}^{(t)}.
+\]
+
+\[
+\mathbf e_{x,\ell}^{(t+1)}=\operatorname{Norm}\!\left(\tilde{\mathbf e}_{x,\ell}^{(t+1)}\right).
+\]
+
+Aquí, $f_{\mathrm{bu}}^{\ell}$ es la part-to-whole prediction, $f_{\mathrm{td}}^{\ell}$ es la whole-to-part prediction, $x$ puede funcionar como neural-field location condition, $\mathbf c_{x,\ell}^{(t)}$ es el lateral consensus y los cuatro $\lambda$ representan pesos que se ajustan según level, time o reliability. La figura de la clase dice «average», y el artículo original discute además la source reliability; esta ecuación es una síntesis del mecanismo, no la única implementation oficial.
+
+\lecturefigure{slide-22-four-interactions.jpg}{Actualización de cuatro vías: bottom-up, top-down, previous state y lateral attention.}{Video oficial de Stanford Online 00:35:14--00:35:47.}
+
+\begin{knowledgebox}{Lectura de la figura: cada una de las cuatro entradas cumple una función distinta}
+La bottom-up source, con el número 1, aporta evidence local; la top-down source, con el número 2, aporta whole context; la previous-state source, con el número 3, aporta inertia, y el neighborhood average, con el número 4, aporta agreement dentro del mismo nivel. No son cuatro residual branches intercambiables: sin la 1, el sistema se desconecta de la entrada; sin la 2, pierde la corrección por contexto; sin la 3, tiende a oscilar, y sin la 4, las hypotheses entre posiciones no pueden formar islands.
+\end{knowledgebox}
+
+\begin{importantbox}{Por qué bottom-up / top-down no son una simple línea}
+Ambas rutas necesitan una multi-layer neural network, porque no solo cambian la dimensión, sino que también deben realizar la transformación de identity y de coordinate frame. La misma bottom-up function debe poder manejar casos de distinto tipo, como nostril-to-nose y steering-wheel-to-car; «universal» exige que la semántica la determine la activity, y no que haya un módulo programado de forma fija para cada tipo de parte.
+\end{importantbox}
+
+\subsection{Similarity-gated lateral attention}
+
+La ecuación de actualización de cuatro vías deja aún una pregunta central: ¿cómo distingue la lateral branch entre «un vecino que debe formar parte de la misma island» y «otro objeto que solo está cerca en el espacio»? Esta sección desarrolla esa regla de selección y explica por qué locality y temperature forman parte del anti-collapse contract. Dentro de la vecindad del mismo nivel $\mathcal N_\ell(x)$, solo los embeddings que ya son similares se atraen con fuerza entre sí; la forma presentada en clase se aproxima a un dot-product softmax:
+
+\[
+\alpha_{xy}^{(t,\ell)}=
+\frac{\exp\!\left(\beta_\ell\,\mathbf e_{x,\ell}^{(t)\top}\mathbf e_{y,\ell}^{(t)}\right)}
+{\sum_{z\in\mathcal N_\ell(x)}\exp\!\left(\beta_\ell\,\mathbf e_{x,\ell}^{(t)\top}\mathbf e_{z,\ell}^{(t)}\right)},
+\qquad
+\mathbf c_{x,\ell}^{(t)}=\sum_{y\in\mathcal N_\ell(x)}\alpha_{xy}^{(t,\ell)}\mathbf e_{y,\ell}^{(t)}.
+\]
+
+Aquí, $\alpha_{xy}$ es el lateral weight de $y$ sobre $x$, $\beta_\ell$ controla la similarity sharpness, $\mathcal N_\ell(x)$ es la level-specific neighborhood y $\mathbf c$ es el consenso de la vecindad. La localidad es importante: si todas las posiciones se atrajeran globalmente desde el principio, el global collapse se volvería un shortcut más fuerte.
+
+\lecturefigure{slide-23-attention-weighted-average.jpg}{El attention-weighted average de vectores similares del mismo nivel debe propiciar la formación de islands.}{Video oficial de Stanford Online 00:35:48--00:37:13.}
+
+\begin{knowledgebox}{Lectura de la figura: el texto en rojo «islands are echo chambers» es a la vez mecanismo y riesgo}
+La posición central $x$ compara primero su same-level embedding con cada posición de la vecindad; las más similares reciben un softmax weight mayor y después se forma el weighted average. La retroalimentación positiva hace más consistentes las regiones que ya son similares, y así se forma una island; pero la misma retroalimentación positiva también puede amplificar una hypothesis errónea. Al leer la figura conviene plantearse tres preguntas a la vez: qué tan grande es el neighbor range, cómo se normaliza la similarity y cómo la bottom-up evidence corrige la attention errónea que cruza un boundary real.
+\end{knowledgebox}
+
+\begin{knowledgebox}{Diferencias entre la attention de GLOM y el Transformer estándar}
+\begin{tabularx}{\textwidth}{L{0.24\textwidth}L{0.33\textwidth}>{\raggedright\arraybackslash}X}
+\toprule
+Dimensión & Configuración habitual del Transformer estándar & Esbozo de GLOM en esta clase \\
+\midrule
+Q/K/V & Pueden provenir de proyecciones distintas & En clase, embedding, key, query y value se simplifican al extremo en un mismo vector \\
+Alcance & Habitualmente global o con un sparse pattern predefinido & Level-specific local neighborhood; los niveles superiores pueden ser más lejanos y más dispersos \\
+Ejecución & Un único forward con un número fijo de capas & Múltiples recurrent settling sobre la misma entrada \\
+Objetivo & Token contextualization & Formar islands en el mismo nivel, consistentes con la coordinate prediction de los niveles superior e inferior \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Pseudocódigo didáctico de una sola settling update de GLOM}]
+def glom_step(state, level, neighbors, weights):
+    next_state = {}
+    for x in state.locations:
+        current = state[x, level]
+        lower = state[x, level - 1]
+        upper = state[x, level + 1]
+
+        bottom_up = bottom_up_net[level](lower)
+        top_down = top_down_net[level](upper, location=x)
+
+        scores = [dot(current, state[y, level]) for y in neighbors(x, level)]
+        alpha = softmax(weights.beta[level] * scores)
+        lateral = weighted_sum(alpha, [state[y, level] for y in neighbors(x, level)])
+
+        mixed = (weights.bu * bottom_up + weights.td * top_down
+                 + weights.self * current + weights.lat * lateral)
+        next_state[x] = normalize(mixed)
+    return next_state
+\end{lstlisting}
+
+\subsection{Resumen de la sección}
+
+La unidad de cómputo de GLOM no es un block estático, sino un recurrent consensus process sobre un estado tridimensional de position, level y time. La update de cuatro vías transporta a la vez evidence local, whole expectation, temporal inertia y agreement de la vecindad; si falta cualquiera de ellas, la estructura puede perder pose, context, estabilidad o fronteras.
