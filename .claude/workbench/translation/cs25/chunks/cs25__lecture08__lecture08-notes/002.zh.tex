@@ -1,0 +1,77 @@
+\section{行为谜题：怎样量化 In-Context Learning}
+
+在研究内部电路前，首先要定义待解释的外部现象。\term{In-context learning}（ICL）指参数固定时，模型仅凭当前 context 中的 examples、pattern 或 instructions 改善后续预测。它看起来像模型在 prompt 内又执行了一次临时学习，因此成为大型语言模型最引人注意的能力之一。
+
+\lecturefigure{slide-04-in-context-learning-motivation.jpg}{In-context learning：固定参数的语言模型从 prompt/context 中临时获得新能力。}{Stanford Online 官方视频 00:05:40--00:06:51。}
+
+\teachervoice{讲者把 ICL 称为大型语言模型最 striking 的性质之一，但这里的“learning”不是 gradient update。模型参数保持不变，变化发生在 residual activations 与 attention computation 中。}
+
+\subsection{两个 learning axis}
+
+普通 learning curve 以训练进度为横轴，观察模型随着 gradient steps 增加而改善；ICL curve 则固定某个 training snapshot，以 context token index 为横轴，观察同一 forward 中越靠后的 token 是否预测得更好。把两者放在一起，得到二维函数
+\[
+\mathcal{L}(s,i)
+=\mathbb{E}_{x}\left[-\log p_{\theta_s}(x_i\mid x_{<i})\right],
+\]
+其中：
+\begin{itemize}
+  \item $s$：training snapshot 或累计训练 tokens；
+  \item $i$：当前 sequence 中的 token index；
+  \item $\theta_s$：snapshot $s$ 的参数；
+  \item $\mathcal{L}(s,i)$：该 snapshot 在第 $i$ 个 context position 的平均 next-token loss。
+\end{itemize}
+
+\lecturefigure{slide-05-learning-vs-in-context-curves.jpg}{Learning curve 与 in-context learning curve：训练时间轴和 context 位置轴。}{Stanford Online 官方视频 00:06:52--00:10:33。}
+
+\begin{importantbox}{两种“学习”不能混为一谈}
+Training learning 改变 $\theta_s$；in-context learning 固定 $\theta_s$，只改变输入 prefix 和内部 activations。前者回答“模型训练得更久会怎样”，后者回答“同一模型看到更多 context 会怎样”。
+\end{importantbox}
+
+\subsection{二维 loss map 与 ICL score}
+
+把每个 snapshot 的 per-token loss 叠起来，纵轴为 context position、横轴为 snapshot，就得到二维地图。横切片是某个 token position 的 training curve；纵切片是某个 snapshot 的 ICL curve。讲者使用一个简单 summary statistic：
+\[
+S_{\mathrm{ICL}}(s)
+=\mathcal{L}(s,500)-\mathcal{L}(s,50).
+\]
+
+\begin{itemize}
+  \item 若 $S_{\mathrm{ICL}}<0$，第 500 个 token 比第 50 个 token 更容易预测；
+  \item 数值越负，late-context advantage 越强；
+  \item 该指标只压缩 context-position improvement，不等价于 few-shot task accuracy；
+  \item token 50 与 500 是论文设置中的 operational choice，不是 ICL 的唯一合法定义。
+\end{itemize}
+
+\lecturefigure{slide-06-token-snapshot-loss-map.jpg}{统一诊断图：token index × training snapshot loss，以及 $\mathrm{Loss@500}-\mathrm{Loss@50}$。}{Stanford Online 官方视频 00:10:34--00:12:45。}
+
+\begin{knowledgebox}{读图：先看轴，再看右侧差分曲线}
+左侧热图显示每个 training snapshot 在不同 token index 上的 loss；中间的 Loss@50 与 Loss@500 是两条横切片；右侧差分曲线消去整体训练改善，突出“后半段 context 是否突然变得更有用”。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={从 per-token loss 计算 ICL score 与 phase-change diagnostic。}]
+def in_context_learning_score(loss_by_snapshot_and_token):
+    loss_50 = loss_by_snapshot_and_token[:, 49]
+    loss_500 = loss_by_snapshot_and_token[:, 499]
+    score = loss_500 - loss_50  # more negative means stronger ICL
+    slope = derivative(score, with_respect_to="log_training_tokens")
+    return score, slope
+\end{lstlisting}
+
+\subsection{0.4 nats 到底有多大}
+
+Negative log-likelihood 使用 natural logarithm 时单位为 nat。要换成 bits，除以 $\ln 2$：
+\[
+0.4\ \mathrm{nats}
+=\frac{0.4}{\ln 2}\ \mathrm{bits}
+\approx 0.577\ \mathrm{bits/token}.
+\]
+换句话说，模型对 late-context token 的 uncertainty 每 token 大约少半个 bit，粗略相当于每两 token 少一个 binary choice。这不是“准确率提高 40\%”，也不能跨数据集直接比较，却足以说明 context 内新增信息被稳定利用。
+
+\lecturefigure{slide-07-meaning-of-point-four-nats.jpg}{效果量直觉：$0.4$ nats 约为 $0.5$ bits/token。}{Stanford Online 官方视频 00:12:46--00:13:47。}
+
+\teachervoice{Olah 主动把 nats 转成 bits，是为了防止曲线上的小数被低估。Language modeling 每个 token 都累积损失，半个 bit/token 在长序列上会形成很大的 total log-likelihood difference。}
+
+\subsection{本章小结}
+
+ICL 的行为指标来自二维 loss surface：一个轴是训练进度，一个轴是 context position。$\mathrm{Loss@500}-\mathrm{Loss@50}$ 把 late-token advantage 压缩为一条曲线，为后续寻找内部 circuit 提供了可干预的目标量。
+

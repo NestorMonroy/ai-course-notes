@@ -1,0 +1,114 @@
+\section{CogVLM、CogAgent 与 GLM-4V：分开参数路径还是压缩输入}
+
+这一章集中分析讲者团队展示的视觉理解模型。重点不是比较模型名，而是看三类瓶颈：image alignment 是否覆盖语言能力、high-resolution screenshot 如何控制 token cost、OCR/grounding benchmark 是否能代表真实 GUI agent。
+
+\subsection{CogVLM：vision experts 避免覆盖 language path}
+
+CogVLM 的动机是：若所有 image-text alignment gradient 都更新原 LLM parameters，基础语言行为可能被覆盖。它为视觉 token 增加独立 attention/MLP experts，同时保留 text token 的原路径。可抽象为
+\[
+h'_{i}=h_i+\begin{cases}
+F_{\text{vision}}(h_i), & i\in\mathcal{I}_{\text{image}},\\
+F_{\text{text}}(h_i), & i\in\mathcal{I}_{\text{text}}.
+\end{cases}
+\]
+
+\lecturefigure{slide-15-cogvlm-architecture.jpg}{CogVLM：以 vision experts 分离视觉与语言参数路径}{Stanford Online 官方录像 00:38:44}
+
+\begin{importantbox}{“保留语言行为”需要怎样验证}
+结构上保留 text expert 只能提供机制假设。真正验证需要在 multimodal tuning 前后比较 language-only perplexity、instruction following、reasoning、safety 和 domain tasks；不能仅凭参数没有完全共享就断言无遗忘。
+\end{importantbox}
+
+\teachervoice{00:37:25--00:39:27，讲者把 CogVLM 的设计目标明确说成 keep all language behavior。讲义保留这个目标，但不把它升级成未经完整语言回归测试的结论。}
+
+\subsection{CogVLM 结果页：雷达图先问 protocol，再问面积}
+
+结果 slide 汇总 image captioning、grounding、VQA 和综合 VLM benchmarks，并给出开源链接。读图时应先确认每个轴的 metric、model size、input resolution、prompting 与 test split，再比较单项，而不是只比较雷达图覆盖面积。
+
+\lecturefigure{slide-16-cogvlm-benchmarks.jpg}{CogVLM 的课堂时 benchmark 汇总与开源信息}{Stanford Online 官方录像 00:39:27}
+
+\begin{warningbox}{Benchmark table 不等于 production robustness}
+VQA accuracy、caption score、grounding IoU 与 LLaVA-Bench 测量的问题不同；它们不能直接推出 GUI reliability、OCR 长尾、幻觉率、adversarial robustness 或真实用户任务成功率。下载量也只说明 adoption，不说明 correctness。
+\end{warningbox}
+
+\subsection{CogAgent：高分辨率旁路为何必要}
+
+网页 screenshot 包含大量小文字、icons 和坐标关系。若把分辨率提高 $s$ 倍，而 patch size 不变，二维 token 数近似提高 $s^2$ 倍；full attention cost 可能进一步接近 $s^4$ 倍。CogAgent 用 cross-attention high-resolution branch，让高分辨率特征不必全部扩展到 LLM hidden width。
+
+\lecturefigure{slide-17-cogagent-architecture.jpg}{CogAgent：为 GUI/OCR 增加 high-resolution cross-attention branch}{Stanford Online 官方录像 00:40:13}
+
+若低分辨率 language tokens 为 $H_l\in\mathbb{R}^{n\times d}$，高分辨率 features 为 $H_h\in\mathbb{R}^{m\times d_h}$，旁路可写成
+\[
+\widetilde H_l=H_l+\operatorname{CrossAttn}(H_lW_Q,H_hW_K,H_hW_V),
+\]
+其目标是让 $m$ 个细粒度 features 被查询，而不是全部成为等价的 LLM sequence tokens。
+
+\teachervoice{01:15:00--01:16:15，Q\&A 中讲者直接区分 CogAgent 与 CogVLM：前者从后者 fine-tune/扩展而来，专门面向 high-resolution web screen，并用较轻 cross-attention 控制成本。}
+
+\subsection{Web trace：模型输出的是 grounded action，不是“会用浏览器”四个字}
+
+示例任务要求搜索 CVPR 2023 best paper。slide 展示从 screenshot 理解、定位搜索框、输入 query、读取结果到继续点击的多步 trace。一个 action 通常需要 type 与 coordinates/text，例如
+\[
+a_t=(\text{action\_type},x_t,y_t,\text{text}_t),
+\qquad
+p(a_t\mid I_t,g,h_{<t}).
+\]
+
+\lecturefigure{slide-18-cogagent-web-demo.jpg}{CogAgent web navigation：从 screenshot 到 action sequence}{Stanford Online 官方录像 00:41:19}
+
+\begin{lstlisting}[caption={GUI agent 的最小可审计 action schema}]
+observation = capture_screenshot()
+action = model.predict(goal, observation, history)
+validate(action.type, action.coordinates, action.text)
+execute_in_sandbox(action)
+record(observation, action, result, failure_reason)
+stop_only_when(goal_is_verified)
+\end{lstlisting}
+
+\begin{warningbox}{单条成功 trace 不估计可靠性}
+真实 GUI agent 还需测量 repeated trials、layout shift、small-text OCR、unexpected popups、permission boundary、irreversible actions 和 recovery。课堂 demo 证明接口可行，不证明 autonomous browsing 已经稳健。
+\end{warningbox}
+
+\subsection{Vary：增加 vision vocabulary 以服务 OCR}
+
+Vary 把不同视觉 features 组合为更丰富的 vision vocabulary，目标是补足通用 CLIP features 对 document/OCR 细节的不足。可抽象为
+\[
+Z=\operatorname{Project}\!\left([f_{\text{general}}(I);f_{\text{ocr}}(I)]\right),
+\]
+其中两个 encoder 的 inductive bias 不同，合并后再接 LLM。
+
+\lecturefigure{slide-19-vary.jpg}{Vary：ensemble vision features 以扩大视觉词表}{Stanford Online 官方录像 00:41:46}
+
+\begin{knowledgebox}{Vision vocabulary 不是离散文字词表}
+这里的 vocabulary 指可表达的视觉 feature patterns：layout、small text、objects、regions 与文档结构。增加专用 encoder 可能提升 OCR，但也增加训练、部署、feature alignment 与维护成本。
+\end{knowledgebox}
+
+\subsection{GLM-4V：简单 stride convolution 与 mixed training}
+
+课堂展示的 GLM-4V 结构回到较简单的 LLaVA-style path，只把 projector 换成 stride convolution，以压缩高分辨率 feature map。若输入 feature map 为 $H\times W$，stride 为 $s$，token 数近似从 $HW$ 降到
+\[
+n_v\approx \frac{H}{s}\frac{W}{s}.
+\]
+随后 text/image data 做 mixed training，以减少多模态训练对 language behavior 的破坏。
+
+\lecturefigure{slide-20-glm4v-architecture.jpg}{课堂展示的 GLM-4V：stride convolution 与 text-image mixed training}{Stanford Online 官方录像 00:42:34}
+
+\teachervoice{00:41:46--00:43:00，讲者特意说最新模型反而使用更简单的 architecture。这个例子支持他的 data thesis：更复杂 bridge 并不自动带来更强最终系统。}
+
+\subsection{GLM-4V 结果表：每一列回答不同问题}
+
+表中同时出现 MMBench、MME、MMMU、MathVista、MMVet、DocVQA、OCRBench 等。它们覆盖 general perception、knowledge/reasoning、math/diagram、document OCR 等不同能力，不能求一个未经定义的“总分”。
+
+\lecturefigure{slide-21-glm4v-results.jpg}{GLM-4V 的课堂时多 benchmark 结果表}{Stanford Online 官方录像 00:43:00}
+
+\begin{knowledgebox}{读多模态 benchmark 表的顺序}
+先确认 model/version 和输入分辨率，再确认 zero-shot/few-shot、prompt、test split 与 metric；然后按任务族比较，而不是跨列直接平均。若某模型 OCR 强但 MMMU 弱，结论是能力分布不同，不是简单的“谁更智能”。
+\end{knowledgebox}
+
+\begin{warningbox}{课堂时 GLM-4V 与后续版本不能混用}
+这张 slide 早于后续稳定 technical reports。讲义只记录当时展示的 architecture 和 table，不用后来 GLM-4V/GLM-4.1V 的能力反向证明 2024 年版本。
+\end{warningbox}
+
+\subsection{本章小结}
+
+CogVLM 用 experts 分离参数路径，CogAgent 用 high-resolution cross attention 控制 GUI/OCR 成本，Vary 扩充视觉 features，GLM-4V 用 stride convolution 压缩输入。它们都在回答同一问题：怎样把视觉细节送入 LLM，同时控制遗忘、token 数和系统成本。
+

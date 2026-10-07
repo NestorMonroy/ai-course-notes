@@ -1,0 +1,71 @@
+\section{怎样测量 oversight 真的变好了}
+
+``让 AI 帮忙评价'' 很容易演示，却很难科学验证。真正困难的任务往往没有可得 ground truth；如果 evaluator 与 assistant 都给出同一个结论，我们不知道它们是一起发现真相，还是一起被相同偏差说服。本章介绍 targeted perturbations 与 discriminator--critique gap 两个诊断工具。
+
+\subsection{Targeted perturbations：人为制造已知缺陷}
+
+实验先取一个 response，暂时把它作为 reference，再由人类植入一个 subtle but important flaw，得到 perturbed response。由于研究者知道哪一份被修改，就能随机展示其中之一，测量 unaided human 与 assisted human 识别缺陷的准确率差异。
+
+\lecturefigure{slide-15-measuring-progress.jpg}{测量 AI assistance：从原回答构造带已知 subtle flaw 的配对样本。}{Stanford Online 官方视频 00:26:38--00:28:57。}
+
+\begin{knowledgebox}{读图：ground truth 到底是什么}
+流程中的 ground truth 是 ``哪一份被人为扰动''，不是原回答已经被证明绝对正确。这个设计让实验能测量 assistance 是否更容易发现植入缺陷，同时保留任务的自然语言复杂度；它不能覆盖自然出现、研究者没有预想到的全部错误模式。
+\end{knowledgebox}
+
+设 $z_i=1$ 表示第 $i$ 个样本被正确判为 flawed/correct，辅助条件 $a\in\{0,1\}$，则
+
+\[
+\widehat{\mathrm{Acc}}_a=\frac{1}{N_a}\sum_{i:a_i=a} z_i,
+\qquad
+\Delta_{\mathrm{assist}}=\widehat{\mathrm{Acc}}_1-\widehat{\mathrm{Acc}}_0.
+\]
+
+其中，$N_a$ 是对应条件的样本数，$\widehat{\mathrm{Acc}}_1$ 是有 AI assistance 的正确率，$\widehat{\mathrm{Acc}}_0$ 是无 assistance 的正确率，$\Delta_{\mathrm{assist}}$ 衡量净增益。还应同时报告误报、缺陷严重度和 evaluator 是否原本会注意到该问题。
+
+\begin{lstlisting}[caption={Targeted perturbation 评测的最小伪代码}]
+for prompt, reference in task_set:
+    flawed = human_insert_subtle_flaw(reference)
+    shown, label = random_choice([
+        (reference, "reference"),
+        (flawed, "flawed"),
+    ])
+
+    unaided = human_judge(shown)
+    critique = assistant_critique(prompt, shown)
+    assisted = human_judge(shown, critique=critique)
+
+    record(label, unaided, assisted, critique)
+\end{lstlisting}
+
+\subsection{Critique experiment：有希望，但远未闭环}
+
+本节用 topic-based summarization 实验检验上一节的评测方法：model critiques 帮助人类发现约百分之五十更多的 flaws。这个结果说明模型可以把自己的一部分任务知识转成 evaluator 可用的检查线索；但讲者紧接着给出三个限制：任务还不够难，实际效果应更大才令人放心，很多 critiques 是垃圾或 nitpicking。因此读图顺序应是先确认有无 assistance 的相对差异，再追问绝对漏检率、缺陷严重度和任务外推范围，而不是只记住 headline percentage。只有把效果量与失败样本一起读，才能判断 assistance 是真正增加洞察，还是仅仅增加了 evaluator 需要筛掉的文本数量。
+
+\lecturefigure{slide-16-summarization-critiques-results.jpg}{Summarization critiques 的课堂结果：assistance 提高了人类发现缺陷的数量。}{Stanford Online 官方视频 00:28:57--00:29:45。}
+
+\begin{warningbox}{读图时不能省略的三条限制}
+第一，``50\% more flaws'' 是相对增量，不等于发现全部缺陷；第二，summarization 比未来超人类任务更容易验证；第三，高召回 critique 可以容忍许多垃圾建议，因为人类会丢弃它们，而一个自主 assistant 若同样不可靠会造成更大成本。结果是 proof of concept，不是 scalable oversight 已解决。
+\end{warningbox}
+
+\teachervoice{讲者把 critique 的现实作用描述为 ``帮助你 brainstorm 应该看哪里''。这比 ``AI 已经知道正确答案'' 更克制：辅助模型可能只提供检查方向，最终判断仍需人类结合原文、严重度和任务规范完成。}
+
+\subsection{Discriminator--critique gap：模型知道却没有说出的部分}
+
+Q\&A 把问题推进一步：同一 pretrained model 分别微调成 discriminator 与 critique model。Discriminator 只需判断哪个 response 有 flaw；critique model 必须用自然语言指出 flaw。若前者明显更强，说明模型表示中存在可用于判别的信息，却没有被可靠地表述给人类。
+
+为了把这项差异变成可比较指标，可以定义
+
+\[
+G_{\mathrm{D-C}}=\mathrm{Acc}_{\mathrm{disc}}-\mathrm{Help}_{\mathrm{critique}},
+\]
+
+其中，$\mathrm{Acc}_{\mathrm{disc}}$ 是 discriminator 在配对任务上的判别准确率，$\mathrm{Help}_{\mathrm{critique}}$ 是 critique 实际帮助人类找到正确缺陷的成功率，$G_{\mathrm{D-C}}$ 是 discriminator--critique gap。大的正 gap 表示 ``能区分'' 与 ``能/愿意解释'' 之间存在显著距离。
+
+\begin{importantbox}{为什么 gap 比单独看 critique 质量更有信息}
+Critique 差可能是模型根本不知道，也可能是它知道但无法组织语言、优化目标没有奖励完整披露，或策略性地省略。Discriminator 提供一个近似上界探针。这个上界仍受 probe、数据和分布限制，但能把 ``模型到底知道多少'' 从纯哲学问题转成可比较实验。
+\end{importantbox}
+
+\subsection{本章小结}
+
+Targeted perturbations 用人为缺陷构造局部 ground truth；critique experiments 测量 assistance 对人类发现错误的实际增益；discriminator--critique gap 检查模型表征与可沟通知识之间的距离。三者都是诊断，不是最终保证。
+

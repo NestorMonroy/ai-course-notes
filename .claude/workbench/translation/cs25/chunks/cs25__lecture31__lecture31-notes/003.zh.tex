@@ -1,0 +1,103 @@
+\section{Transformer 架构与训练系统：能力边界由资源路径决定}
+
+在多模态模型出现前，语言底座必须先被稳定训练。讲者的核心判断是：现代 LLM 的许多关键改进不是全新网络，而是对 decoder path、normalization、KV memory、parameter routing 与 distributed execution 的持续修整。理解这些术语，是后面理解 high-resolution VLM 和 video scaling 的前提。
+
+\subsection{现代 decoder-only recipe 的术语消化}
+
+前一章说明了 objective、scale 与 alignment 怎样移动研究瓶颈；本节进一步问：当 decoder-only LLM 成为共同底座后，工程团队究竟改了计算图的哪些位置，又分别换来了什么稳定性、容量或 inference memory。下面这张 slide 把常见 architecture updates 压在一页里，读图时不要只数名词，而要区分它们作用于 residual path、position、KV sharing、MLP 还是 routing。
+
+\lecturefigure{slide-06-transformer-architecture.jpg}{现代 Transformer 常见更新：decoder-only、pre-norm、RoPE、GQA、GLU 与 MoE}{Stanford Online 官方录像 00:16:10}
+
+标准 causal self-attention 为
+\[
+Q=XW_Q,\quad K=XW_K,\quad V=XW_V,\qquad
+\operatorname{Attn}(X)=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_h}}+M\right)V,
+\]
+其中 $M$ 是 causal mask。GQA（Grouped-Query Attention）让多组 query heads 共享更少的 key/value heads，主要减少 KV cache，而不是减少所有 attention FLOPs。
+
+\begin{knowledgebox}{密集术语表：它们解决的是不同瓶颈}
+\begin{tabularx}{\textwidth}{L{0.17\textwidth} L{0.30\textwidth} X}
+\toprule
+术语 & 核心机制 & 课程关系 \\
+\midrule
+Decoder-only & 统一 causal generation path & 便于规模化预训练与统一接口 \\
+Pre-norm & 在子层前做 LayerNorm & 改善深层残差训练稳定性 \\
+RoPE & 在 $Q,K$ 上旋转编码相对位置 & 为长上下文和外推提供位置结构 \\
+GQA & 多个 query heads 共享 KV heads & 缩小 inference KV cache \\
+SwiGLU/GLU & 用门控乘法替代普通 MLP 激活 & 改变 feed-forward 容量与优化 \\
+MoE & 每个 token 只激活部分 experts & 增加总参数而控制 active compute \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\teachervoice{00:13:18--00:17:45，讲者强调这些改进大多是长期累积而非突然出现的“新 Transformer”。他的玩笑是 architecture innovation 很少，但这不等于每个改动都无关紧要。}
+
+\subsection{DeepSpeed 与 ZeRO：先算清一份参数占多少显存}
+
+训练系统的第一课不是背 ZeRO-1/2/3，而是做 resource accounting。对混合精度 AdamW，一个参数常需要 FP16/BF16 parameter、gradient，以及 FP32 master weight、first moment $m$、second moment $v$。粗略字节数为
+\[
+B_{\text{per-param}}\approx 2_{\theta}+2_g+4_{\theta_{32}}+4_m+4_v=16\ \text{bytes}.
+\]
+十亿参数仅这些 states 就约 16 GB，尚未计 activation、temporary buffers、fragmentation 与 communication workspace。
+
+\lecturefigure{slide-07-deepspeed.jpg}{DeepSpeed：optimizer states、activation checkpointing 与 ZeRO 分片}{Stanford Online 官方录像 00:19:30}
+
+\begin{importantbox}{首次定义：sharding、optimizer state 与 activation checkpointing}
+\textbf{Sharding（分片）}是把原本每张卡复制的一类状态切到不同 data-parallel ranks；\textbf{optimizer state} 是 Adam/AdamW 的 $m,v$ 与常见 FP32 master weights；\textbf{activation checkpointing} 只保存少量 forward activations，backward 时重算其余部分，和保存模型文件的 model checkpointing 不是一件事。
+\end{importantbox}
+
+ZeRO-1 分片 optimizer state，ZeRO-2 再分片 gradients，ZeRO-3 连 parameters 也分片。若 data-parallel world size 为 $p$，理想状态占用近似按 $1/p$ 缩小，但换来 all-gather、reduce-scatter 等 collectives（多 GPU 通信原语）。
+
+\begin{lstlisting}[caption={混合精度训练的显存核算清单}]
+bytes = parameter_low_precision
+bytes += gradient_low_precision
+bytes += master_parameter_fp32
+bytes += adam_first_moment_fp32
+bytes += adam_second_moment_fp32
+bytes += saved_activations_or_recompute_budget
+bytes += communication_and_kernel_workspace
+report(bytes_per_rank, sharding_stage, world_size)
+\end{lstlisting}
+
+\teachervoice{00:17:45--00:21:13，讲者特别指出显存大头常来自 Adam states，而 activation checkpointing 的代价是 backward 重算。把“省显存”写成免费优化会丢掉系统事实。}
+
+\subsection{Megatron：tensor 与 pipeline parallelism 分别切什么}
+
+ZeRO 沿 data-parallel ranks 分片状态；Megatron 的 tensor parallelism（TP）在一层内部切 hidden dimensions/heads，pipeline parallelism（PP）沿层深切 stages。两者解决的维度不同，通信模式也不同。
+
+\lecturefigure{slide-08-megatron.jpg}{Megatron：tensor parallel 与 pipeline parallel 的切分方式}{Stanford Online 官方录像 00:21:13}
+
+若线性层 $Y=XW$ 按列切 $W=[W_1,\ldots,W_p]$，每个 rank 计算 $Y_i=XW_i$，后续可能需要 all-gather；按行切则局部结果需要 all-reduce 求和。PP 的利用率受 micro-batch 数 $m$ 与 stage 数 $p$ 影响，朴素 bubble fraction 可粗略写成
+\[
+\rho_{\text{bubble}}\approx \frac{p-1}{m+p-1}.
+\]
+interleaving、1F1B 与 ZeroBubble 类调度都在减少空闲，但会增加排程复杂度和通信约束。
+
+\begin{knowledgebox}{Collectives 不是一个模糊的“同步”}
+\textbf{All-reduce} 汇总并把结果发回每个 rank；\textbf{reduce-scatter} 汇总后只保留各自分片；\textbf{all-gather} 收集所有分片；\textbf{broadcast} 从一个 rank 发送给所有 rank。不同 sharding/parallelism 方案的性能差异，常来自这些操作的频率、消息大小和拓扑匹配。
+\end{knowledgebox}
+
+\teachervoice{00:20:00--00:22:50，讲者把超大模型训练概括为 engineering work，并用“MLP 不重要，ML6 重要”的玩笑强调：没有 systems knowledge，架构纸面 FLOPs 无法变成有效训练。}
+
+\subsection{Long context：full attention 仍然要支付二次复杂度}
+
+长上下文 slide 对比早期 CogLTX 的显式 retrieval/rehearsal 结构与 2024 年 full-attention context parallelism。所谓 lossless 指不通过 sparse attention 改写 attention pattern，不代表计算没有代价。
+
+\lecturefigure{slide-09-long-context.jpg}{Lossless 128K：context parallel、Ring Attention 与 Ulysses}{Stanford Online 官方录像 00:24:27}
+
+对 sequence length $n$、head dimension $d_h$，完整 score matrix 的主要计算为
+\[
+\mathcal{O}(n^2d_h),
+\]
+单卡显式存储也可达 $\mathcal{O}(n^2)$。context parallelism 把 sequence 分到 $p$ 个 ranks，局部 activation 约降到 $\mathcal{O}(nd/p)$，但必须轮转或交换 $K,V$ blocks，并处理 causal load imbalance。
+
+\begin{warningbox}{长上下文的隐藏成本是 prefill}
+Q\&A 中讲者把 inference 分成 prefill 与 decode。长文档常只生成短答案，但 prefill 仍要读取并处理整段 context，可能耗时数秒到一分钟。更长窗口不是“免费 memory”，还会增加 latency、KV cache、communication 与无关信息干扰。
+\end{warningbox}
+
+\teachervoice{01:08:10--01:10:30，讲者接受某些文档理解场景用较长 prefill 换取短回答，但没有声称所有交互应用都能容忍这一 latency。}
+
+\subsection{本章小结}
+
+现代 LLM recipe 同时包含 architecture updates 与 distributed systems。ZeRO 切状态，TP 切层内张量，PP 切层，context parallelism 切序列；每次减少单卡显存，都通过 collectives、重算、bubble 或 latency 支付代价。这些系统路径会在 high-resolution image 与 video 中再次出现。
+

@@ -1,0 +1,84 @@
+\section{Scaled Dot-Product Attention 与 Transformer Architecture}
+
+有了动机，下一步要把“内容相似”变成稳定、可扩展的计算图。课程强调 Transformer 不是只包含 attention：Q/K/V projection、softmax scaling、causal mask、multi-head decomposition、feed-forward block、residual connection、normalization 与 position signal 共同组成可训练系统。
+
+\subsection{从多种 Attention Formulation 选择 Dot Product}
+
+Transformer 之前已有 location-based、additive、dot-product、scaled dot-product 等多种 attention。团队选择 dot product 的主要工程原因是能映射到高效矩阵乘法；$1/\sqrt{d_k}$ scaling 则防止维度增大时 score 方差过高，使 softmax 过度饱和。
+
+\lecturefigure{slide-15-attention-mechanisms-table.jpg}{Transformer 之前的 attention mechanism 家族}{官方录像恢复幻灯片 V015；00:20:33}
+
+\begin{knowledgebox}{读图：比较 score function，而不是只记名字}
+表格的核心列是 query/key 如何产生 scalar compatibility：拼接后过 MLP、直接 dot product、是否缩放、是否依赖位置。先看哪些方法可批量 matrix multiply，再看参数量与 numerical behavior。Transformer 没有发明“对齐”，而是选择了最适合硬件与大规模训练的 formulation。
+\end{knowledgebox}
+
+设输入矩阵 $X\in\mathbb{R}^{n\times d}$，则：
+\[
+Q=XW_Q,\quad K=XW_K,\quad V=XW_V,\qquad
+\operatorname{Attn}(Q,K,V)=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right)V.
+\]
+其中 $n$ 是 sequence length，$d$ 是 model width，$d_k$ 是 key/query head dimension，$W_Q,W_K,W_V$ 是 learned projection。Score matrix 的第 $(i,j)$ 项表示 position $i$ 对 position $j$ 的读取偏好。
+
+\subsection{Encoder Self-Attention 与 Decoder Causal Mask}
+
+上一小节给出了无约束的 scaled dot-product attention，但 sequence-to-sequence 模型中的 encoder 与 decoder 并不共享同一种可见性规则。本节要区分“理解完整输入”与“按前缀生成输出”这两个任务：读两张图时先比较每个 query 可以连接哪些 key，再把连边差异对应到训练时的信息边界。Encoder 可让每个位置读取全部输入；decoder 训练时必须阻止当前位置看到未来 target token，否则会发生 label leakage。\term{causal mask（因果掩码）}在未来位置的 score 上加 $-\infty$，softmax 后对应权重为零。
+
+\lecturefigure{slide-16-dot-product-encoder-attention.jpg}{Encoder 中的 scaled dot-product self-attention}{官方录像恢复幻灯片 V016；00:21:48}
+
+\begin{knowledgebox}{读图：Q、K、V 是职责，不是三份独立 token}
+同一 hidden state 经不同 projection 分别形成“我要找什么”“我提供什么索引”“我要传递什么内容”。先沿 query 与所有 keys 的 dot product，再看 softmax 权重怎样汇总 values。Q/K 决定路由，V 决定被路由的信息。
+\end{knowledgebox}
+
+\lecturefigure{slide-17-decoder-self-attention.jpg}{Decoder self-attention 只允许读取当前位置及左侧历史}{官方录像恢复幻灯片 V017；00:21:57}
+
+带 mask 的 attention 为：
+\[
+A=\operatorname{softmax}\!\left(\frac{QK^\top+M}{\sqrt{d_k}}\right),\qquad
+M_{ij}=\begin{cases}0,&j\le i,\\-\infty,&j>i.\end{cases}
+\]
+其中 $M$ 是 causal mask，$A$ 是 row-normalized attention matrix。训练时可以并行计算所有行，但每行只依赖合法前缀；inference 时仍需逐步扩展 prefix，并用 KV cache 避免重复计算历史 keys/values。
+
+\begin{lstlisting}[caption={Scaled dot-product attention 与 causal mask 的概念实现}]
+def attention(query, key, value, causal=False):
+    scores = query @ key.transpose(-1, -2)
+    scores = scores / sqrt(query.shape[-1])
+    if causal:
+        scores = scores.masked_fill(upper_triangle(scores), -inf)
+    weights = softmax(scores, dim=-1)
+    return weights @ value
+\end{lstlisting}
+
+\subsection{Complexity：Less FLOPs 只在特定 Regime 成立}
+
+标准 self-attention 的 pairwise score 成本约为 $O(n^2d)$，projection/FFN 常为 $O(nd^2)$。当 $n\ll d$ 时，attention 可能比宽 convolution 更省；当 context 极长时，$n^2$ 项成为主导。理论 operation count 还没有考虑 memory traffic、kernel launch 和 hardware utilization。
+
+\lecturefigure{slide-18-complexity-less-flops.jpg}{Self-attention、recurrent 与 convolution 的复杂度和路径长度}{官方录像恢复幻灯片 V018；00:22:48}
+
+\begin{knowledgebox}{读图：同时比较 complexity、sequential operations 与 path length}
+表格不是简单的“谁是 $O(n^2)$ 谁就差”。Self-attention 的 sequential operations 为常数、最长依赖路径为 $O(1)$，适合并行；RNN 的总算力可较低却有 $O(n)$ critical path；convolution 介于两者。实际选择取决于 $n,d,k$ 和硬件。
+\end{knowledgebox}
+
+\teachervoice{讲者在“Less FLOPs”页立刻补充：not all FLOPs are equal。这个伏笔贯穿后半场——一个公式减少乘加，若引入不规则访存或巨大 activation，wall-clock 仍可能更慢。}
+
+\subsection{完整架构：Attention 只是 Block 的一部分}
+
+原始 Transformer 使用 encoder--decoder stack：encoder block 包含 self-attention 和 position-wise FFN；decoder 还加入 masked self-attention 与 cross-attention。每个 sublayer 通过 residual connection 与 normalization 连接，position signal 在底部注入。
+
+\lecturefigure{slide-19-transformer-architecture.jpg}{原始 Transformer encoder--decoder 架构}{官方录像恢复幻灯片 V019；00:22:57}
+
+\begin{knowledgebox}{读图：按 residual stream 逐层追踪}
+先从 embedding + position 进入 encoder，再看 decoder 的三类读取：target prefix、encoder output 和 FFN。Attention 负责 token mixing，FFN 负责 position-wise feature transformation，residual path 保留和叠加信息。把所有能力归因于 attention 会漏掉架构的一半。
+\end{knowledgebox}
+
+\lecturefigure{slide-20-resnet-structure.jpg}{Transformer block 延续 ResNet 的 residual 结构思想}{官方录像恢复幻灯片 V020；00:23:30}
+
+\begin{knowledgebox}{读图：架构创新经常是跨领域重新组合}
+右侧 ResNet 将 transformation 放在 identity path 旁，Transformer 也用 residual stream 串联 attention 与 FFN。先比较 block topology，再看 operator 不同；图支持结构 lineage，却不表示 vision ResNet 与 sequence Transformer 的 inductive bias 相同。
+\end{knowledgebox}
+
+\teachervoice{Vaswani 把最终架构描述为一次 synthesis：attention formulation 已有先例，residual structure 来自 ResNet，团队把这些组件组织成能高效训练的 sequence model。这样的叙事比“一个公式改变世界”更符合实际研究过程。}
+
+\subsection{本章小结}
+
+Scaled dot-product attention 把 content routing 变成矩阵乘法，causal mask 在并行训练中保持 autoregressive constraint，residual/FFN/normalization 让深层网络可训练。复杂度优势依赖 sequence length 与 width，后续 systems section 将进一步说明 FLOPs 之外的成本。
+

@@ -1,0 +1,73 @@
+\section{非随机初始化：bit-cipher 为什么先于 attention 出场}
+
+显式初始化不能从随机 embedding 开始推导一切。输入向量如果本身随机、符号不受控或每次更新，后续共现统计和缓存都会失去稳定参照。因此课程先讨论 Lottery Ticket 直觉、低维表示的必要性和 bit-cipher，再进入 attention warm start。
+
+\subsection{Lottery Ticket 是动机，不是反对 multi-head 的证明}
+
+多个 attention heads 具有相同结构与训练目标，但随机初始化让它们在优化过程中走向不同角色。讲者把这种不确定性与 Lottery Ticket Hypothesis 联系起来：一个大网络可能包含少数真正有效的子结构，而大量随机参数的训练成本最终没有转化为可用能力。
+
+\lecturefigure{slide-04-no-lottery-tickets.jpg}{Transforming without lottery tickets：减少随机初始化与对称副本}{Stanford Online 官方录像 00:11:04}
+
+\begin{warningbox}{不能从 Lottery Ticket 直接推出“多头无用”}
+不同 heads 可以学习互补的关系，也可以通过训练打破对称。slide 提供的是研究动机：若能根据数据统计直接找到好起点，是否可以少依赖随机抽奖？它不是 multi-head attention 的消融结论。
+\end{warningbox}
+
+\teachervoice{00:08:03--00:10:44，Williams 把多个同构 heads 的随机角色分化解释为一种 lottery-ticket 问题，并强调随机初始化可能让昂贵参数最终没有承担稳定功能。}
+
+\subsection{Dimensionality reduction 仍不可避免}
+
+上一节的问题是如何减少同构 heads 的随机“抽奖”，但 attention 之前还有更早的随机源：token embedding。若不先稳定输入坐标系，后面的 generalized co-occurrence 与 comparison cache 都会随着 embedding 更新而漂移。因此本节先说明为什么维度必须压缩，再区分“低维”与“好的非随机低维表示”。设词表大小为 $V$，若直接把 token 表示为 one-hot $y\in\{0,1\}^{V}$，后续权重矩阵的维度会随 $V$ 膨胀。学习 embedding $E\in\mathbb{R}^{V\times d}$ 的通常做法把 $d\ll V$，但随机 embedding 离输出 loss 很远，需要梯度穿过整个网络才能逐步成形。
+
+\lecturefigure{slide-05-dimensionality-reduction.jpg}{低维表示仍然必要，但随机 embedding 难以稳定和解释}{Stanford Online 官方录像 00:11:21}
+
+\begin{importantbox}{表示压缩与初始化是两个问题}
+\textbf{Dimensionality reduction} 决定用多少维表达 token；\textbf{initialization} 决定这些维度一开始表示什么。把维度从 $V$ 降到 $d$ 并不自动得到一个好表示，随机矩阵只是给优化器一个可训练起点。
+\end{importantbox}
+
+\teachervoice{00:11:14--00:12:40，讲者强调低维表示对大词表是计算必需品，但 embedding 离输出 loss 最远，随机起点需要昂贵训练才能稳定。}
+
+\subsection{Bit-cipher：先保证唯一性，再讨论语义}
+
+Bit-cipher 用长度为 $b$ 的 bit vector 编码 token。除全零向量外，理论上最多有
+\[
+N_{\text{codes}}=2^b-1
+\]
+个唯一编码，因此覆盖词表至少需要 $b\ge \lceil\log_2(V+1)\rceil$。团队按 unigram frequency 排序分配 bit pattern，使高频 token 优先获得稀疏、易区分的编码，再做归一化
+\[
+e_i=\frac{\eta_i}{\|\eta_i\|_1},\qquad \eta_i\in\{0,1\}^{b}.
+\]
+
+\lecturefigure{slide-06-bit-cipher.jpg}{Bit-cipher：用频率排序的 bit vectors 扩展 one-hot encoding}{Stanford Online 官方录像 00:15:01}
+
+\begin{knowledgebox}{Bit-cipher 解决什么，又没有解决什么}
+它提供确定、唯一、低维、非负的 token identity，因此便于显式公式和复现实验。它本身不保证语义相近的词向量接近；后续还要利用 co-occurrence 聚合或 radial context statistics 增加相关结构。
+\end{knowledgebox}
+
+\begin{warningbox}{频率排序不是语义定理}
+高频 token 获得更简单编码是一种工程设计。仅凭频率不能推出语义相似性、句法角色或跨语言对齐，必须通过下游任务和相关性分析验证。
+\end{warningbox}
+
+\teachervoice{00:12:53--00:15:45，讲者说明 bit-cipher 的真正价值是 deterministic low dimensionalization。它看似只是中间步骤，却是团队能够继续推导非随机 SAFFU 初始化的实际起点。}
+
+\subsection{术语消化：后文会反复出现的五个词}
+
+这些术语常被压缩成一句“closed-form training”，但它们代表不同阶段和不同强度的主张。
+
+\begin{knowledgebox}{初始化与优化术语表}
+\begin{tabularx}{\textwidth}{L{0.18\textwidth} L{0.27\textwidth} X}
+\toprule
+术语 & 定义 & 本讲中的作用 \\
+\midrule
+Cold start & 参数从随机分布开始 & 作为常规训练 baseline \\
+Warm start & 参数从数据统计得到的非随机值开始 & 降低初始 loss/困惑度，改善后续轨迹 \\
+Explicit solution & 不用迭代梯度、直接由统计量计算的近似参数 & 初始化 softmax layer 与 SAFFU 组件 \\
+Priming number & 显式解中描述输入 norm/feature 数的归一化量 & 调整共现矩阵的 column translation \\
+Label embedding & 预测目标的低维表示 & 为中间层提供可计算的 hidden targets \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+非随机初始化需要稳定、非负、低维的输入。Bit-cipher 先解决可复现 identity encoding，再让 generalized co-occurrence 有固定坐标系。它不是语义表示的终点，而是 SAFFU 显式 warm start 的前提之一。
+

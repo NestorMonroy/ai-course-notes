@@ -1,0 +1,66 @@
+\section{QLoRA 与 Guanaco：低内存训练的边界}
+
+上一章的模型仍需要昂贵显存和训练基础设施。QLoRA 把量化 base weights 与低秩 adapter 结合，使 7B/13B 甚至更大模型能在更少 GPU 上 fine-tune。它显著扩大参与者范围，却没有消除 rollout、reward modeling、RL stability 与评测成本。
+
+\subsection{LoRA 与 QLoRA 的参数和内存逻辑}
+
+本节先解释 low-rank adaptation。冻结原权重 $W$，只训练两个小矩阵 $A,B$，用低秩增量近似完整更新。QLoRA 进一步把冻结的 base weights 量化存储，反向传播时仍通过它计算梯度，从而节省显存。
+
+\lecturefigure{slide-041.jpg}{QLoRA 与 Guanaco：LoRA、量化和内存可访问性}{official deck, p.~41}
+
+LoRA 更新写成
+\[
+W'=W+\Delta W,
+\qquad \Delta W=\frac{\alpha}{r}BA,
+\]
+其中 $W\in\mathbb{R}^{d_{\mathrm{out}}\times d_{\mathrm{in}}}$ 是冻结权重，$A\in\mathbb{R}^{r\times d_{\mathrm{in}}}$、$B\in\mathbb{R}^{d_{\mathrm{out}}\times r}$ 是可训练矩阵，$r$ 是低秩维度，$\alpha$ 是缩放系数。当 $r\ll d$ 时，可训练参数显著减少。
+
+\lecturefigure{slide-042.jpg}{Full fine-tuning、LoRA 与 QLoRA 的显存规模对比}{official deck, p.~42}
+
+\begin{knowledgebox}{什么占据 fine-tuning 显存}
+完整 Adam fine-tuning 通常要保存权重、梯度，以及 Adam 的一阶矩 $m$ 和二阶矩 $v$；这些 optimizer state 会显著增加内存。LoRA 冻结大部分权重，只为 adapter 保存梯度与 $m,v$；QLoRA 再把冻结权重压到较低 bit，进一步降低常驻内存，但计算和数值误差仍需谨慎处理。
+\end{knowledgebox}
+
+量化可抽象为
+\[
+W\approx s\,(q-z),
+\]
+其中 $q$ 是低 bit 整数，$s$ 是 scale，$z$ 是 zero point。QLoRA 的关键不是简单把所有计算降到低精度，而是用量化表示存储 frozen base，同时保持 adapter 训练所需的梯度质量。
+
+\subsection{Guanaco：方法价值必须落到模型发布}
+
+上一节只证明 QLoRA 能降低 fine-tuning 的显存门槛，本节要验证更严格的问题：效率优势能否穿过数据、优化和评测三道关，最终形成可用模型。技术是否真正改变生态，要看是否产生有竞争力的 release。Guanaco 用 QLoRA 和过滤后的 OpenAssistant 数据训练多个规模模型；读图时先分开看“方法节省多少资源”和“发布模型达到什么质量”，再检查二者是否由同一套实验闭环连接。它展示低内存方法不仅能让 loss 下降，也能做出当时较强的聊天模型。
+
+\lecturefigure{slide-043.jpg}{Guanaco：QLoRA 加开放数据产生竞争力模型}{official deck, p.~43}
+
+\begin{knowledgebox}{读图：方法论文的三层证据}
+第一层是内存/吞吐是否下降；第二层是训练是否稳定收敛；第三层是最终模型在人类或可信评测上是否有竞争力。只有第三层出现，社区才知道方法没有用效率换掉关键质量。Guanaco 的意义在于把三层连起来。
+\end{knowledgebox}
+
+\teachervoice{00:24:56--00:27:09，Nathan 把 QLoRA 称为解锁更多参与者的技术，并用 80GB A100 与消费级显存作对比。讲者同时强调 Guanaco 和过滤版 OpenAssistant 数据才让方法变成可信模型发布。}
+
+\subsection{LoRA methods 与 RL 为什么没有自动成功}
+
+低内存 IFT 容易复现后，许多团队尝试把 LoRA/QLoRA 直接用于 RLHF。困难在于 RL 需要 policy rollout、reference policy、reward model、advantage estimation 和多次更新，内存不是唯一瓶颈；adapter 参数化也会改变优化几何。
+
+\lecturefigure{slide-045.jpg}{LoRA methods 是否适合 RL：探索很多，出圈模型很少}{official deck, p.~45}
+
+\begin{warningbox}{Loss 降低不是 RLHF 成功证明}
+RL pipeline 可以让训练目标下降，却产生 reward hacking、KL 漂移、模式坍缩或评测退化。必须有最终模型 release、独立评测和行为样本。Q\&A 中 Nathan 给出的经验规则是：在深入追逐一个方法前，先等它产生同量级的竞争模型。
+\end{warningbox}
+
+\teachervoice{00:27:28--00:28:45，讲者回忆当时 LoRA-RL loss 能下降、实验很兴奋，但很少有真正“splash”的模型。01:05:44 之后他又说，自己会等到相关方法产生竞争力 release 才深挖。}
+
+\begin{lstlisting}[caption={从效率方法到可信模型发布的验证门}]
+check_memory_reduction()
+check_training_stability()
+check_base_capability_retention()
+run_fast_automatic_evals()
+run_human_or_arena_evaluation()
+release_model_recipe_and_data_provenance()
+\end{lstlisting}
+
+\subsection{本章小结}
+
+QLoRA 解决的是参与门槛：减少可训练参数和 frozen weight 存储，让更多团队能做 IFT。它没有自动解决 RLHF 的数据、rollout、稳定性和评测。课程的证据标准是“方法—模型—评测”闭环，而不是只看资源曲线或训练 loss。
+

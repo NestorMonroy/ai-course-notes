@@ -1,0 +1,130 @@
+\section{NPT Architecture：在 datapoints 与 attributes 之间交替 attention}
+
+输入契约建立后，下一步是决定 attention 沿哪个维度运行。NPT 先对每个 attribute 做类型感知 embedding，得到三维张量；随后在“整行表示”与“行内 attributes”之间反复 reshape，交替执行 Attention Between Datapoints（ABD）和 Attention Between Attributes（ABA）。
+
+\subsection{Per-Attribute Embedding}
+
+不同 columns 可能是 continuous、categorical、position/index 或 target。NPT 不把它们粗暴拼成同一种 token，而为每个 attribute 采用相应 linear/typed embedding，并把 mask information 一起编码。
+
+\lecturefigure{slide-17-per-attribute-embedding.jpg}{每个 attribute 独立嵌入，形成 $n\times d\times e$ 的表示张量。}{Stanford Online 官方视频 00:27:16--00:27:43。}
+
+记初始表示为
+\[
+H^{(0)}=\operatorname{Embed}(X,M)
+\in\mathbb{R}^{n\times d\times e},
+\]
+其中 $e$ 是每个 attribute embedding 的维度。对 categorical value 可使用 learned lookup，对 continuous value 可使用带 column-specific 参数的线性映射；position/type embedding 帮助模型保留 column identity。
+
+\begin{knowledgebox}{为什么 rows 可交换、columns 不可随意交换}
+Datapoint order 通常没有语义，所以模型应对 row permutation equivariant。Columns 却表示年龄、收入、标签等不同变量；交换 columns 会改变任务，除非连同 column-specific embeddings、mask 与输出语义一起变换。
+\end{knowledgebox}
+
+\subsection{ABD：把一整行压成 attention token}
+
+ABD 需要比较 datapoints，因此先把每一行的 $d$ 个 attribute embeddings flatten 成长度 $h=d\cdot e$ 的向量。Self-attention 随后沿 $n$ 维运行，每个 row 可以从其他 rows 聚合信息。
+
+\lecturefigure{slide-18-flatten-datapoint-attention.jpg}{ABD：将 attributes flatten 后，在 $n$ 个 datapoints 之间做 self-attention。}{Stanford Online 官方视频 00:27:44--00:29:35。}
+
+\[
+R_{\mathrm{row}}:
+\mathbb{R}^{n\times d\times e}\rightarrow
+\mathbb{R}^{n\times (de)},
+\]
+\[
+\operatorname{ABD}(H)
+=R_{\mathrm{row}}^{-1}\!\left(
+\operatorname{MHSA}(R_{\mathrm{row}}(H))
+\right).
+\]
+
+\begin{itemize}
+  \item $R_{\mathrm{row}}$：把每个 datapoint 的 attributes 串成一个 row representation；
+  \item MHSA 的 sequence length 此时是 $n$，不是 $d$；
+  \item 一个 ABD layer 学 pairwise row interactions，多层可组合为 higher-order interactions；
+  \item 计算与 memory 的主要项随 $n^2$ 增长。
+\end{itemize}
+
+\subsection{ABA：在每一行内部重新组织 attributes}
+
+只做 ABD 会把整行当作一个不可分的 token，难以重新编码具体 columns。ABA 把张量恢复为 $n\times d\times e$，并对每一行独立地沿 $d$ 个 attributes 做 self-attention，使模型学习 per-datapoint transformation。
+
+\[
+\operatorname{ABA}(H)
+=\operatorname{stack}_{i=1}^{n}
+\left[\operatorname{MHSA}(H_{i,:,:})\right]
+\in\mathbb{R}^{n\times d\times e}.
+\]
+
+\begin{itemize}
+  \item $H_{i,:,:}$：第 $i$ 行的 attribute sequence；
+  \item ABA 在各 rows 之间共享参数，但每行独立计算；
+  \item 它学习 attribute interactions，不直接读取其他 datapoints；
+  \item ABD 与 ABA 交替，使“找相关行”和“变换当前行”互相促进。
+\end{itemize}
+
+\lecturefigure{slide-19-abd-aba-architecture.jpg}{完整交替架构：ABD 学跨 datapoint 关系，ABA 学单行变换，并保持 row permutation equivariance。}{Stanford Online 官方视频 00:29:36--00:31:03。}
+
+\begin{importantbox}{Permutation equivariance}
+令 $P\in\{0,1\}^{n\times n}$ 为 row permutation matrix，NPT 满足
+\[
+f(PX,PM)=P\,f(X,M).
+\]
+也就是说，打乱输入 rows 只会以同样方式打乱输出 rows，不应改变每个 datapoint 的预测内容。Equivariance 与 invariance 不同：输出不是保持完全不变，而是跟随输入置换。
+\end{importantbox}
+
+\teachervoice{讲者强调 ABD 与 ABA 的职责不同：前者捕捉 higher-order relationships between datapoints，后者处理 individual datapoint transformations。把二者都叫“attention block”会丢掉最关键的 tensor axis。}
+
+\teachervoice{Q\&A 中作者承认 ABA 不是不可替代的教条：ablation 显示它有益，但若 attribute 数极大，可以考虑用 compact MLP 替代，以降低 attribute dimension 的扩展成本。}
+
+\subsection{三阶段系统与 masking objective}
+
+前两阶段解决“输入如何表示、关系如何传播”，第三阶段决定模型为什么会学会 lookup。NPT 不是先训练普通 classifier 再在推理时临时加入 neighbors；它从训练开始就反复面对被遮住的 features 与 targets，并必须利用可见 entries 重建它们。
+
+\lecturefigure{slide-20-three-stage-overview.jpg}{NPT 三阶段：dataset input、datapoint attention、masking-based objective。}{Stanford Online 官方视频 00:31:04--00:33:33。}
+
+\lecturefigure{slide-21-stochastic-masking-objective.jpg}{Feature masking 与 target masking 的联合目标。}{Stanford Online 官方视频 00:33:34--00:33:52。}
+
+设 $\mathcal{L}_{\mathrm{Targets}}$ 是被 mask targets 的 negative log-likelihood 或回归 loss，$\mathcal{L}_{\mathrm{Features}}$ 是随机被 mask feature entries 的辅助重建 loss：
+\[
+\mathcal{L}_{\mathrm{NPT}}
+=(1-\lambda)\mathcal{L}_{\mathrm{Targets}}
++\lambda\mathcal{L}_{\mathrm{Features}}.
+\]
+
+\begin{itemize}
+  \item $p_{\mathrm{feature}}$：训练时随机遮住 feature values 的概率；
+  \item $p_{\mathrm{target}}$：训练时随机遮住 training targets 的概率；
+  \item $\lambda$：target loss 与 auxiliary feature loss 的权衡；
+  \item test time 只对 test targets 做 mask 与评估，不能暴露其真值。
+\end{itemize}
+
+\begin{knowledgebox}{两个 masking term 各自做什么}
+Feature masking 让模型学习整个数据矩阵的结构，增加 supervision 并提供 regularization；论文 ablation 中它帮助了十个 tabular datasets 中的八个。Target masking 则让部分 training labels 保持可见，使另一些被遮住的 rows 可以学习读取、匹配与变换这些 labels。
+\end{knowledgebox}
+
+\teachervoice{Neil Band 的关键解释是：模型不必把每条 training input--output mapping 全部记进 parameters；它可以把容量用于学习“如何利用其他 training features 与 targets”。这正是 learned k-NN intuition 从比喻变成 objective-level mechanism 的地方。}
+
+\begin{lstlisting}[caption={NPT forward 与随机 mask 的概念性伪代码。}]
+def npt_step(dataset, train_rows, test_rows, model):
+    mask = sample_feature_masks(dataset)
+    mask |= sample_training_target_masks(train_rows)
+    mask |= all_test_targets(test_rows)
+
+    hidden = per_attribute_embed(dataset, mask)
+    for _ in range(num_blocks):
+        hidden = attention_between_datapoints(hidden)  # ABD
+        hidden = attention_between_attributes(hidden)  # ABA
+    prediction = project_all_attributes(hidden)
+    return masked_entry_loss(prediction, dataset, mask)
+\end{lstlisting}
+
+\begin{warningbox}{Mini-batch approximation改变了 retrieval set}
+对大数据使用随机 mini-batch 时，某个 query 只能读取同 batch 的 datapoints，而不是全体训练集。增大 batch 提高候选覆盖，却带来 $O(b^2)$ attention 成本；因此 mini-batching 是统计与系统折中，不是严格等价的全数据计算。
+\end{warningbox}
+
+\teachervoice{作者给出具体尺度：不做 mini-batching 时可容纳约 8,000 points；11 million points 的数据集必须依赖 mini-batches。他们也观察到无需“荒谬地大”的 batch 才能学到跨 datapoint 关系，但这仍是经验结论。}
+
+\subsection{本章小结}
+
+NPT 将 $(X,M)$ 嵌入为 $n\times d\times e$ 张量，交替用 ABD 处理 rows、ABA 处理 columns，并以 masking objective 训练关系性 lookup。Row equivariance、test-label protection 与 quadratic datapoint attention 是理解实现的三条硬约束。
+

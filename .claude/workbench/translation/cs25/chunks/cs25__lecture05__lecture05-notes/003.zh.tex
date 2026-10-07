@@ -1,0 +1,44 @@
+\section{Switch Layer：为什么把 top-2 简化成 top-1}
+
+有了通用 MoE 定义，本节转向 Switch Transformer 的具体约束。它没有把所有 Transformer 操作都替换成专家，而是保留 self-attention，只在部分 FFN 位置插入 Switch layer。这样可以利用 FFN 在大模型中占据大量参数的特点，同时避免让注意力结构、残差路径和每一层都动态化。
+
+\lecturefigure{slide-07-switch-transformer-layer.jpg}{Switch layer：router 为每个 token 选择一个 FFN expert。}{Stanford Online 官方视频 00:05:38--00:07:21。}
+
+Switch 的 top-1 规则为：
+
+\[
+i^*(x)=\arg\max_{i\in\{1,\ldots,E\}}p_i(x),
+\qquad
+y(x)=p_{i^*}(x)E_{i^*}(x).
+\]
+
+其中，$i^*(x)$ 是 router 概率最高的 expert 索引；$p_{i^*}(x)$ 是保留的 gate 权重；$E_{i^*}(x)$ 是唯一被执行的 expert；$y(x)$ 是该层输出。与 top-2 相比，top-1 将每个 token 的 expert FFN 次数从两个降到一个，并减少 dispatch 数据量。
+
+\begin{lstlisting}[caption={Switch top-1 路由的概念性伪代码。}]
+def switch_layer(tokens, router, experts):
+    logits = router(tokens)
+    probs = softmax(logits, axis=-1)
+    expert_id = argmax(probs, axis=-1)
+    gate = gather(probs, expert_id)
+    output = dispatch_to_one_expert(tokens, expert_id, experts)
+    return gate * output
+\end{lstlisting}
+
+\begin{importantbox}{top-1 是系统设计，不只是数学删项}
+减少一个 expert 路径会同时改变 FFN FLOPs、token 通信、capacity buffer、router 训练和溢出行为。因此 top-1 的价值应通过 time-to-quality 与硬件效率评估，而不能只比较同一步数下的 loss。
+\end{importantbox}
+
+\teachervoice{Barret Zoph 特别说明，实际模型通常每两层或每四层才放一个 sparse layer。router 的 float32 计算也只占极小比例。换句话说，“Switch Transformer”仍然有大量普通 dense Transformer 结构。}
+
+仅把 top-2 改为 top-1 还不够。讲座把可用系统总结为四个控制件：router selective precision、较小初始化尺度、expert 层更强的 fine-tuning regularization，以及可微负载均衡。这些控制件分别处理数值误差、初始激活幅度、下游过拟合和硬件利用率。
+
+\lecturefigure{slide-08-improved-training-methodology.jpg}{Switch Transformer 的四类训练改进。}{Stanford Online 官方视频 00:07:22--00:08:49。}
+
+\begin{knowledgebox}{读图：四个改进分别管什么}
+Selective precision 管 router 的数值稳定；reduced initialization scale 管训练初期的激活和梯度幅度；higher regularization 管高参数容量在小数据上的过拟合；load-balancing loss 管 token 是否能形成近似等大的 expert batch。它们不是四个同义技巧，而是覆盖数值、优化、泛化与系统四个层面。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+Switch layer 只替换部分 FFN，并采用 top-1 routing。真正可用的方案是“简单路由加四类控制件”，而不是一个孤立的 argmax。
+

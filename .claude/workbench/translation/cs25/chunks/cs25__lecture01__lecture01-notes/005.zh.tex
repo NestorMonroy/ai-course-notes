@@ -1,0 +1,76 @@
+\section{Self-Attention：Query、Key、Value 与直接交互}
+
+\term{self-attention}（自注意力）让输入序列同时产生 query、key 和 value。每个位置用 query 与所有 key 比较，再用权重汇总 value。它与 encoder-decoder attention 的区别不是公式完全不同，而是 query、key、value 来自同一序列，因此 token 可以直接建立内部依赖。
+
+\subsection{Scaled dot-product attention}
+
+令输入矩阵 $X\in\mathbb{R}^{n\times d_{model}}$，线性投影得到
+\[
+Q=XW_Q,\qquad K=XW_K,\qquad V=XW_V.
+\]
+Scaled dot-product attention 为
+\[
+\operatorname{Attention}(Q,K,V)
+=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}+M\right)V.
+\]
+$n$ 是 token 数，$d_k$ 是 key/query 维度，$QK^\top$ 给出所有 query-key score，$\sqrt{d_k}$ 防止维度增大后 dot product 过大，$M$ 是可选 \term{mask}（掩码），把不允许访问的位置加上 $-\infty$，softmax 后权重近似为零。
+
+\lecturefigure{slide-11-self-attention-formulation.jpg}{Self-attention 用同一序列产生 query、key 与 value。}{官方视频 08:00；Vaswani et al. 2017。}
+
+\begin{knowledgebox}{读图：一个 token 同时有三种角色}
+Query 表示“我现在需要什么”，key 表示“我可以用什么索引被匹配”，value 表示“若被选中，我提供什么内容”。三者来自不同线性投影，因此同一个词可以用一种子空间决定相关性、另一种子空间传递信息。输出仍是一组 token representation，而不是把整段序列压成一个向量。
+\end{knowledgebox}
+
+\begin{importantbox}{三 token 手算直觉}
+假设 query 与三个 key 的缩放分数为 $[2,1,0]$，softmax 后约为 $[0.665,0.245,0.090]$。若 values 是 $v_1,v_2,v_3$，输出就是 $0.665v_1+0.245v_2+0.090v_3$。这不是从数据库取回一条记录，而是可微的加权混合；训练会同时学习 score space 和 value content。
+\end{importantbox}
+
+\begin{lstlisting}[caption={Scaled dot-product attention 的最小伪代码}]
+scores = (query @ key.transpose(-2, -1)) / sqrt(key_dim)
+scores = scores + mask
+weights = softmax(scores, dim=-1)
+output = weights @ value
+\end{lstlisting}
+
+\subsection{信息路径与并行性}
+
+RNN 中第一个 token 影响最后一个 token，通常需要经过 $O(n)$ 个递归步骤；单层 full self-attention 中，任意两位置通过一条 attention edge 直接交互。训练时所有 query 可用矩阵乘法并行计算，这与 accelerator 的高吞吐特性相匹配。代价是显式 score matrix 有 $n\times n$ 项。
+
+\lecturefigure{slide-12-self-attention-diagram.jpg}{Self-attention 将 token-to-token 关系展开为可并行的直接连接。}{官方视频 10:30；课堂动画 final state。}
+
+\begin{knowledgebox}{读图：看连接，不要只看方框}
+图中输入 token 经线性投影产生多组表示，每个输出位置聚合来自其他位置的信息。与 recurrent chain 相比，依赖路径更短；与 convolution 相比，连接不是固定局部 kernel，而是由内容动态决定。图没有展示的是 attention head 之间的分工、residual path 和层间堆叠，因此它解释 routing，不代表完整 Transformer block。
+\end{knowledgebox}
+
+\begin{warningbox}{直接连接不等于自动学会正确关系}
+Self-attention 允许任意 token 交互，但模型仍需要数据、objective、position、optimization 和足够层数来学习有用模式。高容量还可能拟合 shortcut、spurious correlation 或泄漏信息；可访问性是能力条件，不是正确性保证。
+\end{warningbox}
+
+\subsection{Multi-head attention}
+
+\term{multi-head attention}（多头注意力）并行执行多个较低维 attention：
+\[
+\operatorname{head}_r=\operatorname{Attention}(QW_r^Q,KW_r^K,VW_r^V),
+\qquad
+\operatorname{MHA}=\operatorname{Concat}(\operatorname{head}_1,\ldots,\operatorname{head}_H)W^O.
+\]
+不同 head 可以学习局部、长距离、句法或位置模式，但不保证每个 head 都有清晰人类语义。多头的主要作用是提供多个表示子空间和并行 routing channel。
+
+\begin{knowledgebox}{术语消化：Q/K/V、head 与 mask}
+\begin{tabularx}{\textwidth}{L{0.18\textwidth} X}
+\toprule
+术语 & 解决的问题与课程关系 \\
+\midrule
+Query & 为当前位置表达读取需求；决定它向哪些 key 发问。 \\
+Key & 为候选位置提供匹配索引；与 query 共同产生 score。 \\
+Value & 被权重混合的内容；相关性与传递内容可使用不同子空间。 \\
+Head & 独立投影和 attention channel；扩展关系类型与表示容量。 \\
+Mask & 强制信息边界；padding mask 忽略空位，causal mask 阻止看到未来。 \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+Self-attention 的核心是可学习的 query-key 匹配与 value 混合。它缩短依赖路径并提高训练并行性，却产生二次 score matrix，并且需要 position、mask、residual 与 normalization 才能成为稳定架构。
+

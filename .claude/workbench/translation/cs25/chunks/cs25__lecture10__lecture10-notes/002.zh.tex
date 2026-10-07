@@ -1,0 +1,71 @@
+\section{固定硬件与动态 Parse Tree 的矛盾}
+
+一张图像中的“眼睛属于脸、轮子属于车”并不是固定树；换一张图，节点数、部件种类和连接方式都会改变。程序可以动态申请内存并写 pointer，真实神经元却不能在几毫秒内重写全部连接权重。GLOM 的核心问题因此可以写成：\emph{在不动态分配 neuron identity 的条件下，怎样让 activity 表示一个每次输入都变化的 parse tree？}
+
+\lecturefigure{slide-04-hard-part-whole-hierarchies.jpg}{每张图有不同 parse tree，但真实神经网络不能即时分配新神经元。}{Stanford Online 官方视频 00:02:38--00:04:13。}
+
+\begin{importantbox}{核心矛盾}
+网络连接参数 $\theta$ 在样本之间变化很慢，而输入 $I$ 对应的结构 $\mathcal T(I)$ 每次都不同。目标不是让 $\theta$ 直接存一棵固定树，而是让由 $\theta$ 计算出的动态状态 $\mathbf E(I)$ 在一次 inference 内编码 $\mathcal T(I)$。
+\end{importantbox}
+
+\subsection{Symbolic allocation、Capsule routing 与 universal capsule}
+
+Symbolic AI 的答案很直接：拿一块 memory 当 node，再写入指向其他 node 的 pointer。早期 capsule 路线则预先分配许多可能节点，每个 capsule 专门表示一种 entity；一次输入只激活其中少量 capsule，并用 routing 决定 parent-child connection。这避免了动态创建 neuron，却带来大量静默硬件、type-specific capsule 与 routing optimization。
+
+\lecturefigure{slide-05-symbolic-ai-and-capsules.jpg}{两条旧路线：动态符号内存，或预分配 capsule 再执行 routing。}{Stanford Online 官方视频 00:04:14--00:05:35。}
+
+\teachervoice{Hinton 用一句很有教学价值的话评价研究想法：有些 idea “want to work”，有些不想工作；capsule 介于两者之间，经过大量努力可以工作，但过程艰难。这不是对 capsule 的否定，而是在提醒我们：结构先验越强，optimization contract 越必须讲清楚。}
+
+GLOM 把 capsule 改成 \term{universal capsule}：硬件仍按空间位置组织成 column，但每个 column 的同一层级 embedding 不再预先绑定“只能表示鼻子”或“只能表示轮子”。它可以表示任意 identity 与 pose；“它这次是什么”由 activity 决定，而不是由 capsule 的固定类型决定。
+
+\subsection{Column、level 与 island of agreement}
+
+把图像划成空间位置 $x\in\mathcal X$，每个位置建立一个 column；column 内有多个层级 $\ell=0,1,\ldots,L$。同一位置可能从低到高表示纹理、nostril、nose、face、person、scene。GLOM 不为“face node”分配一颗专用 neuron，而让属于同一 face 的位置在 face level 上逐渐形成近似相同的 embedding。
+
+\lecturefigure{slide-06-islands-of-identical-vectors.jpg}{新表示：用同层 embedding 的 islands 表示 parse-tree node。}{Stanford Online 官方视频 00:05:36--00:08:29。}
+
+令 $\mathbf e_{x,\ell}^{(t)}\in\mathbb R^d$ 表示位置 $x$、层级 $\ell$、settling step $t$ 的动态向量。一个候选 island $S$ 可用下面的近似条件描述：
+
+\[
+\max_{x,y\in S}\left\|\mathbf e_{x,\ell}^{(t)}-\mathbf e_{y,\ell}^{(t)}\right\|_2\le \varepsilon.
+\]
+
+其中，$S$ 是某个层级上的位置集合，$d$ 是 embedding 维度，$t$ 是 recurrent inference 的迭代步，$\varepsilon$ 是“足够相似”的容差。课堂二维箭头只用方向表示 equality；它不是说真实表示只有两个维度，也不是要求所有分量严格 bitwise identical。
+
+\begin{importantbox}{动态 activity 才是 pointer}
+参数权重决定“如何更新向量”，embedding activity 决定“当前输入里这个位置属于谁”。因为 activity 每张图都能变化，固定网络可以形成不同 islands；这些 islands 及其跨层对应关系承担了 dynamic parse-tree node 的角色。
+\end{importantbox}
+
+\lecturefigure{slide-07-column-embedding-hierarchy.jpg}{一维位置示意：低层向量各异，高层逐渐形成更大的 agreement islands。}{Stanford Online 官方视频 00:08:30--00:09:15。}
+
+\begin{knowledgebox}{读图：箭头方向只编码“是否相同”}
+先沿横轴看空间位置，再沿竖轴看抽象层级。最底层黑色箭头各不相同，表示每个 patch 的局部内容不同；向上后，连续位置出现同方向红、绿、蓝箭头，表示它们在该层被解释为同一 part、object 或 scene。问号表示尚未 settle 的状态。图不提供 embedding 的真实数值、置信度或边界阈值，因此只能读出设计意图，不能读成 segmentation result。
+\end{knowledgebox}
+
+\begin{knowledgebox}{术语消化：不要把四个对象混成一个词}
+\begin{tabularx}{\textwidth}{L{0.21\textwidth}L{0.29\textwidth}X}
+\toprule
+术语 & 在 GLOM 中是什么 & 容易混淆之处 \\
+\midrule
+column & 一个空间位置上的多层硬件与状态 & 不是 CNN channel，也不是数据库 column \\
+level & part-whole hierarchy 的一个抽象尺度 & 不是普通深层网络的第 $k$ 层同义词 \\
+embedding & 某位置、层级、时间步的动态 activity vector & 不是固定词向量，也不是网络权重 \\
+island & 同层相邻或可关联位置形成的近似一致区域 & 不是输入中预先给出的 mask，也不保证等于 ground-truth object \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{比普通空间分割更宽的结构}
+
+Hinton 特别指出，island 不必只表达连续图像区域。在语言中，短语的两个 fragment 可以在更高层获得相同表示，即使它们在序列中并非一个连续二维块。这意味着 GLOM 想表达的是“共同属于一个 higher-level entity”，而不只是 connected-component segmentation。
+
+\teachervoice{课堂用 “shut” 与 “up” 举例：低层是两个不同 fragment，高层可以共享 “shut up” 的向量。这个例子提示我们，island 的拓扑由 neighborhood 与 attention graph 决定，不应被狭义理解为像素平面上的实心色块。}
+
+\begin{warningbox}{Island 不自动等于 object}
+即使某层出现大块相似向量，也可能来自 texture、背景、错误 collapse 或 optimization shortcut。若要声称“模型发现对象”，还需 segmentation alignment、intervention、cross-view consistency 与下游因果使用等证据。本讲没有提供这些实验。
+\end{warningbox}
+
+\subsection{本章小结}
+
+GLOM 用 universal capsule 与 dynamic embeddings 替代 type-specific node allocation。它的关键主张不是“多做几层 attention”，而是让每个层级的 agreement pattern 本身成为 parse structure；真正困难的下一步，是让这种 agreement 既能形成又不会全局塌缩。
+

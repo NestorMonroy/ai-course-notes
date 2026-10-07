@@ -1,0 +1,71 @@
+\section{Next-token Prediction：一个目标怎样承载海量任务}
+
+上一章给出方法，本章进入 Jason 的第一个核心直觉。语言模型训练表面上只要求预测下一个 token，但每个 token 的正确概率可能依赖语法、词义、事实、空间关系、翻译、算术甚至文档体裁。关键不是给预训练贴上 ``multi-task'' 标签，而是理解任务边界如何由上下文临时形成。
+
+\subsection{从概率分布到训练损失}
+
+本节先补齐最小数学背景。给定历史 token $x_{<t}=(x_1,\ldots,x_{t-1})$，模型输出词表上每个候选 token 的条件概率；训练时只观察真实 token $x_t$，并提高它的概率。读 slide 时先区分 ``模型输出整个分布'' 与 ``数据只给出一个观测结果''。
+
+\lecturefigure{jason-slide-004.jpg}{语言模型为词表中的每个候选词分配下一个位置的概率}{Jason Wei official deck, p.~4}
+
+自回归语言模型的负对数似然可以写成
+\[
+\mathcal{L}_{\mathrm{NLL}}(\theta)=-\frac{1}{T}\sum_{t=1}^{T}\log p_{\theta}(x_t\mid x_{<t}).
+\]
+其中 $\theta$ 表示模型参数，$T$ 是序列长度，$p_{\theta}(x_t\mid x_{<t})$ 是模型给真实下一个 token 的概率。概率越低，$-\log p$ 惩罚越大；优化器通过梯度更新 $\theta$，使训练分布中的真实 continuation 更可能。
+
+\begin{knowledgebox}{什么是 perplexity}
+Perplexity（困惑度，PPL）是平均交叉熵的指数：
+\[
+\operatorname{PPL}=\exp\!\left(\mathcal{L}_{\mathrm{NLL}}\right).
+\]
+它可粗略理解为模型在每一步面对的“有效候选数”。例如 PPL 为 10 并不表示模型真的在十个词之间均匀选择；它只是对数损失的指数化摘要，也不能直接等同于事实性、推理正确率或人类偏好。
+\end{knowledgebox}
+
+\subsection{Massive multi-task learning 不是比喻}
+
+有了损失定义，下一步是问一个 token 的概率由什么决定。只要语料足够大，模型会在不同上下文中反复遇到语法、语义、事实与任务格式。每一种可预测规律都会对同一个 NLL 贡献梯度，因此统一目标在参数空间中叠加了许多局部学习信号。
+
+\lecturefigure{jason-slide-005.jpg}{直觉一：大规模 next-word prediction 是 massive multi-task learning}{Jason Wei official deck, p.~5}
+
+\begin{importantbox}{Latent task 的定义}
+Latent task（潜在任务）是由上下文临时规定、却没有显式 task ID 的预测子问题。例如 ``The capital of Azerbaijan is'' 触发事实检索，``The movie was'' 可能触发情感补全，``The Spanish word for pretty is'' 触发翻译。它们共享一个词表和一个损失，却需要不同中间计算。
+\end{importantbox}
+
+\lecturefigure{jason-slide-006.jpg}{预训练句子同时教授语法、语义、事实、情感、翻译、空间与算术}{Jason Wei official deck, p.~6}
+
+\begin{knowledgebox}{读图：先比较“监督从哪里来”}
+每一行都没有单独标注任务名称，监督来自真实 continuation。语法例子要求排除不合句法的词；世界知识例子要求把 Baku 排在 London 前；空间例子要求跟踪人物位置；算术例子则要求利用题面关系。图支持的不是“模型一定学会了每项能力”，而是“语料确实向这些能力提供了概率梯度”。
+\end{knowledgebox}
+
+\teachervoice{Jason 在 00:04:59--00:07:03 连续给出多个例子，最后强调这样的任务可以有数百万个。课堂语气很重要：他没有声称预训练数据天然均衡，而是说只要相关句子存在，next-token objective 就可能从中吸收监督。}
+
+\subsection{任务可以任意到难以命名}
+
+上一页列出的任务都很“干净”，容易被人类命名；本节故意看一个难以归类的 continuation。若一句 Wikipedia 文本依次要求预测人名、逗号、冠词和职业词，每个位置调用的规律都不同。任务不是预先列好的 benchmark，而是序列中每个条件分布提出的瞬时问题。
+
+\lecturefigure{jason-slide-007.jpg}{同一句文本中的潜在任务可以从事实跳到标点，再跳到难命名的续写规律}{Jason Wei official deck, p.~7}
+
+设语料中第 $t$ 个 token 隐含任务 $z_t$，则训练目标可概念性地写成
+\[
+\mathcal{L}=\mathbb{E}_{(x,z)\sim\mathcal{D}}\bigl[\ell(x_t,x_{<t};z_t)\bigr].
+\]
+其中 $\mathcal{D}$ 是训练分布，$z_t$ 不是数据中显式提供的标签，而是分析者为了理解所引入的潜变量，$\ell$ 是该位置的预测损失。这个写法提醒我们：同一个 token 可能同时依赖多个规律，因此任务分解只是解释工具，不保证存在唯一正确边界。
+
+\begin{warningbox}{不要把 pretraining corpus 想成自动清洗好的任务仓库}
+同一机制也会学习拼写错误、偏见、伪相关、模板复制与低质量来源。Q\&A 中 Jason 明确说，训练时并不会自动区分好坏数据；研究者仍要审查数据来源、过滤明显不可靠内容，并用独立评估检查学到的是可迁移规律还是数据捷径。
+\end{warningbox}
+
+\begin{lstlisting}[caption={把一段文本拆成 latent-task probe 的伪代码}]
+for position in document:
+    context = tokens[:position]
+    target = tokens[position]
+    ask("What knowledge or rule raises target probability?")
+    tag(grammar, fact, format, reasoning, noise, other)
+    store(context, target, tags)
+\end{lstlisting}
+
+\subsection{本章小结}
+
+Next-token prediction 之所以强，不是因为目标名称复杂，而是因为语料把大量条件预测问题折叠进同一个目标。模型每次只优化真实 token 的概率，却在共享参数中累计了跨任务的表示和计算模式。这个视角为下一章铺路：若总体 loss 是许多潜在任务损失的混合，那么总体曲线与单项能力曲线就不必具有同一种形状。
+

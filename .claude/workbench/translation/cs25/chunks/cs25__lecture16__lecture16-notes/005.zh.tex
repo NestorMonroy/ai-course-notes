@@ -1,0 +1,77 @@
+\section{Symbolic Knowledge Distillation}
+
+人工 crowdsourcing 提供高质量 schema 和 seed knowledge，却难以覆盖长尾。直接让 GPT-3 大量生成又会得到巨量噪声。Symbolic Knowledge Distillation 把这两个事实组合成 pipeline：general LM 负责规模，critic 负责选择，symbolic corpus 负责可审计中间层，student model 负责低成本使用。
+
+\subsection{Smaller and Better 为什么不是普通 Distillation}
+
+问题 slide 用漏斗问：能否把 GPT-3 变小，同时比 teacher 更好？普通 knowledge distillation 通常让 student 逼近 teacher distribution，因此容量下降往往伴随质量下降。这里的突破口不是更精确复制全部 teacher，而是只蒸馏一个 aspect——causal commonsense——并丢弃 teacher 的低质量样本。
+
+\lecturefigure{slide-18-symbolic-distillation-smaller-better-question.jpg}{Symbolic KD 的反直觉目标：student 更小也更好}{官方录像恢复幻灯片 V018；West et al., 2022}
+
+完整 pipeline 把 GPT-3 samples 送入 critic，筛选后形成约 6.5M 高质量 knowledge graph，再训练 student commonsense model。图中的黄色回路意味着数据可以被保存、检查和复用；知识不只以 neural weights 存在。这也是“symbolic”一词的关键，而不是说生成过程完全由手写规则完成。
+
+\lecturefigure{slide-19-symbolic-kd-pipeline.jpg}{Symbolic Knowledge Distillation：teacher、critic、knowledge graph 与 student}{官方录像恢复幻灯片 V019；West et al., 2022}
+
+\begin{importantbox}{三种资源要分开核算}
+Teacher compute 决定候选生成成本；critic labels 决定过滤质量；student training 决定部署成本。只报告 student 参数量会隐藏前期 teacher 调用和人工 critic supervision。系统更便宜，通常指重复 inference 更便宜，不代表整个知识生产过程零成本。
+\end{importantbox}
+
+\subsection{从 Distribution Matching 到 Symbolic Samples}
+
+经典蒸馏让 student distribution $P_S$ 匹配 teacher $P_T$：
+\begin{equation}
+H(P_T,P_S)=-\sum_{y\in\mathcal{Y}}P_T(y)\log P_S(y).
+\end{equation}
+分类任务的 $\mathcal{Y}$ 可枚举；句子空间却指数巨大。Symbolic KD 用 teacher samples 近似期望，同时把 sampled strings 组织成知识三元组，因此 sample 既是优化近似，也是可发布 corpus。
+
+\lecturefigure{slide-20-knowledge-distillation-formula-symbolic-output.jpg}{Sequence-level distillation：采样近似与 symbolic corpus 副产物}{官方录像恢复幻灯片 V020；West et al., 2022}
+
+若 $y^{(k)}\sim P_T(\cdot\mid x)$，可用 Monte Carlo 近似
+\begin{equation}
+H(P_T,P_S)\approx -\frac{1}{K}\sum_{k=1}^{K}
+\log P_S\!\left(y^{(k)}\mid x\right).
+\end{equation}
+$K$ 是每个 query 的 teacher samples 数量。仅靠采样会忠实继承 teacher 噪声，因此还需要 critic score $c_\phi(x,y)$。
+
+\subsection{Loose Teacher 与 Critical Teacher}
+
+comparison slide 区分 loose teacher 与 critical teacher。loose teacher 保留更多 GPT-3 generations，规模大但噪声多；critical teacher 只保留 critic 认可的 subset，数据少却更准。最关键的比较不是“有无 GPT-3”，而是“teacher sample 是否经过独立质量模型筛选”。
+
+\lecturefigure{slide-21-loose-critical-teacher-comparison.jpg}{Loose teacher 与 critical teacher：数量和质量的交换}{官方录像恢复幻灯片 V021；West et al., 2022}
+
+可把过滤后的 corpus 写为
+\begin{equation}
+\mathcal{D}_{\tau}=\{(x,y):y\sim P_T(\cdot\mid x),\ c_{\phi}(x,y)\ge\tau\},
+\end{equation}
+其中 $\tau$ 是接受阈值。提高 $\tau$ 通常减少数据量、提高 precision，却可能丢失稀有但正确的知识。critic 由约一万条 moderate-size human labels 训练，它不是 truth oracle，而是显式、可测量的 quality gate。
+
+\begin{lstlisting}[caption={Symbolic Knowledge Distillation 的数据与训练流程}]
+def symbolic_distill(queries, teacher, critic, threshold):
+    accepted = []
+    for query in queries:
+        for candidate in teacher.sample(query, many=True):
+            if critic.score(query, candidate) >= threshold:
+                accepted.append(to_typed_triple(query, candidate))
+    knowledge_graph = deduplicate_and_validate(accepted)
+    student = train_commonsense_model(knowledge_graph)
+    return knowledge_graph, student
+\end{lstlisting}
+
+\subsection{结果：Student 为什么可能超过 Teacher}
+
+结果 slide 的左侧比较 human-authored、GPT-3 loose teacher 与 critical teacher；右侧比较对应 students。读图时先观察绿色 good knowledge 占比，再看 student bar。critical teacher 虽然数据较少，却让 student 获得更高 human-judged accuracy，说明 filtering 改变了训练分布，而不是简单压缩 teacher 行为。
+
+\lecturefigure{slide-22-critic-student-results.jpg}{Critical teacher 产生更高质量知识和更强 student}{官方录像恢复幻灯片 V022；West et al., 2022}
+
+下一页在 accuracy、scale、value 与 diversity 四个轴上比较 human-authored ATOMIC 2020 与 machine-authored ATOMIC10x。绿色柱整体更高，支持自动蒸馏在指定关系类型上的规模与质量增益。底部限定非常重要：实验聚焦七类 causal commonsense relation，不能外推成“机器生成知识在所有领域都优于人类”。
+
+\lecturefigure{slide-23-atomic10x-human-vs-machine.jpg}{ATOMIC10x 与人工 ATOMIC 的 accuracy、scale、value、diversity 对比}{官方录像恢复幻灯片 V023；West et al., 2022}
+
+\begin{warningbox}{Critic 会把偏差变成 Corpus Policy}
+critic 的训练标签、阈值和负例定义决定哪些知识被保留。若 critic 偏好常见表达、主流文化或短句，filtered corpus 会系统性丢失少数观点。可审计的 symbolic layer 让问题更容易发现，但不会自动消失。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Symbolic KD 的核心不是“大模型教小模型”这句泛化口号，而是 teacher generation、critic filtering、symbolic corpus 与 student deployment 的四段式资源设计。student 超过 teacher 的原因在于任务专门化与数据选择，而不是参数量本身创造了额外知识。
+

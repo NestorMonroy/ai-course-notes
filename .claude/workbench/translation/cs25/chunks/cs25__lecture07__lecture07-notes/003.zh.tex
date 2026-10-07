@@ -1,0 +1,84 @@
+\section{Fast Autoregressive Training：为什么 decoder 能并行训练}
+
+生成模型在推理时必须逐 token 展开，但训练不必照搬这一串行过程。Transformer decoder 的关键是把真实 target sequence 整体右移后送入模型，并通过 causal mask 保证每个位置只能看到过去。于是所有位置的 next-token loss 可以在一次并行前向中计算。
+
+\lecturefigure{slide-05-decoder-transition.jpg}{Transformer decoder 与 fast autoregressive decoding 的转场。}{Stanford Online 官方视频 00:03:28--00:04:07。}
+
+给定输入 $x$ 与输出序列 $y_{1:T}$，autoregressive factorization 为
+\[
+p(y_{1:T}\mid x)=\prod_{t=1}^{T}p(y_t\mid y_{<t},x).
+\]
+
+\begin{itemize}
+  \item $T$：输出长度；
+  \item $y_{<t}$：位置 $t$ 之前的 prefix；
+  \item 推理时必须先得到 $y_{t-1}$，才能构造下一步条件；
+  \item 训练时已有完整 gold sequence，可以同时构造所有正确 prefixes。
+\end{itemize}
+
+\lecturefigure{slide-06-sequence-generation.jpg}{序列生成：训练目标是学习从输入序列到输出序列的条件映射。}{Stanford Online 官方视频 00:04:08--00:05:19。}
+
+\subsection{Teacher Forcing：用 gold prefix 训练每一个位置}
+
+Teacher forcing（教师强制）指训练时把真实历史 tokens 而非模型自己的采样结果作为 decoder 输入。设右移后的输入为 $\tilde y=(\langle\mathrm{BOS}\rangle,y_1,\ldots,y_{T-1})$，则一次 forward 可以产生全部位置的 logits，并计算
+\[
+\mathcal{L}_{\mathrm{TF}}
+=-\sum_{t=1}^{T}\log p_{\theta}(y_t\mid y_{<t},x).
+\]
+
+\begin{itemize}
+  \item $\theta$：模型参数；
+  \item $p_{\theta}(y_t\mid y_{<t},x)$：在正确 prefix 下对第 $t$ 个 target 的概率；
+  \item 每个 $t$ 的 hidden state 可并行计算，但序列维度仍有 attention 与 memory 成本；
+  \item 训练条件与自由生成条件不同，会形成 exposure bias，但不改变并行训练的正确性。
+\end{itemize}
+
+\lecturefigure{slide-07-autoregressive-decoding.jpg}{推理逐步生成，训练则可以一次喂入完整的正确 target sequence。}{Stanford Online 官方视频 00:05:20--00:06:03。}
+
+\teachervoice{Gomez 称这个细节“有点 subtle，但对训练速度影响巨大”。模型在训练早期即使自己会生成垃圾 token，也仍在正确 prefix 上学习每个 next-token conditional；正是这种并行监督让大规模 Transformer 训练成为可能。}
+
+\lecturefigure{slide-08-teacher-forcing.jpg}{Teacher forcing 的核心问题：如何在一次 decoder 调用中预测所有位置而不泄露答案？}{Stanford Online 官方视频 00:06:04--00:06:33。}
+
+\begin{lstlisting}[caption={Teacher forcing 与 causal mask 的概念性训练步骤。}]
+def autoregressive_training(source, target, model):
+    decoder_input = shift_right(target, bos_token=True)
+    causal_mask = upper_triangle_is_blocked(len(target))
+    logits = model(source, decoder_input, causal_mask=causal_mask)
+    return cross_entropy(logits, target)
+\end{lstlisting}
+
+\subsection{Causal Mask：并行不等于允许看未来}
+
+上一小节已经说明 gold sequence 为什么能换来并行监督，本小节补上这个技巧成立的必要条件：每个位置的计算图仍必须与 autoregressive factorization 一致。若把完整 target 直接交给 self-attention，位置 $t$ 可以读取 $y_t$ 或未来 token，训练任务会退化为抄答案；因此读下面公式时应同时检查“哪些位置可见”和“并行矩阵乘法是否仍被保留”。Causal mask 把 attention logits 的严格上三角设为负无穷：
+\[
+C_{ij}=\begin{cases}
+0, & j\le i,\\
+-\infty, & j>i,
+\end{cases}
+\qquad
+A=\operatorname{softmax}\!\left(\frac{QK^{\top}}{\sqrt{d_k}}+C\right).
+\]
+
+\begin{itemize}
+  \item $i$：当前 query 位置；
+  \item $j$：被读取的 key/value 位置；
+  \item $j>i$ 的未来位置在 softmax 后权重为零；
+  \item mask 保留并行矩阵计算，同时维护 autoregressive conditional 的信息边界。
+\end{itemize}
+
+\lecturefigure{slide-09-causal-mask.jpg}{完整 causal mask：每个位置只能读取自身与左侧 prefix。}{Stanford Online 官方视频 00:12:36--00:13:04。}
+
+\begin{knowledgebox}{读图：黑白矩阵代表什么}
+横轴可理解为 key/value 位置，纵轴为 query 位置。允许区域形成下三角；被遮挡的未来区域不会参与归一化。图中 mask 的价值不是节省计算，而是阻止 target leakage，使并行训练仍等价于正确的 next-token likelihood。
+\end{knowledgebox}
+
+\begin{warningbox}{训练并行与推理解码不要混为一谈}
+Teacher forcing 让训练中的所有位置并行，但普通 autoregressive inference 仍需逐步采样，因为下一步输入取决于模型刚生成的 token。KV cache、speculative decoding 等技术优化推理成本，却不是 teacher forcing 本身。
+\end{warningbox}
+
+\teachervoice{讲者反复强调“不能向前偷看”：我们已经把正确答案放进 decoder input，如果没有 causal mask，零误差并不意味着模型学会生成，只意味着它发现了数据泄漏。}
+
+\subsection{本章小结}
+
+Autoregressive likelihood 仍按时间分解；teacher forcing 只是利用已知 targets 并行构造所有正确 prefixes。Causal mask 是维持信息边界的必要条件，它把“并行训练”和“未来不可见”同时实现。
+

@@ -1,0 +1,83 @@
+\section{Multi-Agent Systems：并行不等于自动更聪明}
+
+课堂从单 agent 转向多 agent，主要动机是 parallel execution、task decomposition 与 specialization。这个转向类似从单线程到多线程：可以降低 wall-clock latency、扩大处理规模，但也引入通信、同步、共享状态与错误聚合问题。
+
+\subsection{从单 Agent 到 Autonomous AI System}
+
+Multi-Agent System slide 用一个上层 agent 与多个下层 agent 表示任务分派。图形很简洁，却包含关键架构选择：谁拥有全局目标、谁能创建子任务、worker 是否共享 memory、结果由谁验证，以及失败后是局部重试还是全局重规划。本节先把这些隐含选择显式化，再讨论并行化真正能节省什么。
+
+\lecturefigure{slide-55-multi-agent-system.jpg}{Manager 与多个 worker 构成的 Multi-Agent System}{Stanford 课堂视频 00:43:00}
+
+\begin{knowledgebox}{读图：树形结构隐含控制面与执行面}
+Manager 属于 control plane，负责 decomposition、routing、budget 和 aggregation；workers 属于 execution plane，调用各自工具完成 bounded tasks。若每个 worker 都能无限创建新 worker，系统会失去资源上限和责任边界。
+\end{knowledgebox}
+
+\teachervoice{讲者说，即使单 agent 达到很高成功率，它一次也只能顺序做一件事；多 agent 的直接收益首先是 parallelization，而不是凭空提高推理质量。}
+
+\subsection{为什么 Multi-Agent：并行、规模与专长}
+
+Why Multi-Agent slide 列出 parallelization unlock、task specialization、collaboration 和 agent-to-agent communication。以 Craigslist 家具搜索为例，多个 worker 可以并行联系候选，再由 manager 聚合；另一个例子是 spreadsheet、Slack 与 browser agent 各自负责熟悉的工具域。
+
+\lecturefigure{slide-56-why-multi-agent.jpg}{Multi-Agent 的并行化、专长与协作动机}{Stanford 课堂视频 00:45:39}
+
+\begin{importantbox}{并行收益与可靠性代价}
+若 $n$ 个独立子任务串行时间为 $\sum_i T_i$，理想并行时间接近
+\[
+T_{parallel}\approx \max_i T_i+T_{route}+T_{sync}+T_{aggregate}.
+\]
+通信与聚合开销过大时，并行不一定更快。若任务要求所有 $n$ 个结果都正确且单项成功率为 $p$，独立近似下端到端成功率为 $p^n$；子任务越多，验证与局部重试越重要。
+\end{importantbox}
+
+\begin{warningbox}{Specialization 也会产生接口债务}
+专用 agent 可以减少 prompt 与工具复杂度，但 manager 必须知道各 worker 的能力、输入 schema、权限和失败模式。没有明确 contract 的“专家群聊”容易出现重复工作、责任漂移和互相相信错误结果。
+\end{warningbox}
+
+\subsection{Communication Protocol：消息要携带状态}
+
+Communication overview slide 画出 user、manager 与 worker agents。课堂把 communication 称为最大挑战，并设想标准 protocol 表达 request、final response、success/failure、retry 与 security。协议的价值不只是格式统一，而是让任务状态可机读、可审计。
+
+\lecturefigure{slide-57-agent-communication-overview.jpg}{User、manager 与 worker 之间的通信结构}{Stanford 课堂视频 00:47:30}
+
+\begin{knowledgebox}{Agent message 的最小字段}
+一条可靠消息至少应包含 \texttt{task\_id}、\texttt{parent\_id}、目标、输入来源、允许工具、deadline、budget、expected output schema、status 与 evidence。自由文本可解释意图，但不能替代 machine-checkable contract。
+\end{knowledgebox}
+
+\teachervoice{讲者把 agent communication 与人类组织中的 miscommunication 类比，并预期会出现标准协议来表达成功、失败、重试和安全信息。重点是减少信息丢失，不是让 agents 说得更像人。}
+
+\subsection{Manager--Worker：成功回报与显式重做}
+
+Task slide 展示 manager 把任务分给 agents，并接收状态更新；下一页展示 worker 返回错误结果后，manager 发送 re-do。两页共同说明 multi-agent reliability 依赖 state transition，而不是一次性广播任务后等待任意自然语言回复。
+
+\lecturefigure{slide-58-agent-communication-task.jpg}{Manager 分派任务并接收 worker 状态}{Stanford 课堂视频 00:49:00}
+
+\begin{knowledgebox}{读图：Manager 必须维护 authoritative task state}
+每个子任务需要 queued、running、blocked、failed、verified 等状态。Worker 的“done”只是声明，manager 还要检查 output schema 与 evidence；否则一个错误 completion 会污染后续 aggregation。
+\end{knowledgebox}
+
+\lecturefigure{slide-59-agent-communication-redo.jpg}{错误任务触发 manager 的 re-do 指令}{Stanford 课堂视频 00:49:51}
+
+\begin{knowledgebox}{读图：重试应改变条件而不是机械重复}
+有效 re-do 应附带 failure reason、修正约束、剩余预算和最大次数。若输入、工具和策略都不变，无限 retry 只会放大成本；超过阈值后应升级给用户或切换 worker。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={带验证和有限重试的 manager--worker 协议}]
+def run_subtask(task, workers, retry_limit=2):
+    attempt = 0
+    feedback = None
+    while attempt <= retry_limit:
+        worker = route(task, workers, feedback)
+        report = worker.execute(task, feedback)
+        verdict = verify_schema_evidence_and_constraints(report, task)
+        if verdict.ok:
+            return mark_verified(report)
+        feedback = verdict.failure_reason
+        attempt += 1
+    return escalate_to_manager_or_user(task, feedback)
+\end{lstlisting}
+
+\teachervoice{课堂用 very concrete 的 re-do message 说明：多 agent 不是把多个模型同时启动就结束，manager 必须知道 worker 是否做错，并把纠正信息重新注入流程。同步与通信本身就是核心能力。}
+
+\subsection{本章小结}
+
+Multi-agent 的主要收益来自 parallelization、task decomposition 与 specialization；其主要代价来自 routing、communication、synchronization、aggregation 和 compound failure。Manager--worker 系统必须使用结构化状态、evidence-based verification、有限重试与升级路径。
+

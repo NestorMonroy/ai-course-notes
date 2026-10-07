@@ -1,0 +1,109 @@
+\section{搜索、Critique 与 Preference Learning：AgentQ 的训练机制}
+
+AgentQ 论文把三种机制组合起来：Monte Carlo Tree Search（MCTS）扩大探索，LLM critique 为中间节点提供过程反馈，Direct Preference Optimization（DPO）风格目标从较好与较差轨迹中学习。三者分别解决“没有探索”“不知道哪里错”“成功经验不能沉淀”的问题。
+
+\lecturefigure{slide-34-agentq-methods-paper.jpg}{AgentQ 的三项组件：MCTS、self-critique/process supervision 与 DPO}{00:20:47}
+
+\subsection{MCTS：为长任务保留替代分支}
+
+树搜索把一个状态下的多个候选动作保留下来，而不是贪心地承诺第一条路径。典型 UCT 选择公式为
+
+这一步承接 demo 中的自我修正：如果 policy 每次只输出一个动作，失败后只能从相同上下文重新采样，很容易重复原路径；树结构则显式保存“已经试过什么、哪些分支价值较高、哪里仍值得探索”。阅读 MCTS 图时先找 root、候选分支和叶节点，再区分 value estimate 与真实执行结果。对网页 agent 而言，搜索树应优先在模拟器或可回滚副本中展开，真实网站只执行经过筛选的少量动作。
+\[
+a^*=\arg\max_a\left[Q(s,a)+c\sqrt{\frac{\ln N(s)}{N(s,a)+1}}\right].
+\]
+$Q(s,a)$ 是当前价值估计，$N(s)$ 是父状态访问次数，$N(s,a)$ 是动作访问次数，$c$ 控制 exploration。第一项偏向已知好路径，第二项鼓励尝试访问较少的动作。
+
+\lecturefigure{slide-35-mcts-search.jpg}{MCTS 在 Agent 决策树中平衡探索与利用}{00:21:40}
+
+\begin{warningbox}{网页环境中的 MCTS 不是免费回溯}
+许多动作不可逆：提交订单、发送消息和支付不能像棋盘一样撤销。安全实现应在模拟环境搜索，或只对可回滚状态展开；真实环境中的探索必须有权限、预算与沙箱限制。
+\end{warningbox}
+
+\subsection{Process feedback：奖励中间决策，而非只看结局}
+
+仅用最终成功 $r_{\text{outcome}}$ 会产生稀疏信号，也可能把“偶然成功但过程危险”的轨迹标为正例。过程奖励可写成
+\[
+R(\tau)=\alpha r_{\text{outcome}}+
+\sum_{t=1}^{T}\beta_t r_{\text{process},t}-\lambda C(\tau),
+\]
+$\tau$ 是完整轨迹，$r_{\text{process},t}$ 评价第 $t$ 步是否合理，$C(\tau)$ 记录工具成本、违规或不可逆风险。$\alpha,\beta_t,\lambda$ 决定结果、过程与成本的权衡。
+
+\lecturefigure{slide-36-self-critique-process.jpg}{LLM critique 为候选动作提供过程反馈}{00:22:58}
+
+\begin{knowledgebox}{Critique 的三个层次}
+\textbf{Syntax critique} 检查动作格式；\textbf{state critique} 检查动作是否符合当前页面和约束；\textbf{goal critique} 检查动作是否仍服务原始用户目标。只做语言流畅度 critique，无法发现日期、身份、权限和预算错误。
+\end{knowledgebox}
+
+\subsection{从成功与失败分支构造偏好}
+
+AgentQ 将搜索产生的分支排序为 preferred 与 rejected，再用离线偏好目标更新 policy。DPO 的常见形式为
+\[
+\mathcal{L}_{\text{DPO}}(\theta)
+=-\mathbb{E}\log\sigma\!\left(
+\beta\left[
+\log\frac{\pi_\theta(y^+\mid x)}{\pi_{\text{ref}}(y^+\mid x)}-
+\log\frac{\pi_\theta(y^-\mid x)}{\pi_{\text{ref}}(y^-\mid x)}
+\right]\right).
+\]
+$x$ 是状态与任务上下文，$y^+$ 是较好动作或轨迹，$y^-$ 是较差分支，$\pi_{\text{ref}}$ 是参考策略，$\beta$ 控制偏好强度。对 agents 而言，偏好不能只来自最终网页截图；应结合过程 critique、工具错误和安全约束。
+
+\lecturefigure{slide-37-rlhf-preference-learning.jpg}{从搜索和 critique 轨迹构造偏好学习信号}{00:23:23}
+
+\teachervoice{00:20:47--00:23:24，讲者用 MCTS、LLM critique 和 preference learning 解释 AgentQ。老师强调：成功与失败轨迹都应进入学习，尤其要让模型学会在复杂环境中 backtrack 与 recover。}
+
+\subsection{七步 OpenTable 轨迹：最终成功不隐藏中间错误}
+
+这组图应按状态转移阅读，而不是当作七张相似截图。轨迹先导航目标餐厅，进入主页，定位餐厅，再选择了错误日期；之后打开日期选择器、纠正日期并完成预约。错误发生在第四步，恢复发生在第五、六步，最终确认是第七步。
+
+这组轨迹的教学价值在于它同时包含\textbf{目标保持}和\textbf{局部纠错}。系统没有因为日期出错就重新搜索另一家餐厅，也没有把用户请求压缩成“订到任意餐厅即可”；它保留餐厅、人数和时间范围，只修改错误字段。读每张图时应追踪三条线：当前页面状态、agent 宣称的下一动作、原始目标中仍未满足的约束。这样才能判断恢复是真修正还是偶然绕到一个可完成结果。
+
+\lecturefigure{slide-38-opentable-step1-navigate.jpg}{步骤 1：导航到目标餐厅与站点}{00:24:10}
+
+\lecturefigure{slide-39-opentable-step2-homepage.jpg}{步骤 2：进入 OpenTable 主页并开始搜索}{00:24:15}
+
+\lecturefigure{slide-40-opentable-step3-restaurant.jpg}{步骤 3：定位 La Pizza \& La Pasta 页面}{00:24:42}
+
+\lecturefigure{slide-41-opentable-step4-wrong-date.jpg}{步骤 4：选择了错误日期，轨迹出现可诊断失败}{00:24:49}
+
+\lecturefigure{slide-42-opentable-step5-date-selector.jpg}{步骤 5：重新打开日期选择器}{00:24:52}
+
+\lecturefigure{slide-43-opentable-step6-correct-date.jpg}{步骤 6：修正日期并进入确认流程}{00:24:54}
+
+\lecturefigure{slide-44-opentable-step7-confirmed.jpg}{步骤 7：预约完成，确认页提供最终证据}{00:24:56}
+
+\begin{importantbox}{Trajectory-level acceptance}
+最终成功记为 $s_T=1$ 仍不够。建议同时报告：错误动作数、恢复次数、不可逆动作数、用户确认次数、总工具成本和完成时延。这样才能区分“一次顺利完成”与“绕路、误点、但最后碰巧成功”。
+\end{importantbox}
+
+\begin{lstlisting}[caption={轨迹验证与恢复的伪代码}]
+for step in range(max_steps):
+    observation = environment.observe()
+    action = policy.propose(goal, observation, memory)
+    if not permission_check(action):
+        action = request_user_confirmation(action)
+    result = environment.execute(action, idempotency_key=step)
+    if postcondition_holds(goal, result):
+        return SUCCESS
+    if repeated_state(result) or budget_exhausted():
+        return HUMAN_FALLBACK
+    memory.record(observation, action, result)
+return TIMEOUT
+\end{lstlisting}
+
+\subsection{结果页：数字必须绑定实验设置}
+
+课堂展示的 OpenTable 成功率图比较多个设置，并突出 AgentQ、online search 等组件带来的提升。论文报告 Llama-3 70B 零样本从 18.6\% 提升到 81.7\%，加入 online search 后达到 95.4\%。这些数字是特定任务、数据收集、模型和判定方法下的结果；它们支持“搜索与学习有效”，不支持“所有网页任务已经 95\% 可靠”。
+
+读柱状图时先比较相同 base model 下增加组件后的变化，再比较不同模型之间的差异；不要把所有柱子的差额都归因于一个算法。还应检查成功判定是否只看最终页面、是否允许人工或外部搜索、每个设置用了多少交互数据，以及失败是否来自相同任务分布。若实验配置不同，柱高只能作为系统组合的结果，不能直接推出单个 MCTS、DPO 或 search 模块的独立因果贡献。
+
+\lecturefigure{slide-45-agentq-real-world-benchmark.jpg}{AgentQ 在真实预约场景中的成功率比较}{00:26:41}
+
+\begin{warningbox}{相对提升与绝对可靠性不要混淆}
+从 18.6\% 到 81.7\% 是巨大研究进步，但 81.7\% 意味着约五次任务仍有一次失败。即使 95.4\%，若每天执行一百次高风险动作，期望失败数仍不可接受。上线门槛必须结合频率、严重性和可恢复性。
+\end{warningbox}
+
+\subsection{本章小结}
+
+AgentQ 的机制链是：树搜索产生多样分支，process critique 判断中间步骤，偏好目标把好坏分支写回策略，轨迹级评测同时检查结果与过程。OpenTable 案例说明错误并不可怕，无法发现、无法恢复和无法学习才是系统性缺陷。
+

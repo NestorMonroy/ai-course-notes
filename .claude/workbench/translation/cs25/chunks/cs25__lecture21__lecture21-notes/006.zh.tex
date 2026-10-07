@@ -1,0 +1,64 @@
+\section{为什么需要 Multi-Head Attention：一个 Weighted Average 不够}
+
+上一章给出公式，本章用讲者的机制直觉解释 multi-head。单头 attention 最终只产生一个加权平均；如果所有 relation 都共享同一套 value projection，不同语法、位置、实体或复制关系会竞争同一表示空间。Multi-head 用多组 projection 并行学习不同路由与变换。
+
+\subsection{单头 Attention 是共享 Value Transform 的加权平均}
+
+对位置 $i$，单头输出可写为：
+\[
+y_i=\sum_{j=1}^{n}\alpha_{ij}W_Vx_j,
+\qquad \sum_j\alpha_{ij}=1,\quad \alpha_{ij}\ge 0.
+\]
+其中 $W_V$ 对所有被读取位置共享，$\alpha_{ij}$ 随 query/key 内容改变。路由是动态的，但传递内容使用同一线性变换，因此单个 head 的 relation capacity 受限。
+
+\lecturefigure{slide-21-attention-weighted-average.jpg}{单头 attention 可视为 values 的动态加权平均}{官方录像恢复幻灯片 V021；00:25:30}
+
+\begin{knowledgebox}{读图：动态的是权重，固定的是同一 head 内的变换}
+箭头粗细由 $\alpha_{ij}$ 决定，所有输入先经过同一个 $W_V$。先看它可以从任意位置取信息，再看不同 offset/关系是否拥有独立 transform；这解释了为何单头比固定 pooling 灵活，却仍可能把多类关系压进同一子空间。
+\end{knowledgebox}
+
+\subsection{Convolution 为不同 Offset 提供不同 Transform}
+
+一维 convolution 的输出近似为：
+\[
+y_i=\sum_{\delta\in\mathcal{K}}W_{\delta}x_{i+\delta}.
+\]
+其中 $\mathcal{K}$ 是 kernel offsets，$W_{\delta}$ 可随相对位置不同。Convolution 的连接位置固定、transform 多样；single-head attention 的连接权重动态、value transform 共享。Multi-head 试图同时获得动态路由和多组 transform。
+
+\lecturefigure{slide-22-convolution-linear-transformations.jpg}{Convolution 对不同相对位置使用不同 linear transformation}{官方录像恢复幻灯片 V022；00:27:03}
+
+\begin{knowledgebox}{读图：Attention 与 Convolution 各自把自由度放在哪里}
+彩色边代表不同 offset 的 kernel weight。卷积能区分“左一位”“右两位”，但读取范围由 kernel 预定；attention 能按内容选择任意位置，却在单头内共享 value transform。理解这个对照，才能看出 multi-head 不是简单 ensemble。
+\end{knowledgebox}
+
+\subsection{Multi-Head：多个 Relation Subspace 并行工作}
+
+\term{multi-head attention（多头注意力）}为每个 head 使用独立 $W_Q^h,W_K^h,W_V^h$，再拼接输出：
+\[
+\operatorname{MHA}(X)=\operatorname{Concat}(H_1,\ldots,H_H)W_O,
+\qquad H_h=\operatorname{Attn}(XW_Q^h,XW_K^h,XW_V^h).
+\]
+其中 $H$ 是 head count，$W_O$ 是输出 projection。不同 head 可学习局部关系、复制、指代、位置或其他 interaction，但没有保证每个 head 对应人类可命名概念。
+
+\lecturefigure{slide-23-multi-head-attention.jpg}{Multi-head attention 提供多组路由与 value transformation}{官方录像恢复幻灯片 V023；00:28:15}
+
+\begin{importantbox}{Multi-head 的核心不是“多看几遍”}
+每个 head 同时改变 query/key routing 和 value feature space。它让模型在同一层表达多类关系，并把结果写回共享 residual stream；head 数越多并不自动越好，head dimension、冗余、KV memory 与 serving cost 共同决定有效规模。
+\end{importantbox}
+
+\begin{lstlisting}[caption={Multi-head attention 与共享 KV 的概念结构}]
+for head in query_heads:
+    query = project_q(hidden, head)
+    kv_group = head_to_kv_group(head)  # MHA: one group/head; GQA/MQA: shared
+    key = project_k(hidden, kv_group)
+    value = project_v(hidden, kv_group)
+    head_output[head] = attention(query, key, value, causal=True)
+output = project_o(concat(head_output))
+\end{lstlisting}
+
+\teachervoice{讲者把 single-head attention 概括为“一次 weighted average”，再用 convolution 的 offset-specific transforms 解释为何需要多头。这种机制解释比“多头能关注不同位置”更精确：多头同时提供不同相似度空间和不同内容变换。}
+
+\subsection{本章小结}
+
+Single-head attention 把动态路由与共享 value transform 结合，convolution 则提供固定路由与 offset-specific transform；multi-head attention 把多组动态路由和 feature transform 并行化。后续 MQA/GQA 会为降低 KV memory，重新选择哪些 projection 必须独立。
+

@@ -1,0 +1,63 @@
+\section{Perceiver：把大输入压入小 latent workspace}
+
+本节进入 Perceiver 的核心。它不在所有 raw inputs 上反复做 self-attention，而是维护 $N$ 个 learned latents，其中 $N\ll M$。一次 cross-attention 让 latent queries 从大输入读取信息，后续深层 self-attention 只发生在小 latent array 内。
+
+\lecturefigure{slide-08-perceiver-title.jpg}{Perceiver：通过 iterative attention 扩展 Transformer，同时保持较弱的领域假设。}{Stanford Online 当前官方视频 00:09:42--00:10:39。}
+
+\subsection{为什么 raw-input self-attention 不可承受}
+
+对高分辨率图像，若每像素都是 token，$M=224\times224=50{,}176$，attention score 已有约 25 亿个元素；视频再乘时间帧数。ViT 通过 patching 减小 $M$，但 patch 大小与二维卷积成为图像专用选择。Perceiver 选择保留细粒度输入，却用 latent 数量控制深层处理规模。
+
+\lecturefigure{slide-09-self-attention-scales-poorly.jpg}{Self-attention 表达力强，但图像像素级输入导致二次计算与内存。}{Stanford Online 当前官方视频 00:10:40--00:16:15。}
+
+\begin{warningbox}{线性输入 scaling 的前提}
+Perceiver 对输入长度线性，是在 latent 数 $N$ 固定或增长很慢时成立。若为了更高容量让 $N$ 与 $M$ 同比例增长，cross-attention 的 $MN$ 与 latent self-attention 的 $N^2$ 仍会变贵。
+\end{warningbox}
+
+\subsection{Cross-attention：用 N 个 queries 读取 M 个 inputs}
+
+令输入为 $X\in\mathbb{R}^{M\times d_x}$，latent array 为 $Z\in\mathbb{R}^{N\times d_z}$。Cross-attention 使用 latent 生成 query、input 生成 key/value：
+
+\[
+Q=ZW_Q,\qquad K=XW_K,\qquad V=XW_V,
+\qquad
+Z'=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right)V.
+\]
+
+其中，$QK^\top$ 形状为 $N\times M$；$M$ 是大输入长度，$N$ 是较小 latent 数。Cross-attention 成本约为 $\mathcal{O}(MNd)$，若 $N$ 固定则对 $M$ 线性；之后 latent self-attention 成本约为 $\mathcal{O}(N^2d)$。
+
+\lecturefigure{slide-10-cross-attention-linear-scaling.jpg}{Cross-attention 以小 query array 读取大 input array，使输入规模项从 $M^2$ 变为 $MN$。}{Stanford Online 当前官方视频 00:16:16--00:18:59。}
+
+\begin{importantbox}{Latent bottleneck 的三重作用}
+它既是计算瓶颈，也是信息压缩接口，还是模态无关的内部坐标系。输入多大、特征维度多少，都先通过 cross-attention 写入固定宽度 latent；模型深度主要花在 latent processing，而不是 raw input pairwise attention。
+\end{importantbox}
+
+\begin{knowledgebox}{读图：三个复杂度模块要分开}
+输入投影和 value 聚合对 $M$ 线性；attention map 是 $N\times M$；latent Transformer 是 $N\times N$。因此不能只说“全部线性”：当 latent 很大或 decoder outputs 很多时，其他项会重新成为瓶颈。
+\end{knowledgebox}
+
+\subsection{完整 Perceiver：Encode、Process、Readout}
+
+原始 Perceiver 用 learned latent array cross-attend 输入，再在 latents 上重复 self-attention/MLP；最终通过 pooling 或紧凑 readout 完成分类。Latents 可以视为 learned queries 或共享工作寄存器，它们不是输入中的固定区域，也不保证每个 latent 对应可解释对象。
+
+\lecturefigure{slide-11-perceiver-architecture.jpg}{原始 Perceiver：输入 cross-attention、latent Transformer 重复与紧凑输出。}{Stanford Online 当前官方视频 00:19:00--00:21:41。}
+
+\begin{lstlisting}[caption={Perceiver encode/process/readout 的概念性伪代码。}]
+def perceiver(inputs, latents, repeats):
+    latents = cross_attention(query=latents, key=inputs, value=inputs)
+    for _ in range(repeats):
+        latents = latent_self_attention(latents)
+        latents = latent_mlp(latents)
+    return task_readout(latents)
+\end{lstlisting}
+
+\teachervoice{讲者说明 latent 是随机初始化并学习的，类似 learned recurrent state；部分重复模块可以共享权重。图中的 cross-attention 也包含 residual 和 MLP，不能把它误画成只有一个裸 $QK^\top V$。}
+
+\begin{warningbox}{Latent 不是无损压缩保证}
+$N\ll M$ 意味着模型必须把任务相关信息压入有限 workspace。若任务要求保留所有细节，瓶颈可能限制质量；Perceiver IO 通过 task-specific output queries 提高读取能力，但不会自动恢复编码阶段丢失的信息。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Perceiver 用 $N$ 个 learned latents 从 $M$ 个输入读取信息，将深层处理从 $M^2$ 移到 $MN+N^2$。线性输入 scaling 的条件是 latent 数受控，且 latent bottleneck 足以承载任务信息。
+

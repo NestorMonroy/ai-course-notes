@@ -1,0 +1,120 @@
+\section{Original DiT：从 ViT 到条件去噪器}
+
+原始 DiT 的力量来自克制：patch embedding、position embedding、self-attention 和 MLP 基本沿用 ViT，新增部分集中在 timestep/class conditioning 与输出解码。理解它不应背图，而应从 tensor shape 和 residual equation 推导。
+
+\subsection{Patchify 与两类条件}
+
+前一节只说明了“把 U-Net 换成 Transformer”的方向，本节进一步把这句话落实为张量变换：二维 latent 怎样变成 token，timestep 与 class label 又怎样进入同一串 encoder blocks。读图时应同时追踪 token 数、embedding 维度与条件路径，因为三者共同决定质量、计算量和模型是否能复用标准 ViT 组件。
+
+设 latent 为 $x_t\in\mathbb R^{B\times C\times H\times W}$，patch size 为 $P$，则 token 数
+\[
+N=\frac{H}{P}\frac{W}{P},
+\]
+每个 token 经线性投影到维度 $D$。$P$ 越大计算越省，但局部细节更难恢复。
+
+\begin{knowledgebox}{Patch size 是生成质量与系统成本的共同旋钮}
+把 $P$ 加倍会让高、宽方向的 token 数各缩小一半，总 token 数约降为四分之一，二次 attention 的主项可降到约十六分之一；代价是每个 token 必须概括更大的空间区域。因而 patch size 不是单纯的预处理参数，而是把细节保真、序列长度和计算预算绑定在一起的架构选择。
+\end{knowledgebox}
+
+\lecturefigure{slide-22.jpg}{经典 ViT forward pass：patchify、位置编码、encoder blocks 与 head}{22}
+
+这张代码页是 baseline：图像 patch 被展平并投影，加入位置编码与 class token，再经过相同结构的 blocks。DiT 去掉分类目标，却保留 tokenization 与 encoder 主干。读代码时先追踪 shape，而不是函数名。
+
+\lecturefigure{slide-23.jpg}{从 ViT 到 class-conditional DiT：主干几乎不变，只替换条件与输出}{23}
+
+DiT 仍对 latent patches 做 embedding；新增 $t$ embedder 与 $y$ embedder；最终 head 不输出类别，而把每个 token 解码为 patch pixels/latents 的预测。生成任务因此可被写成“条件 token sequence regression”。
+
+\lecturefigure{slide-24.jpg}{Original DiT block 与输出头的整体结构}{24}
+
+每个 block 包含 self-attention、MLP 和 adaptive LayerNorm；condition $c$ 同时影响归一化参数与 residual gate。输出层还要反 patchify 回空间 tensor。图中没有 cross-attention，因为 class label 与 timestep 都可压缩成一个条件向量。
+
+\lecturefigure{slide-25.jpg}{Timestep embedding：把标量噪声时间映射为高维连续表示}{25}
+
+常用 sinusoidal embedding 为
+\[
+e_{2k}(t)=\sin(t/\omega_k),\qquad
+e_{2k+1}(t)=\cos(t/\omega_k),
+\]
+再经过 MLP 得到条件。不同时间步对应不同信噪比，网络必须知道当前应恢复大结构还是细节；$t$ 不是普通序号，而是去噪任务的状态变量。
+
+\lecturefigure{slide-26.jpg}{Class embedding：离散类别通过 embedding table 变成条件向量}{26}
+
+类别 $y$ 经 `nn.Embedding` 映射到 $D$ 维。为 classifier-free guidance，训练时会以一定概率丢弃类别，学习 unconditional branch。推理时可组合条件与无条件预测，提高 prompt/class adherence，但过强 guidance 会牺牲多样性。
+
+\lecturefigure{slide-27.jpg}{条件融合：class 与 timestep embedding 相加得到 $c=y+t$}{27}
+
+相加要求两种条件已投影到同一维度，并假设一个向量足以控制整层。这里没有 token-level 对齐问题，因此简单相加高效。后续文本条件更丰富，PixArt 与 MMDiT 会改变这一路径。
+
+\begin{importantbox}{DiT 的最小改造清单}
+相对 ViT，需要四个新增接口：noisy latent patchification、timestep embedding、任务条件 embedding、以及把 token 解码回空间预测的 head。Self-attention/MLP 主干并不因“扩散”而神秘化。
+\end{importantbox}
+
+\subsection{AdaLN-Zero：条件怎样进入每个 block}
+
+Original DiT 不用 cross-attention，而让 condition 生成 LayerNorm 的 scale、shift 和 residual gates。这样条件成本与 token 数无关，特别适合低维 class/timestep 控制。本节的核心问题是：条件既要影响每个 block，又不能在深网络起点破坏稳定性；AdaLN-Zero 用调制参数与零初始化 residual gate 同时回答了“如何注入”和“如何安全启动”。
+
+\lecturefigure{slide-28.jpg}{每个 block 从条件向量回归 AdaLN 的调制参数}{28}
+
+Adaptive LayerNorm 可写为
+\[
+\operatorname{AdaLN}(h;c)=
+(1+s(c))\odot\frac{h-\mu(h)}{\sqrt{\sigma^2(h)+\epsilon}}+b(c),
+\]
+$s(c)$ 与 $b(c)$ 分别是条件生成的 scale 和 shift。加 $1$ 让零初始化时退化为普通归一化。
+
+\lecturefigure{slide-29.jpg}{AdaLN-Zero block：条件同时调制 attention、MLP 与 residual gate}{29}
+
+一层可概括为
+\[
+h'=h+g_{\mathrm{msa}}(c)\odot
+\operatorname{MSA}(\operatorname{AdaLN}_1(h;c)),
+\]
+\[
+h''=h'+g_{\mathrm{mlp}}(c)\odot
+\operatorname{MLP}(\operatorname{AdaLN}_2(h';c)).
+\]
+六组参数控制两个子层的 scale、shift 与 gate。条件因此能在深度方向持续影响计算，而非只在输入拼接一次。
+
+\lecturefigure{slide-30.jpg}{输出层：把 $(B,N,D)$ token 解码成 patch，并 unpatchify 回空间}{30}
+
+若输出通道为 $C_o$，每个 token 需预测 $P^2C_o$ 个值。线性层得到 $(B,N,P^2C_o)$，再 reshape 为 $(B,C_o,H,W)$。输出可包含 noise/velocity，也可能同时预测 variance，取决于训练参数化。
+
+\lecturefigure{slide-31.jpg}{初始化策略：AdaLN 与 final layer 零初始化，使网络起点接近 identity}{31}
+
+深残差网络若一开始每层都大幅改写信号，优化可能不稳。把 gates 与 final projection 初始化为零，使每个 block 初始近似 $h\mapsto h$，模型逐步学会偏离 identity。这是 DiT 训练成功的重要实现细节，不是 cosmetic trick。
+
+\lecturefigure{slide-32.jpg}{AdaLN-Zero 的价值与后续共享参数路线}{32}
+
+AdaLN-Zero 比 cross-attention 便宜，因为条件网络不随 token 数二次增长；后续 PixArt 还共享不同 block 的 AdaLN 参数，进一步降低参数和计算。代价是低维条件压缩可能不适合长文本的细粒度对齐。
+
+\teachervoice{00:24:53--00:32:56，老师强调 Original DiT 没有用自然想到的 cross-attention，而是用条件驱动的 LayerNorm 与 gates；zero init 让每个 block 从 identity 开始，是非常实际的稳定化机制。}
+
+\begin{lstlisting}[language=Python,caption={AdaLN-Zero DiT block 的核心计算}]
+def dit_block(tokens, condition):
+    shift1, scale1, gate1, shift2, scale2, gate2 = modulator(condition)
+    attn_input = layer_norm(tokens) * (1 + scale1) + shift1
+    tokens = tokens + gate1 * self_attention(attn_input)
+    mlp_input = layer_norm(tokens) * (1 + scale2) + shift2
+    return tokens + gate2 * mlp(mlp_input)
+\end{lstlisting}
+
+\subsection{Scaling：更多 compute 是否稳定换来更好质量}
+
+DiT 论文的重要结果不是一张漂亮样例，而是随着模型规模与训练 compute 增加，FID 等指标相对平滑改善。统一 block 使这一缩放实验比高度定制 U-Net 更可控。本节因此不把结果页当排行榜，而把它当缩放证据：先确认横纵轴和控制变量，再区分“观察到的区间趋势”与“可无限外推的定律”。
+
+\lecturefigure{slide-33.jpg}{DiT 结果：模型规模与计算增加时生成质量持续改善}{33}
+
+气泡图通常同时编码模型大小、GFLOPs 与 FID。应先确认横纵轴方向，再比较同一训练设置下的系列。趋势支持 scalability，但不能推出无限缩放；数据质量、VAE bottleneck 和采样算法最终会成为限制。
+
+\lecturefigure{slide-34.jpg}{DiT 的 compute-quality 效率与 class-conditional 局限}{34}
+
+Original DiT 在 class-conditional ImageNet 上展示效率，却不直接解决开放词汇 text-to-image。类别向量很短，适合 AdaLN；自然语言 prompt 是长序列，需要 token-level interaction。下一步 PixArt 不是简单把 class id 换成句向量，而是引入 text encoder 与 cross-attention。
+
+\begin{warningbox}{FID 改善不等于所有维度都改善}
+FID 对 feature distribution 敏感，但不能完整衡量文字、计数、组合关系、人类偏好或安全。读 scaling plot 时还应检查推理步数、guidance、训练数据与分辨率。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Original DiT 把 latent patch 视为 token，用 timestep/class embedding 生成 AdaLN-Zero 参数，并把输出 token 解码回空间。其结构接近 ViT，关键创新集中在条件调制与 identity initialization。Scaling 证据证明结构可扩展，却尚未解决自然语言条件。
+

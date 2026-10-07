@@ -1,0 +1,80 @@
+\section{PaLM-E：把多模态感知注入语言模型}
+
+PaLM-E 是第一段路线的起点。它不把机器人当成一个独立的 downstream classifier，而把连续 sensor embedding 插入语言 token sequence，让一个 embodied multimodal language model 同时处理机器人 planning、视觉问答、captioning 与一般语言任务。关键问题是：这种 consolidation 是否产生 positive transfer，而非任务相互干扰。
+
+\subsection{Model family 与 consolidation 目标}
+
+模型家族页把 PaLM-SayCan、RT-1、PaLM-E 与 RT-2 放在同一演进图中。纵向是 foundation model 规模，横向是 low-level policy 能力；PaLM-E 试图将 embodied planning 与通用语言视觉能力合并，RT-2 再进一步让 VLM 直接生成 action token。
+
+\lecturefigure{slide-16-model-consolidation-family.jpg}{2023--2024 Google DeepMind robotics model family}{官方录像恢复幻灯片 V016；00:26:00}
+
+\lecturefigure{slide-17-palm-e-title.jpg}{PaLM-E：Embodied Multimodal Language Model}{官方录像恢复幻灯片 V017；00:26:03}
+
+\subsection{Sensor embedding 怎样进入 LLM}
+
+PaLM-E 将 image、state estimate 或其他 sensor observation 通过 encoder 和 projection 映射到与 language token 相同维度，再把这些向量插入 prompt。若文字 token embedding 为 $E(w_i)$，sensor feature 为 $z_j$，projection 为 $W_s$，则输入序列可抽象为
+$$
+x=\big[E(w_1),\ldots,E(w_k),W_sz_1,\ldots,W_sz_m,E(w_{k+1}),\ldots\big].
+$$
+其中 $w_i$ 是第 $i$ 个文本 token，$z_j$ 是第 $j$ 个 sensor feature，$W_s$ 把 sensor feature 投影到 LLM hidden dimension，$x$ 是送入 Transformer 的统一 embedding sequence。
+
+\lecturefigure{slide-18-palm-e-architecture.jpg}{PaLM-E：sensor encoder 输出作为 language-model token}{官方录像恢复幻灯片 V018；00:26:12}
+
+\begin{importantbox}{PaLM-E 的 consolidation 不等于 sensor 都变成文字}
+Sensor embedding 与 text embedding 共享序列接口，但二者来源不同。模型利用 self-attention 在同一 hidden space 中融合它们；这并不意味着 image、proprioception 或 state estimate 被无损翻译成自然语言，也不保证 LLM 原有知识能直接用于每种机器人状态。
+\end{importantbox}
+
+\subsection{Mixed-task training：让 robot data 借力 web data}
+
+Training slide 同时放入 embodied robotics tasks、vision-language tasks 和一般语言任务。直觉是 robot data 数量少，但 web tasks 能训练视觉语义、对象关系与语言遵循；如果共享表示有效，模型可用大规模辅助任务改善机器人决策。一个简化目标是
+$$
+\mathcal{L}=\lambda_r\,\mathbb{E}_{D_r}\!\left[-\log p_\theta(y_r\mid x_r)\right]
++\lambda_w\,\mathbb{E}_{D_w}\!\left[-\log p_\theta(y_w\mid x_w)\right].
+$$
+其中 $D_r$ 是 robot/embodied dataset，$D_w$ 是 web-scale vision-language 或 language dataset，$x$ 是输入序列，$y$ 是目标 token，$\lambda_r,\lambda_w$ 控制两类任务在训练中的采样或损失权重。
+
+\lecturefigure{slide-19-palm-e-training-and-tasks.jpg}{PaLM-E 的 embodied 与 vision-language 混合训练}{官方录像恢复幻灯片 V019；00:28:09}
+
+\lecturefigure{slide-20-palm-e-main-model.jpg}{Main model：PaLM-E-562B 与多类 sensor / task 输入}{官方录像恢复幻灯片 V020；00:29:30}
+
+\begin{lstlisting}[caption={多任务训练采样器的概念伪代码}]
+for step in range(num_steps):
+    task = sample_task(weights={"robot": lambda_r, "web": lambda_w})
+    batch = datasets[task].next_batch()
+    inputs = encode_text_and_sensors(batch)
+    loss = autoregressive_loss(model(inputs), batch.targets)
+    optimizer.step(loss)
+\end{lstlisting}
+
+\teachervoice{讲者强调 PaLM-E 的目标不是为每个任务维护一个专用模型，而是观察 joint scaling 能否让任务相互帮助。讲义因此把 “one model” 理解为共享参数与表示的实验假设，而不是部署时所有 perception、planning 和 safety module 都必须消失。}
+
+\subsection{Positive transfer 应怎样读}
+
+Multimodal example 页展示模型能回答视觉问题、处理机器人状态和执行 embodied planning；bar chart 更关键，因为它比较不同训练方案下 robot task 的表现。定义目标任务 $T$ 上联合训练与单任务训练的差异为
+$$
+\Delta_T=\operatorname{Score}(M_{\text{joint}},T)-\operatorname{Score}(M_{\text{single}},T).
+$$
+其中 $M_{\text{joint}}$ 使用多任务混合，$M_{\text{single}}$ 只使用目标任务数据。$\Delta_T>0$ 是 positive transfer，$\Delta_T<0$ 则是 negative interference。它必须逐任务、逐数据量解释，不能只看平均值。
+
+\lecturefigure{slide-21-palm-e-multimodal-examples.jpg}{PaLM-E 的多模态与 embodied task 示例}{官方录像恢复幻灯片 V021；00:32:27}
+
+\lecturefigure{slide-22-palm-e-positive-transfer.jpg}{PaLM-E positive transfer：不同任务组的相对收益}{官方录像恢复幻灯片 V022；00:36:27}
+
+\begin{knowledgebox}{读图：先看 training mixture，再看 bar height}
+图中不同颜色代表不同 model/data 配置，横轴是任务组。第一步不是寻找最高柱，而是确认比较是否只改变 model scale、是否加入 general visual-language data、robot data 是否一致；第二步观察收益是否集中在某类任务。图支持“联合训练可产生 transfer”，但不证明任意 web data 都有帮助，也不证明所有 embodied tasks 都共享同一最优 representation。
+\end{knowledgebox}
+
+\subsection{Real robot result 的正确结论}
+
+Real Robot Results 页把 language prompt、图像 observation 与机器人行为并列。它证明模型可以在真实平台执行训练和泛化任务，并显示同一 model checkpoint 处理多种指令；它没有单独量化长期可靠性、恢复率、硬件磨损或安全事故，因此不能从几段成功视频推断可部署性。
+
+\lecturefigure{slide-23-palm-e-real-robot-results.jpg}{PaLM-E 的真实机器人结果与任务迁移}{官方录像恢复幻灯片 V023；00:37:57}
+
+\begin{warningbox}{Positive transfer 不是“互联网知识自动变成动作”}
+Web task 提供对象、语言和关系 prior，robot trajectory 提供动作与后果监督。若目标对象、camera geometry、action semantics 或 embodiment 与训练不兼容，模型仍可能失败。Transfer 是通过共同训练和表示对齐产生的统计效果，不是一个无需 robot data 的知识拷贝按钮。
+\end{warningbox}
+
+\subsection{本章小结}
+
+PaLM-E 通过统一 embedding sequence 与 mixed-task objective 实现 model consolidation。它的重要证据不是模型“能看图聊天”，而是辅助任务和 scale 是否提高 embodied task；同时，真实机器人 demo 仍需与长期可靠性和安全评估分开。
+

@@ -1,0 +1,65 @@
+\section{分布式执行：Data、Model 与 Expert Parallelism 如何组合}
+
+前面的曲线说明 expert parallelism 有效，本节进一步回答“权重究竟放在哪里”。MoE 的可扩展性来自把专家分散到设备，同时让 token 根据路由跨设备移动；这与 data parallel 的样本复制、model parallel 的张量切分可以叠加。真正的设计对象不是单个层，而是设备网格上的数据、权重和 token movement。
+
+\lecturefigure{slide-24-contextualizing-parallelism.jpg}{Data、model 与 expert parallelism 在设备网格中的权重放置方式。}{Stanford Online 官方视频 00:36:26--00:41:35。}
+
+\begin{knowledgebox}{读图：先问“复制什么、切开什么、移动什么”}
+Data parallelism 复制权重并移动梯度统计；model parallelism 切分同一权重并移动中间激活或部分和；expert parallelism 让每卡持有不同 experts，并移动 token 到其目标设备。图中的方格颜色表示权重归属，不表示 token 永远留在原卡。
+\end{knowledgebox}
+
+\begin{table}[H]
+\centering
+\small
+\caption{三类并行的资源与通信模式。}
+\begin{tabularx}{\textwidth}{L{0.19\textwidth}L{0.23\textwidth}X X}
+\toprule
+方式 & 被切分或复制的对象 & 主要通信 & 主要目标 \\
+\midrule
+Data parallel & 模型复制，batch 切分 & 梯度 all-reduce / reduce-scatter & 扩大吞吐与全局 batch \\
+Model parallel & 单层参数或张量维度切分 & all-gather、reduce-scatter 或点对点激活 & 放下单个 dense 模型 \\
+Expert parallel & experts 切分，token 动态 dispatch & token all-to-all 与结果 combine & 扩大条件参数池 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{importantbox}{什么是 collectives}
+Collectives 是多设备集合通信原语，例如 all-reduce、reduce-scatter、all-gather 与 all-to-all。MoE 的关键通常是 all-to-all：每个设备把本地 token 按 expert 目的地发送给其他设备，执行 expert 后再把结果送回原序列位置。
+\end{importantbox}
+
+\subsection{从 T5-Base 到 Switch-C：设计旋钮不只有 expert 数}
+
+模型设计表同时改变 dense hidden size、层数、heads、expert 数、sparse layer 频率与并行布局。总参数可以增长到万亿，但 active path 仍只包含被选 expert。比较模型时必须对齐 per-token FLOPs 和训练硬件，否则“同计算”可能只是理论算术相近，真实通信并不相同。
+
+\lecturefigure{slide-25-design-choices-switch-models.jpg}{Switch 模型族的 dense 维度、expert 数、参数量与计算设计。}{Stanford Online 官方视频 00:41:36--00:43:21。}
+
+可以用一个简化核算表达总参数与 active 参数的差异：
+
+\[
+P_{\text{total}}=P_{\text{shared}}+E\,P_{\text{expert}},
+\qquad
+P_{\text{active/token}}\approx P_{\text{shared}}+kP_{\text{expert}}.
+\]
+
+其中，$P_{\text{shared}}$ 是 attention、embedding 与 dense 层等共享参数；$P_{\text{expert}}$ 是单个 expert 参数；$E$ 是 expert 总数；$k$ 是每 token 选择的 expert 数，Switch 中通常为 1。增大 $E$ 会快速增加总参数，但 active expert 部分只随 $k$ 增长。
+
+\begin{warningbox}{Optimizer state 仍随总参数增长}
+Adam/AdamW 为每个参数维护一阶动量 $m$ 与二阶动量 $v$，这些 optimizer state 连同权重、梯度和 checkpoint 都与总参数相关。即使每 token 只激活一个 expert，训练时仍要存储并更新被访问的庞大参数池。
+\end{warningbox}
+
+\subsection{“参数存知识、FLOPs 做推理”只是待检验假设}
+
+讲者提出一个直觉：更多参数可能更适合存储 knowledge，而更多 active compute 可能更适合 reasoning。关键是他立刻称其为“mostly unsubstantiated theory”。这句话应转化为实验问题：固定 upstream quality、active FLOPs 或数据后，额外稀疏参数是否独立改善事实型、组合型与推理型任务？
+
+\lecturefigure{slide-26-parameters-knowledge-compute-reasoning.jpg}{讲者的限定性假设：参数可能更偏向知识容量，FLOPs 可能更偏向推理。}{Stanford Online 官方视频 00:43:22--00:43:57。}
+
+\teachervoice{这里最值得保留的 teacher voice 不是口号，而是“不确定性标签”。讲者主动说这是 mostly unsubstantiated theory；因此讲义不能把它升级为已证实规律，更不能据此断言稀疏模型天然更会记忆、dense 模型天然更会推理。}
+
+\begin{importantbox}{可证伪的实验设计}
+选择一组 knowledge-heavy、reasoning-heavy 与混合任务，分别控制 upstream loss、active FLOPs、总参数、训练 token 和检索增强；再比较 dense 与 sparse。只有在这些混杂因素被控制后，才可能讨论参数容量与计算深度的独立作用。
+\end{importantbox}
+
+\subsection{本章小结}
+
+MoE 通过 expert parallelism 分散条件参数，并与 data/model parallelism 组合。总参数与 active 参数必须分开核算；“参数用于知识、计算用于推理”在本讲中是研究假设，不是结论。
+

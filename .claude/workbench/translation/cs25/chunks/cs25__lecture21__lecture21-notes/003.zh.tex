@@ -1,0 +1,62 @@
+\section{RNN、Convolution 与 Attention：能力和可训练性是两回事}
+
+上一章的通用 formulation 仍依赖 backbone。课程没有把 LSTM 描写成失败模型；相反，它强调 recurrent network 非常 expressive，甚至能学出计数器般的状态机。Transformer 的动机主要来自 computation graph：长序列上的串行 dependency、远距离 path length 和硬件利用率限制了训练规模。
+
+\subsection{LSTM 很 Expressive，但状态更新必须排队}
+
+LSTM（Long Short-Term Memory）通过 gated cell state 缓解普通 RNN 的长期梯度问题。它能学习复杂 transition，理论和实验上都可模拟某些计数、复制与条件行为；然而每个时间步都依赖上一步结果，模型再聪明也无法同时算出整段 hidden states。
+
+\lecturefigure{slide-06-lstm-expressive.jpg}{LSTM 可以实现计数与复杂序列变换}{官方录像恢复幻灯片 V006；00:12:09}
+
+\begin{knowledgebox}{读图：不要把系统瓶颈误写成表达力不足}
+左侧任务展示 recurrent state 能表示结构化序列规律，右侧门控图说明状态更新具有多条可学习路径。先看它能表达什么，再看计算必须如何调度；图支持 LSTM 很强，却不改变 $h_t$ 依赖 $h_{t-1}$ 的 critical path。
+\end{knowledgebox}
+
+\lecturefigure{slide-07-sequential-bottleneck.jpg}{Recurrent reading 与 writing 的串行瓶颈}{官方录像恢复幻灯片 V007；00:12:33}
+
+\begin{warningbox}{Parallel batch 不等于 parallel sequence}
+GPU 可以同时处理许多句子、许多 hidden dimension，却仍要按 $t=1,2,\ldots,n$ 推进同一句子的 recurrence。增加 batch size 不能消除单样本的 sequential critical path；长序列会降低硬件利用率并拉长梯度传播路径。
+\end{warningbox}
+
+\teachervoice{讲者专门说 LSTM 是“fantastic models”，并用 $a^n\mapsto b^n$ 的例子说明单 cell 也能形成近似计数器。课堂真正反对的是把这种强表达力绑定在逐 token 串行执行上，而不是否定 recurrence 本身。}
+
+\subsection{Convolution：并行了，但远距离关系要靠堆深}
+
+一维 convolution 可以同时处理所有位置，每层在局部窗口内聚合信息。\term{receptive field（感受野）}是某个输出位置能够依赖的输入范围；kernel width 为 $k$、无 dilation 的 $L$ 层卷积，其感受野近似为：
+\[
+R_L=1+L(k-1).
+\]
+其中 $R_L$ 是第 $L$ 层可见范围，$k$ 是 kernel width。若 $k=3$，每多一层只向两侧扩展一个位置，跨越长度 $n$ 的依赖仍需要 $O(n)$ 层或 dilation/sparsity 等额外设计。
+
+\lecturefigure{slide-08-convolution-parallel-structure.jpg}{Convolutional sequence model 允许位置并行计算}{官方录像恢复幻灯片 V008；00:14:09}
+
+这页先看所有位置是否能同时进入同一层，再看每个 kernel 覆盖多少邻居。卷积移除了 recurrent 时间链，适合 GPU；但每层仅聚合局部信息。图支持 parallelization 改善，却没有展示任意两 token 在一层直接交互。
+
+\lecturefigure{slide-09-convolution-receptive-field.jpg}{卷积的 receptive field 随层数逐步增长}{官方录像恢复幻灯片 V009；00:14:42}
+
+\begin{knowledgebox}{读图：比较最短路径，而不只数 FLOPs}
+蓝/红路径表示信息跨层传播。先找两个远距离 token 之间需要经过多少层，再比较 self-attention 的一跳连接；更长 path 会增加优化难度和信息损耗。Dilated convolution 可加速扩展，但仍要预先规定连接模式，不能按内容动态选邻居。
+\end{knowledgebox}
+
+\subsection{Encoder--Decoder Attention：按内容读取 Source}
+
+\term{encoder--decoder attention（交叉注意力）}让 target position 根据当前 decoder query，对所有 source states 分配权重。它突破固定向量 bottleneck，并把 word alignment 变成可微计算。若 encoder state 为 $h_j$、decoder state 为 $s_t$，可写成：
+\[
+e_{tj}=a(s_{t-1},h_j),\qquad
+\alpha_{tj}=\frac{\exp e_{tj}}{\sum_{k}\exp e_{tk}},\qquad
+c_t=\sum_j\alpha_{tj}h_j.
+\]
+其中 $e_{tj}$ 是 compatibility score，$\alpha_{tj}$ 是归一化 alignment，$c_t$ 是 target step $t$ 读取的 source context。Attention 已经并行地访问 source，但 encoder 与 decoder 主干仍可能是 recurrent。
+
+\lecturefigure{slide-10-encoder-decoder-attention.jpg}{Encoder--decoder attention 建立 source 与 target 的内容连接}{官方录像恢复幻灯片 V010；00:15:54}
+
+\begin{knowledgebox}{读图：箭头不是固定线路，而是数据相关权重}
+目标位置 $y_t$ 可连接所有 source states $x_j$，粗细或选择由 query 与 key 内容决定。先看它与卷积固定 offset 的差别，再看 decoder 仍按时间生成；图支持 content-based retrieval，但尚未把 source sentence 自身的表示学习改成 self-attention。
+\end{knowledgebox}
+
+\teachervoice{Vaswani 把 attention 的直觉追溯到 non-local means 与 texture synthesis：根据内容相似性，从远处 patch 拉取信息。这说明“content talks to content”是跨模态自然出现的 motif；Transformer 的关键是把它变成主干，而不是证明 NLP 独有一种神秘机制。}
+
+\subsection{本章小结}
+
+RNN 提供强表达力但串行，convolution 提供并行但远距离 path 仍随深度增长，encoder--decoder attention 则证明 content-based global lookup 有效。Self-attention 的下一步是让每个 token 直接从同一序列的所有 token 构造新表示。
+

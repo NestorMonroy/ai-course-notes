@@ -1,0 +1,79 @@
+\section{Attention 作为图上的通信阶段}
+
+公式常把 attention 写成矩阵乘法，容易掩盖它真正做的事。本章采用 Karpathy 的解释：每个 token 是图中的 node，node 保存 private state；attention 根据当前状态决定从哪些允许邻居收集什么信息；MLP 则在每个 node 内独立计算。Transformer block 因而交替执行 communication 与 computation。
+
+\subsection{Communication 与 computation 的交替}
+
+设第 $\ell$ 层的 token states 为矩阵 $X^{(\ell)}\in\mathbb R^{T\times d}$。一个 pre-norm block 可写成
+
+\[
+\widetilde X^{(\ell)}=X^{(\ell)}+\operatorname{Attn}(\operatorname{LN}(X^{(\ell)})),
+\]
+\[
+X^{(\ell+1)}=\widetilde X^{(\ell)}+\operatorname{MLP}(\operatorname{LN}(\widetilde X^{(\ell)})).
+\]
+
+其中，$T$ 是 token 数，$d$ 是 residual width，$\operatorname{LN}$ 是 LayerNorm。第一式让 token 交换信息，第二式让每个 token 对收集后的信息做相同参数的非线性变换。
+
+\lecturefigure{slide-29-attention-communication-phase.jpg}{Attention 是 data-dependent communication；MLP 是每个 node 的独立 computation。}{Stanford Online 官方视频 00:22:32--00:23:32。}
+
+\begin{importantbox}{核心抽象：先路由，再计算}
+Attention 回答“当前 node 应从哪些 node 读取、读取多少”；MLP 回答“拿到信息后怎样局部变换”。Connectivity mask 规定哪些边存在，attention weights 决定这些边当前有多强。二者不能混为一谈：固定 causal graph 仍可产生数据依赖的消息强度。
+\end{importantbox}
+
+\subsection{Q/K/V：寻址、匹配与传输}
+
+上一节只把 attention 分成“通信阶段”，本节进一步回答一次通信怎样决定发送者与内容。关键是把同一个 node state 投影成三种角色：query 表达当前需求，key 提供可匹配地址，value 携带真正要聚合的信息。角色分离后，模型可以用一种特征判断“该不该读”，再用另一种特征决定“读到什么”。从状态 $X$ 线性投影得到
+
+\[
+Q=XW_Q,\qquad K=XW_K,\qquad V=XW_V,
+\]
+
+并计算 scaled dot-product attention：
+
+\[
+\operatorname{Attn}(Q,K,V)=
+\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}+M\right)V.
+\]
+
+其中，$Q$ 表示每个 node 正在寻找什么，$K$ 表示每个 node 可被怎样匹配，$V$ 表示真正传递的内容，$d_k$ 是 key/query 维度，$M$ 是 connectivity mask。除以 $\sqrt{d_k}$ 用来控制 dot-product variance，避免 softmax 在维度增大时过早饱和。
+
+\lecturefigure{slide-30-attention-code-and-graph.jpg}{Python 伪代码与有向图：一次 attention message-passing round。}{Stanford Online 官方视频 00:23:32--00:25:35。}
+
+\begin{knowledgebox}{读图：沿一个目标 node 走完整条路径}
+先取目标 node 的 query；再收集所有允许入边源 node 的 keys；dot product 得到未归一化 affinity；softmax 把它们转成和为 1 的权重；最后对源 nodes 的 values 加权求和，作为目标 node 的更新。图结构告诉模型“可向谁问”，Q/K 告诉模型“当前该问谁”，V 告诉模型“答案内容是什么”。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={单头 attention 的最小矩阵表达；真实实现还需要 batch/head 维度与 dropout。}]
+def attention(x, Wq, Wk, Wv, mask):
+    q = x @ Wq                  # [T, dk]
+    k = x @ Wk                  # [T, dk]
+    v = x @ Wv                  # [T, dv]
+    scores = q @ k.T / sqrt(k.shape[-1])
+    scores = scores.masked_fill(mask == 0, -inf)
+    weights = softmax(scores, dim=-1)
+    return weights @ v          # [T, dv]
+\end{lstlisting}
+
+\subsection{Heads 并行、layers 串行；self 与 cross 只差信息来源}
+
+Multi-head attention 用不同参数并行执行 $H$ 次 attention：
+
+\[
+\operatorname{MHA}(X)=\operatorname{Concat}(\text{head}_1,\ldots,\text{head}_H)W_O.
+\]
+
+每个 head 可以学习不同的 compatibility 与 value subspace；layers 则串行堆叠，使一轮收集后的表示成为下一轮通信输入。Self-attention 中 $Q,K,V$ 来自同一组 states；cross-attention 中 query 来自 decoder，key/value 来自 encoder。数学操作相同，memory source 不同。
+
+\lecturefigure{slide-31-parallel-communication-and-compute.jpg}{并行通信与逐点计算：encoder、causal decoder 和 cross-attention 的 connectivity。}{Stanford Online 官方视频 00:25:35--00:31:00。}
+
+\begin{knowledgebox}{读图：三种 connectivity}
+Encoder self-attention 通常允许所有 token 两两通信；causal decoder 只允许位置 $t$ 读取 $\le t$ 的 token，形成下三角图；encoder--decoder 模型还让 decoder queries 读取全部 encoder keys/values。多头不改变允许边集合，只是在同一边集合上学习多套并行路由规则。
+\end{knowledgebox}
+
+\teachervoice{有人问 heads 与 layers 的区别，Karpathy 的回答非常实用：“heads 是 copy-paste in parallel，layers 是 copy-paste in series。”他也承认图类比是当天早上才形成的，因此把它当教学模型，而把下一章的 nanoGPT 当可执行证据。}
+
+\subsection{本章小结}
+
+Attention 可以被理解为有向图上的 data-dependent message passing：mask 定义可通信边，Q/K 产生 affinity，softmax 归一化，V 传递内容；MLP 再在每个 node 内独立计算。Heads 提供并行关系子空间，layers 提供串行推理深度，self/cross attention 只在 key/value 来源上不同。
+

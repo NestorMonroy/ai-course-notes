@@ -1,0 +1,72 @@
+\section{Ambiguity：从 Pairwise Message 到 Hough-Style Voting}
+
+低层证据天然多义：一个 circle 可能是 left eye、right eye、front wheel 或 back wheel。若每个候选 part 都直接向所有其他候选 part 发送“你是否支持我”的 pose-transformed message，relation type 与 spatial pair 会快速膨胀。GLOM 提出另一种方向：让每个 part 都预测 parent identity-pose，再在 parent level 检查这些预测是否一致。
+
+\lecturefigure{slide-24-upper-level-disambiguation.jpg}{用正确的 spatial relation 在 parent level 消解 ambiguous parts。}{Stanford Online 官方视频 00:39:04--00:43:35。}
+
+\subsection{Transformational random field 的复杂度}
+
+假设 nose hypothesis 要询问附近是否存在兼容 mouth。message 不只说“有/没有 mouth”，还要把 nose pose 经 nose-to-mouth relation 变换成 expected mouth pose，回程再做 inverse transform。若 $N$ 个候选位置、$H$ 种 relation head 都直接交互，朴素 message 数量接近 $O(HN^2)$，且每条 message 都含 coordinate transform。
+
+\begin{warningbox}{这里的 $O(N^2)$ 是设计压力，不是实测 profiler 数据}
+课堂用它说明 direct relation-specific messaging 为什么复杂。真实成本还取决于 local window、candidate pruning、head sharing、sparsity 与 representation dimension；不能据此直接给 GLOM 或 Hough route 做速度排名。
+\end{warningbox}
+
+\subsection{Hough transform：让 parts 在 parent space 会合}
+
+更简单的做法是：nose 与 mouth 不直接互认，而各自预测 face 的 identity 与 pose。如果两个不同位置、不同外观的 part 给出相同 parent embedding，那么 parent level 的 attention 会将其视为互相支持。这与经典 Hough voting 相似：局部 evidence 被映射到一个共同 hypothesis space，峰值代表一致解释。
+
+\lecturefigure{slide-25-hough-transform.jpg}{Hough-style 路线：parts 预测 whole，再比较 whole hypothesis 是否一致。}{Stanford Online 官方视频 00:43:36--00:44:31。}
+
+\begin{knowledgebox}{读图：比较 direct relation 与 common-parent vote}
+图左的 direct route 需要 nose 对不同潜在 mouth、eye 等发送 relation-specific message；图右把每个 part 映射到 whole hypothesis space。nose 与 mouth 虽位于不同 columns，只要预测出相同 face identity-pose vector，就会在 face level 相互支持。关键比较不是“有没有 attention”，而是 attention 发生在 pairwise part space 还是 common parent space。
+\end{knowledgebox}
+
+可以把 part $p$ 的 parent prediction 抽象为：
+
+\[
+\hat{\mathbf e}_{w}^{(p)}=f_{\mathrm{bu}}\!\left(\mathbf e_p\right).
+\]
+
+若 nose 与 mouth 属于同一 face，则理想情况是
+
+\[
+\hat{\mathbf e}_{\mathrm{face}}^{(\mathrm{nose})}
+\approx
+\hat{\mathbf e}_{\mathrm{face}}^{(\mathrm{mouth})}.
+\]
+
+其中，$\mathbf e_p$ 包含 part identity 与 pose，$f_{\mathrm{bu}}$ 学习 part-to-whole relation，$\hat{\mathbf e}_w^{(p)}$ 是该 part 对 parent 的 vote。agreement 支持共同 parent，但 disagreement 也可能来自 occlusion、bad pose estimate 或多个重叠 objects。
+
+\begin{importantbox}{为什么这条路线减少 routing burden}
+每个 column 的 embedding 始终描述该空间位置“在某层是什么”；column 内不需要把 activity 动态搬到另一颗专用 capsule。跨 column 的联系仍存在，但退化为 same-level similarity attention：比较的是 parent votes，而不是为每种 part-pair 建专用 routing table。
+\end{importantbox}
+
+\subsection{如何保留 multiple hypotheses}
+
+一个 circle 在 early inference 中不能立刻被压成唯一解释。Hinton 提出：embedding 中每个 neuron 对 joint identity-pose space $z=(\text{identity},\text{pose})$ 提供一个宽的 log-probability basis function；多个 active neurons 的 contribution 相加后，可以形成尖锐或多峰分布。
+
+\lecturefigure{slide-26-joint-identity-pose.jpg}{用 joint identity-pose log-probability basis 表示 multimodal prediction。}{Stanford Online 官方视频 00:44:32--00:44:45。}
+
+\begin{knowledgebox}{读图：vague basis 相加后才形成 sharp hypothesis}
+单个 neuron 对 joint identity-pose space 贡献一块宽的 log-probability surface，因此不能单独读成“这个 neuron 就是左眼”。多个 active basis 的加和相当于多个 constraints 的交集，可留下一个或多个峰。图没有展示 normalized probability、训练方式或 calibration；它只解释 distributed activity 如何在原则上保留 multiple hypotheses。
+\end{knowledgebox}
+
+一个教学化表达是：
+
+\[
+\log p(z\mid\mathbf e)=\sum_{i=1}^{d} e_i\,\phi_i(z)-\log Z(\mathbf e).
+\]
+
+其中，$z$ 是 identity-pose hypothesis，$e_i$ 是 embedding 第 $i$ 个 activity，$\phi_i(z)$ 是该 neuron 在 hypothesis space 中的宽 basis function，$Z(\mathbf e)$ 是 normalization constant。不同 evidence 的 log probability 相加，相当于 probability 相乘，可让重叠支持区域变尖。
+
+\begin{warningbox}{讲者自己把这个论证称为 weak argument}
+这是一种 representational hypothesis：它说明 high-dimensional distributed activity \emph{可能}如何表达 multimodal uncertainty。课堂没有给出 calibrated likelihood、basis visualization、ablation 或 neural recording 来验证公式。讲义保留公式是为了让假说可检验，不是给它追加虚假的实证权威。
+\end{warningbox}
+
+\teachervoice{Hinton 说 perception 必须处理 uncertainty，因此 neuron 不能只代表一个确定对象；但他也承认“这是我能想到的唯一方式”并不是强证明。这个自我批评应与公式放在同一页，否则读者会把设计偏好误读成事实。}
+
+\subsection{本章小结}
+
+GLOM 用 part-to-whole vote 把 relation-specific pairwise messaging 转换成 parent-level agreement；再用 distributed log-probability basis 为 early ambiguity 留空间。这两步都很有解释力，但分别需要 complexity experiment 与 uncertainty calibration 才能成为被验证的机制。
+

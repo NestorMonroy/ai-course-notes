@@ -1,0 +1,48 @@
+\section{高分辨率的二次成本与 SANA}
+
+DiT 结构统一后，最大的系统问题重新变成 token 数。4K 图像即使在 latent 空间仍可能产生数十万位置，vanilla self-attention 的 $N^2$ 时间与内存不可承受。SANA 试图线性化 image self-attention，同时保留文本 cross-attention。
+
+\subsection{为什么 latent space 仍会爆炸}
+
+下采样只把问题推迟。若 4096 图像经 8 倍 VAE 得到 $512\times512$ latent，再以 $P=1$ token 化，则 $N=262{,}144$；attention matrix 有约 $6.9\times10^{10}$ 元素，单层就不可接受。本节从这个数量级出发，比较 FlashAttention 的 I/O 优化与 linear attention 的复杂度重写，核心是判断它们分别消除了什么成本、又保留了哪些二次项或质量风险。
+
+\lecturefigure{slide-41.jpg}{超高分辨率下，latent token 仍让二次 attention 失控}{41}
+
+Vanilla attention 的主要成本为
+\[
+T_{\mathrm{attn}}=O(N^2d),\qquad
+M_{\mathrm{attn}}=O(N^2),
+\]
+$N$ 是 token 数，$d$ 是 head dimension。FlashAttention 可避免显式存完整矩阵并改善 I/O，却不改变二次计算量。
+
+\lecturefigure{slide-42.jpg}{SANA 总体结构：线性 self-attention、cross-attention 与高效 FFN}{42}
+
+SANA 不把所有 attention 都线性化。图像 token 间使用 linear attention，文本条件仍通过 cross-attention 注入；此外用 Mix-FFN、压缩与轻量设计补偿表达力。读图应分别判断 image-image 与 image-text 两条路径。
+
+\lecturefigure{slide-43.jpg}{SANA 细节：重排乘法次序，复用 $K^\top V$ 避免 $N\times N$ 矩阵}{43}
+
+对可分解核 $\phi$，线性 attention 写成
+\[
+\operatorname{LA}(Q,K,V)
+=\phi(Q)\left(\phi(K)^\top V\right).
+\]
+先计算 $\phi(K)^\top V$，复杂度近似 $O(Nd^2)$，不构造 $N^2$ attention map。代价是 softmax attention 的精确归一化与某些 pairwise interaction 被近似。
+
+\begin{warningbox}{Linear attention 不是把二次成本免费删除}
+复杂度下降依赖可分解特征映射、固定 head dimension 与特定实现；当 $d$ 很大、序列较短或 kernel 未充分优化时，理论线性形式未必更快。更重要的是，近似改变了 token 间可表达的交互，因此必须同时报告真实 latency、峰值显存和质量退化，而不能只比较大 $O$ 记号。
+\end{warningbox}
+
+\lecturefigure{slide-44.jpg}{SANA 的质量--速度折中：高分辨率生成显著加速}{44}
+
+性能图应沿 Pareto frontier 读：同等质量谁更快、同等延迟谁更好。不同硬件、batch、分辨率和采样步数会改变排名。线性 attention 的价值不是在所有尺度都更强，而是在超长视觉序列上避免二次瓶颈。
+
+\begin{importantbox}{效率结论必须绑定 workload}
+报告 FLOPs 不足以预测速度。还要测 kernel 实现、HBM 带宽、batch size、序列长度、编译器与硬件。短序列上 vanilla/FlashAttention 可能更快，长序列才显现线性方法优势。
+\end{importantbox}
+
+\teachervoice{00:40:45--00:49:49，老师解释 SANA 并非“删除 attention”：它只线性化 image self-attention，仍保留 text cross-attention，并用 Mix-FFN 等组件补偿质量。}
+
+\subsection{本章小结}
+
+高分辨率使 latent token 数再次成为主导瓶颈。SANA 通过改变乘法顺序把 image self-attention 从二次降到近线性，同时保留文本交互。其结果必须作为 quality--speed Pareto 而非单一指标胜负来理解。
+

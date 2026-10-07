@@ -1,0 +1,60 @@
+\section{结构偏置的边界：ViT、Cross-attention、Fourier 与 ImageNet}
+
+有了 latent bottleneck，本节回答两个问题：Perceiver 与 ViT/已有 cross-attention 有何不同？它又如何在不依赖二维卷积的情况下获得位置？讲座并未声称所有结构先验都无用，而是通过对照和消融寻找“最少但足够”的输入信息。
+
+\subsection{与 ViT 对照：Patching 本身就是图像假设}
+
+前一节给出了 Perceiver 的统一瓶颈，本节先与最接近的视觉 Transformer 对照。ViT 把图像分成固定二维 patches，再用卷积或线性投影生成 tokens。这一方案对图像非常有效，却需要为不同网格、点云或传感器重新定义 patching。Perceiver 可以直接接收像素/数组元素，并把位置作为额外特征。
+
+\lecturefigure{slide-12-contrast-vit.jpg}{ViT 通过二维 patch embedding 降低 token 数，Perceiver 避免把网格 patch 写进核心接口。}{Stanford Online 当前官方视频 00:21:42--00:22:55。}
+
+\begin{knowledgebox}{读图：ViT 与 Perceiver 优化的瓶颈不同}
+ViT 先用 patch size 减少 $M$，然后仍在 patch tokens 上 self-attend；Perceiver 保留更细输入，通过 latent queries 控制 workspace。前者通常更高效且成熟，后者更容易迁移到非网格或异构数组。
+\end{knowledgebox}
+
+\teachervoice{Q\&A 中老师给出明确立场：视觉领域的 convolution/attention hybrids 在图像问题上追求速度与质量的精确 Pareto 点，非常重要；Perceiver 团队追求的是尽可能 general、同时仍保持可用性能。两条路线不是互相否定。}
+
+\subsection{Cross-attention 不是 Perceiver 独有}
+
+DETR 用 object queries 从卷积特征图解码 bounding boxes；Slot Attention 用 learned slots 竞争性读取特征并形成对象中心表示。Perceiver 的新意在于把这类不对称 attention 提升为通用输入瓶颈，并反复在 latent workspace 中处理。
+
+\lecturefigure{slide-13-cross-attention-detr.jpg}{DETR 与 Slot Attention 等视觉工作中的 cross-attention 先例。}{Stanford Online 当前官方视频 00:22:56--00:23:11。}
+
+\begin{importantbox}{方法归属要准确}
+Perceiver 没有发明 cross-attention。其贡献是组合：大输入到小 learned latent 的不对称读取、latent 内部深度处理、弱模态假设，以及 Perceiver IO 的输出-query 解码。
+\end{importantbox}
+
+\subsection{Fourier positional features：用频率基函数表示坐标}
+
+为了在不硬编码局部连接的情况下表达细粒度位置，本节对二维坐标 $p=(x,y)$ 构造多频率正弦/余弦特征：
+
+\[
+\gamma(p)=\big[\sin(2\pi f_1x),\cos(2\pi f_1x),\sin(2\pi f_1y),\cos(2\pi f_1y),\ldots\big].
+\]
+
+其中，$f_k$ 是从低频到 Nyquist 附近的一组频率；$x,y$ 是归一化坐标；$\gamma(p)$ 与 RGB 或其他内容特征拼接。低频表达大尺度位置，高频帮助区分细粒度坐标。
+
+\lecturefigure{slide-14-fourier-position-encodings.jpg}{二维 Fourier positional encodings：多频率坐标特征与 RGB 拼接。}{原始讲解 00:26:18--00:26:55；完整 progressive build 在当前官方视频 00:39:52 再次显示。}
+
+\teachervoice{老师报告一个具体经验：在图像输入上，把 Fourier position 与 RGB \textbf{concatenate} 通常比先投影后相加更好。他并未给出确定机制，只猜测图像内容特征不像词 embedding 那样稀疏；这种“观察可靠、解释未定”的状态应被保留。}
+
+\begin{warningbox}{Fourier features 仍然提供真实结构}
+模型虽然没有卷积邻域，但坐标编码明确告诉它每个像素位于二维平面的哪里。若称其“完全不使用图像结构”是不准确的；更准确的说法是结构以输入特征而非固定计算图提供。
+\end{warningbox}
+
+\subsection{Permuted ImageNet：排列不变不等于结构无用}
+
+接下来用一个反直觉实验检验位置特征是否真的替代了固定数组顺序。实验将图像像素顺序随机打乱，只要每个像素仍携带正确位置编码，Perceiver 仍取得相近 ImageNet top-1 结果。这个结果表明架构不依赖输入数组的内存顺序或局部扫描顺序；它不能证明位置、局部性或卷积偏置对数据效率无价值。
+
+\lecturefigure{slide-15-imagenet-permuted-classification.jpg}{ImageNet 标准与 permuted 输入：正确位置特征使模型不依赖数组排列。}{Stanford Online 当前官方视频 00:29:34--00:33:47。}
+
+\begin{knowledgebox}{读表：比较的是数组顺序，不是删除空间}
+Permuted 版本仍附带位置编码，因此模型可以学习哪些像素在空间上相邻。若同时打乱位置标签，任务会变成不同问题。表中结果支持 input-order robustness，而非“二维结构不存在”。
+\end{knowledgebox}
+
+\teachervoice{Q\&A 的重要提醒是：弱偏置模型可能需要更多数据才能自行恢复结构。对 ImageNet 这类大数据，通用性可以被训练出来；小数据场景仍是讲者明确承认的未解决瓶颈。}
+
+\subsection{本章小结}
+
+Perceiver 比 ViT 少写入 patch/grid 假设，但仍使用位置特征。Cross-attention 有丰富先例，贡献在于通用化组合。Permuted ImageNet 展示输入顺序鲁棒性，却不能推翻局部偏置的数据效率优势。
+

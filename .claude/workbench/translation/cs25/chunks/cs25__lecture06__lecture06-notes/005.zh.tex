@@ -1,0 +1,77 @@
+\section{Perceiver IO：把 Output Query 变成通用任务接口}
+
+原始 Perceiver 很适合分类等紧凑输出，但图像重建、语言序列和 optical flow 需要大量结构化 outputs。Perceiver IO 在 latent processor 后加入 decoder cross-attention：每个 output query 从 latents 读取与自己任务、位置或模态相关的信息。
+
+\subsection{先统一 heterogeneous inputs}
+
+不同模态的 raw feature 维度和语义可以不同。视频 token 可能包含 RGB、$(x,y,t)$ 和 modality tag；音频 token 可能包含振幅、时间和 modality tag。通过投影、padding/拼接与位置/模态编码，它们被组成一个 input array，再由同一 latent set cross-attend。
+
+\lecturefigure{slide-16-featurizing-multimodality.jpg}{多模态特征化：内容、位置、时间与 modality tag 组成统一输入数组。}{Stanford Online 当前官方视频 00:33:50--00:40:31。}
+
+\begin{knowledgebox}{概念解释：把数据视为表格}
+每一行是一个输入元素，每列是内容或元数据特征。行数可随模态和分辨率变化，列数通过投影统一。这个视角适合任意有限数组，但不自动解决缺失值、不同采样率、时间对齐和模态不平衡。
+\end{knowledgebox}
+
+\teachervoice{讲者在结尾 Q\&A 直接说：Perceiver 有效地把任何输入当作 tabular data。这里的“表格”是统一数组接口，不等于传统小型 CSV 表格模型，也不意味着类别列、缺失值和因果结构无需专门处理。}
+
+\subsection{Basic Perceiver 与 Perceiver IO}
+
+本节把同一 latent processor 的两种输出接口并排比较。Basic Perceiver 编码大输入、处理 latents，再用平均池化和分类 head 产生一个紧凑输出。它对 ImageNet 分类合适，却无法自然表达“每个像素一个向量”或“每个字节位置一个 token 预测”。
+
+\lecturefigure{slide-17-basic-perceiver-architecture.jpg}{Basic Perceiver：encode scales with input、process independent of input、compact readout。}{Stanford Online 当前官方视频 00:40:32--00:41:33。}
+
+Perceiver IO 添加 output query array $Y_q\in\mathbb{R}^{O\times d}$，由它查询 processed latents $Z$：
+
+\[
+Y=\operatorname{softmax}\!\left(\frac{(Y_qW_Q)(ZW_K)^\top}{\sqrt{d_k}}\right)(ZW_V).
+\]
+
+其中，$O$ 是输出元素数；$Y_q$ 编码输出位置、任务或模态；$Z$ 是 latent array。Decoder cross-attention 成本约为 $\mathcal{O}(ONd)$，所以输入可以很大，但极大输出仍需付出与 $O$ 线性相关的成本。
+
+\lecturefigure{slide-18-perceiver-io-architecture.jpg}{Perceiver IO：输入 cross-attention、latent processing 与 output-query decoder。}{Stanford Online 当前官方视频 00:41:34--00:41:55。}
+
+\begin{importantbox}{Output query 是“问题”，不是空占位符}
+Query 可以包含坐标、模态、任务 ID 或语义标签。Decoder 回答的是：“对于这个输出位置/任务，从共享 latents 中应读取什么？”同一 latent state 可以被不同 queries 解码成图像像素、类别、文本标签或光流向量。
+\end{importantbox}
+
+\subsection{构造 queries：位置决定输出拓扑}
+
+为了把抽象 output query 变成具体任务接口，本节先看图像 autoencoding：它为每个目标像素建立一个带二维位置的 query。模型不需要在 latent workspace 中保留同样数量的 slots；只需在解码时让每个输出位置读取共享 latent。输出顺序可以通过 query coordinates 恢复。
+
+\lecturefigure{slide-19-constructing-output-queries.jpg}{图像 autoencoding 的 output queries：每个像素位置查询共享 latent。}{Stanford Online 当前官方视频 00:42:04--00:42:59。}
+
+\begin{lstlisting}[caption={任务化 output-query 构造的概念性伪代码。}]
+def build_queries(task, positions, modalities):
+    queries = []
+    for position, modality in zip(positions, modalities):
+        query = concat(
+            task_embedding(task),
+            modality_embedding(modality),
+            fourier_position(position),
+        )
+        queries.append(query)
+    return stack(queries)
+\end{lstlisting}
+
+多模态 autoencoding 可以为视频、音频、label 等输出分别使用不同 modality/task query。输入和输出的元素数可以不同，某些模态甚至只输出一个类别，另一些输出高分辨率网格。
+
+\lecturefigure{slide-20-multimodal-query-construction.jpg}{多模态输出 query：按 modality、task 和 position 解码不同大小的输出。}{Stanford Online 当前官方视频 00:43:00--00:43:05。}
+
+\begin{knowledgebox}{读图：共享的是 latent，不是所有 decoder head 参数}
+不同 queries 访问同一 processed latent state，但最后的 projection、loss 和输出通道仍可因任务不同而变化。统一 architecture interface 不要求分类 logits 与 RGB 像素使用完全相同的数值头。
+\end{knowledgebox}
+
+\subsection{ImageNet refinements：架构通用不代表超参数固定}
+
+Perceiver IO 的 ImageNet 表格展示若干训练与模型调整，例如更深网络、clipping、cutmix/mixup 等。它提醒我们：核心 encode/process/decode 接口可复用，但达到强结果仍需要任务训练 recipe，不能把“少领域假设”误读为“无需调参”。
+
+\lecturefigure{slide-21-imagenet-results.jpg}{Perceiver IO 的 ImageNet 配置与结果。}{Stanford Online 当前官方视频 00:43:06--00:43:43。}
+
+\begin{warningbox}{架构对照必须匹配训练 recipe}
+若 Perceiver 使用更长训练、数据增强或不同正则，而 baseline 没有，结果不能只归因于 latent bottleneck。报告应拆分 architecture、optimization、augmentation 与 compute。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Perceiver IO 通过 output queries 将紧凑 latent state 解码为任意结构化输出。输入、处理与输出规模被分离，但 decoder 仍随 output count 线性增长，任务特定 query 和训练 recipe 仍是必要设计。
+

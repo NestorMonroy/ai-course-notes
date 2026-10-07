@@ -1,0 +1,86 @@
+\section{Scaling ViT：更大模型需要新的训练制度}
+
+讲座第二部分讨论 further scaling。重点不是简单增加参数，而是寻找能放进硬件的 shape、设计足够长且稳定的 learning-rate schedule、对任务头施加合适 regularization，并同时观察 SOTA、few-shot sample efficiency 与 scaling law。Scale 是 recipe 的放大镜：小模型上不明显的优化问题会成为大模型瓶颈。
+
+\subsection{第二阶段的问题清单}
+
+分隔页列出 Scaling ViT 团队与研究方向，提醒读者后续结果来自模型、训练与评估协同，而非原始 ViT 论文的直接外推。读这一组图时，应把“模型能否放得下”“训练是否足够久”“下游头是否过拟合”作为三个独立问题。
+
+\lecturefigure{slide-26-further-scaling-divider.jpg}{Further scaling up ViTs 引出模型形状、训练日程与下游正则化。}{官方视频 52:32。}
+
+\begin{knowledgebox}{读图：团队页也是 provenance}
+这张页本身没有曲线，却界定了后续证据属于 Scaling Vision Transformers 工作。保留它是为了避免把跨论文结果混成同一实验，并提醒读者查看原论文中的 dataset、compute、model family 与 appendix，而不是只从课堂截图复制结论。
+\end{knowledgebox}
+
+\subsection{Scale model：参数放在哪里}
+
+扩大模型时，可以增加 depth、hidden width、MLP width、heads 或更细 patch。不同配置即使参数量接近，也可能在 TPU/GPU memory 与 matrix shape 上差异巨大。团队先从 memory feasibility 出发，再搜索性能更好的结构。
+
+\lecturefigure{slide-27-scaling-model-build.jpg}{进一步扩展 ViT 时，模型维度和硬件内存约束共同决定可行配置。}{官方视频 1:00:08。}
+
+\begin{knowledgebox}{读图：红圈是受约束的设计变量}
+图把 Transformer block、attention heads 与 MLP 维度标出，说明 scaling 不是单一 slider。固定 memory 下，增加 layers 会保存更多 activation；增加 width 会扩大矩阵和 optimizer state；减小 patch 会增加 token。这里的 \term{optimizer state} 指 Adam/AdamW 为每个参数保存的一阶矩 $m$ 与二阶矩 $v$ 等更新状态，它们常比参数本身占用更多训练内存。\term{activation checkpointing}（激活检查点）只保存部分 forward activations，在 backward 时重新计算其余激活，以额外 compute 换 memory；它不同于保存模型权重的 training checkpoint。\term{sharding}（分片）则把参数、梯度、optimizer state 或 activation 切分到多张设备，使这些状态不再在每个 rank 完整复制，但会引入 \term{collectives}（多设备集合通信），例如 all-reduce、reduce-scatter、all-gather 与 broadcast，用于聚合或重新分发各 rank 的张量。低精度训练也能改变可行边界，却需要处理数值范围与累积精度。
+\end{knowledgebox}
+
+\lecturefigure{slide-28-model-shape-search.jpg}{不同 layer count 与 MLP width 的可行区域展示 shape search 如何受内存限制。}{官方视频 1:00:48。}
+
+\begin{knowledgebox}{读图：先区分不可行、可行与最优}
+每个面板对应不同 depth，色块表示可容纳或性能区域。白色/截断区域往往是 memory 不可行，不等于精度差。最佳 shape 是硬件、batch、parallelism 与目标 metric 的联合结果；换 accelerator 或 sequence length 后，最优点可能移动。
+\end{knowledgebox}
+
+\subsection{Scale training：从有限 schedule 到近似无限日程}
+
+大模型需要更多优化步才能进入其优势区间。若预先固定短 schedule，训练结束时模型仍在快速改善，比较会系统性偏向小模型。所谓“infinite” schedule 不是字面无限训练，而是构造可延长、无需预知最终步数的 learning-rate rule，使 checkpoint 在多个预算点都保持可用。
+
+\lecturefigure{slide-29-infinite-lr-schedules.jpg}{不同 learning-rate schedule 随训练步数延伸时的行为。}{官方视频 1:00:56。}
+
+\begin{knowledgebox}{读图：schedule 必须与停止时间解耦}
+传统 cosine decay 需要预先知道总步数；若临时延长训练，学习率可能已衰减过低。可延展 schedule 让研究者在不同 compute budget 上比较 checkpoint，而不为每个终点重新训练。曲线优劣还要看 validation loss、stability 与最终 transfer，不只是学习率形状。
+\end{knowledgebox}
+
+\teachervoice{Lucas 的“be patient”在这里变成具体训练设计：若大模型需要更长时间显现优势，就不能用为小模型设计的短 schedule 评价它。课堂提示：early stopping 规则也属于模型比较的一部分。}
+
+\subsection{Head weight decay：下游小数据需要局部正则化}
+
+预训练 backbone 很大，但 few-shot 任务的 classifier head 只看到少量样本，容易成为过拟合入口。对 head 使用不同 weight decay，可以改变低样本区间的 bias-variance tradeoff；统一 regularization 未必适合 backbone 与新初始化 head。
+
+\lecturefigure{slide-30-head-weight-decay.jpg}{Head weight decay 对 few-shot 网格搜索和训练曲线的影响。}{官方视频 1:01:00。}
+
+\begin{knowledgebox}{读图：看最优区域是否稳定}
+左侧热图展示不同 label budget 与 weight decay 的组合，右侧曲线比较 recipe。低样本下较强正则可能更重要；样本增加后最优值会变化。若只在 test set 上选最优 decay，会产生 selection leakage；应使用 validation protocol 或预先固定规则。
+\end{knowledgebox}
+
+\subsection{结果：SOTA、sample efficiency 与 scaling law 分开看}
+
+扩展后的模型需要从三个维度验收：绝对性能是否提高、少样本迁移是否更有效、性能是否随 compute 呈可预测趋势。它们分别对应 frontier、adaptation cost 与 planning value，不能用一个 ImageNet top-1 代替。
+
+\lecturefigure{slide-31-new-sota.jpg}{扩展 ViT 在 ImageNet、分布迁移与 VTAB 等指标上形成新的结果。}{官方视频 1:01:56；Zhai et al. 2021。}
+
+\begin{knowledgebox}{读图：表格中的每一列是不同承诺}
+ImageNet 衡量常见分类；ImageNet-V2 检验重新采样后的分布变化；ReaL 修正多标签问题；ObjectNet 增强姿态/背景 shift；VTAB 测多任务迁移。一个模型在所有列都改善，比只在原始 ImageNet 提升更有说服力；仍不能外推到 detection、video 或 open-world reliability。
+\end{knowledgebox}
+
+\lecturefigure{slide-32-sample-efficiency.jpg}{更大 ViT 在 10-shot、few-shot 与 full fine-tuning 条件下表现出不同 sample-efficiency 曲线。}{官方视频 1:02:40。}
+
+\begin{knowledgebox}{读图：横轴是下游样本，曲线间距是表示价值}
+当样本很少时，较好的 representation 应降低错误率；样本增多后，所有模型可能收敛但速度不同。若大模型只在 full-data 领先，说明其优势未必是少样本表示；若 10-shot 也领先，才更支持 kick-start 新任务的原始目标。
+\end{knowledgebox}
+
+\lecturefigure{slide-33-vit-scaling-laws.jpg}{ViT 的 error 与 compute/模型规模关系呈现近似幂律区间。}{官方视频 1:02:52。}
+
+\begin{importantbox}{Scaling law 的常用形式}
+在有限实验区间内，可用
+\[
+E(C)=E_{\infty}+aC^{-\alpha}
+\]
+拟合 error $E$ 与 compute $C$；$E_{\infty}$ 是不可约/饱和项，$a$ 是尺度系数，$\alpha$ 是经验 exponent。幂律便于规划预算，却不是自然定律：数据耗尽、distribution shift、optimizer 改变或 metric ceiling 都可能导致转折。
+\end{importantbox}
+
+\begin{warningbox}{外推前必须检查三件事}
+拟合区间是否跨足够数量级；不同 model family 是否共享 exponent；训练是否都接近各自最优 recipe。若小模型欠训练、大模型充分训练，表面 scaling law 可能混入 optimization gap。外推到未测试的百倍 compute 时，应报告区间和不确定性。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Scaling ViT 将规模问题拆成 shape feasibility、schedule extensibility、head regularization、绝对性能、sample efficiency 与 scaling law。更大模型只有在训练成熟、适配稳定且多类评估同步改善时，才构成可信进步。
+

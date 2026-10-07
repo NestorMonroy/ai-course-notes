@@ -1,0 +1,76 @@
+\section{训练目标与 rollout：从监督学习到闭环控制}
+
+Decision Transformer 最有吸引力的工程特征，是训练时使用标准 action prediction loss。可训练性来自熟悉的监督目标，但部署仍是闭环 rollout：模型输出动作、环境产生新状态与 reward、系统更新剩余目标并再次调用模型。本节把训练和推理严格分开。
+
+\subsection{Continuous 与 discrete action loss}
+
+训练目标取决于 action space 的统计形式，但二者共享同一个原则：直接把 logged action 当作监督 label，而不是先构造 value target。连续控制通常回归一个实数向量，离散控制则预测 action category 的概率分布。读公式时应同时检查 action normalization、有效 timestep mask 与 reduction 方式，因为这些实现细节会改变不同 episode 对梯度的权重。对 continuous action，可用均方误差：
+\[
+\mathcal{L}_{\mathrm{MSE}}(\theta)
+=\frac{1}{T}\sum_{t=1}^{T}\lVert a_t-\widehat{a}_t\rVert_2^2.
+\]
+对 discrete action，可用 cross-entropy：
+\[
+\mathcal{L}_{\mathrm{CE}}(\theta)
+=-\frac{1}{T}\sum_{t=1}^{T}\log p_{\theta}(a_t\mid \widehat{R}_{\le t},s_{\le t},a_{<t}).
+\]
+$a_t$ 是数据集中的真实 action，$\widehat{a}_t$ 或 $p_{\theta}$ 是模型输出，$T$ 是有效序列长度。Padding 位置必须通过 mask 排除，否则短 episode 会被人工 token 污染。
+
+\lecturefigure{slide-11-loss-function.jpg}{训练目标：continuous action 使用 MSE，discrete action 使用 cross-entropy。}{Stanford Online 官方视频 23:40。}
+
+\begin{knowledgebox}{读图：真正的论点是 “No dynamic programming”}
+slide 底部的粗体结论比两个公式更重要。传统 value-based RL 常用 Bellman target，target 本身依赖另一个估计值或 slowly updated network；Decision Transformer 直接拟合日志中的 action label，训练接口更接近 supervised learning。代价是模型不会自动进行 policy improvement，提升必须来自 return conditioning、数据组合和模型 generalization。
+\end{knowledgebox}
+
+\teachervoice{老师强调，MSE 与 cross-entropy 的价值在于“稳定、易正则化”，而不是它们比 RL loss 更神奇。将复杂问题改写成监督学习能复用成熟基础设施，但也把成败更多地交给数据质量与条件设计。}
+
+\subsection{推理时如何更新 return-to-go}
+
+设初始目标为 $R_{\mathrm{target}}$。在时刻 $t$，模型根据当前上下文采样或输出动作 $a_t$；环境返回 reward $r_t$ 与新状态 $s_{t+1}$。未折扣情形下更新：
+\[
+\widehat{R}_{t+1}=\widehat{R}_t-r_t.
+\]
+若使用折扣 return，需要保持与训练时定义一致，而不能简单照搬减法。每一步还要把新 token 追加到上下文，并只保留最近 $K$ 个 timestep。
+
+\lecturefigure{slide-12-rollouts.jpg}{Rollout 与 autoregressive generation 类似：设定目标回报，生成动作，追加新状态并更新剩余回报。}{Stanford Online 官方视频 24:58。}
+
+\begin{lstlisting}[caption={未折扣 return-to-go 下的 autoregressive rollout},label={lst:dt-rollout}]
+target_return = desired_return
+state = env.reset()
+returns, states, actions, timesteps = [target_return], [state], [], [0]
+
+while not done:
+    action = model(returns, states, actions, timesteps)[-1]
+    next_state, reward, done, info = env.step(action)
+
+    actions.append(action)
+    states.append(next_state)
+    returns.append(returns[-1] - reward)
+    timesteps.append(timesteps[-1] + 1)
+
+    returns, states, actions, timesteps = keep_last_k_steps(
+        returns, states, actions, timesteps, K
+    )
+\end{lstlisting}
+
+\subsection{一个数值例子}
+
+假设目标回报为 10。前三步实际 reward 分别是 $2,0,3$，那么输入模型的 remaining return 依次是 $10,8,8,5$。若第二步没有 reward，目标不会凭空减少；若某一步得到比预期更高的 reward，剩余目标会更快接近零。这个过程使模型持续知道“还差多少”，但前提是训练数据中存在足够多相似剩余目标与状态组合。
+
+\begin{importantbox}{Rollout 的四个不变量}
+\begin{enumerate}
+  \item 训练和推理必须使用一致的 return 定义与 reward scale；
+  \item 当前 action 不能泄漏到预测它的输入位置；
+  \item 更新的是实际获得 reward 后的剩余目标，不是模型自己预测的 reward；
+  \item context truncation 必须按完整 timestep 对齐，不能把 $(R,s,a)$ 三元组切碎。
+\end{enumerate}
+\end{importantbox}
+
+\begin{warningbox}{Exposure bias 仍然存在}
+训练时模型看到日志中的真实历史 action；rollout 时它看到自己的历史 action。一个小错误会改变未来 state，造成与训练分布偏离。Decision Transformer 的监督目标稳定，并不等于 closed-loop error accumulation 已被解决。
+\end{warningbox}
+
+\subsection{本章小结}
+
+训练阶段直接拟合 action，避免显式 Bellman backup；推理阶段则按 autoregressive loop 与环境交互，持续更新 remaining return 和 context。监督学习简化了优化，却没有消除 rollout 中的分布偏移与错误累积。
+

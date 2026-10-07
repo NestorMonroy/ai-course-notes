@@ -1,0 +1,124 @@
+\section{实验主线：从总分到可证伪的机制}
+
+实验部分不是一张“DT 赢了”的排行榜，而是一串逐步收紧的测试：先比较 offline RL 总体结果，再测 target return 是否可控、是否只是筛选高分轨迹、history 是否必要、sparse reward 是否退化、长期 credit 如何表现，以及同一模型能否作为 critic。每一张图都回答一个不同问题。
+
+\subsection{实验范围与评价协议}
+
+原工作使用 Atari、OpenAI Gym / MuJoCo 与 Key-to-Door 等环境，并与 model-free offline RL、behavior cloning 等 baseline 比较。不同 benchmark 的数据量、reward scale 与 normalized score 定义不同，因此应在同一数据集和协议内比较，而不能跨表直接把数值当作统一百分比。
+
+\lecturefigure{slide-14-experiments-divider.jpg}{课程从方法机制转入 experiments：后续每张图检验一个具体假设。}{Stanford Online 官方视频 32:24。}
+
+\begin{knowledgebox}{Normalized score 的直觉}
+D4RL 常把 raw return 映射为
+\[
+\mathrm{score}_{\mathrm{norm}}
+=100\times\frac{R_{\mathrm{policy}}-R_{\mathrm{random}}}
+{R_{\mathrm{expert}}-R_{\mathrm{random}}}.
+\]
+$R_{\mathrm{policy}}$ 是被测 policy 的真实环境回报，$R_{\mathrm{random}}$ 与 $R_{\mathrm{expert}}$ 是参考点。这个数值便于同任务比较，但不一定严格落在 $[0,100]$，也不是“完成任务百分比”。
+\end{knowledgebox}
+
+\subsection{Offline RL 总体结果}
+
+第一组图比较 Decision Transformer、TD-learning 类方法与 behavior cloning。读图时应先看三件事：每组柱对应哪个 environment/data regime，baseline 是否使用同一 offline dataset，以及差异是否跨任务一致。课程结论是 DT 在多项 benchmark 上具有竞争力，而不是在所有设置中绝对支配。
+
+\lecturefigure{slide-15-offline-rl-summary-results.jpg}{Offline RL summary：Decision Transformer 与 TD learning、behavior cloning 在多组任务上的比较。}{Stanford Online 官方视频 33:24；具体数值以原论文表格为准。}
+
+\begin{knowledgebox}{读图：柱状图支持的是“competitive”，不是“universally superior”}
+三组任务的相对高度表明 DT 可以在不显式训练 value function 的情况下达到强 baseline 水平。图中任务数量有限、数据由既定 collection process 产生，且不同方法可能对 hyperparameter 与 architecture 敏感。因此稳健结论是“sequence modeling 是可行的 offline-RL formulation”，而不是“动态规划从此无用”。
+\end{knowledgebox}
+
+\teachervoice{课堂讨论追问 baseline 是否带 recurrence、数据由何种 policy 收集。讲者承认某些实现细节需要回查，并强调 replay buffer 通常来自在线 agent 的训练过程。实践经验：当结果依赖数据 regime 时，source policy 与数据量必须和模型结构一起报告。}
+
+\subsection{Return conditioning 是否真的可控}
+
+若模型输入 desired return，最直接的验证是横轴设置不同 target，纵轴测量真实 achieved return。理想 oracle 是对角线 $y=x$；logged dataset 的最佳轨迹提供另一个参考上界。曲线越接近对角线，说明目标条件与实际行为质量越一致。
+
+\lecturefigure{slide-16-evaluating-return-conditioning.jpg}{Return conditioning：横轴是 requested return，纵轴是 rollout 中实际得到的 return。}{Stanford Online 官方视频 38:12。}
+
+\begin{knowledgebox}{读图：先分清三条“上界”}
+绿色对角线表示完美控制：请求多少就实现多少；橙色线表示离线数据中最佳轨迹，而不是环境理论最优；模型曲线表示真实 rollout。部分环境中，模型在训练数据最高回报以上仍有提升迹象，但更高 target 最终趋于饱和。饱和比灾难性下降更安全，却仍说明 target token 不是无限增益旋钮。
+\end{knowledgebox}
+
+\begin{warningbox}{Occasional extrapolation 不是 OOD 保证}
+Seaquest 等环境出现过 achieved return 超过 logged best trajectory 的现象，可能来自组合已有局部行为、随机性或函数泛化。讲者明确说这种趋势并不一致。工程上应报告 target sweep、置信区间、失败率与超出数据支持的距离，不能只展示最好一次。
+\end{warningbox}
+
+\teachervoice{学生问：如果输入荒谬大的 target（例如 10,000）会怎样？讲者回答，性能通常在某个阈值后饱和，而不是无限提升，也没有普遍观察到突然崩溃。这一口头说明比“可控生成”四个字更准确。}
+
+\subsection{“Multitask” 需要限定语义}
+
+改变 target return 可以让同一模型生成“保守停留”“中等移动”或“追求高分”等不同行为，因此可视为一种 behavior selection。但这不自动等同于跨任务泛化：return 是一维标量，可能无法区分不同目标、约束或语义任务。更一般的 multitask agent 还需要 goal state、language instruction、task ID 或其他条件。
+
+\begin{warningbox}{Return conditioning 不是完整 task specification}
+两个任务可能拥有相同 return scale，却要求完全不同的行为；同一 return 也可能对应多种策略。把 return 当作 task cue 在特定环境中有效，但不能据此证明模型已经学会抽象任务身份。
+\end{warningbox}
+
+\subsection{它是否只是 behavior cloning 高分轨迹}
+
+Percent behavior cloning（percent BC）先按 trajectory return 排序，保留最高的 $q\%$，再训练普通 behavior cloning：
+\[
+\mathcal{D}_{q}=\{\tau\in\mathcal{D}:R(\tau)\ge Q_{1-q}(R)\},
+\qquad
+\min_{\theta}\;\mathbb{E}_{(s,a)\sim\mathcal{D}_q}[-\log\pi_{\theta}(a\mid s)].
+\]
+$Q_{1-q}(R)$ 是 return 的分位数阈值。这个 baseline 很强，因为它也把低质量轨迹从监督信号中移除；差别在于 DT 保留全部数据，并用 return 条件区分质量。
+
+\lecturefigure{slide-17-comparison-with-behavior-cloning.jpg}{Percent behavior cloning 对照：在中高数据 regime 很强，低数据 regime 中 DT 优势更明显。}{Stanford Online 官方视频 47:34。}
+
+\begin{knowledgebox}{读图：简单 baseline 为什么重要}
+表格先比较 DT 与不同筛选比例的 BC。中等和高数据量时，percent BC 可能接近 DT，说明部分收益确实来自“专注高回报行为”；Atari 的低数据 regime 中，过度筛选会让数据更少，DT 利用全部轨迹与 return 条件的优势更明显。强简单 baseline 能防止把数据选择效应误归因于复杂架构。
+\end{knowledgebox}
+
+\teachervoice{讲者称 percent BC 是未来 offline-RL 工作都应包含的强 baseline。老师强调，这不是削弱 Decision Transformer，而是把贡献说得更精确：当数据足够时，筛选高质量轨迹已很强；当数据稀缺时，条件化使用全部数据更有价值。}
+
+\subsection{Context length 是否真的有用}
+
+将 context length 设为 $K=1$，模型几乎只依赖当前 return 与 state；若完整 context 显著更好，说明历史确实提供了 action-relevant information。这个 ablation 直接检验前文“有意 non-Markov”的设计，而不是仅比较更大与更小网络。
+
+\lecturefigure{slide-18-effect-of-context-length.jpg}{Context-length ablation：完整历史相较 $K=1$ 在多项任务上获得更好结果。}{Stanford Online 官方视频 53:06。}
+
+\begin{knowledgebox}{读图：性能差异可能来自三种来源}
+历史窗口可以恢复 partial observation、识别 behavior phase，也可能仅提供 episode time。要确认真正机制，应进一步比较：显式 time feature、recurrent baseline、随机打乱历史、不同 $K$ 曲线与跨 episode generalization。原 slide 支持“历史有用”，但尚不能唯一确定历史中哪类信息最关键。
+\end{knowledgebox}
+
+\subsection{Sparse reward：credit assignment 不等于 exploration}
+
+稀疏奖励实验只在 trajectory 终点提供 cumulative reward。训练时每个位置的 return-to-go 可由完整日志回算，因此早期 token 仍能得到“这条轨迹最终成功或失败”的条件信息。传统 per-transition 方法若没有合适 backup 或 representation，可能更难传播远期结果。
+
+\lecturefigure{slide-19-sparse-reward-environments.jpg}{Sparse-reward 实验：只在轨迹终点给累计 reward，DT 性能保持而 CQL 明显下降。}{Stanford Online 官方视频 55:12。}
+
+\begin{warningbox}{这项实验没有证明在线探索被解决}
+Offline dataset 已经包含成功和失败 trajectory，模型可以在训练时看到完整结果；在线 cold start 则可能一条成功轨迹都没有。Return-to-go 帮助把未来结果作为条件传播到早期动作，但不能在没有成功数据时自动发现奖励。Credit assignment 与 exploration 是相关但不同的问题。
+\end{warningbox}
+
+\teachervoice{课堂讨论给出了很好的直觉：offline training 每一步都由日志中的真实 action 接回正确轨迹，不会像在线 agent 一样在早期随机动作后“摸黑”。讲者同意，真正在线化时探索与 exploitation 的细节仍需重新设计。}
+
+\subsection{Key-to-Door：跨阶段长期 credit}
+
+Sparse-reward 表格只说明把中间 reward 删除后性能没有明显崩溃，却仍可能是短 episode 或局部线索在起作用。Key-to-Door 进一步把决定成功的早期动作和最终 reward 主动拉开：agent 必须先拿钥匙，再经过一段没有任务信息的空房间，最后才看到门；只有拿到钥匙并成功开门才获得 binary reward。这个三阶段设计把因果相关动作与长 distractor interval 分开，专门检验模型能否把末端成功与很早之前的取钥匙联系起来。
+
+\lecturefigure{slide-20-long-term-credit-assignment.jpg}{Key-to-Door：取钥匙、空房间、开门三个阶段检验长期 credit assignment。}{Stanford Online 官方视频 1:00:04。}
+
+\begin{knowledgebox}{读图：trajectory count 也是自变量}
+表格比较不同成功 trajectory 数量。DT 与 percent BC 在该任务上优于若干 baseline，但当日志中成功行为过少时，任何方法都会缺乏证据。结果支持“sequence context 能保留跨阶段信息”，不能证明模型可在完全没有成功示例时发明拿钥匙策略。
+\end{knowledgebox}
+
+\subsection{同一模型能否成为 critic}
+
+把输出 target 从 action 改为 return 或 reward probability，就能把 causal Transformer 解释为 critic。模型观察历史后，估计未来成功可能性：未拿钥匙时概率下降；拿到钥匙后暂时保持；最终接近门时再根据行动上升或下降。
+
+\lecturefigure{slide-21-decision-transformers-as-critics.jpg}{Decision Transformer 作为 critic：随 Key-to-Door 三阶段更新未来 reward probability。}{Stanford Online 官方视频 1:03:02。}
+
+\begin{knowledgebox}{读图：曲线变化对应可逆与不可逆信息}
+一旦 phase 1 结束且 agent 未拿钥匙，未来成功几乎不可达，蓝线应下降并保持低位；拿到钥匙后，phase 2 的空房间不会立即决定成败，因此候选轨迹仍接近；phase 3 是否到达门口才最终分叉。这说明模型 hidden state 保存了长期事件，并能把它用于 value-like prediction。
+\end{knowledgebox}
+
+\begin{warningbox}{“Impressive critic” 仍不是完整 actor-critic 算法}
+这项实验展示 target 可替换与长期预测能力，但没有自动提供 policy improvement、pessimism、uncertainty calibration 或 off-policy correction。若把它接入 actor-critic 系统，仍需定义 target、bootstrap、data support 和稳定化策略。
+\end{warningbox}
+
+\subsection{本章小结}
+
+实验链条逐步证明：DT 是有竞争力的 offline-RL formulation；return condition 与 achieved return 有相关可控性；percent BC 是必须比较的强 baseline；history 对部分任务确实有用；sequence context 能处理稀疏和长期 credit；同一架构可改为 critic。所有结论都依赖数据 regime，且没有直接解决 online exploration。
+

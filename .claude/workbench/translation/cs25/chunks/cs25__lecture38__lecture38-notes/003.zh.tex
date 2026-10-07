@@ -1,0 +1,114 @@
+\section{从 neuron 到 attribution graph}
+
+前一章给出了计算载体；本章进入方法核心。讲座采用“先找到更可解释的 feature，再把 feature 连接成 prompt-specific graph，最后回到原模型做 intervention”的三步路线。每一步都引入近似，也对应不同强度的证据。
+
+\subsection{为什么单个 neuron 往往不是合适单位}
+
+如果把一个 neuron 的最高激活样本列出来，常会看到代码片段、自然语言、符号与主题混杂。这种 polysemanticity（多义性）说明单坐标未必对应单概念。更稳妥的做法，是在高维激活中寻找稀疏方向，使一组 neuron 的线性组合共同表示“Golden Gate Bridge”之类较一致的模式。
+
+\lecturefigure{slide-10-what-does-neuron-do.jpg}{朴素问题：这个 neuron 到底表示什么}{00:11:50}
+
+\lecturefigure{slide-11-single-neuron-top-activations.jpg}{单 neuron 的高激活样本混合了多个不相干语境}{00:13:07}
+
+图 11 应读成反例而不是失败结论：一个 neuron 的 top activations 不一致，并不说明网络没有概念结构；它说明坐标系可能不对。研究者需要寻找更合适的 basis（基底）。同时，feature label 仍是人类压缩后的名称，不能把“看起来像 Texas”误当成数学上唯一的语义真值。
+
+\lecturefigure{slide-12-golden-gate-feature.jpg}{多个 neuron 的组合可以形成更稳定的 Golden Gate Bridge feature}{00:15:21}
+
+\begin{warningbox}{不要把 feature 当作数据库字段}
+Feature 是激活空间中的方向及其经验解释，不是网络里预先命名的布尔变量。它可能有模糊边界、多个语义用途，也可能因 prompt、层或模型而变化。标签是研究接口，不是本体论证明。
+\end{warningbox}
+
+\subsection{稀疏替换模型：把密集 MLP 改写为少量 feature}
+
+设原模型某处的 MLP 输出为 $y\in\mathbb{R}^d$，替换模型用非负稀疏激活 $a\in\mathbb{R}^m$ 与 feature 字典 $D\in\mathbb{R}^{d\times m}$ 重建它：
+\[
+\hat y=Da,\qquad
+a=\sigma(Ex+b),\qquad
+\mathcal{L}=\lVert y-\hat y\rVert_2^2+\lambda\lVert a\rVert_1.
+\]
+这里 $x$ 是输入状态，$E$ 是 encoder，$b$ 是偏置，$\sigma$ 是产生稀疏激活的非线性，第一项是 reconstruction error，第二项以 $\lambda$ 控制稀疏度。目标不是完美复制每个 neuron，而是在保真度与可读 feature 数量之间取舍。
+
+“Finding and connecting features in Claude 3.5 Haiku” 包含两个不可合并的阶段。Finding 先用大规模激活样本学习 feature，并检查每个方向在何种 token 与语境中出现；connecting 再针对当前 prompt 计算这些方向之间的影响。前者回答词典问题，后者回答程序问题。即使 feature 的 top examples 很清晰，如果它在目标 prompt 上没有激活或没有向下游传递贡献，也不应被塞进解释图中。
+
+\lecturefigure{slide-13-finding-features-haiku.jpg}{研究对象：在 Claude 3.5 Haiku 中寻找并连接 feature}{00:16:47}
+
+\textbf{Finding and connecting features in Claude 3.5 Haiku} 不是“一键生成解释”的流程。研究团队先在大量激活上学习候选方向，再用自动与人工样本为方向建立暂定标签；随后回到特定 prompt，只保留实际激活并对目标输出有贡献的节点。最后还要检查 reconstruction error、边权稳定性和原模型干预。这个顺序能阻止一种常见偏差：先知道希望看到 Dallas--Texas--Austin 故事，再从海量节点中挑出看起来支持故事的部分。可解释性结果必须来自预先定义的筛选与验证规则，而不是事后拼图。
+
+\lecturefigure{slide-14-dallas-austin-prompt.jpg}{用 Dallas 所在州的首府问题构造可追踪的多步事实链}{00:17:29}
+
+这组图把方法落到一个可核验 prompt：输入提到 Dallas，输出应为 Austin，中间概念包含 Texas 与 state capital。理想解释不只是发现这些词相关，而是显示 Dallas feature 如何提升 Texas feature，Texas 与 capital 又如何共同提升 say-Austin feature。
+
+\begin{lstlisting}[language=Python,caption={稀疏 feature 提取：用少量非零方向近似密集 MLP 输出}]
+def sparse_features(hidden_state):
+    activations = relu(encoder @ hidden_state + bias)
+    active = top_sparse_entries(activations)
+    reconstruction = decoder[:, active] @ activations[active]
+    return active, reconstruction
+\end{lstlisting}
+
+\subsection{Cross-Layer Transcoder 与 prompt-specific graph}
+
+普通 per-layer transcoder 只解释同一层 MLP 的输入输出；Cross-Layer Transcoder（CLT）允许较早层 feature 直接写向多个后续层，从而把跨层重复放大压缩成更短路径。对单个 prompt，研究者只保留实际激活且影响较大的 feature，形成 attribution graph。
+
+\lecturefigure{slide-15-prompt-computational-graph.jpg}{从成千上万激活中抽出 prompt-specific computational graph}{00:22:13}
+
+\lecturefigure{slide-16-cross-layer-transcoder.jpg}{CLT：feature 从一层读取，并可写入多个后续层}{00:23:51}
+
+\lecturefigure{slide-17-replacement-model-comparison.jpg}{原始 Transformer 与稀疏、可解释替换模型的对照}{00:24:49}
+
+CLT 的优势是路径更短、重复 feature 更少；代价是跨层替换可能牺牲局部保真度。更关键的是，本讲的替换模型主要重建 MLP 贡献：base-model attention 被保留并用于传播影响，却没有被 feature 化解释。因此图上缺少的“选择动作”可能恰恰由 attention 完成。
+
+对比图还揭示了一个容易忽略的测量问题：replacement model 并不是把原网络参数逐一翻译成中文标签，而是在原计算旁边训练一个更稀疏的代理。代理输出接近原 MLP，并不保证内部路径逐节点对应；不同字典、稀疏惩罚或层间连接方式可能得到不同但行为相近的图。因此评估不能只看 reconstruction loss，还要看下游 token 概率、干预预测、路径长度与失败 prompt。可读性越高，越需要主动检查是否以丢失真实机制为代价。
+
+\begin{warningbox}{第一证据边界：方法没有解释 attention}
+讲义后面会看到“两个策略同时存在、其中一个胜出”。当前图能较好描述 MLP feature 如何执行策略，但未必能解释 attention 如何选择信息、路由位置或决定哪条策略占优势。图短不等于机制完整。
+\end{warningbox}
+
+\teachervoice{00:22:28--00:25:22，老师明确说“先把 attention 忘掉”，并强调他们使用原模型 attention、没有尝试解释它。这个限定必须贯穿后面的 planning 与 unfaithfulness 结论。}
+
+\subsection{从 reconstruction error 到原模型 intervention}
+
+替换模型永远有残差。将原 MLP 输出写成 $y=\hat y+e$，其中 $e$ 是 reconstruction error；如果 $e$ 仍显著影响后续节点，就应在图中显式出现，而不是假装可解释 feature 已覆盖全部计算。随后按贡献筛选节点、合并相似 feature，并在原模型中沿 feature 方向增减激活，验证预测是否成立。
+
+\lecturefigure{slide-18-reconstruction-error.jpg}{重建误差节点记录替换模型未解释的原模型贡献}{00:26:55}
+
+\lecturefigure{slide-19-select-top-contributors.jpg}{按对目标输出的贡献筛选最重要 feature}{00:27:35}
+
+\lecturefigure{slide-20-group-similar-features.jpg}{把多个相近 Texas feature 组合成可阅读的 supernode}{00:28:49}
+
+若节点 $i$ 对节点 $j$ 的局部影响近似为
+\[
+A_{i\to j}=a_i\left\langle d_i,\nabla_h a_j\right\rangle,
+\]
+其中 $a_i$ 是源 feature 激活，$d_i$ 是其写入 residual stream 的方向，$\nabla_h a_j$ 是目标 feature 对状态 $h$ 的局部梯度。$A_{i\to j}$ 是 attribution score，不是永久因果常数；它依赖当前 prompt、局部线性近似与替换模型。
+
+\lecturefigure{slide-21-interventions-original-model.jpg}{在原始模型中写入 feature 方向，观察输出是否按预测改变}{00:30:27}
+
+这张图是证据强度的转折点：如果把 Texas feature 改成 California feature 后，答案沿着预测方向改变，就比“图上两节点相连”更支持因果解释。仍要注意，成功干预说明该方向足以影响行为，不证明标签唯一、路径穷尽或自然运行时只使用这一条回路。
+
+\begin{lstlisting}[language=Python,caption={最小 intervention test：在原模型激活上沿 feature 方向加减并比较输出}]
+base_logits = model(prompt)
+for alpha in [-strength, 0.0, strength]:
+    edited_logits = model(prompt, edit=(layer, feature_direction, alpha))
+    record(alpha, edited_logits[target_token])
+check_monotonic_prediction()
+\end{lstlisting}
+
+\begin{importantbox}{三层证据阶梯}
+\textbf{Feature interpretation} 回答“这个方向像什么”；\textbf{attribution graph} 回答“在这个 prompt 上它可能怎样影响下游”；\textbf{original-model intervention} 回答“主动改变该方向，行为是否按预测变化”。三者应联合使用，不能互相替代。
+\end{importantbox}
+
+\lecturefigure{slide-22-lecture-agenda.jpg}{案例路线：抽象表示、并行处理与规划}{00:32:44}
+
+路线图把方法阶段转入发现阶段。接下来不再逐项介绍工具，而是用不同任务检验三类内部计算。读者应始终携带两个问题：图中显示了什么机制；这个机制通过何种干预得到验证、又遗漏了什么。
+
+\lecturefigure{slide-23-attribution-graph-overview.jpg}{Dallas-to-Austin attribution graph 的整体视图}{00:33:24}
+
+\lecturefigure{slide-24-texas-austin-route.jpg}{代表性路径：Dallas 激活 Texas 相关表示，再推动 Austin 输出}{00:33:41}
+
+最后两图展示同一事实链的不同尺度。整体图说明真实网络并非三节点符号程序，而是许多相近 feature 与旁路共同贡献；放大图则提供可讲授的压缩路径。好解释应在两者之间往返：既不把复杂图当不可读噪声，也不把压缩后的 Dallas→Texas→Austin 当作唯一运行路径。
+
+\subsection{本章小结}
+
+Circuit tracing 的完整工作流是：寻找稀疏 feature、训练跨层替换模型、记录 reconstruction error、计算 prompt-specific attribution、筛选与分组节点、回到原模型干预。它比 neuron 列表更有结构，比纯可视化更接近因果，但仍受替换误差、局部近似、feature 标签和未解释 attention 限制。
+

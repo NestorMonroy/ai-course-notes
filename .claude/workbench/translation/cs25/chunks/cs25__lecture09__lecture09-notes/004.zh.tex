@@ -1,0 +1,67 @@
+\section{Raw Audio Synthesis：把下一个 Sample 当成分类问题}
+
+第一篇工作选择最困难也最直接的表示：不先计算 spectrogram，不先学习 codec，而是在 waveform level 自回归预测下一个量化 sample。这样做的好处是目标清楚、应用通用；坏处是每秒要执行上万次预测，而且误差会逐步反馈进后续 context。本章先建立严格任务定义，再讨论 Transformer 是否真的“击败” WaveNet。
+
+\lecturefigure{slide-14-audio-transformer-paper-title.jpg}{第一篇工作：用 Transformer architecture 建模 raw audio generation。}{Stanford Online 官方视频 00:13:10--00:14:27；Verma 与 Chafe, arXiv:2106.16036。}
+
+\subsection{为什么 waveform generator 是通用积木}
+
+WaveNet 类生成器不只用于直接播放声音。只要上游系统产生某种 condition，它就可以充当声码器、去噪器、源分离 decoder、丢包补偿器或音频变换的末端，将 latent/spectral representation 转回时域 waveform。因此，改进 next-sample model 的意义不只是一张音乐生成 demo。
+
+\lecturefigure{slide-15-raw-audio-synthesis-background.jpg}{Raw synthesis 的应用背景：speech、music、denoising、transforms、vocoders 等。}{Stanford Online 官方视频 00:13:12--00:14:30。}
+
+\teachervoice{讲者把 WaveNet 称为许多系统里的“core building block”。这句话提醒读者：生成器常是大 pipeline 的 decoder；单独比较 generator 时，必须说明 condition、数据和前端是否相同。}
+
+\subsection{任务为什么困难：长度、因果性与误差敏感}
+
+量化后的 waveform 记为 $x_1,\ldots,x_T$，每个 $x_t\in\{0,\ldots,255\}$。Causal autoregressive model 将联合分布分解为
+\[
+p(x_{1:T})=\prod_{t=1}^{T}p(x_t\mid x_{<t}).
+\]
+训练通常最小化交叉熵
+\[
+\mathcal{L}_{\mathrm{NLL}}
+=-\sum_{t=1}^{T}\log p_\theta(x_t\mid x_{<t}).
+\]
+这里 $T$ 是 samples 数，$x_{<t}$ 是历史样本，$p_\theta$ 输出 256 类概率。生成时，模型采样或选择 $x_t$ 后再把它送回 context；因此局部错误可能改变未来输入分布。
+
+\lecturefigure{slide-16-raw-audio-synthesis-difficulty.jpg}{Raw audio generation 的困难：局部与全局依赖、极长序列、WaveNet/SampleRNN 基线。}{Stanford Online 官方视频 00:14:30--00:16:24。}
+
+\begin{importantbox}{十秒为什么是十六万个决策}
+在 16 kHz 下，十秒 waveform 有 $16\,000\times10=160\,000$ 个 samples。若按 8-bit 量化，每一步是 256-way classification。即使单步准确率很高，自回归 rollout 仍需十六万次条件预测；这与一次生成几十个文本 tokens 的错误传播形态完全不同。
+\end{importantbox}
+
+\teachervoice{Verma 用“眼睛未必察觉一个 pixel，耳朵却会迅速察觉几个 samples 的偏差”解释感知敏感性。这是直觉而非严格心理声学定律，但它准确指出：next-sample metric 与可听质量之间存在复杂映射。}
+
+\subsection{论文问题与受控比较}
+
+论文提出两步问题：在相同数据和相近参数量下，causal Transformer 能否比经典 WaveNet 更好地预测 next sample；若 full attention 的 context 太贵，能否用压缩后的更长历史作为 condition？第一问比较架构，第二问比较 context design。两者都不是“任意 Transformer 对任意 WaveNet”的总判决。
+
+\lecturefigure{slide-17-paper-contributions.jpg}{论文贡献：受控比较、conditional raw-audio Transformer 与通用生成接口。}{Stanford Online 官方视频 00:16:24--00:17:11。}
+
+\lecturefigure{slide-18-dataset-and-setup.jpg}{数据与目标：约 840 条钢琴录音、56 小时、16 kHz、8-bit quantization、100 ms context。}{Stanford Online 官方视频 00:17:12--00:18:14。}
+
+100 ms 在 16 kHz 下对应 $1\,600$ samples。论文使用真实世界钢琴录音，包含不同艺术家、录制条件和 mono/polyphonic 结构；这让数据比单一合成音更复杂，但也把结论限制在该分布。Top-5 metric 定义为
+\[
+\mathrm{Acc}_{5}
+=\frac{1}{T}\sum_{t=1}^{T}
+\mathbf{1}\!\left[x_t\in\operatorname{Top5}\bigl(p_\theta(\cdot\mid x_{<t})\bigr)\right].
+\]
+它检查真值是否落入概率最高的五类，而不是生成的声音是否自然。
+
+\begin{lstlisting}[caption={计算量化 waveform 的 next-sample top-5 accuracy。}]
+def top5_next_sample_accuracy(model, contexts, targets):
+    logits = model(contexts)          # [batch, 256]
+    top5 = logits.topk(k=5, dim=-1).indices
+    hits = (top5 == targets[:, None]).any(dim=-1)
+    return hits.float().mean()
+\end{lstlisting}
+
+\begin{warningbox}{Top-5 accuracy 不是听感分数}
+该指标适合比较同任务下的 local predictive distribution，也能避免只看 negative log-likelihood 难以直觉解释；但它忽略采样策略、长程音乐结构、相位连贯性、累积误差和 human preference。后文所有 “74\% 到 85\%” 都只指这个实验指标。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Raw synthesis 将 waveform 直接写成 256 类自回归问题，换来通用性，也承担极端长度与误差反馈。公平比较要求固定数据、context 和指标；next-sample accuracy 提供局部证据，不能单独证明高保真生成。
+

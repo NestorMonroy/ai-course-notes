@@ -1,0 +1,78 @@
+\section{并行计算：模型怎样真正完成加法}
+
+前面的案例强调表示，本章转向计算结构。模型被问 $36+59$ 时，口头解释是“个位相加、进位、十位相加”；attribution graph 却显示多个粗略范围与末位 lookup 路径并行运行，最后才合并成 95。这个差异是理解 chain-of-thought faithfulness 的入口。
+
+\lecturefigure{slide-32-parallel-processing-intro.jpg}{第二条发现主线：Parallel Processing}{00:52:00}
+
+\lecturefigure{slide-33-parallel-addition-intro.jpg}{案例入口：加法并不是单一路径的学校竖式}{00:52:47}
+
+\subsection{自然语言自述与内部算法不一致}
+
+前两张 section card 只告诉我们要看并行计算；真正的诊断从“先让模型作答，再让它解释自己”开始。这个实验把 answer correctness 与 mechanism report 拆开：如果两者来自同一内部过程，自述应与 trace 大致一致；如果解释只是训练语料中常见的教学模板，就会出现答案正确、故事合理、机制却不同的三层分离。
+
+模型先正确回答 95，再被问“怎么算的”，它给出标准竖式解释。这个解释在人类眼中合理，却未必是产生答案的路径。语言模型擅长生成“某类问题通常怎样解释”的文本，这与它是否能读出自身激活并不相同。评价时应分别记录最终答案、生成 rationale、内部 attribution 与干预结果，不能用其中一个替代其余三个。
+
+\lecturefigure{slide-34-addition-self-report.jpg}{模型自述：个位相加、进位、再算十位}{00:52:56}
+
+\lecturefigure{slide-35-actual-parallel-addition.jpg}{追踪结果：粗略总和路径与末位路径并行，末端合并为 95}{00:54:12}
+
+可把图中的机制压缩为
+\[
+\text{answer}(a,b)\approx
+\operatorname{combine}\bigl(
+\operatorname{coarseSum}(a,b),
+\operatorname{lastDigit}(a\bmod 10,b\bmod 10)
+\bigr).
+\]
+$a,b$ 是两个加数；$\operatorname{coarseSum}$ 产生类似 88--97 的范围证据；$\operatorname{lastDigit}$ 根据个位产生“结果以 5 结尾”的证据；$\operatorname{combine}$ 在后层把这些约束交叉，提升 95 的 logit。公式是教学抽象，不表示网络只有两个函数模块。
+
+\begin{importantbox}{并行计算的含义}
+模型不是先完成“个位步骤”再把符号化进位写进隐藏草稿。多个近似路径在同一遍前向传播中同时累积证据：有的判断数量级，有的判断末位，有的利用记忆化组合；最终输出由这些约束共同决定。
+\end{importantbox}
+
+\subsection{lookup feature、sum feature 与组合}
+
+为了理解并行路径，需要区分三类 feature：operand feature 表示输入数字局部属性；lookup-table feature 记住特定末位组合；sum feature 表示可能的结果范围或末位。它们不是互斥模块，而是可在不同层和上下文中互相放大。
+
+\lecturefigure{slide-36-addition-feature-graph.jpg}{互动论文中的 addition feature graph}{00:54:14}
+
+\lecturefigure{slide-37-sum-features.jpg}{不同加数区域激活不同的 sum feature}{00:54:15}
+
+\lecturefigure{slide-38-lookup-and-sum-features.jpg}{近似总和路径与 lookup-table 路径在后层汇合}{00:55:40}
+
+读这组三图应先找输入端的 36、59 与末位 6、9，再沿边看粗范围和末位证据，最后观察 “sum=95” 与 “sum ends in 5” 如何共同支持输出。图没有显示一条完整可执行的 Python 加法程序，却揭示了比口头竖式更接近内部实现的分布式约束满足。
+
+还应注意“粗略”并不等于无用。单独的 88--97 范围不能确定答案，单独的末位 5 也不能确定十位；两条弱证据交叉后却能显著缩小候选。神经网络常用大量不完全 feature 共同投票，而不是等待某个节点携带完整真值。这个结构解释了为何删除一条路径可能只造成概率下降而非彻底失败，也提醒研究者寻找冗余与补偿路径，而不是把最高 attribution edge 当作唯一必要边。
+
+\begin{warningbox}{可读解释不是 privileged access}
+模型说“我先算个位再进位”，可能只是学会模仿数学解题说明。除非解释文本被证明与内部因果路径一致，否则它应被视为另一个输出，而不是模型对自身算法的可信 introspection。
+\end{warningbox}
+
+\lecturefigure{slide-39-addition-metacognition-gap.jpg}{询问内部方法后，模型仍复述学校算法而非追踪到的机制}{00:56:11}
+
+\lecturefigure{slide-40-explanation-versus-algorithm.jpg}{训练中学会生成解释，与梯度下降形成实际算法，是两件不同的事}{00:56:12}
+
+\teachervoice{00:51:44--00:58:54，老师强调运算是 massively parallel，并把“会做加法但不知道自己怎么做”称为简单的 metacognitive mismatch。课堂提示：生成解释与执行内部算法来自不同训练压力。}
+
+\subsection{feature 会离开原任务复用}
+
+上一小节证明同一 prompt 内存在多条加法路径；这一小节追问 feature 是否只记住训练题型，还是能在新语境中承担相同计算角色。判断复用不能只看语义相似度，而要看激活位置是否恰好需要同一种数值约束、下游边是否仍推动相同末位，以及去掉该 feature 是否损害预测。
+
+如果一个 feature 真正编码“6 与 9 相加使末位为 5”，它可能在非算术文本中被重新用于任何需要预测末位 5 的上下文。互动论文展示天文测量结束时间、财务表递增序列等例子，说明 feature 的 computational role 可以跨任务迁移。与此同时，高激活也可能来自文本格式或数字共现，因此需要与随机数字、错误末位和相似排版的对照样本比较。
+
+\lecturefigure{slide-41-addition-generalization-context.jpg}{加法 feature 在非算术语料中也会激活}{00:56:20}
+
+\lecturefigure{slide-42-addition-generalization-time.jpg}{测量时长案例：由起始分钟与持续时间推断末位}{00:58:08}
+
+\lecturefigure{slide-43-addition-generalization-table.jpg}{财务表案例：由列内递增规律预测下一数值}{00:58:13}
+
+三图支持 feature reuse，但证据边界同样重要：研究者是从高激活样本中寻找解释，容易偏向成功的可读案例。更严格的评估需要统计 precision、recall、反例与随机对照，不能只凭几个漂亮样本宣布 feature 已被完全理解。
+
+\begin{knowledgebox}{抽象 feature 的另一面：计算角色可变}
+同一方向可以在不同上下文中承担相似的数值约束，却不必对应单一自然语言名称。Feature 的“意义”既来自激活语境，也来自它对下游计算的作用；只看 top examples 会漏掉后者。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+加法案例同时证明两件事：一次前向传播可以并行组合多条计算路径；模型生成的推理文本不一定忠实报告这些路径。解释研究因此不能只问“文本是否合理”，还要问“内部 feature 与干预是否支持这套因果故事”。
+

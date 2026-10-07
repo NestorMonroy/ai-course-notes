@@ -1,0 +1,89 @@
+\section{Retrieval Stack：Sparse、Dense、Late Interaction 与 Hybrid}
+
+检索器决定 generator 能看到哪些证据。课堂从传统 sparse retrieval 讲到 dense bi-encoder、vector database、ColBERT late interaction，再以 SPLADE、DRAGON 与 hybrid search 收束。不同表示不是简单的“新方法淘汰旧方法”，而是 exact match、semantic match、效率与可更新性的取舍。
+
+\subsection{Sparse Retrieval：词项空间中的精确匹配}
+
+Sparse retrieval slide 展示 TF-IDF、BM25 与 DrQA。文档向量的维度对应词项，大多数维度为零，因此称为 sparse；query 与 document 共享词项时获得高分，品牌名、编号、专有名词和代码 token 往往受益。
+
+\lecturefigure{slide-13-sparse-retrieval.jpg}{TF-IDF、BM25 与传统 sparse retrieval}{Stanford 课堂视频 00:15:03}
+
+\begin{importantbox}{BM25 的核心直觉}
+对 query $Q$ 与文档 $D$，BM25 可写为
+\[
+\operatorname{BM25}(D,Q)=\sum_{q\in Q}\operatorname{IDF}(q)
+\frac{f(q,D)(k_1+1)}{f(q,D)+k_1\left(1-b+b\frac{|D|}{\operatorname{avgdl}}\right)}.
+\]
+$f(q,D)$ 是词频，$\operatorname{IDF}$ 提高稀有词权重，长度归一化避免长文档仅因词多而占优。它不理解深层语义，却对 exact lexical evidence 强而高效。
+\end{importantbox}
+
+\teachervoice{Q\&A 中讲者用 Apple 与 pear 解释 dense retrieval 的风险：品牌名需要精确匹配时，不希望“语义相近”把公司 Apple 扩成水果 pears。}
+
+\subsection{Dense Retrieval：把 query 与 passage 投入共享向量空间}
+
+Dense retrieval slide 展示 ORQA 与 DPR。Query encoder 和 passage encoder 生成低维 dense embeddings，再用 dot product 或 cosine similarity 排序。它可以召回词面不同但语义相关的 passage，但 representation 是否适合当前 generator 和 domain 取决于训练。
+
+\lecturefigure{slide-14-dense-retrieval.jpg}{ORQA/DPR 的 dense bi-encoder retrieval}{Stanford 课堂视频 00:16:48}
+
+\begin{importantbox}{Dense similarity 与 MIPS}
+设 query embedding 为 $e_q\in\mathbb{R}^d$，文档 embedding 为 $e_i$，常用分数为
+\[
+s(q,d_i)=e_q^\top e_i
+\quad\text{或}\quad
+\cos(e_q,e_i)=\frac{e_q^\top e_i}{\|e_q\|\,\|e_i\|}.
+\]
+Maximum Inner Product Search（MIPS）是在大规模 index 中近似寻找最高内积向量；FAISS 等库用量化、分桶或图结构降低穷举成本。
+\end{importantbox}
+
+\lecturefigure{slide-15-vector-database.jpg}{Vector database：在十亿级 embedding 上做 similarity search}{Stanford 课堂视频 00:17:45}
+
+\begin{knowledgebox}{读图：Vector database 存的是可搜索表示}
+它通常负责写入 embedding、建立 ANN index、过滤 metadata、执行 top-$k$ search 与更新。数据库不会替模型决定 chunk 是否可信，也不会保证 semantic similarity 等于 task relevance；这些仍取决于 encoder、corpus 与 downstream objective。
+\end{knowledgebox}
+
+\subsection{ColBERT：从单向量压缩到 token-level late interaction}
+
+Bi-encoder 把整个 query 和 passage 各压成一个向量，效率高但可能丢失细粒度匹配。ColBERT 保留每个 token 的 contextual embedding，预先编码文档，查询时对每个 query token 找最匹配的 document token，再聚合分数。
+
+\lecturefigure{slide-16-colbert-late-interaction.jpg}{ColBERT 从 representation interaction 到 late interaction}{Stanford 课堂视频 00:17:51}
+
+\begin{importantbox}{MaxSim late interaction}
+设 query token embeddings 为 $Q_1,\ldots,Q_m$，document token embeddings 为 $D_1,\ldots,D_n$，ColBERT 的典型分数是
+\[
+s(q,d)=\sum_{i=1}^{m}\max_{1\le j\le n} Q_i^\top D_j.
+\]
+每个 query token 都能找到最相关的 passage token，因此比单向量表达更细；代价是 index 更大、查询计算更多。
+\end{importantbox}
+
+\subsection{SPLADE、DRAGON 与 Hybrid Search}
+
+SOTA slide 用 SPLADE 表示 learned sparse expansion：模型给 query/doc 扩展相关词项，同时仍可使用倒排索引；DRAGON 用 progressive data augmentation 和 hard negatives 训练 generalized dense retriever。课堂最后强调 developer practice 常把 sparse 与 dense 结果融合。
+
+\lecturefigure{slide-17-retrieval-sota-splade-dragon.jpg}{SPLADE、DRAGON 与 hybrid search 的课堂综述}{Stanford 课堂视频 00:24:57}
+
+\begin{knowledgebox}{读图：Sparse meets dense 的两种路径}
+SPLADE 把 semantic expansion 写回高维 sparse vocabulary；hybrid search 则保留独立 BM25 与 dense retriever，再融合排名。前者共享一个 learned sparse representation，后者允许不同系统各自更新和过滤。
+\end{knowledgebox}
+
+\begin{importantbox}{Reciprocal Rank Fusion}
+给多个检索器 $r\in\mathcal{R}$，文档 $d$ 的融合分数可写为
+\[
+\operatorname{RRF}(d)=\sum_{r\in\mathcal{R}}\frac{1}{c+\operatorname{rank}_r(d)},
+\]
+其中 $c$ 是平滑常数。RRF 不要求不同 retriever 的原始分数同尺度，只利用排名，因此是实用的 hybrid baseline。
+\end{importantbox}
+
+\begin{lstlisting}[caption={Sparse recall + dense rerank 的两阶段检索}]
+def hybrid_retrieve(query, corpus, top_k=8):
+    sparse_candidates = bm25.search(query, limit=200)
+    dense_scores = dense_encoder.score(query, sparse_candidates)
+    reranked = sort_by_score(sparse_candidates, dense_scores)
+    return reranked[:top_k]
+\end{lstlisting}
+
+\teachervoice{讲者当时称 DRAGON/DragonPlus 是很好的 off-the-shelf dense retriever，并观察开发者普遍采用 hybrid search。讲义保留这是 2023 年课堂判断，不把它写成 2026 年永久排名。}
+
+\subsection{本章小结}
+
+Sparse retrieval 强在 exact terms 与成熟倒排索引，dense retrieval 强在语义召回，ColBERT 用更大 index 换取 token-level interaction，hybrid search 则把多种信号融合。选择 retriever 要从 query 类型、domain、index 规模、更新频率和 generator utility 出发。
+

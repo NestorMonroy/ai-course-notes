@@ -1,0 +1,89 @@
+\section{RLHF 目标、Reward Model 与 DPO：公式相近，优化过程不同}
+
+有了评测反馈，本章进入偏好训练。RLHF 先用人类比较训练 reward model，再优化 policy；DPO 把同一类偏好信号转成直接分类式损失。两者都试图提高 chosen response 相对 rejected response 的概率，但数据采样、在线 rollout、稳定性和计算成本不同。
+
+\subsection{RLHF objective：奖励与 KL 约束}
+
+本节先读标准目标。若只最大化 learned reward，policy 可能找到 reward model 的漏洞并远离 base behavior；因此加入对 reference model 的 KL divergence，限制分布漂移。PPO 是常见优化器，但目标本身不等于 PPO。
+
+\lecturefigure{slide-059.jpg}{RLHF objective 的符号：policy、reference、prompt、response 与 reward}{official deck, p.~59}
+
+\lecturefigure{slide-060.jpg}{RLHF objective 的第一部分：最大化 reward model 评分}{official deck, p.~60}
+
+\lecturefigure{slide-061.jpg}{RLHF objective 的第二部分：用 KL 防止 policy 远离 reference}{official deck, p.~61}
+
+目标写成
+\[
+\max_{\theta}\;\mathbb{E}_{x\sim D,\,y\sim\pi_{\theta}(\cdot\mid x)}
+\left[r_{\phi}(x,y)-\beta\log\frac{\pi_{\theta}(y\mid x)}{\pi_{\mathrm{ref}}(y\mid x)}\right].
+\]
+其中 $x$ 是 prompt，$y$ 是 policy $\pi_{\theta}$ 采样的回答，$r_{\phi}$ 是 reward model，$\pi_{\mathrm{ref}}$ 是 reference model，$\beta$ 控制 KL penalty。$\beta$ 太小会漂移和 reward hacking，太大则难以改变行为。
+
+\teachervoice{00:40:00--00:41:55，讲者把公式拆成“追求 reward”和“不能离 base 太远”两股力，并强调 reference constraint 不是装饰，而是防止 learned reward 被过度利用。}
+
+\subsection{Preference modeling：为什么用 pairwise comparison}
+
+人很难稳定给开放回答打绝对 0--10 分，却更容易判断 A 与 B 哪个更好。Reward model 因此常用 chosen/rejected pairs，学习相对排序。数据质量取决于 prompt、候选生成方式、标注指南和 annotator agreement。
+
+\lecturefigure{slide-062.jpg}{Preference reward modeling：相对比较优于直接监督绝对分数}{official deck, p.~62}
+
+Bradley--Terry 模型写成
+\[
+P(y_w\succ y_l\mid x)=\sigma\!\left(r_{\phi}(x,y_w)-r_{\phi}(x,y_l)\right),
+\]
+其中 $y_w$ 是 preferred/chosen response，$y_l$ 是 rejected response，$r_{\phi}$ 是标量 reward，$\sigma$ 是 sigmoid。训练最小化 chosen 没有胜出的负对数概率。
+
+\begin{warningbox}{Preference data 不等于客观真理}
+标注反映具体人群、政策、界面和候选集合。若两个候选都很差，pairwise label 仍会选一个；若候选差异太明显，reward model 学不到细粒度边界。应保留 tie/skip、标注者信息和 disagreement，而不是只保存二元标签。
+\end{warningbox}
+
+\teachervoice{00:42:00--00:43:44，Nathan 解释直接监督 scalar reward 的效果不理想，而 pairwise preference 更自然。课程的重点不是人类比较无偏，而是相对判断通常比绝对打分更稳定。}
+
+\subsection{从“直接 gradient ascent”到 DPO}
+
+有了 pairwise reward objective，可以问是否必须显式训练 reward model 再跑 RL。DPO 利用 KL-regularized optimum，把隐式 reward 写成 policy 与 reference 的 log-ratio，直接对 chosen/rejected pair 做 logistic classification。
+
+\lecturefigure{slide-063.jpg}{问题：能否直接对 preference objective 做 gradient ascent}{official deck, p.~63}
+
+\lecturefigure{slide-064.jpg}{答案：Direct Preference Optimization 把目标改写为直接偏好损失}{official deck, p.~64}
+
+DPO loss 为
+\[
+\mathcal{L}_{\mathrm{DPO}}(\theta)=-\mathbb{E}\log\sigma\!\left(
+\beta\left[
+\log\frac{\pi_{\theta}(y_w\mid x)}{\pi_{\mathrm{ref}}(y_w\mid x)}-
+\log\frac{\pi_{\theta}(y_l\mid x)}{\pi_{\mathrm{ref}}(y_l\mid x)}
+\right]\right).
+\]
+其中 $\pi_{\theta}$ 是待训练 policy，$\pi_{\mathrm{ref}}$ 是 reference，$y_w,y_l$ 是 chosen/rejected，$\beta$ 控制偏离 reference 的强度。DPO 提高 chosen 的相对 log-ratio，同时降低 rejected 的相对 log-ratio。
+
+\teachervoice{00:43:44--00:46:20，讲者把 DPO 的吸引力概括为实现极简、不需要显式 RL rollout；但他随后强调 DPO 与 PPO 是非常不同的 optimizer，目标推导相连不等于训练动态相同。}
+
+\subsection{DPO core facts 与 PPO 差异}
+
+本节把实现便利与能力边界分开。DPO 只需离线 preference pairs，训练像 supervised classification；PPO 在线从当前 policy 采样、用 reward 估计 advantage，并通过 clipping/regularization 做多步更新。PPO 更复杂、更贵，也可能从 reward signal 中提取更多。
+
+\lecturefigure{slide-065.jpg}{DPO core facts：实现简单、普及迅速、但仍有假设}{official deck, p.~65}
+
+\lecturefigure{slide-066.jpg}{DPO 与 PPO/REINFORCE 是不同优化器和数据循环}{official deck, p.~66}
+
+\begin{knowledgebox}{术语消化：objective 与 optimizer}
+\begin{tabularx}{\textwidth}{L{0.18\textwidth} X}
+\toprule
+对象 & 含义 \\
+\midrule
+Preference objective & 希望 chosen 比 rejected 更可能，同时限制离 reference 太远。 \\
+DPO & 用固定离线 pairs 直接优化 policy/reference log-ratio。 \\
+PPO & 从当前 policy rollout，基于 reward/advantage 做受约束的 on-policy 更新。 \\
+REINFORCE & 用采样回报乘 score-function gradient 的经典 policy-gradient estimator。 \\
+\bottomrule
+\end{tabularx}
+同一高层目标可由不同 optimizer 逼近，稳定性、样本效率和最终行为不必相同。
+\end{knowledgebox}
+
+\teachervoice{Q\&A 的 01:09:02--01:09:40，Nathan 给出经验判断：PPO 若调通，往往能从同一数据中再榨出一点性能；但优势处于 fine margins，代价是大量模型和训练迭代。}
+
+\subsection{本章小结}
+
+RLHF 的核心是 learned reward 与 reference constraint；pairwise preference 是 reward modeling 的常用数据形式；DPO 把隐式 reward 改写为直接偏好分类损失。数学联系不能抹平 optimizer 差异。评价 DPO/PPO 需要看最终 release、数据、计算、稳定性和人类偏好，而不是只看实现长度。
+

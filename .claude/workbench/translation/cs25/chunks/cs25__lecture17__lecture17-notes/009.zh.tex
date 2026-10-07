@@ -1,0 +1,90 @@
+\section{DeepConsensus：用 Transformer 修正测序读段}
+
+课程进入 genomics 后先处理一个“输入质量”问题。基因组分析依赖测序 read；如果 read 本身含错，后续 variant calling、组装与疾病研究都会受到影响。DeepConsensus 把多次观测同一 DNA 分子的 subreads 对齐成一个带 gap 的二维表示，再预测更准确的 consensus sequence。
+
+\subsection{从圆形共识测序到学习式纠错}
+
+章节分隔页之后，问题页直接询问 Transformer 能否改进 DNA 测序。DeepConsensus 角色页把模型放在测序 pipeline 中：它不生成新的生物序列，而是利用仪器产生的重复观测修正 base call。PacBio circular consensus sequencing（CCS）页说明，同一环形分子可被多次读取，多个 subread 提供冗余证据。
+
+\lecturefigure{slide-58-section-genomics.jpg}{章节切换：基因组应用}{官方录像恢复幻灯片 V058；Stanford CS25 Lecture 17}
+
+\lecturefigure{slide-59-deepconsensus-question.jpg}{问题：Transformer 能否改善 DNA 测序？}{官方录像恢复幻灯片 V059；Stanford CS25 Lecture 17}
+
+\lecturefigure{slide-60-deepconsensus-role.jpg}{DeepConsensus 在测序流程中的位置}{官方录像恢复幻灯片 V060；Stanford CS25 Lecture 17}
+
+\lecturefigure{slide-61-pacbio-consensus-sequencing.jpg}{PacBio circular consensus sequencing 的重复读取机制}{官方录像恢复幻灯片 V061；Stanford CS25 Lecture 17}
+
+\begin{knowledgebox}{背景概念：read、subread 与 consensus}
+\term{read} 是测序仪输出的一段碱基序列；环形模板被多次经过时产生多个 \term{subread}；把它们按参考位置对齐并综合，得到 \term{consensus read}。重复观测能平均随机错误，但 insertion、deletion 与系统偏差要求模型理解 alignment，而不是逐列多数投票。
+\end{knowledgebox}
+
+\subsection{输入标签与 gap-aware 表示}
+
+纠错任务页把多条 subread 对齐到当前 draft，标签页说明输出是真实 consensus base。困难在于插入和删除会产生 gap；如果模型把 gap 当普通空白，位置关系就会错乱。DeepConsensus 因而使用 gap-aware representation，把 base identity、质量、strand、位置与对齐事件编码为可供 Transformer 处理的特征。
+
+\lecturefigure{slide-62-ccs-correction-task.jpg}{CCS correction：从多条 noisy subread 预测共识序列}{官方录像恢复幻灯片 V062；Stanford CS25 Lecture 17}
+
+\lecturefigure{slide-63-deepconsensus-labels.jpg}{训练标签：正确 base 与对齐位置}{官方录像恢复幻灯片 V063；Stanford CS25 Lecture 17}
+
+\lecturefigure{slide-64-deepconsensus-transformer.jpg}{DeepConsensus 的 gap-aware Transformer 架构}{官方录像恢复幻灯片 V064；Stanford CS25 Lecture 17}
+
+\begin{lstlisting}[caption={DeepConsensus 式纠错流程（概念伪代码）}]
+def correct_consensus(aligned_subreads):
+    features = encode_bases_gaps_quality(aligned_subreads)
+    hidden = gap_aware_transformer(features)
+    base_logits, quality_logits = output_heads(hidden)
+    sequence = decode_aligned_bases(base_logits)
+    quality = calibrate_quality(quality_logits)
+    return sequence, quality
+\end{lstlisting}
+
+\begin{warningbox}{为什么 gap 不是 padding}
+padding 表示“这里没有输入”，alignment gap 却表示相对于另一条序列发生了 insertion 或 deletion，是需要解释的生物与测量事件。错误掩掉 gap 会改变后续位置对应关系，使模型在恰恰最难的 indel 区域失去信息。
+\end{warningbox}
+
+这个输入还体现了“多次观测不是普通 batch”这一点。不同 subread 对应同一物理分子，模型应该在对齐列上综合证据，同时识别某次 pass 的局部低质量；如果把 subread 当互不相关样本，就失去共识信息。相反，若直接做多数投票，又无法利用 strand、质量分数和上下文相关错误。Transformer 的作用正是在每个对齐位置汇集多条 read 的证据，并通过邻近列理解 insertion/deletion pattern。数据增强也必须保持这种几何结构，不能随意打乱列或把不同分子的 read 拼在一起。
+
+\subsection{Alignment loss 与 base quality}
+
+普通 token cross-entropy 假设预测位置和标签位置一一对应，但测序序列中的 insertion/deletion 会造成整体位移。Alignment loss 页强调需要允许局部对齐后再惩罚差异。可用抽象形式表示为
+$$
+\mathcal{L}_{\text{align}}(\hat Y,Y)=
+\min_{a\in\mathcal{A}(\hat Y,Y)}
+\sum_{(i,j)\in a} c(\hat y_i,y_j)+\lambda\,g(a),
+$$
+其中 $\hat Y$ 是预测序列，$Y$ 是 truth，$\mathcal{A}$ 是允许的 alignment 集合，$c$ 是 base mismatch 代价，$g(a)$ 是 gap 代价，$\lambda$ 控制 gap 惩罚。公式表达的重点是：相同生物序列若只差一个插入，不应被误判为后续所有位置都错。
+
+\lecturefigure{slide-65-alignment-loss.jpg}{特殊 alignment loss：处理插入、删除与位置错位}{官方录像恢复幻灯片 V065；Stanford CS25 Lecture 17}
+
+模型还输出 base quality，用 Phred 风格分数表达错误概率：
+$$
+Q=-10\log_{10}p_{\mathrm{error}}.
+$$
+其中 $p_{\mathrm{error}}$ 是该 base 错误的概率，$Q$ 越高表示预测越可靠。质量分数必须校准：如果声称 $Q=30$，相似预测中错误率应接近千分之一，而不只是 logit 数值很大。
+
+\lecturefigure{slide-66-base-quality-output.jpg}{DeepConsensus 同时输出共识 base 与质量分数}{官方录像恢复幻灯片 V066；Stanford CS25 Lecture 17}
+
+\begin{importantbox}{两个输出头对应两个决策问题}
+base head 回答“序列是什么”，quality head 回答“我们有多确定”。下游 variant caller 需要同时使用两者；高准确但严重过度自信的模型仍会放大错误。校准因此不是附属指标，而是测序 pipeline 的接口契约。
+\end{importantbox}
+
+\subsection{Read-level accuracy 与真实系统影响}
+
+Read-level accuracy 页把模型与已有 consensus 方法比较。关键趋势是 DeepConsensus 提高高精度 read 的比例，而不是只在平均 per-base error 上获得微小收益。Real-world impact 页进一步展示部署层收益：更准确读段可以减少为达到相同质量所需的重复测序，提高吞吐，并降低后续分析成本。
+
+\lecturefigure{slide-67-read-level-accuracy.jpg}{DeepConsensus 对 read-level accuracy 的提升}{官方录像恢复幻灯片 V067；Stanford CS25 Lecture 17}
+
+\lecturefigure{slide-68-real-world-impact.jpg}{真实系统影响：更高精度、吞吐与成本收益}{官方录像恢复幻灯片 V068；Stanford CS25 Lecture 17}
+
+\begin{knowledgebox}{读图：从模型指标走向系统指标}
+先看 base error 是否下降，再看完整 read 达到高质量阈值的比例，最后看同一预算下可交付多少有效数据。前两层属于模型和测序质量，最后一层才是系统效益。部署收益还依赖硬件、pipeline 延迟、失败重跑和下游工具兼容性，不能只由单一准确率外推。
+\end{knowledgebox}
+
+部署评估还应关注错误分布，而非只看平均曲线。某些重复区域、同聚物或极端 GC 区域可能仍然困难；若错误集中在临床相关基因，平均 read accuracy 会掩盖下游风险。系统团队需要把旧 pipeline 与新模型在相同样本、相同 compute budget 下做 paired comparison，并检查 variant calling、assembly 或 methylation 等下游任务是否真正改善。只有当模型收益穿过这些接口仍然存在，real-world impact 才不是把离线指标换算成市场数字。
+
+\teachervoice{讲者把 DeepConsensus 视为“真实世界已经产生影响”的例子：Transformer 不只写文本或刷 benchmark，而是进入测序基础设施，改变可获得的数据质量与成本。这一案例提醒我们，biomedical AI 的价值经常通过整个 pipeline 放大。}
+
+\subsection{本章小结}
+
+DeepConsensus 利用同一 DNA 分子的多次 noisy 观测，借助 gap-aware Transformer、alignment-sensitive loss 和质量分数预测生成更准确的 consensus read。它的完整证据链从 base 到 read，再到测序系统吞吐与成本，展示了模型指标如何转化为基础设施价值。
+

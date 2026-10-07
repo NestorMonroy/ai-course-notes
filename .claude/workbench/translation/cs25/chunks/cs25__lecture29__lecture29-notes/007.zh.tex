@@ -1,0 +1,123 @@
+\section{Q\&A 工程综合：什么时候 MoE 值得，什么时候 dense 更诚实}
+
+主讲结束后的 Q\&A 占整段录像一半以上，且补上 slides 没有展开的部署条件。本章不按提问顺序堆答案，而按系统因果重组：edge/cloud memory、expert parallel communication、batch throughput、domain adaptation、RAG、modular experts、gradient flow 与 larger expert counts。
+
+\subsection{Edge versus cloud：稀疏执行不等于稀疏驻留}
+
+对 memory-constrained edge device，dense model 往往更直接，因为 MoE 仍需存所有 experts。若权重全驻 GPU，resident memory 近似 total parameters；若只驻 CPU，GPU 虽省内存，却需要频繁搬运。Centralized serving 拥有多卡、高带宽和大 batch，才更容易把稀疏执行转成吞吐收益。
+
+\begin{importantbox}{Edge 选型的第一问}
+先问设备能否容纳 total weights，而不是只问 active parameters。一个 12.9B-active 的 MoE 仍可能需要约 46.7B 参数的存储。若单机只能容纳 7B dense，不能因为 top-two 就假设 Mixtral 也等价占用 13B。
+\end{importantbox}
+
+\teachervoice{00:31:45--00:33:10，Albert 纠正现场提问者：edge 上 dense model 可能更合适，因为 sparse inference 仍要加载所有 experts；MoE 的 cost/performance 优势更适合集中式 serving。}
+
+\subsection{Batch size 与 throughput：为什么高流量更可能摊薄复杂度}
+
+在小 batch 下，不同 experts 收到的 token 少且不均，all-to-all 与 kernel launch 难以摊薄；高 batch 可把更多 token 聚合成较大的 expert GEMM，提高 arithmetic intensity。可用简化吞吐模型表示
+\[
+\operatorname{throughput}\approx \frac{T}{\max_i t_{\text{expert},i}+t_{\text{dispatch}}+t_{\text{combine}}}.
+\]
+提高 $T$ 只有在 expert batches 变大且 imbalance 可控时才有帮助；若热点 expert 同比例变热，tail 仍由它决定。
+
+\begin{knowledgebox}{读系统指标：平均 latency 不够}
+同时报告 tokens/s、time-to-first-token、inter-token latency、P50/P95/P99、per-expert batch size、all-to-all bytes 和 HBM occupancy。MoE 可能提高 aggregate throughput，却让单请求 latency 或 tail 更差。
+\end{knowledgebox}
+
+\teachervoice{00:42:47--00:43:33 与 00:54:56--00:56:17，讲者两次强调 use case：高 batch、high-volume serving 更能体现 MoE throughput；小规模和显存受限环境则承担更多复杂度。}
+
+\subsection{Communication topology：跨 node 比跨 GPU 更贵}
+
+Expert parallelism 的成本不仅由 bytes 决定，还由 topology 决定。同 node GPU 可能通过 NVLink/NVSwitch 通信，跨 node 则经过 InfiniBand/Ethernet 与 network stack。若一个 expert 本身跨多卡做 tensor parallel，token dispatch 与 expert 内 collectives 还会叠加。
+
+\begin{warningbox}{专家数越多不一定越快}
+增加 $E$ 可以提供更多 routing choices，却会让每个 expert 的 batch 变小、placement 更碎、metadata 与 communication 更复杂。若 experts 跨 nodes，网络延迟可能吞掉稀疏计算收益。
+\end{warningbox}
+
+\teachervoice{00:40:43--00:41:36，Albert 指出 GPU-to-GPU 已经昂贵，node-to-node 更昂贵；通信成本与 token routing 及硬件放置相关，如何继续扩展仍是开放问题。}
+
+\subsection{Memory、offload 与 dense-equivalent heuristic}
+
+Q\&A 给出三个容易混淆的判断。第一，naive resident memory 接近 46.7B/7B 的权重比例；第二，CPU offload 可省 GPU HBM，却增加参数搬运；第三，用 $\sqrt{P_{\text{active}}P_{\text{total}}}$ 估计 dense-equivalent capability 只能是粗略 rule of thumb。
+
+几何平均 heuristic 为
+\[
+P_{\text{equiv}}\approx \sqrt{P_{\text{active}}P_{\text{total}}},
+\]
+但能力还受 training tokens、data quality、optimizer、router balance 和 architecture 影响。它不能替代同训练预算的 controlled scaling experiment。
+
+\teachervoice{00:50:42--00:52:42，讲者说全驻显存时 memory 更接近 total parameter ratio；CPU offload 会损失传输效率；几何平均可作 rule of thumb，但前提是训练 token 与质量等条件相当。}
+
+\subsection{Knowledge versus reasoning：benchmark category 不是机制探针}
+
+听众问 Mixtral 为什么 reasoning 更好，Albert 的回答很克制：数学 benchmark 中，模型可能真正推理，也可能记住可调用 lemma 或模式；knowledge 与 reasoning 的边界本就模糊。因此更高分不证明 MoE 学到新内部算法，更不证明 attention/MLP 已被功能拆开。
+
+\begin{warningbox}{能力标签不能代替过程证据}
+若要研究 reasoning mechanism，应加入 out-of-distribution composition、intermediate trace、counterfactual perturbation 和 memorization control。仅靠 benchmark 名字中的 “reasoning” 无法判定计算过程。
+\end{warningbox}
+
+\teachervoice{00:53:26--00:54:41，讲者认为 Mixtral 的 knowledge 增益明确，但 knowledge 是否诱发 reasoning 改进高度 speculative；benchmark 自己也难区分 recall 与 reasoning。}
+
+\subsection{Domain adaptation、RAG 与 modular experts 是三条独立轴}
+
+MoE 增加 model capacity，continued pretraining/fine-tuning 改变 domain distribution，RAG 在 inference 时检索外部证据。三者可以组合，不能互相替代。一个 medical dense model 通过专门数据训练后，可能比通用 MoE 更强；一个 MoE 也可以接 RAG；把新 medical expert 插入 checkpoint，则还需训练 router 学会何时使用它。
+
+\begin{knowledgebox}{三条轴的区别}
+\begin{tabularx}{\textwidth}{L{0.18\textwidth} L{0.27\textwidth} X}
+\toprule
+机制 & 改变什么 & 不自动解决什么 \\
+\midrule
+MoE & 参数容量与 token execution path & 外部知识更新、明确 domain label \\
+Domain tuning & 权重对目标数据分布的适配 & 实时事实、检索 provenance \\
+RAG & inference-time context/evidence & 模型内部参数容量与 routing balance \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\teachervoice{00:43:50--00:44:40，Albert 说专门 domain pretraining/fine-tuning 很难被通用模型击败，而且 Mixtral experts 并非显式 medical/coding experts。00:59:02--00:59:43，他又说明 RAG 与 dense/MoE 是正交组合。}
+
+\subsection{Expert swapping：可行不等于 plug-and-play}
+
+若替换某个 expert，router 原 logits 与新 expert behavior 不匹配。即使 tensor shape 一致，模型也不知道何时把 medical token 路由到新模块；还可能破坏 residual statistics。最低限度需要 router/新 expert adaptation，并检查其他 experts 的负载与能力退化。
+
+\begin{lstlisting}[caption={替换 expert 后的最小验证流程}]
+load_base_moe_checkpoint()
+replace_one_expert_with_domain_module()
+freeze_or_partially_train_shared_attention()
+train_router_and_new_expert_on_mixed_data()
+measure_load_balance_and_general_capability()
+run_domain_eval_and_out_of_domain_regression()
+\end{lstlisting}
+
+\teachervoice{00:59:43--01:00:54，讲者认为 expert swapping 有研究潜力，但明确要求继续训练 gating layers，让 router 学会新的 domain expert 应在何时被调用。}
+
+\subsection{Gradient flow 与 training cost：\texorpdfstring{top-$k$}{top-k} 仍可端到端优化}
+
+Q\&A 最后纠正另一个误解：router 虽然产生离散 top-$k$ selection，选中路径上的 gating 与 expert operations 仍可微，模型可端到端训练。严格来说 top-$k$ 边界是分段/非光滑的，但实际优化对当前选中 experts 传播梯度，并配合 load-balancing objectives。
+
+训练成本可概括为
+\[
+C_{\text{train}}\approx C_{\text{active forward/backward}}+C_{\text{router}}+C_{\text{communication}}+C_{\text{balance}}.
+\]
+它通常更接近同 active-size dense model，而不是 total-size dense model，但 extra communication 与 optimizer/state storage 仍存在。
+
+\begin{knowledgebox}{Optimizer state 仍按训练参数计费}
+Adam/AdamW 为每个可训练参数维护一阶矩 $m$ 与二阶矩 $v$，再加 parameter 和 gradient。若所有 expert weights 都训练，optimizer state 与 total trainable parameters 相关，而不是只与当前 token active path 相关；分布式训练常需 state sharding 来降低每卡内存。
+\end{knowledgebox}
+
+\teachervoice{01:01:10--01:02:08，Albert 说 routing path 可端到端 differentiable，训练计算大致像 13B active model，但还要承担额外 communication。}
+
+\subsection{更多 experts：选择空间增加，服务难度也增加}
+
+把 expert 数提高到 64/128，可以给 router 更细的选择空间，也可能让 experts 更专门化；但每个 expert batch 更小、placement 跨更多 nodes、all-to-all 更复杂，甚至单个 expert 都可能无法放进一张 GPU。模型提供商可通过专门基础设施隐藏复杂度，自部署用户则必须面对它。
+
+\begin{importantbox}{扩大 $E$ 前的四个问题}
+每个 expert 是否足够大以学习有用 features？每 step 每 expert 有多少 token？Experts 是否跨 node？Serving volume 是否足以形成大 GEMM？若这些问题没有正面答案，更多 experts 可能只增加 orchestration cost。
+\end{importantbox}
+
+\teachervoice{01:02:26--01:04:14，讲者认为更多 experts 很有研究吸引力，却会让 multi-node serving 和 communication 更难；对单 GPU，他更倾向 dense 或 heavily quantized MoE，并判断量化后的 Mixtral 8x7B 仍可实践。}
+
+\subsection{本章小结}
+
+Q\&A 把 slides 的算法叙述变成部署条件：MoE 更适合有足够 resident memory、interconnect 与 serving volume 的环境；edge 与小 batch 未必划算。Domain tuning、RAG 和 MoE 彼此正交；expert swapping 需要 router adaptation；训练 compute 接近 active path，但 optimizer state、communication 与 load balancing 仍按更完整系统计费。
+

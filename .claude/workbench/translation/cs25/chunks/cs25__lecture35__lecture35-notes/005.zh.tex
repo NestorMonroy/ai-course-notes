@@ -1,0 +1,190 @@
+\section{Behavior Evals：从“模型感觉不对”到可调试的拒答系统}
+
+模型行为不像数学题只有一个答案。拒答、直接性、政治话题中的平衡、幻觉承认、语言风格和情绪反应共同构成用户感受到的产品。讲者先问“怎样做可信 eval”，再用 Claude 2.1 到 Claude 3 的 over-refusal 改进说明：正确流程不是凭直觉调一个总 reward，而是建立 taxonomy、混合数据来源、追到具体训练集，并用 before/after 样例和 benchmark 回归。
+
+\lecturefigure{slide-34-evals-question.jpg}{核心问题：怎样做可信 eval，怎样测真正需要的行为}{00:20:25--00:20:43}
+
+\begin{importantbox}{定义：Eval 是决策协议，不是题库文件}
+一个完整 eval 至少包含任务分布 $D$、模型/系统版本 $M$、评分规则 $S$、运行条件 $C$ 和验收阈值 $\tau$：
+\[
+\operatorname{Eval}(M;D,S,C)\ge \tau.
+\]
+若 prompt、工具、system message、sampling、judge 版本或人工 rubric 改变，结果就不再可直接比较。可信 eval 的关键是可复现和能支持产品决策，而不是题目数量多。
+\end{importantbox}
+
+\subsection{把 model behavior 写成向量}
+
+第一组 traits 包括减少 benign refusal、回答时更有主见、降低 milquetoast response，同时在不确定处保留 caveat。第二组 traits 包括高风险话题中的 nuance、鼓励 media literacy、适度更长的解释，以及知道自己不知道。它们不是同一个“helpfulness”维度；若只优化单分数，模型可能用更长、更圆滑的文字掩盖事实错误。
+
+\lecturefigure{slide-35-general-behaviors-refusal-opinions.jpg}{行为向量 I：benign refusal、直接性、caveat 与非模板化回答}{00:20:43--00:23:23}
+
+\lecturefigure{slide-36-general-behaviors-nuance-knowledge.jpg}{行为向量 II：nuance、media literacy、长度与 calibrated self-knowledge}{00:23:23--00:24:17}
+
+可以把一次回答的行为表示为
+\[
+\mathbf{b}(x,y)=
+\begin{bmatrix}
+h & s & d & n & c & v
+\end{bmatrix}^{\top},
+\]
+其中 $h$ 为 helpfulness，$s$ 为 safety，$d$ 为 directness，$n$ 为 nuance，$c$ 为 calibration，$v$ 为 voice consistency。产品验收不是寻找全局最大值，而是在不同风险域中定义允许区域 $\mathcal{B}_{\text{task}}$。例如医疗问题要求更强 caveat，创意写作则不应因出现“监控”“heist”等词自动拒答。
+
+\begin{knowledgebox}{术语消化：行为评测常见维度}
+\begin{tabularx}{\textwidth}{L{0.18\textwidth} X X}
+\toprule
+维度 & 解决的问题 & 不能替代什么 \\
+\midrule
+Helpfulness & 是否推进用户目标 & 不能替代事实正确性 \\
+Harmlessness & 是否避免真实伤害 & 不能用表面关键词判断意图 \\
+Directness & 是否先回答核心问题 & 不能省略必要限定 \\
+Nuance & 是否保留冲突证据与条件 & 不能变成无结论的两边讨好 \\
+Calibration & 是否表达合理置信度 & 不能替代外部验证 \\
+Self-knowledge & 是否知道能力/信息边界 & 不能靠固定免责声明伪装 \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\teachervoice{00:20:25--00:23:52，课堂没有用一个分数概括“Claude 3 更好”，而是逐项列出 refusals、directness、nuance、balance 与 self-knowledge。课堂提示：产品行为首先要被分解，团队才知道哪一项改好了、哪一项被牺牲。}
+
+\subsection{Over-refusal：安全分类器把表面词当成意图}
+
+Claude 2.1 的典型问题是：提示表面上含有危险词，实际任务却无害。图中“kill a python process”是进程管理问题；模型若只用 keyword 关联风险，就会拒绝。更隐蔽的是创意写作、长文档附件和 function calling：系统可能因为某段上下文看似有害，或忘记 system prompt，产生 misdirected refusal。
+
+\lecturefigure{slide-37-claude21-overrefusal.jpg}{Claude 2.1 over-refusal：表面危险词导致无害请求被拒}{00:23:52--00:25:55}
+
+\lecturefigure{slide-38-nuanced-refusals.jpg}{更细致的拒答：说明责任、承认边界并给出可行替代}{00:25:55--00:26:27}
+
+设 benign prompt 集合为 $D_b$，模型拒答指示为 $r(x)\in\{0,1\}$，则 false refusal rate 为
+\[
+\operatorname{FRR}=\frac{1}{|D_b|}\sum_{x\in D_b}r(x).
+\]
+FRR 下降并不自动表示安全变好，因为模型也可能开始回答真实有害请求。因此至少要与 harmful compliance rate 一起报告，并按域分层；总平均会掩盖 function calling、creative writing 或长文档中的局部崩溃。
+
+\begin{warningbox}{拒答不是越少越好}
+优化目标应是“对无害请求少拒绝、对真实风险稳健限制、对边界请求给出可解释的安全帮助”。只压低 FRR 会诱发 unsafe compliance；只压低 harmful compliance 会诱发模板化拒绝。二者都需要 hard negatives：表面相似但意图不同的成对样本。
+\end{warningbox}
+
+\subsection{Taxonomy：先给失败命名，再决定修哪里}
+
+讲者列出的 taxonomy 包括 benign over-refusal、creative-writing refusal、function-calling refusal、long-document attachment 和 misdirected refusal。分类的作用不是写报告，而是把“模型拒了”映射到可能的系统层：安全数据、self-knowledge 数据、tool schema、long-context 路由或 system-prompt 遗忘。
+
+\lecturefigure{slide-39-refusal-taxonomy.jpg}{拒答 taxonomy：benign、creative writing 与 function calling}{00:26:27--00:27:08}
+
+\lecturefigure{slide-40-refusal-taxonomy-examples.jpg}{拒答 taxonomy 的视觉样例：附件与 misdirected refusal}{00:27:08--00:28:12}
+
+\begin{knowledgebox}{Root-cause 表：同一拒答表面下的不同原因}
+\begin{tabularx}{\textwidth}{L{0.22\textwidth} X X}
+\toprule
+症状 & 可能根因 & 首先检查 \\
+\midrule
+``kill python process'' 被拒 & 关键词安全数据过强 & benign hard negatives \\
+创意故事被拒 & 安全样本污染创作域 & 域配比与 pair data \\
+``can't see tool'' & self-knowledge 数据错误 & 工具可用状态 \\
+长附件触发拒答 & 文档局部内容误导全局判断 & 段落归因与查询意图 \\
+忘记 system prompt & 上下文/路由缺陷 & 提示拼装与回归轨迹 \\
+\bottomrule
+\end{tabularx}
+名字相同的“refusal”可能需要完全不同的修复；先加通用 SFT 数据往往会互相污染。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={拒答失败的最小分诊流程}]
+case = replay(prompt, attachments, tools, system_prompt, model_version)
+if case.intent_is_benign and case.refused:
+    bucket = classify_refusal(case)
+    sources = trace_training_and_policy_influences(bucket)
+    candidate_fix = design_targeted_data_or_system_change(sources)
+    run_regression(candidate_fix, benign_suite, harmful_suite, domain_suite)
+else:
+    preserve_or_strengthen_safety_boundary(case)
+\end{lstlisting}
+
+\teachervoice{00:23:52--00:28:35，Karina 反复强调 over-refusal 不是单一数据源造成的；团队建立 taxonomy，区分 benign、creative writing、function calling、long document 与 misdirected refusal。实践经验：看到一个坏例子时，先问它属于哪种机制，不要立即全局改 reward。}
+
+\subsection{可信 eval 的来源组合}
+
+Slides 将 eval prompt 分为 product flywheel 中真实收集的失败、人工整理的用户样本、覆盖 harmless/helpful 边界的 synthetic prompts，以及 XSTest 等外部 benchmark。每一类都解决不同盲点：真实流量有生态有效性但采样偏，synthetic data 可控但受 generator 偏差，公开 benchmark 可复现但容易被过拟合。
+
+\lecturefigure{slide-41-trusted-evals-sources.jpg}{可信 eval 的来源：产品 flywheel、synthetic prompts 与 XSTest}{00:28:12--00:30:21}
+
+若第 $k$ 个来源分布为 $D_k$，综合 eval 可写为 mixture
+\[
+D_{\text{eval}}=\sum_{k=1}^{K}w_kD_k,
+\qquad \sum_k w_k=1.
+\]
+$w_k$ 不是自然常数，而是产品风险决策。按流量占比加权会低估长尾高风险；完全均匀又可能偏离真实使用。更稳妥的做法是同时报告 overall、slice 和 worst-case，并冻结关键回归集。
+
+\begin{knowledgebox}{首次使用：RLAIF 与 synthetic preference data}
+\term{RLAIF（Reinforcement Learning from AI Feedback）}用 AI judge 或 AI 生成的 preference 代替/补充人工反馈。Synthetic preference data 能快速覆盖特定风格、边界和长尾，但其价值取决于 diversity、judge calibration 与抽样审计。它不是“AI 自己证明自己正确”，而是一个仍需外部验证的数据生产流程。
+\end{knowledgebox}
+
+\subsection{修复策略：像 debug 软件一样 debug 数据}
+
+General Approaches 包括清理/正则化数据、定向人工收集、生成 anti-refusal synthetic data，以及直接 RL。关键不在方法名字，而在根因定位。讲者随后给出最重要的实践句：\textbf{look at data like you'd debug software}。Function-calling refusal 可能来自 self-knowledge 数据；长文档拒答可能来自“我没有视觉能力”类样本；创意写作则可能受安全数据配比影响。
+
+\lecturefigure{slide-42-refusal-general-approaches.jpg}{修复 over-refusal 的一般路线与 WildChat/XSTest 结果}{00:30:21--00:31:00}
+
+\lecturefigure{slide-43-debug-data-like-software.jpg}{像 debug 软件一样看数据：不同拒答来自不同路径}{00:31:00--00:31:13}
+
+\lecturefigure{slide-44-dataset-specific-refusals.jpg}{创意写作拒答与安全数据的可能耦合}{00:31:13--00:31:44}
+
+\begin{importantbox}{Data debugging 的四个可追踪对象}
+\begin{enumerate}
+  \item \textbf{Provenance}：样本来自用户、标注员、模型还是政策模板；
+  \item \textbf{Slice}：样本属于哪个任务、风险与语言域；
+  \item \textbf{Influence}：训练后哪些行为 slice 同步变化；
+  \item \textbf{Reversibility}：能否移除/降权该数据并重跑局部实验。
+\end{enumerate}
+没有 provenance 的大混合数据很难调试；“再加一些好样本”可能掩盖而非解决冲突。
+\end{importantbox}
+
+\teachervoice{00:28:35--00:31:44，课堂从 product prompts、synthetic prompts 与 XSTest 转到数据 root cause。老师明确说每类 refusal 可能由不同数据集造成，应像 debug software 一样检查，而不是相信一个通用 safety/helpfulness 旋钮。}
+
+\subsection{Helpfulness--Harmlessness 是约束优化，不是单滑杆}
+
+前面的 data debugging 说明每类拒答有不同根因；现在需要回答跨类别的产品决策：当模型更愿意响应时，可能同时增加违规信息；当模型更保守时，又会伤害正常用户。这个问题不能靠一个“安全程度”滑杆解决，因为 false refusal 和 harmful compliance 的代价、分布与责任边界并不对称。可把目标写成约束优化：
+\[
+\max_{\pi}\;\mathbb{E}[H(\pi)]
+\quad \text{s.t.}\quad
+\mathbb{E}[U(\pi)]\le \epsilon,
+\]
+$H$ 是有用性，$U$ 是不可接受风险，$\epsilon$ 是产品设定的风险预算。实际系统还要按域设置不同约束，并考虑 false positive 与 false negative 的非对称成本。
+
+\lecturefigure{slide-45-helpfulness-harmlessness.jpg}{Helpfulness 与 Harmlessness：导航平衡，而非选择单边}{00:31:44--00:31:54}
+
+\lecturefigure{slide-46-xstest-refusal-rates.jpg}{XSTest 上的 incorrect refusal rate：版本比较需要读清样本与指标}{00:31:54--00:32:10}
+
+XSTest 图显示不同 Claude 版本的 incorrect refusal rate 有明显差异。读图时先确认纵轴是错误拒答而不是总体安全，再比较模型版本；低柱支持 benign prompt 上更少拒绝，却不能证明 harmful prompt 上更安全，也不能代表所有语言、工具或长文档场景。图中的一个总数必须与 taxonomy slices 一起解释。
+
+\begin{warningbox}{Benchmark 改善不等于产品问题关闭}
+公开集可能覆盖不到新工具、长上下文、真实系统提示和用户分布。验收应要求：公开 benchmark 改善、内部 regression 不退化、真实流量 slice 改善、严重 case 人工复核，以及上线后的监控/回滚条件。
+\end{warningbox}
+
+\subsection{Vibe check：定性样例怎样成为正式证据}
+
+三张 before/after 画面分别使用 surveillance fiction、time travel government project 和 technology-free heist。它们都含有表面危险词，却是合法的创作请求。Claude 2.1 倾向拒绝，Claude 3 给出结构化帮助。单个样例不能证明总体能力，但它们适合检查产品目标是否“有意义地”实现，并帮助人类发现 benchmark 没编码的语气差异。
+
+\lecturefigure{slide-47-vibe-check-surveillance.jpg}{Vibe check I：监控题材科幻写作从拒答变为结构化协助}{00:32:10--00:32:13}
+
+\lecturefigure{slide-48-vibe-check-time-travel.jpg}{Vibe check II：秘密时间旅行项目的 before/after}{00:32:13--00:32:21}
+
+\lecturefigure{slide-49-vibe-check-heist.jpg}{Vibe check III：无现代技术 heist 对话的 before/after}{00:32:21--00:32:30}
+
+\begin{knowledgebox}{Qualitative eval 何时不是“拍脑袋”}
+定性评测需要固定 prompt、模型版本、采样设置和 rubric；至少两名 reviewer 独立判断，并记录 disagreement。它特别适合发现新 failure mode、语气问题和交互断点。发现后应把样例扩展成对照集、变体集和反事实集，再进入持续回归。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={行为 eval 的分层运行框架}]
+suites = [public_benchmarks, frozen_regressions, synthetic_slices,
+          product_replays, qualitative_panels]
+results = run_all(model, suites, fixed_system_and_sampling=True)
+report = aggregate(results, by=[risk, task, language, tool, length])
+gate(report.overall, report.worst_slice, severe_case_review)
+archive(model_version, judge_version, prompts, traces, report)
+\end{lstlisting}
+
+\teachervoice{00:31:44--00:32:30，讲者先展示 quantitative XSTest，再用三组 before/after 做 vibe check。课堂提示：数字负责规模化回归，定性样例负责判断行为是否真正符合产品信念；二者不能互相替代。}
+
+\subsection{本章小结}
+
+可信 behavior eval 从行为向量开始，经 taxonomy、mixed-source prompts、数据 provenance、约束指标、benchmark 和 qualitative review 形成决策协议。Over-refusal 案例最重要的经验不是“少拒答”，而是不同失败有不同根因。下一章将这一思路上升到 RL：产品怎样工作，取决于环境、动作、reward 和验证怎样被构造。
+

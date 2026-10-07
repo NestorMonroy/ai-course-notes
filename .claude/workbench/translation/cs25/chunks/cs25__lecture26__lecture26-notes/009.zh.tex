@@ -1,0 +1,96 @@
+\section{Multi-Agent Systems：并行容易，通信和纠错更难}
+
+单 agent 的长轨迹可能慢，也难覆盖复杂任务。Multi-agent system 试图把任务拆给多个 specialized worker，再由 manager 汇总。课堂最有价值的部分不是“多开几个模型”，而是用连续构图演示 delegation、verification、conflict 与 redo。
+
+\subsection{为什么需要多个 agent}
+
+并行化可以缩短独立子任务的 wall-clock time，specialization 可以让不同 worker 使用不同工具或 prompt。前提是任务能被正确分解，结果能够合并，shared state 不会相互覆盖。下面两页先给出系统形态，再列出并行和 specialization 的收益，随后才进入协议成本。
+
+\lecturefigure{slide-096.jpg}{多个 autonomous agent 组成协作系统}{官方 CS25 V4 slide deck，第 96 页}
+
+\lecturefigure{slide-097.jpg}{Parallelization、specialization 与 multi-agent 动机}{官方 CS25 V4 slide deck，第 97 页}
+
+\begin{importantbox}{并行收益的上限}
+若任务中可并行比例为 $p$，使用 $n$ 个 worker 的理想加速受 Amdahl's law 限制：
+\[
+\operatorname{Speedup}(n)=\frac{1}{(1-p)+p/n}.
+\]
+分解、通信、验证和合并开销会让真实加速更低。Multi-agent 的价值必须以 end-to-end latency、cost 和 success rate 验证，而不是以 agent 数量衡量。
+\end{importantbox}
+
+\teachervoice{讲者强调 multi-agent 的直接好处是 parallelization 和 specialized workers，但随后马上把重点转向 communication：自然语言有歧义，agent 之间也会像人一样产生误解。}
+
+\subsection{Hierarchy 与 message protocol}
+
+课堂提出 manager--worker hierarchy：用户与 manager 对话，manager 分派任务并维护全局状态，worker 处理局部目标。层级减少用户面对的接口，却把正确分解与状态同步集中到 manager。接下来的三页从抽象层级走到 message 和 state，读图时先找 ownership 与 version boundary。
+
+\lecturefigure{slide-098.jpg}{Manager 与 worker 的层级通信结构}{官方 CS25 V4 slide deck，第 98 页}
+
+\lecturefigure{slide-099.jpg}{Natural-language communication 的歧义与同步问题}{官方 CS25 V4 slide deck，第 99 页}
+
+\begin{importantbox}{Typed message 比自由文本更容易验证}
+一个 worker request 至少应包含
+\[
+m=(\texttt{task\_id},\texttt{goal},\texttt{inputs},\texttt{constraints},\texttt{deadline},\texttt{expected\_artifact}).
+\]
+返回消息应包含 status、artifact、evidence、error 与 side effect。自然语言可保留在 explanation 字段，但关键控制信息应结构化。
+\end{importantbox}
+
+\lecturefigure{slide-100.jpg}{Manager state 与 worker state 的初始通信图}{官方 CS25 V4 slide deck，第 100 页}
+
+\begin{knowledgebox}{读图：需要同步的是 state，不只是聊天记录}
+Manager 必须知道任务版本、输入快照、worker 已执行的 action 和产物位置。若两个 worker 在不同 snapshot 上工作，最后文本都“说完成了”也可能无法合并。状态版本和 ownership 比措辞流畅更重要。
+\end{knowledgebox}
+
+\subsection{Verification：完成声明不能直接当事实}
+
+Progressive diagram 的关键变化是加入 verify step。Worker 返回 “done” 只是一条 claim；manager 或独立 verifier 必须检查 artifact、测试、环境状态或外部证据。下面两个 retained state 分别展示正常 verification 与 claim 冲突，重点是证据通道怎样改变控制流。
+
+\lecturefigure{slide-103.jpg}{Manager 对 worker 完成声明执行 verification}{官方 CS25 V4 slide deck，第 103 页}
+
+\begin{importantbox}{Verification contract}
+对 worker 产物 $a$ 与规格 $c$，verifier 输出
+\[
+v=V(a,c,e)\in\{\texttt{pass},\texttt{fail},\texttt{unknown}\},
+\]
+其中 $e$ 是测试、日志、文件、页面或环境证据。\texttt{unknown} 很重要：证据不足时不应被强行压成 pass。
+\end{importantbox}
+
+\lecturefigure{slide-104.jpg}{Scenario 1：worker claim 与验证结果冲突}{官方 CS25 V4 slide deck，第 104 页}
+
+\begin{warningbox}{Conflict handling 不应变成“再问同一个模型一次”}
+若 verifier 只使用同一上下文、同一模型和同一错误假设，复核可能重复原错误。更强的验证应改变证据通道：运行测试、读取真实状态、使用不同 tool、检查 checksum 或要求可执行 proof。
+\end{warningbox}
+
+\subsection{Correction 与 redo path}
+
+最终状态图加入 re-do：manager 将失败原因和更新后的 context 发送给 worker，worker 重新执行。有效 recovery 需要区分 transient failure、bad plan、permission error 与不可逆 side effect。
+
+\lecturefigure{slide-107.jpg}{Scenario 2：验证失败后回传 context 并重新执行}{官方 CS25 V4 slide deck，第 107 页}
+
+\begin{lstlisting}[caption={Manager--worker verification 与 redo 的结构化协议}]
+def run_task(manager, worker, verifier, task, max_attempts=3):
+    context = manager.snapshot(task)
+    for attempt in range(max_attempts):
+        result = worker.execute(task, context=context)
+        verdict = verifier.check(task.spec, result.artifact)
+        if verdict.status == "pass":
+            return manager.commit(result)
+        context = manager.revise_context(
+            previous=context,
+            evidence=verdict.evidence,
+            error=verdict.reason,
+        )
+    raise TaskFailed(task.id, context)
+\end{lstlisting}
+
+\begin{warningbox}{Redo 之前先判断 action 是否可重复}
+发送邮件、支付、删除文件和提交表单可能不是 idempotent。Recovery 需要 action ID、side-effect log、deduplication key 与 compensation plan；否则“重新执行”会把一次错误变成重复副作用。
+\end{warningbox}
+
+\teachervoice{课堂用 progressive diagram 说明 manager 不能相信 worker 的完成声明，必须验证；若结果错误，应把 failure context 回传并重做。这个闭环比“多 agent 自动协作”的口号更接近真实系统。}
+
+\subsection{本章小结}
+
+Multi-agent system 的收益来自并行和 specialization，主要风险来自分解、通信、共享状态、验证与副作用。Manager--worker hierarchy 只有配合 typed protocol、evidence-based verification、versioned state 和 bounded redo，才会比单 agent 更可靠。
+

@@ -1,0 +1,90 @@
+\section{显式 softmax warm start：从共现矩阵到参数}
+
+这一章是课程的数学核心。目标不是声称所有 neural network 都有精确闭式解，而是说明：对 non-negative features 和 softmax-activated single layer，可以从输入--输出的 outer products 得到一个近似好初值；再把该思路扩展到 SAFFU 的多个组件。
+
+\subsection{Generalized co-occurrence 不限于词窗计数}
+
+设 $M$ 个样本的输入 feature matrix 为 $H\in\mathbb{R}_{\ge 0}^{M\times D}$，目标为 one-hot 或概率分布 $Y\in\mathbb{R}_{\ge 0}^{M\times N}$。广义共现定义为
+\[
+F(H,Y)=\sum_{m=1}^{M}H_{m,:}\otimes Y_{m,:}=H^\top Y,
+\]
+其中 $F_{j,i}$ 累积第 $j$ 个输入 feature 与第 $i$ 个输出 target 同时出现的强度。它可以来自 token context，也可以来自图像像素、隐藏层输出或其他非负 feature，不要求是传统半径窗口的词频表。
+
+\lecturefigure{slide-07-softmax-cooccurrences.jpg}{Softmax 与 generalized co-occurrence：显式初始化公式}{Stanford Online 官方录像 00:19:13}
+
+对 softmax decoder $U\in\mathbb{R}^{D\times N}$，slide 给出的近似形式可写成
+\[
+U_{j,i}\approx \log\!\bigl(F(H,Y)_{j,i}+\epsilon\bigr)
+-\frac{K-1}{K}\log\!\left(\sum_{d=1}^{D}F(H,Y)_{d,i}+\epsilon\right),
+\]
+其中 $K$ 是 priming number，$\epsilon>0$ 防止数值上对零取 logarithm。第一项保留 feature--target 联结，第二项按输出列归一化高频 target。
+
+\begin{importantbox}{公式直觉：log 在近似逆转 softmax}
+Softmax 使用 exponentials 把 logits 变成概率；显式解对共现强度取 log，相当于把概率尺度拉回 logit 尺度。Column translation 不改变 softmax 对同一输出列的相对结构，却能补偿不同 target 的总体频率。
+\end{importantbox}
+
+\begin{warningbox}{这不是任意 layer 的精确最优解}
+关键假设包括：feature 非负、activation 为 softmax、统计量可稳定估计、输入 norm 可由 $K$ 描述。多层 composition、ReLU/GELU、negative features 与 attention hidden targets 都需要额外推导。
+\end{warningbox}
+
+\teachervoice{00:15:55--00:18:09，讲者强调这里的 co-occurrence 是任意 inputs 与 outputs 的 outer-product sum，不限于传统 NLP 窗口；$K$ 相关项近似表达 context/feature 数对条件概率的修正。}
+
+\subsection{Priming number：feature 数量与 norm 的近似}
+
+若每个输入向量严格 $K$-norm，即 $\|H_{m,:}\|_1=K$，$K$ 可以直接进入归一化。实际连续 feature 往往不满足统一 norm，课程和论文使用平均值
+\[
+\widehat K=\frac{1}{M}\sum_{m=1}^{M}\|H_{m,:}\|_1
+\]
+作为近似。这个估计说明显式解仍需 data-dependent calibration；它并不是完全无超参数的万能初始化。
+
+\begin{knowledgebox}{如何验证 priming-number 近似}
+至少报告 $\|H_m\|_1$ 的分布、均值/方差、零值比例、加入 $\epsilon$ 的位置，以及不同 $K$ 对 validation loss 的敏感度。只给一个平均值无法判断 heavy-tail 或 outlier 是否破坏近似。
+\end{knowledgebox}
+
+\teachervoice{00:31:20--00:32:15，Williams 说非单位 feature 的 priming number 可用平均输入 norm 估计，并坦言 slide 缺少对应图，完整证据应回到论文核查。}
+
+\subsection{从单层到 SAFFU：hidden targets 是难点}
+
+Feed-forward decoder 的输入 $H$ 和 target $Y$ 明确，因此 $F(H,Y)$ 可直接计算。Attention 则没有显式标签告诉模型“第几个位置应该被关注”。团队的扩展思路是先推导 hidden target：让 attention 输出的表示尽量接近上层 $U$ 所期望的输入，再逐层从下往上初始化。
+
+若简化记号为
+\[
+X\xrightarrow{W} A\xrightarrow{} Z=AX
+\xrightarrow{U} H\xrightarrow{O}\hat Y,
+\]
+则 warm start 顺序是：稳定 $X$；由上层需求估计 attention targets 并初始化 $W$；用 $Z$ 与 label embeddings 初始化 $U$；最后用 $H$ 与真实 $Y$ 初始化 $O$。
+
+\begin{warningbox}{Local fit 不等于 compositional optimum}
+逐层显式初始化只利用局部 inputs/targets。Backpropagation 能通过 chain rule 传播最终任务对所有层的高阶影响，因此 warm start 后仍可能需要迭代优化。课程的主张是“更好的起点”，不是“composition 已被闭式求解”。
+\end{warningbox}
+
+\teachervoice{00:18:13--00:20:57，讲者把 attention 的难点定义为没有直接 target vector；团队通过分析上层期望来构造 hidden targets，并借助 bit-cipher label embeddings 把中间目标降到可处理维度。}
+
+\subsection{可执行过程：从全零参数开始累积统计量}
+
+Slide 8 把理论压成一个 warm-start procedure。工程上最重要的并不是公式看起来“closed form”，而是它只需要 forward-style accumulation：遍历数据，累计 outer products，再做 normalization 与 log transform。
+
+\lecturefigure{slide-08-nonrandom-feedforward-init.jpg}{Non-random feed-forward initialization 的计算步骤}{Stanford Online 官方录像 00:21:16}
+
+\begin{lstlisting}[caption={Softmax layer 显式 warm start 的 shape-first 伪代码}]
+F = zeros(feature_dim, target_dim)
+for features, targets in dataset:
+    assert all(features >= 0) and all(targets >= 0)
+    F += features.T @ targets
+
+K_hat = mean_l1_norm(dataset.features)
+column_mass = F.sum(axis=0, keepdims=True)
+weights = log(F + eps) - ((K_hat - 1) / K_hat) * log(column_mass + eps)
+return weights
+\end{lstlisting}
+
+\begin{knowledgebox}{为什么它容易并行}
+每个 worker 可独立累计局部 $F_r=H_r^\top Y_r$，最后求和 $F=\sum_rF_r$。这类似 sufficient statistics 聚合，不需要在每个 mini-batch 后同步完整 gradient trajectory。但内存、数值范围与稀疏存储仍需工程设计。
+\end{knowledgebox}
+
+\teachervoice{00:21:15--00:22:43，Williams 用“所有参数从 zero 开始”强调非随机性：遍历数据累积输入--输出 outer products，随后 normalization 和 logarithm 便给出初值。}
+
+\subsection{本章小结}
+
+显式 warm start 的最强可复现结论是：在特定 softmax、非负 feature 条件下，可以用 generalized log-co-occurrence 计算一个 data-informed initialization。扩展到 SAFFU 需要 hidden targets 与逐层 composition，不能把单层公式无条件推广到现代 Transformer 的所有模块。
+

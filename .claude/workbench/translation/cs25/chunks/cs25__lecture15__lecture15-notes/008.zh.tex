@@ -1,0 +1,63 @@
+\section{DIAL：用 VLM 扩展 Offline Dataset 的语言覆盖}
+
+RT-1 证明大规模离线模仿可行，却暴露数据经济问题：130,000 episodes、13 台机器人、17 个月、约 700 tasks，还需要把结构化 teleoperator command 改写成自然语言。DIAL 不重新采集动作，而是用 VLM 为已有轨迹生成更丰富 instruction labels。
+
+\subsection{Agenda 与 Teleoperation Cost}
+
+RT-1 的 scaling 结果容易让人把注意力集中在 architecture，却忽略每条 robot trajectory 背后的采集和语言标注成本。DIAL 的出发点正是重新核算这条数据供应链：哪些步骤必须由机器人和操作员完成，哪些语义工作可以交给预训练视觉语言模型。本节先读懂原始 pipeline 的两层人工成本；这些数字解释了扩展瓶颈，但不能直接推出自动标签具有与人工标签相同的精度。
+
+Agenda 进入 DIAL。slide 37 将原始数据链拆成两条：操作员用结构化命令采集动作，crowd worker 再把命令改成自然语言。两层人工成本使每增加一个 semantic concept 都很昂贵，也让绝大多数轨迹只有模板式标签。
+
+\lecturefigure{slide-36-agenda-dial.jpg}{Agenda：DIAL 进入 data augmentation 层}{官方录像恢复幻灯片 V036；Stanford CS25 Lecture 15}
+
+\lecturefigure{slide-37-rt1-teleoperation-cost.jpg}{RT-1 数据经济：130k episodes、13 robots、17 months、700 tasks 与人工语言标注}{官方录像恢复幻灯片 V037；Stanford CS25 Lecture 15}
+
+\teachervoice{讲者把 DIAL 的动机讲得很务实：RT-1 的“secret ingredient”不是某个 fancy layer，而是昂贵且长期的数据工程。若只讨论模型而不讨论谁在遥操作、谁在重标注，就无法解释机器人 scaling 的真实成本。}
+
+\subsection{四阶段 Pipeline}
+
+DIAL 先在小规模 crowd-sourced instructions 上 fine-tune VLM；再用它为大规模 offline dataset 生成语言；随后将原始轨迹、人类标签和 VLM 标签混合训练 language-conditioned policy；最后用训练中未出现的自然语言评估 RT-1-style controller。
+
+\lecturefigure{slide-38-dial-pipeline.jpg}{DIAL 四阶段：少量人类语言、VLM relabeling、混合训练与 unseen instruction evaluation}{官方录像恢复幻灯片 V038；Xiao et al., 2022}
+
+令 $\mathcal{D}_A$ 为少量人工自然语言标签，$\mathcal{D}_B$ 为大量原始结构化轨迹，$\hat{\mathcal{D}}_B$ 为 VLM 重标后的轨迹，则 policy 目标可写成
+\begin{equation}
+\mathcal{L}_{\mathrm{DIAL}}(\theta)
+=-\mathbb{E}_{(o,l,a)\sim
+\mathcal{D}_A\cup\mathcal{D}_B\cup\hat{\mathcal{D}}_B}
+\log p_{\theta}(a\mid o,l).
+\end{equation}
+关键不在公式复杂度，而在 $l$ 的支持集被扩展：同一行为可以获得空间关系、属性、同义表达和更自然的描述。
+
+\subsection{Language Space 从 Cluster 走向覆盖}
+
+左侧 embedding clusters 来自结构化命令，颜色和簇边界非常清楚，因为每个模板近似 one-hot task ID；右侧 DIAL predictions 更连续，不同表达在语义空间中互相穿插。中间例子显示 `open top drawer`、`move bottle near chip bag` 等轨迹如何被改写成更描述性的语言。
+
+\lecturefigure{slide-39-dial-language-clusters.jpg}{Structured commands 与 DIAL predicted language 的 embedding-space 对比}{官方录像恢复幻灯片 V039；Xiao et al., 2022}
+
+\begin{knowledgebox}{稠密 Language Space 有什么用}
+模板标签只告诉 policy “任务编号”，难以共享 `left`、`lonely object`、颜色、形状等概念。更丰富语言让不同任务在词义层面重用表示，并允许测试时用训练未见的 paraphrase 指定同一动作。代价是 VLM 会产生噪声甚至错误描述。
+\end{knowledgebox}
+
+\subsection{Novel Instructions：看总体，也看类别}
+
+结果 slide 左侧比较不同 dataset mixtures，右侧展示 `raise the leftmost can`、`move the lonely object to the others`、`move the right apple to the left` 等未见指令。完整 DIAL 在 overall 上达到 60\%，其中 spatial 与 rephrased categories 较强，semantic category 仍明显更难。
+
+\lecturefigure{slide-40-dial-novel-instruction-results.jpg}{DIAL novel-instruction evaluation：数据组合、类别结果与定性示例}{官方录像恢复幻灯片 V040；Xiao et al., 2022}
+
+\begin{warningbox}{60\% 不等于开放语言控制}
+测试包含六十余条手工构造 novel instructions，覆盖空间、改写和部分语义变化，但不是任意自然语言。讲者还明确说 compositional generalization 的系统 ablation 不完整，许多成功案例的内部机制并不清楚。
+\end{warningbox}
+
+\subsection{Takeaway：Diversity 足够时，少量 Label Noise 可容忍}
+
+DIAL takeaways 有三点：把 VLM 当 data augmentation；把 Internet-scale priors 注入 offline data；当 dataset 足够大且行为多样时，少量标签噪声可能仍可接受。最后一点不是说 label quality 无关，而是冗余轨迹和多样语义能缓冲部分错误。
+
+\lecturefigure{slide-41-dial-takeaways.jpg}{DIAL takeaways：VLM augmentation、Internet priors、offline diversity 与有限 label noise}{官方录像恢复幻灯片 V041；Stanford CS25 Lecture 15}
+
+\teachervoice{Ted Xiao 对“label noise okay”非常谨慎：噪声过高仍会伤害训练，且机器人行为本身必须足够多样。再好的 captioner 也不能从完全相同的动作轨迹中凭空创造一个未采集技能。}
+
+\subsection{本章小结}
+
+DIAL 把 foundation model 放在数据层而不是控制层：VLM 重写已有轨迹的语义接口，使同一动作数据支持更多语言。它降低人工标注成本并改善 novel instruction，但无法替代行为覆盖，且对组合泛化的证据仍有限。
+

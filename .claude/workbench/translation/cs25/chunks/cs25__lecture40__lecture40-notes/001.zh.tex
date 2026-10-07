@@ -1,0 +1,103 @@
+\section{扩散生成不是一张网络图}
+
+这场课讨论的不是“Transformer 能不能生成图片”，而是扩散系统的 denoiser（去噪器）为什么从巨型 U-Net 迁移到可扩展的 Transformer，以及迁移后条件注入、注意力成本、多模态参数化和结构控制怎样重新设计。讲者首先划定范围：不完整讲授 diffusion 或 flow matching 的全部数学，而把焦点放在可学习 backbone 的参数化。
+
+\subsection{从生成效果回到迭代过程}
+
+文本生成图像的结果很吸睛，但架构判断不能从样例图直接开始。下面先建立最小生成过程：从噪声出发，沿多个时间步逐渐得到数据样本；文本只是在每一步改变去噪方向的条件。本节要回答的是：每一步究竟由谁更新状态，条件又在何处改变轨迹；带着这两个问题读后面的样例、公式与组件图，才能把视觉效果还原成可分析的系统。
+
+\lecturefigure{slide-04.jpg}{文本到图像扩散模型已经能生成复杂、写实且富有组合性的场景}{04}
+
+图中不同开放或闭源模型都能处理“仙人掌笑脸”“疯狂科学家熊猫”“月球蛋中孵化的宇航员”等组合 prompt。读图时应区分三件事：photorealism、prompt adherence 和 diversity。单个成功样例只证明模型能生成某个结果，不说明覆盖率、可重复性或对长尾组合的可靠性。
+
+\lecturefigure{slide-05.jpg}{扩散直觉：随机噪声通过多步 refinement 逐渐变成真实图像}{05}
+
+与一次前向传播生成样本的 GAN 不同，扩散采样是顺序迭代。若前向加噪写成
+\[
+x_t=\sqrt{\bar\alpha_t}\,x_0+\sqrt{1-\bar\alpha_t}\,\epsilon,
+\qquad \epsilon\sim\mathcal N(0,I),
+\]
+$x_0$ 是干净样本，$x_t$ 是时间步 $t$ 的带噪状态，$\bar\alpha_t$ 由噪声日程决定。生成时从噪声反向走回数据分布。
+
+\lecturefigure{slide-06.jpg}{文本条件在每个去噪步骤中约束生成轨迹}{06}
+
+白色毛怪样例显示文本并非最后做分类，而是持续影响中间状态。条件生成可抽象为 $\epsilon_\theta(x_t,t,c)$ 或 velocity predictor $v_\theta(x_t,t,c)$，其中 $c$ 是文本、类别、图像或其他控制。条件越复杂，注入方式就越成为 backbone 设计的核心。
+
+\teachervoice{00:02:48--00:06:25，老师把扩散压缩成一个最重要的直觉：它是 iterative refinement，而非 one-shot generation。文本条件的作用是持续改变轨迹，不是给最终图片补一个标签。}
+
+\begin{importantbox}{扩散模型的两个可分问题}
+第一是\textbf{路径与目标}：怎样加噪、怎样定义 velocity/noise/score、怎样选 scheduler；第二是\textbf{网络参数化}：用 U-Net、DiT 还是其他结构预测目标。本讲主要回答第二类问题。
+\end{importantbox}
+
+\subsection{一个产品级扩散系统包含什么}
+
+“Diffusion model”常被误称为单一网络。实际 text-to-image pipeline 至少包括 text encoder、latent representation、denoiser、scheduler 和 VAE decoder；有些系统还使用多个文本编码器与 guidance。
+
+\lecturefigure{slide-07.jpg}{扩散系统的第一块：文本编码器把 prompt 变成条件表示}{07}
+
+文本首先进入一个或多个 encoder。Stable Diffusion 3 等系统会组合多个文本编码器，因为词汇、长文本理解和语义空间各有偏差。条件表示的质量决定模型能否理解 prompt，但也增加显存、延迟与训练接口复杂度。
+
+\lecturefigure{slide-08.jpg}{第二块：生成在 noisy latent 空间而非原始像素空间中进行}{08}
+
+Latent diffusion 先用 VAE 把图像压缩为低分辨率 latent，再在 latent 上扩散。若图像是 $H\times W$、下采样率为 $f$，latent 空间约为 $H/f\times W/f$，显著降低 token 数；代价是 VAE 可能丢失文字、纹理或高频细节。
+
+\lecturefigure{slide-09.jpg}{第三块：U-Net 或 Transformer denoiser 预测每一步更新方向}{09}
+
+Denoiser 接收 noisy latents、时间步和文本条件，输出 noise、velocity 或其他参数化。讲义后面所有架构争论都围绕这一蓝色模块展开。替换 backbone 不会自动替换 scheduler、VAE 或文本编码器，因此端到端收益必须分组件测量。
+
+\lecturefigure{slide-10.jpg}{完整系统：文本、latent、denoiser、scheduler 与 VAE 形成迭代闭环}{10}
+
+Scheduler 使用网络输出计算下一个 latent，循环若干次后由 VAE 解码成图像。推理延迟近似等于“每步 denoiser 成本 × 采样步数”，因此一个单步更快但需要更多步的架构未必端到端更快。讲者在 Q\&A 中也保留了 GAN 在超低延迟 one-shot generation 中的价值。
+
+\begin{knowledgebox}{第一次出现：Scheduler 与 denoiser}
+Scheduler 是确定噪声水平与反向更新规则的数值过程；denoiser 是学习得到的网络。二者共同决定采样，却可相对独立替换。比较模型速度时必须同时报告采样步数与单步成本。
+\end{knowledgebox}
+
+\subsection{Diffusion、flow matching 与本讲焦点}
+
+为了看清 backbone，仍需知道训练信号来自哪里。Diffusion 常预测加入的噪声，flow matching 则在噪声与数据之间定义概率路径并预测速度场；两者都能使用相似 Transformer。
+
+\lecturefigure{slide-11.jpg}{扩散训练：由干净图像与噪声构造 $x_t$，让网络恢复目标}{11}
+
+最常见的 noise-prediction objective 为
+\[
+\mathcal L_{\epsilon}
+=\mathbb E_{x_0,\epsilon,t}
+\left[\|\epsilon-\epsilon_\theta(x_t,t,c)\|_2^2\right].
+\]
+这里 $t$ 决定信噪比，$c$ 是条件。不同 timestep weighting 会改变模型关注的噪声区间，因此训练 recipe 与架构不能完全分开讨论。
+
+\lecturefigure{slide-12.jpg}{Flow matching：沿定义好的路径学习从噪声到数据的速度场}{12}
+
+若采用线性路径 $x_t=(1-t)x_0+t x_1$，目标速度为 $u_t=x_1-x_0$，可训练
+\[
+\mathcal L_{\mathrm{FM}}
+=\mathbb E\left[\|v_\theta(x_t,t,c)-u_t\|_2^2\right].
+\]
+实际路径与参数化可以更复杂，但核心是网络预测局部流向。DiT、MMDiT 与 SANA 的多数结构讨论并不依赖到底预测 noise 还是 velocity。
+
+\lecturefigure{slide-13.jpg}{本讲明确把 scheduler math 放到一边，聚焦 network parameterization}{13}
+
+图中放大的是 $	heta$：网络如何处理 noisy input、如何注入 $t$ 与文本、如何缩放到高分辨率。这个范围限定很重要。若某系统效果更好，可能来自数据、VAE、objective、guidance 或 post-training，而不能全部归功于 backbone。
+
+\lecturefigure{slide-14.jpg}{扩散 backbone 的设计自由度：输入空间、网络结构、条件与输出目标}{14}
+
+Pixel-space 与 latent-space 决定空间尺寸；U-Net 与 Transformer 决定 token mixing；class、text 或 image conditions 决定控制接口；epsilon、velocity 或 data prediction 决定输出语义。读这张表时应把每一行视为可独立 ablate 的实验轴，而不是一个固定套餐。
+
+\begin{warningbox}{不要把 backbone 排名当作完整生成系统排名}
+同一 denoiser 在不同 VAE、数据、scheduler、采样步数和 guidance 下可产生巨大差异。论文若只报告最终 FID 或人工偏好，应继续追问控制变量、训练算力和推理设置。
+\end{warningbox}
+
+\begin{lstlisting}[language=Python,caption={Text-to-image 扩散系统的一次简化采样流程}]
+text_tokens = text_encoder(prompt)
+latent = sample_gaussian(shape)
+for timestep in scheduler.timesteps:
+    prediction = denoiser(latent, timestep, text_tokens)
+    latent = scheduler.step(prediction, timestep, latent)
+image = vae.decode(latent)
+\end{lstlisting}
+
+\subsection{本章小结}
+
+扩散生成是一个多组件、迭代运行的系统。Diffusion 与 flow matching 定义路径和监督，denoiser backbone 定义怎样处理状态与条件。后文只替换蓝色网络模块，但会持续检查端到端速度、训练配方和证据边界。
+

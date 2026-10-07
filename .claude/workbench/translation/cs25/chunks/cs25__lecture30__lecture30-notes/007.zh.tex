@@ -1,0 +1,102 @@
+\section{Precision Language Models：配置、训练阶段与速度}
+
+课程把使用 SAFFU、显式初始化和少量数据训练的系统称为 Precision Language Models。这里的 precision 强调“对参数起点和任务数据更有针对性”，不是数值精度 FP16/BF16。读配置表时要同时看 vocabulary、embedding、context、parameter count、token budget 与硬件，不能只看模型昵称。
+
+\subsection{Big 与 potato：两个目标完全不同的 reference points}
+
+Big configuration 使用约 16K token vocabulary、约 2K context 与约 50M parameters，在旧 12GB Titan V GPU 上训练；potato configuration 使用约 1K token vocabulary、短 context 与约 150K parameters，在 Le Potato CPU 和 2GB RAM 上实时训练。前者测试语言建模规模，后者测试本地 scratch learning。
+
+\lecturefigure{slide-16-plm-configs.jpg}{Precision language models 的 big 与 potato reference configurations}{Stanford Online 官方录像 00:46:08}
+
+\begin{knowledgebox}{PLM 不是数值 precision}
+本讲的 PLM 是团队给一类模型的名称，不是 mixed precision、FP8 或 quantization。若文档只写“precision model”，必须说明这是 architecture/training label，避免与 numerical precision 混淆。
+\end{knowledgebox}
+
+\begin{warningbox}{“实时训练”必须绑定硬件与任务}
+Potato 的实时指本地 binary switch task，模型、词表、context 和数据都很小；它不能外推为在 2GB RAM 上实时训练通用对话模型。
+\end{warningbox}
+
+\teachervoice{00:46:14--00:49:04，Williams 说团队尚不清楚架构在 trillions of tokens 或 RLHF 下会怎样；potato 的目标是利用小数据稳定性，探索传统大模型不强调的 edge scratch-training 能力。}
+
+\subsection{从 micro 到 mega：表格的真正用途是资源审计}
+
+配置表给出多种 vocabulary、context、embedding/hidden dimensions 和 total parameters。它的价值不是宣称每一行都已充分训练，而是展示参数如何随宽度和 context 增长，并为后续 small/medium stress tests 提供命名。
+
+\lecturefigure{slide-17-saffu-size-table.jpg}{SAFFU/PLM 不同规模的参数与 token 配置}{Stanford Online 官方录像 00:48:22}
+
+若一条 branch 的主要矩阵近似为 $W\in\mathbb{R}^{d\times d}$、$U\in\mathbb{R}^{d\times h}$、$O\in\mathbb{R}^{h\times V}$，总参数可粗略写成
+\[
+P\approx Vd+d^2+dh+hV+P_{\text{other}}.
+\]
+随着 vocabulary $V$ 与 hidden $h$ 增大，embedding/output 往往成为主要项；随着多 context branches 增加，$W_b,U_b$ 也会重复或扩展。
+
+\begin{knowledgebox}{配置表要补的四本账}
+\begin{enumerate}
+  \item 参数量：哪些矩阵共享，哪些按 context branch 复制？
+  \item 训练 token：warm start、frozen stage、thawed stage 各看多少数据？
+  \item 内存：weights、optimizer state、activations、cache 各占多少？
+  \item 时间：统计量构建、backpropagation、cache rebuild 与 evaluation 是否都计入？
+\end{enumerate}
+Optimizer state（优化器状态）指 Adam/AdamW 的一阶矩 $m$ 与二阶矩 $v$ 等额外张量，它们会显著增加训练内存；不能只按参数文件大小估算。
+\end{knowledgebox}
+
+\subsection{Medium PLM：warm、freeze、thaw 三阶段}
+
+Medium experiment 使用约 12M parameters 和 BabyLM 100M-token scale。Slide 的三阶段是：先用部分数据构建 warm start；再冻结 vectors，用大部分数据快速训练其余参数；最后 thaw vectors，以更小 learning rate 联合微调。
+
+\lecturefigure{slide-18-medium-plm-training.jpg}{Medium PLM 的 warm-start、frozen-vector 与 thawed-vector 训练动态}{Stanford Online 官方录像 00:49:09}
+
+可抽象成
+\[
+\theta^{(0)}=\operatorname{ExplicitInit}(D_{\text{warm}}),
+\]
+\[
+\theta^{(1)}=\operatorname{Train}(D_{\text{main}},\theta^{(0)};E\ \text{frozen}),
+\]
+\[
+\theta^{(2)}=\operatorname{FineTune}(D_{\text{tail}},\theta^{(1)};E\ \text{trainable}).
+\]
+
+\begin{importantbox}{Freeze 与 thaw 的系统含义}
+Freeze embedding 不仅减少 gradient/optimizer memory，也保证 comparison cache 有效；thaw 允许表示适应最终任务，却需要重新计算 comparisons，并可能改变前面显式解对应的 feature distribution。
+\end{importantbox}
+
+\teachervoice{00:49:09--00:51:35，讲者把 BabyLM 100M tokens 解释为 developmentally plausible exposure，并说冻结 vectors 同时提高训练速度与缓存稳定性，最后 thaw 则用额外成本换最终质量。}
+
+\subsection{How fast：headline 比较必须拆开条件}
+
+Slide 把 GPT-2 在 8 张 A100 上约 100 小时的粗略数字，与 medium PLM 在旧 Titan V 上约 18 tokens/hour 的进度放在一起。两者 context、vocabulary、implementation、目标质量和数据流程并未严格匹配，因此只能读成 motivation，而非公平 benchmark。
+
+\lecturefigure{slide-19-plm-training-speed.jpg}{PLM 训练速度的课堂粗略参照}{Stanford Online 官方录像 00:53:21}
+
+一个更完整的时间账本应写成
+\[
+T_{\text{total}}=T_{\text{stats}}+T_{\text{cache}}
++T_{\text{backprop}}+T_{\text{rebuild}}+T_{\text{eval}},
+\]
+而不是只报告主训练 loop。若显式统计量和 cache 在数据预处理阶段完成，它们仍是训练系统成本。
+
+\begin{warningbox}{不要传播“32 倍容量所以 32 倍速度”}
+GPU theoretical throughput、model FLOPs utilization、memory bandwidth、batch size 和 kernel maturity 都会改变 wall-clock。课堂 slide 的硬件比例不能替代 profiler 或 matched implementation。
+\end{warningbox}
+
+\teachervoice{00:52:48--00:54:10，讲者用 GPT-2/A100 作为直觉参照；讲义应保留其 rough comparison 身份，而不能把它改写成严格 speedup。}
+
+\subsection{Small PLM 能做什么：先区分 fit 与 transfer}
+
+团队到课堂时主要 stress-test 到约 1B tokens，且很多实验只使用几十万到几千万 tokens。小模型能快速降低训练 loss，说明初始化稳定；但真正关键的问题是能否在 application data 上学到可迁移规则，而不只是记住本地样本。
+
+\lecturefigure{slide-20-small-plm-capabilities.jpg}{Small PLM 的核心研究问题：能否从应用数据直接学习}{Stanford Online 官方录像 00:54:16}
+
+\begin{warningbox}{Small-data fit 不等于 general language ability}
+训练集 PPL 很低可能来自 memorization。至少需要 held-out users、未见表述、噪声 ASR、任务外输入与时间漂移测试，才能判断模型是否学到稳健 directive semantics。
+\end{warningbox}
+
+\teachervoice{00:41:57--00:42:33，Williams 主动区分“很快学会几千 tokens”与“成为广泛会说话的语言模型”；前者是观测，后者没有由小数据结果证明。}
+
+\teachervoice{00:54:16--00:55:21，讲者把 application-only transfer from scratch 作为开放问题，而不是已经解决的能力。}
+
+\subsection{本章小结}
+
+PLM 配置跨越 tiny controller 到中型 language model，但每一档都依赖不同词表、context、数据与硬件。真正可重复的训练叙事是 warm--freeze--thaw；速度 headline 只有在完整计入 statistics、cache 和 evaluation 后才有工程意义。
+

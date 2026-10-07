@@ -1,0 +1,115 @@
+\section{REALM 与 Atlas：端到端愿景中的工程近似}
+
+Fully joint training 面临一个物理约束：document encoder 一变，整个 corpus embedding 都可能需要重算。REALM 和 Atlas 的重要性不仅在模型结果，也在它们如何用异步更新、近似目标和多种 retriever losses 让大规模系统可训练。
+
+\subsection{REALM：异步刷新外部知识表示}
+
+REALM slide 展示 masked language model、knowledge retriever 与 knowledge-augmented encoder。它在 pretraining 中根据 masked token likelihood 学 retrieval，同时通过异步 index refresh 处理 document embeddings 随参数变化的问题。
+
+\lecturefigure{slide-32-realm.jpg}{REALM 的 knowledge retriever 与异步 index 更新}{Stanford 课堂视频 00:40:30}
+
+\begin{importantbox}{REALM 的 latent retrieval objective}
+对 masked target $y$ 与 input $x$，可写成
+\[
+p(y\mid x)=\sum_{z\in\operatorname{top}k}p_\eta(z\mid x)
+p_\theta(y\mid x,z).
+\]
+Retriever 没有直接 passage label，也能从 masked-token likelihood 获得信号；top-$k$ 与 stale index 使训练成为近似。
+\end{importantbox}
+
+\begin{lstlisting}[caption={异步 document-index refresh 的训练骨架}]
+for step, batch in enumerate(training_data):
+    docs = index.search(query_encoder(batch))
+    loss = retrieval_augmented_loss(batch, docs)
+    update(query_encoder, generator, loss)
+    if step % refresh_interval == 0:
+        new_vectors = document_encoder.encode(corpus_snapshot)
+        index.swap_in(new_vectors)
+\end{lstlisting}
+
+\begin{warningbox}{Stale index 是优化误差来源}
+训练时 query encoder 已更新，而 index 仍由旧 document encoder 产生，retrieval distribution 会滞后。Refresh 太频繁代价巨大，太慢则 signal mismatch；异步重建是在 freshness 与 throughput 之间取舍。
+\end{warningbox}
+
+\teachervoice{Kiela 说 REALM ``really visionary''，同时指出其 downside：系统复杂、仍是 BERT-style encoder，而且 index 更新必须异步。赞美与限制需要一起保留。}
+
+\subsection{Atlas：Retriever 可以用哪些目标学习}
+
+Atlas Deep Dive 第一页列出 retriever updates：FiD-style attention distillation、EMDR$^2$、likelihood distillation 与 leave-one-out。它们都尝试回答“哪份 passage 对 generator 有贡献”，但使用不同 proxy。
+
+\lecturefigure{slide-33-atlas-retriever-objectives.jpg}{Atlas retriever 的四类训练目标}{Stanford 课堂视频 00:41:15}
+
+\begin{knowledgebox}{术语消化：Atlas loss functions}
+\begin{tabularx}{\textwidth}{L{0.22\textwidth}>{\raggedright\arraybackslash}X}
+\toprule
+目标 & 核心信号 \\
+\midrule
+Attention distillation & 用 FiD decoder 对 passage 的 attention 作为 teacher score \\
+EMDR$^2$ & 对 latent documents marginalize，使 answer likelihood 训练 retriever \\
+Likelihood distillation & 比较每份 document 对目标 sequence likelihood 的贡献 \\
+Leave-one-out & 移除某 document 后 loss 变差多少，估计边际贡献 \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{Retriever Update Derivations}
+
+第二页放大 Atlas 论文中的公式和示意图，强调 retriever score 与 generator likelihood 的结合。Dense retriever 的 top-$k$ selection 不可直接对离散检索求导，因此方法通常在候选集合上定义可微分 surrogate。
+
+\lecturefigure{slide-34-atlas-retriever-continued.jpg}{Atlas retriever update 的论文公式与示意}{Stanford 课堂视频 00:42:09}
+
+\begin{importantbox}{Surrogate objective 的边界}
+对已检索候选 $\mathcal{Z}_k$，常见形式是
+\[
+\mathcal{L}=-\log\sum_{z\in\mathcal{Z}_k}
+p_\eta(z\mid x)p_\theta(y\mid x,z).
+\]
+梯度能重排 $\mathcal{Z}_k$ 内文档，却不能直接学习从未被召回的文档；初始 retriever recall 仍决定上限。
+\end{importantbox}
+
+\subsection{Loss Function Comparison}
+
+Atlas Loss Functions table 比较 closed-book、no joint pre-training、FiD distillation、EMDR$^2$、perplexity distillation、LOO 等方法在 64-shot、1024-shot 与多个任务上的表现。不同 loss 没有在所有列统一获胜，说明 retriever supervision 与数据规模相互作用。
+
+\lecturefigure{slide-35-atlas-loss-functions.jpg}{Atlas 不同 retriever loss 的 few-shot 结果}{Stanford 课堂视频 00:42:36}
+
+\begin{knowledgebox}{读表：不要用单列平均值替代机制分析}
+先看 closed-book 与 retrieval 的整体差距，再比较 no-joint-pretraining 和各 retriever loss；同时观察 64-shot 与 1024-shot 是否改变排名。表格更适合支持“retrieval 与 joint training 有价值”，而不是宣布一个 loss 永久最优。
+\end{knowledgebox}
+
+\subsection{Atlas Pretraining：语言任务与检索共同训练}
+
+Atlas pretraining slide 列出 prefix LM、masked LM、title-to-section generation 等 pretext tasks，并比较 joint 与 fixed retriever。它说明 retrieval-augmented pretraining 需要选择既训练语言能力、又迫使模型利用外部文档的任务。
+
+\lecturefigure{slide-36-atlas-pretraining.jpg}{Atlas 的 joint pretraining tasks 与结果表}{Stanford 课堂视频 00:43:33}
+
+\begin{knowledgebox}{读图：Pretext task 要避免模型走捷径}
+若 target 可从 local context 直接预测，模型可能忽略 retrieved passages。Title-to-section、masked spans 或 knowledge-intensive objectives 让外部 evidence 更有用；但数据构造也可能引入 answer leakage。
+\end{knowledgebox}
+
+\subsection{更新 Query Side 还是 Full Retriever}
+
+Update-results slide 比较 standard fine-tuning、top-100 reranking、query-side fine-tuning 与 fixed retriever，在 64-shot/1024-shot 下的结果。课堂 Q\&A 进一步指出：对 Natural Questions、FEVER 等 narrow knowledge-intensive tasks，强 DPR index 加 query-side update 可能足够；更广 general language modeling 可能需要 document-side adaptation。
+
+\lecturefigure{slide-37-atlas-retriever-update-results.jpg}{Atlas retriever 更新策略的结果比较}{Stanford 课堂视频 00:44:42}
+
+\begin{knowledgebox}{读表：Query-only 的适用条件}
+当 corpus representation 已与任务相近，query encoder 主要学习如何进入现有 index；若 domain、chunk semantics 或 language distribution 改变，固定 document embeddings 可能成为瓶颈。部署时应先测 recall failure 属于 query 还是 corpus representation。
+\end{knowledgebox}
+
+\teachervoice{Q\&A 中讲者没有给出“永远更新哪一边”的答案：知识密集小数据任务可只动 query side，扩展到 general LM 或新 domain 时 document encoder 更可能需要改变。}
+
+\subsection{Atlas versus Closed-Book}
+
+最后的 scaling table 比较 Atlas 与 closed-book 模型在 5-shot、multi-task 与 full transfer 下的表现。Retrieval 让较小参数模型访问更大 external memory，因此参数量不再是唯一知识容量指标。
+
+\lecturefigure{slide-38-atlas-vs-closed-book.jpg}{Atlas 与 closed-book 模型的 few-shot/transfer 比较}{Stanford 课堂视频 00:45:06}
+
+\begin{importantbox}{Model size 与 system capacity 分开报告}
+RAG 系统至少应报告 generator parameters $P_G$、retriever parameters $P_R$、index size $M$、retrieval calls $C_R$ 和 input tokens $T_C$。只说“770M model”会隐藏外部 datastore 与 online compute。
+\end{importantbox}
+
+\subsection{本章小结}
+
+REALM 与 Atlas 表明 joint RAG 需要工程近似：异步 index refresh、候选集合 surrogate、query-only updates 与多种 distillation objectives。端到端不是一句口号，而是明确哪些 signal 穿过哪些组件，以及计算上为什么必须截断。
+

@@ -1,0 +1,89 @@
+\section{MMDiT：让文本与图像在不同空间共同演化}
+
+PixArt 中图像 token 被 cross-attention 更新，文本 token 通常保持冻结。Stable Diffusion 3 的 MMDiT 认为两种模态处于不同表示空间，需要独立 normalization 与 projections，却可在 joint attention 中交换信息。
+
+\subsection{为什么不直接把模态当成同一种 token}
+
+文本与 noisy image 的统计、序列长度和语义不同。完全共享参数可能强迫一方继承另一方偏差；完全分离又无法交互。MMDiT 选择“独立投影、联合注意力”。本节要辨析的是共享与交互并非同一件事：两种模态可以保留各自 normalization/QKV，却仍在同一 attention map 中交换信息；后面的四页正是沿这条边界逐步展开。
+
+\lecturefigure{slide-45.jpg}{MMDiT 动机：文本与图像 embedding 空间不同，单向 cross-attention 有偏置}{45}
+
+单向交叉注意力只更新图像流，文本表示不会根据当前视觉状态变化。MMDiT 希望两边共同演化，同时保留各自参数化。这个动机合理，却不是“分开一定更优”的理论证明。
+
+\lecturefigure{slide-46.jpg}{MMDiT 为不同模态使用独立 AdaLN 与 QKV projections}{46}
+
+文本与图像分别计算
+\[
+(Q_x,K_x,V_x)=f_x(X,c),\qquad
+(Q_t,K_t,V_t)=f_t(T,c),
+\]
+其中 $f_x,f_t$ 含各自 normalization 与投影。参数翻倍提高表达，也增加内存、FLOPs 与实现复杂度。
+
+\lecturefigure{slide-47.jpg}{MMDiT 完整 block：两路调制、两路投影、联合 token attention}{47}
+
+将 $Q=[Q_t;Q_x]$、$K=[K_t;K_x]$、$V=[V_t;V_x]$ 拼接后计算 joint attention：
+\[
+O=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt d}\right)V.
+\]
+再按模态切分输出。这样 text-text、image-image 与 cross-modal interaction 同时存在，而不是单独堆一层 cross-attention。
+
+\lecturefigure{slide-48.jpg}{MMDiT 的优点：不同模态保持专属参数，又通过拼接发生全局交互}{48}
+
+Separate paths 允许不同模态学习不同 scale、shift 和 projections；concatenation 则让注意力统一选择信息。风险是 token 比例不平衡：大量 image tokens 可能压制短文本，需要 normalization、mask 或 loss 设计。
+
+\begin{knowledgebox}{Joint attention 与 cross-attention 的区别}
+Cross-attention 通常只更新 query stream；joint attention 把两种模态 token 放入同一注意力图，两边都可更新。前者更省算力、接口清晰，后者交互更对称但成本更高。
+\end{knowledgebox}
+
+\subsection{结果、缩放与容易忽略的配套组件}
+
+MMDiT 是否值得必须看 ablation，而不是架构图。讲座给出 loss/quality 曲线、缩放结果，并提醒 SD3 还依赖更好的 sampling/training 组件；不能把全部提升归到 multimodal block。本节因此把三类证据分开读取：受控消融回答局部机制，scaling 曲线回答可扩展性，完整系统样例只回答组合 recipe 的最终表现。
+
+\lecturefigure{slide-49.jpg}{MMDiT ablation：多模态专属参数化对训练与质量曲线的影响}{49}
+
+曲线“强烈暗示”而不是证明 MMDiT 有效。应检查 baseline 是否匹配参数量、FLOPs 与训练时长；若 MMDiT 更大，部分收益可能来自 capacity。最好比较 compute-matched 与 parameter-matched 两组实验。
+
+\lecturefigure{slide-50.jpg}{MMDiT scaling：大模型继续获益，但需要 QK-Norm 稳定训练}{50}
+
+随着 hidden size 与层数增加，attention logits 可能爆炸。QK-Norm 对 query/key 做规范化，控制点积尺度。它是训练稳定性组件，不直接增加表示能力，却可能决定大模型是否能收敛。
+
+\lecturefigure{slide-51.jpg}{SD3 的完整效果还依赖“hippo”所代表的配套训练/采样组件}{51}
+
+这张幽默页用河马提醒：架构论文之外还有 Rectified Flow、数据、caption、VAE、guidance 等配套。读任何“某 block 带来 SD3”叙事时，应主动寻找 omitted components，避免单因果归因。
+
+\teachervoice{00:49:49--00:57:31 与 01:03:04--01:04:45，老师把 MMDiT 的理由描述为模态空间差异与共同演化，但在问答中承认这是 hand-wavy intuition，不是 optimality proof。}
+
+\begin{warningbox}{架构解释不是因果分解}
+一条训练曲线同时受到参数量、optimizer、数据、loss weighting 和数值稳定性影响。若没有匹配实验，就不能说“separate QKV 单独导致全部提升”。
+\end{warningbox}
+
+\subsection{MMDiT 的多种折中}
+
+完整 MMDiT 每层都维护两套 projections，成本很高。实际模型可只在部分层使用 multimodal block，其他层用普通 DiT；也可交替更新模态，或在最后阶段再联合。本节从“是否采用 MMDiT”的二元标签进一步进入 block schedule：需要比较哪些层发生联合、联合多久、两路参数保留多少，以及这些选择怎样改变质量--成本 Pareto frontier。
+
+\lecturefigure{slide-52.jpg}{MMDiT 变体：混合 multimodal blocks 与普通 DiT blocks}{52}
+
+若只有 $k$ 个 MMDiT 层、其余 $L-k$ 个普通层，可在交互能力与 FLOPs 间调节。Flux 等模型采用混合设计。关键问题是早期、中央还是后期融合更值钱，以及哪些层真正需要双路参数。
+
+\lecturefigure{slide-53.jpg}{另一种变体：先分别更新模态，再把表示送入联合阶段}{53}
+
+图中 modality A/B 先独立处理，随后交换或拼接。分阶段设计可降低 joint attention 的 token 长度，却可能延迟跨模态对齐。它类似 early/mid/late fusion 的连续选择。
+
+\lecturefigure{slide-54.jpg}{Lumina-Image 2.0 等模型展示不同 multimodal block 组合}{54}
+
+多种变体说明 MMDiT 不是一个固定配方，而是“模态专属参数 + 何时联合”的设计空间。比较论文时应把 block schedule 写成表，而不是只标记是否使用 MMDiT。
+
+\begin{lstlisting}[language=Python,caption={MMDiT block：独立 QKV，联合 attention，再按模态切分}]
+def mmdit_block(text_tokens, image_tokens, condition):
+    q_t, k_t, v_t = text_projection(text_tokens, condition)
+    q_x, k_x, v_x = image_projection(image_tokens, condition)
+    q = concat(q_t, q_x); k = concat(k_t, k_x); v = concat(v_t, v_x)
+    output = attention(q, k, v)
+    text_out, image_out = split_by_modality(output)
+    return text_tokens + text_out, image_tokens + image_out
+\end{lstlisting}
+
+\subsection{本章小结}
+
+MMDiT 让文本与图像使用独立 AdaLN/QKV，又在 joint attention 中共同演化。它改善表达空间冲突的可能性，也显著增加成本。真实系统通过混合 block、阶段融合与 QK-Norm 在质量、稳定性和 FLOPs 间折中。
+

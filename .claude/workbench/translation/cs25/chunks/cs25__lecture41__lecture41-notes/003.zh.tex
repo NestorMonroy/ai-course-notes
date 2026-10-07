@@ -1,0 +1,79 @@
+\section{Flow Matching：把噪声沿速度场运到视频}
+
+有了可处理的 latent，下一步是定义网络预测什么。Flow Matching（流匹配）把生成写成连续时间运输：从高斯噪声 $X_0$ 出发，沿模型学习的速度场走向数据 latent $X_1$。它与 diffusion 都学习反向生成过程，但训练目标和采样解释更接近常微分方程。
+
+\subsection{从 diffusion 直觉到速度场}
+
+上一章已经把像素压缩为可建模 latent，本节进一步回答“怎样从噪声得到这种 latent”。下面的总览图先给出共同结构：前向过程把数据和噪声连接，神经网络学习逆向路径。关键区别不是“有没有多步去噪”，而是中间路径、预测目标和数值积分方式如何定义。
+
+\lecturefigure{slide-187-flow-matching-overview.jpg}{Diffusion 与 Flow Matching 都学习从噪声返回数据的逆过程}{00:22:06}
+
+最简单的线性路径写为
+\[
+X_t=(1-t)X_0+tX_1,
+\qquad t\sim\mathcal U(0,1),
+\]
+其中 $X_0\sim\mathcal N(0,I)$ 是噪声，$X_1$ 是真实视频 latent，$t$ 是连续时间。该路径的目标速度为
+\[
+V_t=\frac{dX_t}{dt}=X_1-X_0.
+\]
+线性路径让速度目标简单，但实际训练还可改变时间采样和路径参数化。
+
+\begin{importantbox}{Flow Matching 的训练对象}
+模型不是直接预测最终视频，也不是分类 timestep；它学习在任意中间状态 $X_t$ 和条件 $c$ 下应该朝哪个方向移动。条件速度场 $v_\theta(X_t,t,c)$ 把文本、时间和当前 noisy latent 联结起来。
+\end{importantbox}
+
+\subsection{训练：随机抽一条路径上的局部监督}
+
+前一节定义了连续速度场，本节说明它如何变成可执行的 minibatch 监督。训练不需要完整模拟从 0 到 1 的轨迹；每次抽取数据、噪声和时间点，构造 $X_t$，再监督局部速度。下面的 slide 和公式把“局部回归如何拼成全局运输”展开。
+
+\lecturefigure{slide-188-flow-matching-training.jpg}{Flow Matching 训练：数据、噪声、时间采样与 velocity 回归}{00:23:58}
+
+典型损失为
+\[
+\mathcal L_{\mathrm{FM}}(\theta)
+=\mathbb E_{X_1,X_0,t,c}
+\left[\left\|v_\theta(X_t,t,c)-(X_1-X_0)\right\|_2^2\right].
+\]
+$\theta$ 是 Transformer 参数，$c$ 是文本条件，期望覆盖训练数据、噪声和时间采样。模型只看到局部状态，却通过所有时间点的监督拼出全局运输场。
+
+\begin{lstlisting}[language=Python,caption={条件 Flow Matching 的单步训练伪代码}]
+video, prompt = sample_batch()
+x1 = tae.encode(video)
+x0 = randn_like(x1)
+t = sample_time(batch_size)
+xt = (1 - t) * x0 + t * x1
+target_velocity = x1 - x0
+prediction = transformer(xt, timestep=t, text=encode_text(prompt))
+loss = mse(prediction, target_velocity)
+loss.backward()
+\end{lstlisting}
+
+\subsection{推理：ODE 离散化就是延迟预算}
+
+训练得到的是任意时间点的局部方向，真正生成样本还要把这些方向沿路径累积。本节把连续目标落到离散系统：选择哪些 timestep、使用什么 solver、运行多少次 backbone，都会同时改变轨迹误差、壁钟延迟和显存占用。
+
+训练得到速度场后，采样从 $\hat X_0\sim\mathcal N(0,I)$ 开始，求解
+\[
+\frac{d\hat X_t}{dt}=v_\theta(\hat X_t,t,c).
+\]
+最简单的一阶 Euler 更新为
+\[
+\hat X_{t_{k+1}}
+=\hat X_{t_k}+\Delta t_k\,v_\theta(\hat X_{t_k},t_k,c),
+\qquad \Delta t_k=t_{k+1}-t_k.
+\]
+$k$ 表示离散求解步，步数越多通常近似越好，但每一步都要运行一次大 Transformer。
+
+\lecturefigure{slide-189-flow-matching-inference.jpg}{Flow Matching 推理：从噪声用 ODE solver 迭代到数据 latent}{00:24:41}
+
+\begin{warningbox}{连续时间训练不等于连续计算}
+模型训练时可采样连续 $t$，实际推理仍必须选择有限时间点和 solver。少步采样降低延迟但会增加离散误差；多步采样提高成本。报告“生成一次视频”的速度时必须同时给出分辨率、帧数、solver 和步数。
+\end{warningbox}
+
+\teachervoice{00:32:28--00:33:54，课堂问答追问 denoising steps。老师说明训练时间变量是连续的，推理只采样一组离散点；更多步骤更接近目标轨迹，但直接增加 latency。}
+
+\subsection{本章小结}
+
+Flow Matching 用随机噪声与数据 latent 之间的路径构造局部速度监督，推理时通过 ODE solver 积分得到样本。公式简单不代表推理便宜：每个时间步都要运行 30B 级 backbone，离散步数因而是质量与延迟的核心旋钮。
+

@@ -1,0 +1,95 @@
+\section{Dense baseline：先看 Mistral 7B 如何组织 attention 与 MLP}
+
+Mixtral 并没有重写整个 Transformer。它沿用 Mistral 7B 的 attention 与 residual structure，只把每层 MLP 换成 top-two-of-eight expert MLP。为了准确理解“只改了哪里”，本章先建立 dense baseline：Grouped-Query Attention、Sliding-Window Attention、RMSNorm、SwiGLU 与 tensor shape。
+
+\subsection{MHA、MQA 与 GQA：先数 query head 和 KV head}
+
+标准 Multi-Head Attention（MHA）让每个 query head 都有独立 key/value head；Multi-Query Attention（MQA）让所有 query heads 共享一组 K/V；Grouped-Query Attention（GQA）位于两者之间，让一组 query heads 共享一个 KV head。Mistral 7B 使用 32 个 query heads 和 8 个 KV heads，目标是保留更多表示自由度，同时降低 KV cache 和 memory bandwidth 压力。
+
+\lecturefigure{slide-02-dense-attention.jpg}{Mistral 7B 的 Grouped-Query Attention 与 Sliding-Window Attention}{Stanford Online 官方录像 00:03:55}
+
+设 query head 数为 $H_q$，KV head 数为 $H_{kv}$，head dimension 为 $d_h$，序列长度为 $L$。自回归解码时，每层 KV cache 的元素量近似为
+\[
+N_{KV}=2L H_{kv}d_h,
+\]
+其中系数 $2$ 对应 key 与 value。若从 MHA 的 $H_{kv}=H_q=32$ 改成 GQA 的 $H_{kv}=8$，同精度、同序列长度下 KV cache 约降为四分之一。
+
+Attention 的核心仍是
+\[
+\operatorname{Attn}(Q,K,V)=\operatorname{softmax}\!\left(\frac{QK^{\top}}{\sqrt{d_h}}+M\right)V,
+\]
+其中 $M$ 是 causal/sliding-window mask。GQA 改的是 K/V 的共享方式，不是这条概率加权公式本身。
+
+\begin{knowledgebox}{背景概念：KV cache 为什么是推理成本}
+KV cache 保存过去 token 在每层生成的 key/value，避免每次解码重新计算全部前缀。它主要驻留在 GPU 的 HBM（High Bandwidth Memory，高带宽显存 DRAM）中；长度、层数、KV head 数或 batch 增长都会线性增加容量，并消耗读写带宽。因此 GQA 的收益不仅是“少几个矩阵”，而是减少长期驻留状态。
+\end{knowledgebox}
+
+\begin{warningbox}{GQA 不等于免费压缩}
+减少 KV heads 可能损失不同 query heads 对 K/V 表示的独立性。最终质量取决于模型规模、训练数据和 head grouping；不能只由缓存公式推导 benchmark 结果。
+\end{warningbox}
+
+\teachervoice{00:02:18--00:03:36，Albert 强调 GQA 与 sliding-window attention 都不是 Mistral 新发明，而是把已有设计组合进一个强 dense baseline。课程关注的是工程选择如何共同工作，而非抢单点 novelty。}
+
+\subsection{Sliding-window attention：局部窗口如何跨层传播}
+
+GQA 解决 KV head 数，Sliding-Window Attention（SWA，滑动窗口注意力）解决单层可见范围。每个位置只直接注意最近 $w$ 个 token，因此单层 attention matrix 从全局 $L^2$ 连接缩到约 $Lw$；但信息可沿层数逐步传播，所以深层 token 能间接吸收更远上下文。
+
+可把第 $\ell$ 层位置 $t$ 的直接可见集合写成
+\[
+\mathcal{N}_{\ell}(t)=\{j\mid \max(0,t-w+1)\le j\le t\}.
+\]
+若每层都允许局部传递，理想化的最大信息传播距离随层数增长，约为 $\ell(w-1)$。这不是“第 $\ell$ 层拥有无损全局 attention”的证明，但说明局部计算可以通过 depth 扩散。
+
+\begin{importantbox}{GQA 与 SWA 解决不同瓶颈}
+GQA 主要降低 K/V 表示和 KV cache；SWA 主要减少每层 attention 连接和长序列计算。两者可以同时使用，因为一个改 head sharing，一个改 token neighborhood。
+\end{importantbox}
+
+\subsection{一层 dense Transformer：读 shape 比背模块名更可靠}
+
+架构图容易隐藏细节，因此讲者直接给出一个单层 PyTorch 实现，并把 tensor dimension 写进变量名。读代码时应跟踪四件事：Q/K/V projection 的 shape、RoPE 后的位置编码、attention residual、SwiGLU MLP residual。这样才能看到 Mixtral 后面真正替换的只有 MLP 路径。
+
+\lecturefigure{slide-03-dense-layer-code.jpg}{Mistral 7B 单层 Transformer 的参数表与 PyTorch 实现}{Stanford Online 官方录像 00:06:45}
+
+若输入 $X\in\mathbb{R}^{L\times d}$，dense block 可概括为
+\begin{align*}
+H &= X+\operatorname{Attention}(\operatorname{RMSNorm}(X)),\\
+Y &= H+\operatorname{MLP}(\operatorname{RMSNorm}(H)).
+\end{align*}
+Mistral 使用 SwiGLU 风格 MLP，可写为
+\[
+\operatorname{MLP}(x)=W_2\left(\operatorname{SiLU}(W_1x)\odot W_3x\right),
+\]
+其中 $W_1,W_3$ 把 hidden dimension 扩到 intermediate dimension，$W_2$ 再投影回来，$\odot$ 是逐元素乘法。Mixtral 的 expert 就是复制这种 MLP 参数化，而不是复制整层 attention。
+
+\begin{lstlisting}[caption={Dense Transformer block 的 shape-first 伪代码}]
+q = x @ Wq            # [tokens, query_heads, head_dim]
+k = x @ Wk            # [tokens, kv_heads, head_dim]
+v = x @ Wv            # [tokens, kv_heads, head_dim]
+h = x + attention(q, k, v, causal_window)
+y = h + swiglu(rms_norm(h), W1, W2, W3)
+\end{lstlisting}
+
+\begin{knowledgebox}{首次使用：fused kernel}
+Fused kernel（融合 kernel）把 RMSNorm、projection、activation 或 gating 等多个 GPU 操作合并成更少的 kernel launch，减少 HBM 中间结果读写与 launch overhead。它能改善真实吞吐，但不会改变模型数学结构，因此不能用 kernel 优化掩盖 total/active parameter 的概念差异。
+\end{knowledgebox}
+
+\teachervoice{00:03:36--00:06:49，讲者说 Transformer architecture 有大量细小 decision choices，仅放一张框图不够，所以用带 tensor-shape 后缀的代码告诉听众每个矩阵到底做什么。}
+
+\subsection{Dense baseline 的证据：小模型不等于弱模型}
+
+在进入稀疏模型前，课程用 Mistral 7B 的当时 benchmark 说明 dense baseline 已经很强。图中的比较是 2023 年发布时的模型快照，不是 2026 年 leaderboard；它的作用是控制变量：Mixtral 的增益必须相对同家族 Mistral 7B 理解，而不是把所有改进都归因于 MoE。
+
+\lecturefigure{slide-04-mistral7b-performance.jpg}{Mistral 7B 在 2023 年发布时的 benchmark 比较}{Stanford Online 官方录像 00:07:01}
+
+\begin{knowledgebox}{读图：先确认模型大小，再看任务类别}
+图把 Mistral 7B 与多种 Llama 2 配置比较。第一步不是寻找最高柱，而是确认每个 baseline 的参数规模；第二步看不同任务是否一致；第三步检查是否存在只在单个 benchmark 上的优势。课程只用它证明 dense baseline 有竞争力，不把任何柱状图当作通用能力排名。
+\end{knowledgebox}
+
+\begin{warningbox}{历史 benchmark 的可比性边界}
+Prompt、few-shot 设置、tokenizer、evaluation harness 和 contamination 都可能改变分数。这里的图用于解释为什么团队从 Mistral 7B 出发研究 Mixtral，而不用于与更新模型横向比较。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Mistral 7B 提供了清晰的 dense control：GQA 减少 KV heads，SWA 限制单层连接，RMSNorm/SwiGLU 组织 residual block。Mixtral 保留这些结构，把第二条 residual branch 的单个 MLP 替换成 sparse expert mixture。因此后面的容量与成本分析都应以“共享 attention + 多个 expert MLP”为基础。
+

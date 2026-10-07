@@ -1,0 +1,72 @@
+\section{从标准 attention 到 SAFFU：到底改了哪一步}
+
+要理解替代机制，必须先把标准 self-attention 拆成“表示投影”“相似度”“归一化”“加权聚合”四步。讲者并不否认标准 Q/K projection 的价值，而是问：当输入已经在同一低维空间时，是否能直接对比较矩阵本身做一个可学习变换，以减少额外投影和随机参数？
+
+\subsection{标准形式：先投影，再比较}
+
+设一个序列的 hidden states 为 $X\in\mathbb{R}^{L\times d}$，标准单头 attention 写成
+\[
+Q=XW_q,\qquad K=XW_k,\qquad V=XW_v,
+\]
+\[
+A_{\text{std}}=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_a}}+M\right),
+\qquad H=A_{\text{std}}V.
+\]
+其中 $L$ 是 token 数，$d$ 是输入维度，$d_a$ 是 attention dimension，$M$ 是 causal 或 padding mask。$W_q,W_k$ 的任务不是简单“算相似度”，而是先把输入变换到更适合当前预测任务的比较空间。
+
+\begin{knowledgebox}{为什么投影常常有用}
+当 query 与 key 来自不同模态、不同维度或不同语义角色时，cross-attention 必须先把它们放到可比较空间。即使是 self-attention，投影也能让不同 heads 学到不同的双线性相似度。替代机制的效率收益来自减少这一步，但也同时放弃一部分表示自由度。
+\end{knowledgebox}
+
+\teachervoice{00:02:54--00:05:06，讲者把标准 attention 描述为 re-dimensionalization：Q/K 改变表示空间，使 dot product 能产生对任务有用的权重；替代形式则直接学习如何解释现有向量比较。}
+
+\subsection{SAFFU 定义：直接变换 comparison matrix}
+
+SAFFU 假设输入向量已经处于可比较的同一空间。先计算原始比较矩阵 $C=XX^\top$，再用可学习矩阵 $W$ 变换比较，得到
+\[
+A_{\text{saffu}}=\operatorname{softmax}(XWX^\top+M),
+\qquad H=A_{\text{saffu}}X.
+\]
+这里 $W\in\mathbb{R}^{d\times d}$ 直接定义一个 bilinear form（双线性型）。若 $W=I$，模型退化为原空间 dot product；一般 $W$ 可以旋转、缩放或重新组合各维度的交互，但它不把 query 和 key 分别映射到两个独立空间。
+
+\lecturefigure{slide-02-saffu-definition.jpg}{SAFFU 的定义、假设与表示约束}{Stanford Online 官方录像 00:06:00}
+
+\begin{importantbox}{标准 attention 与 SAFFU 的代数关系}
+因为
+\[
+QK^\top=XW_qW_k^\top X^\top,
+\]
+若记 $W=W_qW_k^\top$，两者在 score 的双线性形式上可以相互对应。差异在参数化：标准形式把 $W$ 分解成两个 projection，SAFFU 直接处理组合矩阵，并围绕它推导显式初始化。直接参数化不自动更强，也不自动更稳定。
+\end{importantbox}
+
+\begin{warningbox}{“没有 Q/K”不等于没有矩阵变换}
+SAFFU 仍有 $W$，仍学习 token 间比较应怎样改变。它省掉的是两个独立 projection 的参数化与中间表示，而不是把 attention 变成无参数平均。
+\end{warningbox}
+
+\teachervoice{00:05:15--00:05:43，Williams 明确说替代机制与传统 projection 可以同时使用；本讲暂时去掉 projection，是为了隔离并研究 comparison-to-weight 机制本身。}
+
+\subsection{General design：从比较、聚合到输出}
+
+架构图用 $W$ 表示 attention comparison transform，用 $U$ 表示对聚合 hidden state 的 decoder/feed-forward 变换，用 $O$ 表示更上层输出映射。读图时不要把三者都叫“attention 参数”：$W$ 决定位置权重，$U$ 改变聚合后的 feature，$O$ 把 hidden state 映射到预测目标。
+
+\lecturefigure{slide-03-general-saffu-design.jpg}{General SAFFU encoder-decoder：$W$、$U$ 与输出映射的分工}{Stanford Online 官方录像 00:07:38}
+
+对第 $m$ 个样本，设 context matrix 为 $X_m\in\mathbb{R}^{K\times d}$，选定 query 行 $x_{m,h}$，则可写成
+\[
+a_m=\operatorname{softmax}(x_{m,h}WX_m^\top),
+\]
+\[
+h_m=a_mX_mU,\qquad \hat y_m=\operatorname{softmax}(h_mO).
+\]
+$K$ 是 context 中 feature/token 数，$a_m\in\mathbb{R}^{K}$ 是 attention distribution，$U$ 和 $O$ 分别承担隐藏变换与最终分类/语言建模输出。
+
+\begin{knowledgebox}{near-shallow 到底指什么}
+模型仍可以有多层。near-shallow 指底层的一些表示与 pairwise comparisons 可以预先确定、缓存或局部显式初始化，使在线学习主要发生在较少的上层参数中。它描述计算依赖与更新路径，而不是简单的 depth 数字。
+\end{knowledgebox}
+
+\teachervoice{00:05:43--00:07:10，讲者把减少 projection 与减少随机参数联系到 near-shallow，但同时承认这种设计更依赖输入向量维度一致、组织良好，并不是无条件替换。}
+
+\subsection{本章小结}
+
+SAFFU 的核心改动是直接参数化 $XWX^\top$，并把该形式纳入显式初始化。标准 attention 的 projection 更灵活；SAFFU 的吸引力来自更少的独立随机参数、可推导的初值和潜在可缓存比较。后续收益必须与这些约束一起阅读。
+

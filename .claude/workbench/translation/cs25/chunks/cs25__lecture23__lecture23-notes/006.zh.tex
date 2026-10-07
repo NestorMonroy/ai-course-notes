@@ -1,0 +1,104 @@
+\section{数据配方：从来源属性到长尾平衡}
+
+有了 mining pipeline，还不能把所有句对直接混入训练。不同数据源在人工对齐、噪声、规模和模型依赖上差异巨大；这些属性决定了错误相关性、可扩展性与偏差。课堂先列模型挑战，再用 Transformer 示意图建立最小背景，随后把五类数据放进同一比较表。
+
+\subsection{模型阶段面对的三类挑战}
+
+本节承接数据管线，说明更多数据为何立刻转化为模型问题。数据量扩大后，模型要同时处理有效增强、语言干扰和容量扩展。低资源语言需要共享高资源表示获得 transfer，但过度共享又可能产生 interference；增加容量可缓解竞争，却会让稀少任务更快过拟合。
+
+\lecturefigure{slide-23-model-challenges.jpg}{数据增强、语言干扰与模型规模的耦合挑战}{Stanford 课堂视频 00:23:36}
+
+\begin{knowledgebox}{读图：三个 bullet 形成张力，不是独立 TODO}
+Data augmentation 增加覆盖，却可能引入模型生成噪声；减少 language interference 常依赖更多专门容量，却提高过拟合风险；扩大模型又增加训练与路由复杂度。后面的 MoE、EOM 和 curriculum 正是对这组三角矛盾的联合回应。
+\end{knowledgebox}
+
+\subsection{Encoder-decoder Transformer 的翻译路径}
+
+NLLB 使用 encoder-decoder translation model。Encoder 把完整源句编码为上下文化表示，decoder 在源表示与已生成目标前缀条件下逐 token 预测目标句。与 decoder-only prompting 相比，这一结构显式分开源端理解和目标端生成。
+
+\lecturefigure{slide-24-transformer-preliminaries.jpg}{机器翻译中的 Transformer encoder-decoder 流程}{Stanford 课堂视频 00:24:03}
+
+\begin{knowledgebox}{读图：上下两条堆栈承担不同条件}
+上方 encoder 同时读取源 tokens，形成跨位置表示；下方 decoder 使用 causal mask，只能看到目标前缀，并通过 cross-attention 访问 encoder。训练时常用 teacher forcing，推理时则依赖自己先前生成的 token，因此错误可能逐步累积。
+\end{knowledgebox}
+
+给定源序列 $x$ 与目标序列 $y=(y_1,\ldots,y_T)$，条件生成目标为
+\[
+\mathcal{L}_{\text{MT}}(x,y)=-\sum_{t=1}^{T}\log p_\theta(y_t\mid y_{<t},x).
+\]
+$\theta$ 表示模型参数，$y_{<t}$ 表示目标前缀，$p_\theta$ 表示下一 token 条件概率，$T$ 表示目标长度。数据源差异最终都会改变这个损失中出现的 $(x,y)$ 分布。
+
+\subsection{五类数据源不能只按数量比较}
+
+课堂表格逐项加入 NLLB-Seed、public bitext、mined bitext、multilingual MT backtranslation 与 bilingual SMT backtranslation。最终表要求读者比较四个属性：是否人工对齐、是否有噪声、规模是否受限、是否依赖已有模型。
+
+\lecturefigure{slide-25-data-source-comparison.jpg}{NLLB 训练数据来源的 provenance、噪声、规模与依赖}{Stanford 课堂视频 00:26:03}
+
+\begin{knowledgebox}{读图：逐列读比逐行背名字更重要}
+Human-aligned 通常质量高但规模有限；public bitext 可能来自多种来源，质量不一；mined data 可扩展但依赖 encoder 与过滤；MMT/SMT backtranslation 能利用单语数据，却继承 teacher model 偏差。没有一种来源同时满足人工对齐、无噪声、无限规模与模型无关。
+\end{knowledgebox}
+
+\begin{knowledgebox}{术语消化：训练数据来源}
+\begin{tabularx}{\textwidth}{@{}L{0.19\textwidth}L{0.25\textwidth}X@{}}
+\toprule
+来源 & 解决的问题 & 主要风险与课程关系 \\
+\midrule
+NLLB-Seed & 提供可信启动句对 & 小规模、英语中心、可能有 translationese \\
+Public bitext & 复用既有双语资源 & 来源异构，清洗和许可边界不同 \\
+Mined bitext & 从网页扩大平行语料 & 依赖 LID、encoder、阈值，含错配噪声 \\
+MMT backtranslation & 用多语 teacher 生成伪源句 & teacher 偏差跨语言共享，低资源质量不稳 \\
+SMT backtranslation & 用双语统计模型生成伪源句 & 能提供不同归纳偏置，但覆盖与质量受限 \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{原始分布：少数语言占据绝大多数数据}
+
+前面的来源表解释了数据性质，本节进一步看数量分布。仅合并 public 与 seed data 时，语言间训练量跨越多个数量级。图中的高资源语言形成高柱，低资源语言贴近底部；若直接按原始频率采样，模型更新几乎总被大语言支配。
+
+\lecturefigure{slide-26-public-seed-data.jpg}{Public 与 seed data 呈现极端长尾分布}{Stanford 课堂视频 00:26:33}
+
+\begin{knowledgebox}{读图：纵轴是对数尺度，低柱并非小幅落后}
+对数纵轴意味着相邻高度差可能对应十倍、百倍数据差。先比较长尾跨度，再观察具体低资源语言。简单均匀采样会重复使用少量样本并过拟合；按自然频率采样又会让它们几乎不出现，因此需要数据增强与受控采样共同介入。
+\end{knowledgebox}
+
+\begin{warningbox}{数据平衡不是把每种语言复制到同样多}
+重复采样不会增加新信息，反而使低资源方向更快记忆训练集。平衡策略必须同时考虑有效样本多样性、噪声、方向、训练时长和模型容量。
+\end{warningbox}
+
+\subsection{Mining 与 backtranslation 扩大长尾}
+
+接下来观察 augmentation 如何改变长尾。加入 mined bitext 与 backtranslation 后，许多低资源方向获得更大训练量，长尾被抬高。但图仍保留明显差异，说明 augmentation 的作用是改善覆盖，不是把所有语言变成同一数据条件。
+
+\lecturefigure{slide-27-mining-backtranslation.jpg}{Mining 与 backtranslation 扩展低资源训练数据}{Stanford 课堂视频 00:27:00}
+
+\begin{knowledgebox}{读图：柱变高时还要问数据来自哪里}
+Primary data 是人工或公开对齐语料；mined data 来自网页相似句；BT data 由模型根据单语目标句生成伪源句。三种颜色叠加后总量增加，但可信度与误差结构不同。低资源语言若主要靠 BT，模型可能在闭环中强化 teacher 的固定错误。
+\end{knowledgebox}
+
+Backtranslation 以目标语言单语句 $y$ 为起点，用反向模型 $q_\phi(x\mid y)$ 生成伪源句 $\hat{x}$，再训练正向模型：
+\[
+\hat{x}\sim q_\phi(x\mid y),\qquad
+\mathcal{L}_{\text{BT}}=-\log p_\theta(y\mid\hat{x}).
+\]
+$q_\phi$ 是 teacher/backward model，$p_\theta$ 是待训练正向模型，$\hat{x}$ 是 synthetic source。其价值是利用大量单语目标文本；风险是 $q_\phi$ 的错误成为训练标签。
+
+\begin{lstlisting}[caption={带 provenance 与质量控制的 backtranslation 概念流程}]
+for target_sentence in target_monolingual_corpus:
+    synthetic_source = backward_model.translate(target_sentence)
+    score = quality_filter(synthetic_source, target_sentence)
+    if score >= language_specific_threshold:
+        training_buffer.add(
+            source=synthetic_source,
+            target=target_sentence,
+            provenance="backtranslation",
+            teacher=backward_model.version,
+        )
+\end{lstlisting}
+
+\teachervoice{课堂的关键转折是：把多种数据“都放进来”之后，问题并没有结束。更多数据带来更复杂的噪声与长尾，模型需要处理语言间干扰和低资源过拟合。}
+
+\subsection{本章小结}
+
+NLLB 的数据配方由人工 seed、公开 bitext、mined bitext 和两类 backtranslation 组成。每类来源都用不同方式交换质量、规模与模型依赖；长尾改善不等于信息平衡，必须继续从模型与训练调度控制过拟合。
+

@@ -1,0 +1,78 @@
+\section{Attention 的历史问题链：从固定窗口到可寻址记忆}
+
+本章从“下一个 token 怎样依赖上下文”出发。固定窗口 MLP 只能看有限邻域；RNN/LSTM 能处理变长序列，却把源句压成单个最终状态；Bahdanau attention 让 decoder 对所有 encoder states 做可微寻址；Transformer 再把这种寻址提升为每层的主要通信原语。
+
+\lecturefigure{slide-23-where-transformer-came-from.jpg}{问题转场：Transformer 从哪里来？}{Stanford Online 官方视频 00:15:09--00:15:15。}
+
+这张过渡页提醒我们不要从 2017 年架构图倒背组件。历史顺序揭示每一步在修复什么：语言建模提供概率目标，seq2seq 提供变长输入输出，soft alignment 缓解固定向量瓶颈，自注意力缩短任意 token 间的信息路径，残差与归一化则让深层堆叠可优化。
+
+\subsection{2003：神经概率语言模型}
+
+语言模型给定 token 序列 $x_{1:T}$，学习联合概率的自回归分解：
+
+\[
+p(x_{1:T})=\prod_{t=1}^{T}p(x_t\mid x_{<t}).
+\]
+
+其中，$x_t$ 表示第 $t$ 个 token，$x_{<t}$ 表示它之前的上下文。Bengio 等人的 2003 模型用固定长度窗口，把若干词 embedding 拼接后送入 MLP，输出下一个词的概率分布；它已经具备“共享表示 + 神经预测器”的核心，但上下文长度被窗口固定。
+
+\lecturefigure{slide-24-neural-probabilistic-language-model.jpg}{2003 neural probabilistic language model：三个词预测第四个词。}{Stanford Online 官方视频 00:15:12--00:15:43。}
+
+\begin{knowledgebox}{读图：embedding 解决的是离散符号接口}
+词 ID 本身没有距离意义。Embedding table 把每个词映射为可学习向量，窗口内向量经过共享 MLP 后得到 vocabulary logits，再经 softmax 变成概率。模型可以学到“相似词在预测任务中使用相似表示”，但超过窗口的依赖不会直接进入当前预测。
+\end{knowledgebox}
+
+\subsection{2014 seq2seq：变长序列与固定向量瓶颈}
+
+机器翻译要求输入和输出都可变长。经典 seq2seq 用 encoder LSTM 逐词读取源句，把最后隐藏状态作为 context，再由 decoder LSTM 逐词生成目标句。若把 encoder states 记为 $\mathbf h_1,\ldots,\mathbf h_S$，最简单接口是
+
+\[
+\mathbf c=\mathbf h_S,
+\]
+
+其中，$S$ 是源序列长度，$\mathbf c$ 是传给 decoder 的单一 context vector。所有源信息必须穿过这条窄通道，长句中的局部细节容易丢失。
+
+\lecturefigure{slide-25-seq2seq-2014.jpg}{2014 seq2seq：encoder LSTM 把变长源句压成 context，decoder 再生成目标句。}{Stanford Online 官方视频 00:15:43--00:17:02。}
+
+\begin{warningbox}{Encoder bottleneck 不是“向量维度必然不够”这么简单}
+理论上高维实数向量可编码大量信息，但训练必须学会把所有相关细节稳定压缩、跨长时间路径传播，并让 decoder 可恢复。实际瓶颈来自有限容量、优化难度、长路径和统一摘要接口。Attention 的价值是让 decoder 直接访问多个源状态，而不是证明单向量在数学上不可能表示句子。
+\end{warningbox}
+
+\subsection{Bahdanau attention：每个输出位置软检索源序列}
+
+上一节的固定 context 对所有输出位置都相同，无法表达“生成这个词时主要需要源句中的哪一部分”。Bahdanau attention 把这个接口改成逐步查询：decoder 每前进一步，就重新比较当前生成状态与全部 encoder states，再组合出只服务于当前目标词的 context。对目标步 $t$，alignment model 先比较 decoder 前一状态 $\mathbf s_{t-1}$ 与每个 encoder state $\mathbf h_s$：
+
+\[
+e_{t,s}=a(\mathbf s_{t-1},\mathbf h_s),\qquad
+\alpha_{t,s}=\frac{\exp(e_{t,s})}{\sum_{j=1}^{S}\exp(e_{t,j})},
+\]
+\[
+\mathbf c_t=\sum_{s=1}^{S}\alpha_{t,s}\mathbf h_s.
+\]
+
+其中，$a$ 是可学习 compatibility function，$\alpha_{t,s}$ 是对源位置 $s$ 的归一化权重，$\mathbf c_t$ 是当前目标步的动态 context。固定摘要被“每一步都可重新寻址的 memory”取代。
+
+\lecturefigure{slide-26-neural-machine-translation-2014.jpg}{Bahdanau alignment：decoder 为每个目标词对 encoder states 做 soft search。}{Stanford Online 官方视频 00:17:02--00:18:32。}
+
+\begin{knowledgebox}{读图：先看信息路径，再看热力图}
+Encoder 仍按序列产生 $\mathbf h_s$，但 decoder 不再只接收最后一个状态。每个目标步根据当前需求计算一组 $\alpha_{t,s}$，热力图中的高权重位置表示更强的信息读取。权重可提供 alignment 线索，却不自动等价于人类解释或因果归因。
+\end{knowledgebox}
+
+\lecturefigure{slide-27-bahdanau-attention-history.jpg}{Attention 的口述历史：翻译对齐直觉、softmax 加权与命名过程。}{Stanford Online 官方视频 00:18:32--00:20:11。}
+
+\teachervoice{Karpathy 讲述自己邮件询问 Dzmitry Bahdanau：非英语母语者在脑中来回对齐源句与目标句，启发了 soft search；机制据称第一次尝试就奏效；“attention”这个更好的名称来自 Yoshua Bengio 的终稿建议。讲义保留这一归因，但不把个人回忆扩张成完整 priority history。}
+
+\subsection{2017 Transformer：把 attention 变成完整架构包}
+
+Transformer 去掉 recurrent computation，却不能只留下一个 softmax。因为 attention 对输入集合本身没有顺序概念，必须注入 position；因为网络要堆叠，必须有 residual pathway 与 normalization；因为每个位置还需要非线性变换，必须加入 position-wise MLP；因为不同关系可并行建模，使用 multiple heads；decoder 还要通过 mask 防止读取未来。
+
+\lecturefigure{slide-28-transformer-full-package.jpg}{2017 Transformer 的“全家桶”：attention、位置、残差、归一化、MLP 与多头。}{Stanford Online 官方视频 00:20:11--00:22:31。}
+
+\begin{knowledgebox}{读图：哪些部分后来改变，哪些部分保留}
+Karpathy 指出原始 post-norm 常被 pre-norm 替代，绝对 sinusoidal position 也发展出 relative/rotary 等方案；但 residual stream、attention、扩大约四倍的 feed-forward hidden dimension、多头与重复 block 长期保留。架构“韧性”是经验事实，不是证明原始超参数在所有规模都最优。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+神经语言模型定义 next-token 概率目标；seq2seq 解决变长输入输出，却形成单一 context bottleneck；Bahdanau attention 让 decoder 按需读取源状态；Transformer 将这种读取变成主干通信机制，并用位置、残差、归一化、MLP、heads 与 masks 组成可训练 package。下一章用图消息传递重新解释这套机制。
+

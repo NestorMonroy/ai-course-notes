@@ -1,0 +1,84 @@
+\section{Transformer 对 WaveNet：自适应寻址与 Context Conditioning}
+
+任务定义清楚后，架构差异可以被具体化。WaveNet 通过 dilated causal convolutions 预先规定哪些历史 offsets 被组合；Transformer 通过 query--key scores 为当前输入动态分配权重。前者具有强局部/多尺度归纳偏置和线性序列计算，后者寻址更灵活但 pairwise cost 更高。论文的 conditional design 正是在两者之间寻找工程折中。
+
+\subsection{Causal Transformer 怎样预测 waveform}
+
+每个量化 sample 先查表得到 embedding，再加位置编码并经过多层因果自注意力与前馈模块；causal mask 保证位置 $t$ 只读取 $<t$。最终 linear layer 输出 256 logits。多头结构允许不同 heads 关注周期邻域、近期包络或更远 context，但“可以关注”不表示训练一定学到这些可解释分工。
+
+\lecturefigure{slide-19-autoregressive-transformer-architecture.jpg}{Causal raw-audio Transformer：sample embedding、masked attention、feed-forward 与 256-way output。}{Stanford Online 官方视频 00:18:15--00:19:31。}
+
+\begin{knowledgebox}{读图：固定 dilation 与 learned attention 的差别}
+WaveNet 的 edge pattern 由 kernel size 和 dilation schedule 决定；不同输入共享同一拓扑。Transformer 的所有允许位置理论上都可连边，实际权重由内容决定。灵活性增加了 function class，也增加了数据需求、优化难度与 $O(n^2)$ 成本，不能只列优势。
+\end{knowledgebox}
+
+\subsection{为什么可能比固定 WaveNet 更灵活}
+
+讲者把 attention 描述成可以给 waveform 任意历史位置分配 “weightage”。对近似周期信号，这意味着模型可直接寻找与当前相位、音高或演奏状态相关的样本，而不必等待信息沿固定 dilation tree 传播。另一方面，卷积的 translation equivariance 与局部 bias 对音频很有价值；是否需要全局 adaptive routing 应由数据与 latency 目标决定。
+
+\lecturefigure{slide-20-why-better-than-wavenet.jpg}{直觉比较：attention 学习内容相关 routing，WaveNet 使用固定 dilated topology。}{Stanford Online 官方视频 00:19:32--00:20:09。}
+
+\teachervoice{讲者说 Transformer 能给 waveform 任意部分分配权重，这是 representational argument，不是结果表本身。高质量阅读应先承认 capacity 差异，再用受控实验判断训练是否真正利用了它。}
+
+\subsection{Quadratic bottleneck 迫使 Context 分层}
+
+对 100 ms local context，$n=1\,600$，单 head attention matrix 已有 $2.56$ million entries；context 扩到一秒，矩阵规模增加到一百倍。直接扩大 raw-sample window 很快不可行，因此论文把远处历史先压缩成 condition，再让 local predictor 处理高分辨率 samples。
+
+\lecturefigure{slide-21-quadratic-bottleneck.jpg}{主要瓶颈：raw-sample attention 的 memory/compute 为 $O(n^2)$。}{Stanford Online 官方视频 00:20:10--00:20:17。}
+
+\lecturefigure{slide-22-conditioned-transformer.jpg}{Conditioned Transformer：用额外 context summary 扩展可见历史。}{Stanford Online 官方视频 00:20:18--00:20:59。}
+
+形式化地，将最近的高分辨率窗口记为 $x_{t-L:t-1}$，更远历史记为 $x_{t-R:t-L-1}$。先用压缩器 $g$ 产生
+\[
+c_t=g(x_{t-R:t-L-1}),
+\]
+再预测
+\[
+p(x_t\mid x_{t-L:t-1},c_t).
+\]
+局部路径保留 sample detail，condition path 承载更慢的结构。压缩器若过弱会丢信息，若过重则把成本转移到另一网络；这里的价值是把不同时间尺度显式分工。
+
+\lecturefigure{slide-23-context-conditioning-architecture.jpg}{Context conditioning architecture：宽历史先压缩，再注入局部 autoregressive Transformer。}{Stanford Online 官方视频 00:21:00--00:22:07。}
+
+\begin{importantbox}{多尺度的统一模式}
+Raw context conditioning、WaveNet dilation、VQ hierarchy、pooling 与 wavelet 都在做同一件事：让近处保留高分辨率，让远处用更低带宽表示。区别在于压缩发生在 samples、latent codes 还是 intermediate embeddings。
+\end{importantbox}
+
+\teachervoice{课堂中“conditioning on the context itself”容易被听成一句玄学口号。真正机制是把更远历史降采样/编码为 side information，避免让所有 raw samples 互相做 full attention。}
+
+\subsection{结果表：局部预测改善到什么程度}
+
+前面已经解释了 architecture capacity 与 context design，本节才进入 empirical evidence。读表时应先固定三件事：所有模型都在同一钢琴数据上预测 8-bit next sample，评价都是 top-5 accuracy，数字不包含主观听测；然后再分别比较 WaveNet 与同规模 Transformer、conditioned 与 unconditioned 3-layer model、以及深度增加带来的变化。只有在这个受控边界内，“谁更好”才有明确含义。
+
+论文在同一 next-sample setup 下报告：vanilla WaveNet 为 74\%，stacked WaveNet 为 76\%，3-layer Transformer 为 80\%，加入 wider-context condition 后为 82\%，更深的 6/8-layer Transformer 达到 84\%/85\%。这些数字支持“该数据和指标中 Transformer family 更强”，并显示 context condition 在同深度下约增加 2 个百分点。
+
+\lecturefigure{slide-24-controlled-results.jpg}{受控结果：WaveNet、不同深度 Transformer 与 conditioned model 的 top-5 accuracy。}{Stanford Online 官方视频 00:22:08--00:22:35；arXiv:2106.16036 表格。}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Raw-audio next-sample top-5 accuracy（论文设置）。}
+\begin{tabular}{lr}
+\toprule
+模型 & Accuracy \\
+\midrule
+Vanilla WaveNet $(d=2,N=10,F=128)$ & 74\% \\
+Stacked WaveNet $(d=2,N=30,F=128)$ & 76\% \\
+3-layer Transformer $(H=4,E=128)$ & 80\% \\
+Conditioned 3-layer Transformer & 82\% \\
+Large 6-layer Transformer $(H=8,E=128)$ & 84\% \\
+Large 8-layer Transformer $(H=8,E=128)$ & 85\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\teachervoice{结果页上写着 “Adieu WaveNet? Seems like it.”，体现讲者在课堂上的兴奋语气；他比较的仍是同一 next-sample benchmark。讲义保留语气，也必须同时保留 benchmark 边界。}
+
+\begin{warningbox}{“Adieu WaveNet?” 不能怎样读}
+它不证明卷积对 raw audio 已过时：数据是钢琴录音，指标是 teacher-forced next-sample top-5 accuracy，系统没有比较现代高效 attention、并行生成速度、主观听测、不同采样率或部署延迟。最稳妥的结论是：在该受控设置中，adaptive attention 与更深模型改善了局部预测。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Transformer 的优势来自输入相关寻址，WaveNet 的优势来自固定多尺度 bias 与更友好的复杂度。Conditioning 将远处历史压缩后注入局部 predictor，是在 raw detail 与 long context 之间做显式带宽分配。
+

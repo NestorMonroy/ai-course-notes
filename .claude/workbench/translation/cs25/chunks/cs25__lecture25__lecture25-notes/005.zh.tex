@@ -1,0 +1,76 @@
+\section{让 Retriever 适应 Frozen Generator}
+
+有了强 retriever，下一步仍不是结束：通用 relevance score 未必等于某个 generator 的 usefulness。课堂用 RePlug 与 in-context RALM 展示两条中间路线——保持 generator 冻结，利用其 likelihood 或最终任务 loss 训练 retriever/reranker。
+
+\subsection{Contextualizing the Retriever for the Generator}
+
+架构页用火焰标记 retrieval side：目标是让 query encoder 和 retriever 找到“能让这个 generator 更好回答”的文档，而不仅是通用语义相似文档。若 generator 是 GPT-4 式 black-box API，训练接口会受到可见 log-probability 与调用成本限制。
+
+\lecturefigure{slide-18-contextualizing-retriever-for-generator.jpg}{针对 frozen generator 优化 retrieval side}{Stanford 课堂视频 00:25:24}
+
+\begin{knowledgebox}{三种 generator access level}
+\begin{tabularx}{\textwidth}{L{0.22\textwidth}>{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+访问级别 & 可用信号 & 可训练范围 \\
+\midrule
+Text-only API & 最终文本、可能有评分器 & 黑盒搜索、偏好优化、外部 reranker \\
+Log-probability API & 正确答案 likelihood；perplexity（交叉熵的指数，可理解为每 token 的有效候选数，越低越好） & RePlug 式 generator-aware retriever \\
+Full weights & 梯度、hidden states、attention & Joint retriever--generator training \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{RePlug：用语言模型 likelihood 监督 retriever}
+
+RePlug 对 top-$k$ 文档归一化 retrieval scores，再分别把每份文档交给 frozen LM，观察正确 continuation 的 likelihood。训练目标让 retriever distribution 接近 generator utility distribution，因此无需反向传播进入 generator。
+
+\lecturefigure{slide-19-replug.jpg}{RePlug 用 frozen LM likelihood 对齐 retrieval distribution}{Stanford 课堂视频 00:26:42}
+
+\begin{importantbox}{RePlug 的 distribution matching}
+令 retriever 对文档的概率为
+\[
+p_R(d_i\mid x)=\operatorname{softmax}(s_R(x,d_i)),
+\]
+令 frozen LM 在文档 $d_i$ 条件下对目标 $y$ 的分数归一化为 $p_G(d_i\mid x,y)$。训练可最小化
+\[
+\mathcal{L}_{\text{RePlug}}=D_{\mathrm{KL}}\!\left(p_G(\cdot\mid x,y)\,\|\,p_R(\cdot\mid x)\right).
+\]
+Retriever 学到哪份文档能降低 LM perplexity，而 generator 参数保持不变。
+\end{importantbox}
+
+\teachervoice{Kiela 称 RePlug 的想法 ``super simple'' 且适用于多种 generator，只要能够获得 perplexity 或 token likelihood。关键是训练 dense encoder，而不是修改黑盒 LM。}
+
+\subsection{In-Context RALM：BM25 召回，learned reranker 精排}
+
+In-Context RALM slide 展示更朴素的 frozen RAG：先用 BM25 找候选，把文档放进 context；随后训练一个 reranker，使高排名文档更能提高冻结 LM 对目标 token 的概率。Stop-gradient 阻止 LM 参数更新，梯度只进入 rank function。
+
+\lecturefigure{slide-20-in-context-ralm.jpg}{BM25 加 trained reranker 的 In-Context RALM}{Stanford 课堂视频 00:26:48}
+
+\begin{knowledgebox}{读图：Recall 与 precision 分工}
+BM25 用低成本扩大候选集合，reranker 在较小集合上使用更昂贵的 cross-encoder 或 task-aware score。这样保留 exact lexical recall，同时让最终排序靠近 generator objective；但若 BM25 没召回关键文档，reranker 无法补救。
+\end{knowledgebox}
+
+\subsection{Retrieve--Rerank--Generate 的显式三阶段管线}
+
+最后一张架构图在 retriever 与 context 之间加入绿色 reranker。这个额外组件让系统可以独立控制 recall depth、reranking depth 和 final context size，也带来新的 calibration 与 latency 问题。
+
+\lecturefigure{slide-21-retrieve-rerank.jpg}{Documents--retriever--reranker--generator 三阶段架构}{Stanford 课堂视频 00:28:39}
+
+\begin{importantbox}{三种集合大小不要混淆}
+设初始 corpus 大小为 $N$，retriever 返回 $k_r$ 个候选，reranker 保留 $k_c$ 个 context chunks，通常
+\[
+N\gg k_r\ge k_c.
+\]
+$k_r$ 太小会损害 recall，太大增加 reranking cost；$k_c$ 太大增加 prompt cost 与 Lost-in-the-Middle 风险，太小则可能缺证据。
+\end{importantbox}
+
+\begin{warningbox}{Reranker 分数仍不是事实可信度}
+Reranker 衡量 query/task relevance，不自动判断来源是否权威、是否过期或是否被 prompt injection 污染。Production corpus 还需要 source policy、metadata filters 和访问控制。
+\end{warningbox}
+
+\teachervoice{课堂把这一阶段描述为“slowly progressing”到更适配生成任务的系统：先不碰 generator，通过 BM25、dense retriever 或 BERT reranker 把 gradients 引入 retrieval pipeline。}
+
+\subsection{本章小结}
+
+RePlug 和 in-context RALM 都在 frozen generator 条件下学习 retrieval side。前者对齐 retriever 与 LM likelihood distribution，后者用 BM25 recall 加 learned reranker。它们是 frozen RAG 与 fully joint training 之间的重要中间层。
+

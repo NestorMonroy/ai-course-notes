@@ -1,0 +1,98 @@
+\section{Sparse MoE mechanism：router 如何选择并组合 experts}
+
+上一章确认了被替换的对象是 MLP，本章进入真正的 SMoE 机制。关键不是简单复制八份网络，而是建立 token-to-expert routing：router 为每个 token 产生 score，选 top-$k$，对选中 score 归一化，再把多个 expert 输出加权求和。整个过程需要可微、可并行、可平衡。
+
+\subsection{MoE 不是新概念：从 sparsely-gated layer 到 Switch Transformer}
+
+课程先展示文献脉络，提醒读者不要把 Mixtral 的成功误认为 MoE 概念首次出现。2017 年的稀疏门控 MoE 已用 gating network 选择子网络；Switch Transformer 进一步讨论 data/model/expert parallelism 与大规模稀疏训练。Mixtral 则把这些思想放进开放权重的高质量 decoder-only 模型，并给出可分析的 routing evidence。
+
+\lecturefigure{slide-05-moe-history.jpg}{Mixture of Experts 的历史参考：稀疏门控与 Switch Transformer}{Stanford Online 官方录像 00:07:49}
+
+\lecturefigure{slide-06-moe-layer-references.jpg}{Sparse MoE layer 的直接文献来源}{Stanford Online 官方录像 00:08:02}
+
+\begin{knowledgebox}{术语消化：parallelism 不只是“多卡”}
+\begin{tabularx}{\textwidth}{L{0.19\textwidth} L{0.27\textwidth} X}
+\toprule
+方式 & 分割对象 & 主要通信 \\
+\midrule
+Data parallelism & 不同 batch shards，模型复制 & gradient all-reduce \\
+Tensor/model parallelism & 单层矩阵或 hidden dimension & all-reduce / all-gather \\
+Expert parallelism & 不同 experts 放在不同 ranks & token all-to-all dispatch / combine \\
+Pipeline parallelism & 不同层放在不同 stages & activation send/receive \\
+\bottomrule
+\end{tabularx}
+Collectives 是多 GPU 集合通信原语，例如 all-reduce、all-gather、reduce-scatter 和 all-to-all。MoE 最有代表性的通信是 all-to-all：每张卡把 token 发给拥有目标 expert 的卡，计算后再把结果送回。
+\end{knowledgebox}
+
+\teachervoice{00:07:01--00:08:24，Albert 反复说 MoE “not new”。他特别推荐 Switch Transformer 的 parallelism 讨论，并把 Mixtral 放进 2017 年 sparsely-gated layer 的连续谱系。}
+
+\subsection{Top-two routing：从 logits 到 weighted expert output}
+
+对一个 token representation $x\in\mathbb{R}^{d}$，router 用矩阵 $W_r\in\mathbb{R}^{E\times d}$ 产生 $E$ 个 expert logits：
+\[
+z=W_rx.
+\]
+设 $S_k(x)$ 是 $z$ 最大的 $k$ 个 expert index，Mixtral 使用 $E=8,k=2$。只在选中集合上归一化：
+\[
+g_i(x)=
+\begin{cases}
+\dfrac{\exp(z_i)}{\sum_{j\in S_k(x)}\exp(z_j)}, & i\in S_k(x),\\[0.8em]
+0, & \text{otherwise}.
+\end{cases}
+\]
+最终 MoE MLP 输出为
+\[
+y=\sum_{i=1}^{E}g_i(x)\,\operatorname{Expert}_i(x).
+\]
+这三步分别回答“打分”“选择”“组合”。Sparse 的含义是只有 $k$ 个 expert 执行，而不是其余权重从模型中消失。
+
+\lecturefigure{slide-07-moe-layer-diagram.jpg}{Router 为每个 token 选择 experts 并合并输出}{Stanford Online 官方录像 00:08:19}
+
+\begin{importantbox}{Top-$k$ routing 的算法语义}
+每个 token 独立路由；同一序列相邻 token 可以选择不同 experts；同一个 expert 会同时接收来自许多序列的 token。实现必须把 token 按 expert 重新排列、跨卡 dispatch、批量执行 expert MLP，再 inverse-permute 回原顺序。
+\end{importantbox}
+
+\begin{lstlisting}[caption={Top-two token routing 的最小伪代码}]
+router_logits = hidden @ router_weight.T
+expert_ids = topk(router_logits, k=2)
+gates = softmax(gather(router_logits, expert_ids), dim=-1)
+expert_inputs = dispatch_by_expert(hidden, expert_ids)
+expert_outputs = run_selected_experts(expert_inputs)
+output = combine_and_restore_order(expert_outputs, gates)
+\end{lstlisting}
+
+\teachervoice{00:08:24--00:09:18，讲者按同样顺序口头拆解：input 先进入 router，router 选 top two 并给 gating weights，各 expert 独立处理，再用 weights 加权求和。}
+
+\subsection{公式页与参数表：读出 \texorpdfstring{$E=8$、$k=2$}{E=8、k=2} 和 shared parts}
+
+公式页把机制和模型配置放在同一张 slide 上。读表时要把 \texttt{num\_experts=8} 与 \texttt{top\_k\_experts=2} 分开：前者决定每层可用容量，后者决定一个 token 的活跃路径。Attention、embedding、router 和 residual structure 是 shared parameters，不随 expert 数简单乘八。
+
+\lecturefigure{slide-08-moe-equation-table.jpg}{Mixtral 的 top-two routing 公式与模型参数表}{Stanford Online 官方录像 00:09:27}
+
+把每层 shared parameter 记为 $P_s$，单个 expert MLP 参数记为 $P_e$，层数为 $N$，则粗略的总参数与活跃参数为
+\begin{align*}
+P_{\text{total}} &\approx P_{\text{embed}}+N(P_s+E P_e),\\
+P_{\text{active}} &\approx P_{\text{embed}}+N(P_s+k P_e).
+\end{align*}
+因此模型名中的 $8\times 7\mathrm{B}$ 既不是精确总参数，也不是每 token 激活参数；shared parts 使简单乘法失真。
+
+\begin{warningbox}{“稀疏”发生在执行路径，不发生在存储存在性}
+未选中的 expert 在当前 token 上不执行，但它们仍属于 checkpoint，通常仍需驻留在 GPU HBM、CPU DRAM 或其他层级。Resident memory 由 total parameters 决定，per-token MLP FLOPs 更接近 active parameters 决定。
+\end{warningbox}
+
+\subsection{Mixtral 8x7B：容量与活跃路径的正式合流}
+
+现在可以读完整模型 slide。Mixtral 继承 Mistral 7B 的 attention block，每层有八个 SwiGLU experts，每个 token 选两个。课程给出的 release-time 数字约为 46.7B total parameters 与 12.9B active parameters；它们分别对应容量/驻留与每 token 执行路径，不能互换。
+
+\lecturefigure{slide-09-mixtral-8x7b.jpg}{Mixtral 8x7B 的模型结构、参数表与发布时能力摘要}{Stanford Online 官方录像 00:10:26}
+
+\begin{importantbox}{Mixtral 的一句准确描述}
+Mixtral 8x7B 是“共享 attention 与路由器、每层八个 expert MLP、每 token top-two 激活”的 decoder-only SMoE。它不是八个独立 7B 模型投票，也不是只占 13B 权重内存的 dense model。
+\end{importantbox}
+
+\teachervoice{00:09:38--00:10:17，Albert 用 active path 解释 cost-performance frontier，同时列出当时的多语言、32K context、Apache 2.0 与 benchmark claim。讲义把这些保留为 2024 年 release-time 证据，不当作当前产品规格。}
+
+\subsection{本章小结}
+
+Sparse MoE 的数学结构很短：router logits、top-$k$ mask、selected softmax、expert weighted sum；真正困难的是把这条 token-level 算法放到多 GPU 上并保持负载均衡。总参数与活跃参数的分解，是后面所有 myth、性能和部署讨论的共同基础。
+

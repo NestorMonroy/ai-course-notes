@@ -1,0 +1,108 @@
+\section{GLOM 的时空计算骨架}
+
+前几章回答“为什么需要这种表示”；现在进入可计算机制。GLOM 在每个空间位置、每个 hierarchy level 保存一个 embedding，并让这些状态跨若干 settling steps 更新。静态图像被视为重复帧的无聊视频，因此 temporal recurrence 仍然存在；真实主动视觉中的 fixation selection、foveation 与跨 fixation memory 则被暂时排除。
+
+\lecturefigure{slide-20-first-fixation-disclaimer.jpg}{课堂范围：忽略主动选点与多次 fixation，只分析新图像的第一次 fixation。}{Stanford Online 官方视频 00:30:18--00:34:29。}
+
+\begin{warningbox}{Scope omission：真实视觉不是一次全分辨率 forward pass}
+人眼中央高分辨率、外围低分辨率，并主动决定下一次看哪里；同一硬件会跨 fixation 重用。本讲把这些问题冻结，只讨论 first fixation 内的 recurrent settling。若把 GLOM 延伸到机器人或视频，policy、memory、motion correspondence 与 latency 都会重新出现。
+\end{warningbox}
+
+\subsection{状态张量与三个轴}
+
+前面的 first-fixation 限制回答了“本讲暂时忽略什么”，现在需要回答“系统实际保存什么”。最关键的区分是 hierarchy level 与 settling time：前者描述 part-whole scale，后者描述同一输入解释被反复修正的过程；如果把二者都叫 layer，就会误读所有跨层和跨时箭头。可以把系统状态写成 $\mathbf E^{(t)}\in\mathbb R^{|\mathcal X|\times(L+1)\times d}$：位置轴 $x$、hierarchy level 轴 $\ell$、settling time 轴 $t$。
+
+\lecturefigure{slide-21-three-adjacent-levels.jpg}{单个 column 中三个相邻 levels 跨时间交互的架构图。}{Stanford Online 官方视频 00:34:30--00:35:13。}
+
+\begin{knowledgebox}{读图：横向是 time，纵向是 hierarchy}
+每一列小方框属于同一 retinal location；从左到右是连续 settling steps，从下到上是 $L-1,L,L+1$ 三个 part-whole levels。蓝箭头把低层上一时刻映射到当前层，红箭头把高层上一时刻映射下来，绿箭头保留同层历史，虚线斜向箭头表示与其他空间 columns 的 lateral interaction。图只画一个 location，因此 spatial neighborhood 必须结合下一张 slide 才完整。
+\end{knowledgebox}
+
+\teachervoice{讲者说 GLOM 本来是为 video 设计；静态图像只是每一帧都相同的“very boring video”。这句话解释了图中为什么同时出现 hierarchy 与 time，而不是把所有箭头误读成普通 network depth。}
+
+\subsection{四个 contribution 的统一更新式}
+
+位置 $x$、层级 $\ell$ 的下一状态由四类信息组成：低层向上预测、高层向下预测、同一状态的 temporal persistence、同层邻域的 attention consensus。一个教学化写法是：
+
+\[
+\tilde{\mathbf e}_{x,\ell}^{(t+1)}=
+\lambda_{\mathrm{bu}} f_{\mathrm{bu}}^{\ell}\!\left(\mathbf e_{x,\ell-1}^{(t)}\right)
++\lambda_{\mathrm{td}} f_{\mathrm{td}}^{\ell}\!\left(\mathbf e_{x,\ell+1}^{(t)},x\right)
++\lambda_{\mathrm{self}}\mathbf e_{x,\ell}^{(t)}
++\lambda_{\mathrm{lat}}\mathbf c_{x,\ell}^{(t)}.
+\]
+
+\[
+\mathbf e_{x,\ell}^{(t+1)}=\operatorname{Norm}\!\left(\tilde{\mathbf e}_{x,\ell}^{(t+1)}\right).
+\]
+
+其中，$f_{\mathrm{bu}}^{\ell}$ 是 part-to-whole prediction，$f_{\mathrm{td}}^{\ell}$ 是 whole-to-part prediction，$x$ 可作为 neural-field location condition，$\mathbf c_{x,\ell}^{(t)}$ 是 lateral consensus，四个 $\lambda$ 表示随 level、time 或 reliability 调整的权重。课堂图说“average”，原论文进一步讨论 source reliability；这里的式子是机制归纳，不是唯一官方 implementation。
+
+\lecturefigure{slide-22-four-interactions.jpg}{四路更新：bottom-up、top-down、previous state 与 lateral attention。}{Stanford Online 官方视频 00:35:14--00:35:47。}
+
+\begin{knowledgebox}{读图：四路输入分别承担不同责任}
+编号 1 的 bottom-up source 提供局部 evidence，编号 2 的 top-down source 提供 whole context，编号 3 的 previous-state source 提供 inertia，编号 4 的 neighborhood average 提供同层 agreement。它们不是四个可互换 residual branch：去掉 1 会脱离输入，去掉 2 会失去上下文修正，去掉 3 容易振荡，去掉 4 则无法让跨位置 hypothesis 形成 islands。
+\end{knowledgebox}
+
+\begin{importantbox}{为什么 bottom-up / top-down 不是一根线}
+两条路径都需要 multi-layer neural network，因为它们不仅改维度，还要完成 identity 与 coordinate frame 的变换。相同 bottom-up function 应能处理 nostril-to-nose、steering-wheel-to-car 等不同类型；“universal”要求语义由 activity 决定，而非每种部件一套硬编码模块。
+\end{importantbox}
+
+\subsection{Similarity-gated lateral attention}
+
+四路更新式仍留下一个关键问题：lateral branch 怎样区分“应当成为同一 island 的邻居”和“只是空间上靠近的另一个对象”？本节把这条选择规则展开，并说明 locality 与 temperature 为什么是 anti-collapse contract 的一部分。同层邻域 $\mathcal N_\ell(x)$ 中，只有已经相似的 embedding 才强烈相互吸引；课堂给出的形式接近 dot-product softmax：
+
+\[
+\alpha_{xy}^{(t,\ell)}=
+\frac{\exp\!\left(\beta_\ell\,\mathbf e_{x,\ell}^{(t)\top}\mathbf e_{y,\ell}^{(t)}\right)}
+{\sum_{z\in\mathcal N_\ell(x)}\exp\!\left(\beta_\ell\,\mathbf e_{x,\ell}^{(t)\top}\mathbf e_{z,\ell}^{(t)}\right)},
+\qquad
+\mathbf c_{x,\ell}^{(t)}=\sum_{y\in\mathcal N_\ell(x)}\alpha_{xy}^{(t,\ell)}\mathbf e_{y,\ell}^{(t)}.
+\]
+
+其中，$\alpha_{xy}$ 是 $y$ 对 $x$ 的 lateral weight，$\beta_\ell$ 控制 similarity sharpness，$\mathcal N_\ell(x)$ 是 level-specific neighborhood，$\mathbf c$ 是邻域共识。局部性很重要：若所有位置从一开始都全局互吸，global collapse 会成为更强 shortcut。
+
+\lecturefigure{slide-23-attention-weighted-average.jpg}{同层相似向量的 attention-weighted average 应促成 islands。}{Stanford Online 官方视频 00:35:48--00:37:13。}
+
+\begin{knowledgebox}{读图：红字“islands are echo chambers”既是机制也是风险}
+中心位置 $x$ 先与邻域各位置比较 same-level embedding，相似者获得更大 softmax weight，再形成 weighted average。正反馈会让已有相似区域更一致，因此形成 island；但同一正反馈也可能把错误 hypothesis 放大。读图时应同时问三件事：neighbor range 多大、similarity 如何归一化、跨真实 boundary 的错误 attention 如何被 bottom-up evidence 拉回。
+\end{knowledgebox}
+
+\begin{knowledgebox}{GLOM attention 与标准 Transformer 的差别}
+\begin{tabularx}{\textwidth}{L{0.24\textwidth}L{0.33\textwidth}>{\raggedright\arraybackslash}X}
+\toprule
+维度 & 标准 Transformer 常见设置 & 本讲 GLOM 草图 \\
+\midrule
+Q/K/V & 可由不同投影产生 & 课堂把 embedding、key、query、value 极度简化为同一向量 \\
+范围 & 常见全局或预设 sparse pattern & level-specific local neighborhood；高层可更远、更稀疏 \\
+执行 & 固定层数的一次 forward & 同一输入上多次 recurrent settling \\
+目标 & token contextualization & 形成同层 islands，并与上下层 coordinate prediction 一致 \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={GLOM 单次 settling update 的教学伪代码}]
+def glom_step(state, level, neighbors, weights):
+    next_state = {}
+    for x in state.locations:
+        current = state[x, level]
+        lower = state[x, level - 1]
+        upper = state[x, level + 1]
+
+        bottom_up = bottom_up_net[level](lower)
+        top_down = top_down_net[level](upper, location=x)
+
+        scores = [dot(current, state[y, level]) for y in neighbors(x, level)]
+        alpha = softmax(weights.beta[level] * scores)
+        lateral = weighted_sum(alpha, [state[y, level] for y in neighbors(x, level)])
+
+        mixed = (weights.bu * bottom_up + weights.td * top_down
+                 + weights.self * current + weights.lat * lateral)
+        next_state[x] = normalize(mixed)
+    return next_state
+\end{lstlisting}
+
+\subsection{本章小结}
+
+GLOM 的计算单元不是一个静态 block，而是 position、level、time 三维状态上的 recurrent consensus process。四路 update 同时携带局部 evidence、whole expectation、temporal inertia 与邻域 agreement；任何一路缺失，都可能让结构失去 pose、context、稳定性或边界。
+

@@ -1,0 +1,68 @@
+\section{稳定训练：精度、初始化、正则化与负载均衡}
+
+上一节列出了稳定性栈，本节逐一解释它们为什么必要。稀疏模型的不稳定并不只来自参数多，还来自一串离散路由决策：router logits 的微小数值变化可能改变 argmax，随后 token 会进入完全不同的 expert，误差因此不只是输出值轻微偏移，而是计算路径跳变。
+
+\subsection{Selective precision：只把敏感的小部分升到 float32}
+
+训练大模型通常使用 bfloat16 来降低显存和加速矩阵乘法，但 router 内部的 softmax 依赖指数函数。若 logits 的舍入改变概率排序，top-1 路径就会切换。Switch 的选择不是让整网回到 float32，而是仅把 router 的局部计算升精度，再把结果返回低精度主干。
+
+\lecturefigure{slide-09-selective-precision.jpg}{Selective precision：router 使用 float32，主体仍保留 bfloat16 吞吐。}{Stanford Online 官方视频 00:08:50--00:10:21。}
+
+\[
+\operatorname{softmax}(z)_i=\frac{e^{z_i}}{\sum_j e^{z_j}}.
+\]
+
+其中，$z_i$ 是第 $i$ 个 expert 的 router logit；指数 $e^{z_i}$ 会放大输入差异；分母把所有 expert 分数归一化。低精度误差若改变最大的 $z_i$，就会改变离散 expert 选择，因此 router 比普通连续残差分支更需要局部精度保护。
+
+\teachervoice{讲者给出的工程判断是：router float32 几乎是免费操作。它没有跨设备通信，计算量相对 FFN 矩阵乘极小，而且 sparse layer 并非每层都出现；因此表中吞吐差异落在测量噪声内。}
+
+\begin{warningbox}{Selective precision 不是“混合精度自动安全”}
+低精度训练是否稳定取决于敏感操作。对 softmax、归一化、累加和路由排序，应检查溢出、下溢、tie 与 argmax 翻转；不能因为大矩阵乘适合 bfloat16，就假设所有控制路径也适合。
+\end{warningbox}
+
+\subsection{更小初始化：先控制路由与 expert 的动态范围}
+
+训练早期，expert 尚未形成稳定分工，router 也在快速变化。如果初始化让激活和 logits 过大，softmax 会过早饱和，少数 expert 获得更多 token 与梯度，进一步强化失衡。降低初始化尺度让网络从更平缓的区域开始，给负载均衡和主任务 loss 共同塑形的机会。
+
+\lecturefigure{slide-10-reduced-initialization-scale.jpg}{降低初始化尺度可改善 sparse expert 模型的稳定性与质量。}{Stanford Online 官方视频 00:10:22--00:10:51。}
+
+\teachervoice{这页保留了一个很有价值的实践经验：复杂系统的根因不一定需要复杂修复。作者观察到标准初始化对 sparse expert 更敏感，简单缩小尺度就显著改善质量；应先做幅度、饱和度和梯度分布诊断，再堆叠新算法。}
+
+\begin{knowledgebox}{什么是“初始化尺度”}
+初始化尺度决定训练开始时权重的典型幅度，进而影响激活、router logits 与梯度。过小可能让信号弱，过大可能导致饱和、路径集中或梯度爆炸。这里的结论是对该架构与训练设置的经验校准，不是所有 MoE 都应无条件采用同一个缩放常数。
+\end{knowledgebox}
+
+\subsection{Expert dropout：参数容量越大，下游越容易过拟合}
+
+预训练数据巨大，但 SuperGLUE 等下游任务可能只有数万样本。Sparse model 的总参数池很大，即使每个 token 只走一个 expert，也可能在 fine-tuning 时快速记住小数据。讲座因此提高 expert 层 dropout，而不是简单把 dense T5 的正则化原样搬过来。
+
+\lecturefigure{slide-11-higher-regularization-fine-tuning.jpg}{提高 expert 层 dropout，缓解 sparse model 在小下游数据上的过拟合。}{Stanford Online 官方视频 00:10:52--00:12:47。}
+
+\begin{knowledgebox}{读图：不要只找一个“全局最佳 dropout”}
+表格比较多个下游任务，它们的数据规模与噪声不同。应先看 sparse model 相对 dense baseline 是否更需要正则，再看不同任务的最优点是否一致。若最优 dropout 随任务变化，结论应是“需要更强且需调参”，而不是宣布一个通用常数。
+\end{knowledgebox}
+
+\subsection{Load-balancing loss：把概率质量与真实 token 数对齐}
+
+只优化语言建模 loss 时，router 可能把大量 token 送入少数 experts。这样不仅降低分工，还会使某些设备过载、其他设备空闲。Switch 使用辅助 loss，让“实际送入比例”和“平均 router 概率”在 experts 间更均匀。
+
+\[
+\mathcal{L}_{\text{aux}}=\alpha E\sum_{i=1}^{E} f_iP_i.
+\]
+
+其中，$\alpha$ 是辅助 loss 权重；$E$ 是 expert 数；$f_i$ 是 batch 中实际路由到第 $i$ 个 expert 的 token 比例；$P_i$ 是该 expert 的平均 router 概率。若流量与概率都集中在同一少数 experts，内积变大；联合优化会推动更均衡的使用。
+
+\lecturefigure{slide-12-load-balance-loss.jpg}{可微负载均衡：同时约束离散 token 比例与平均 router 概率。}{Stanford Online 官方视频 00:12:48--00:13:29。}
+
+\begin{importantbox}{负载均衡不是装饰性正则项}
+它连接了学习目标与硬件执行。均衡后，每个 expert 可以接收大小相近的 token batch，便于使用高效 dense matrix multiplication；失衡则会造成 overflow、padding、等待和设备利用率下降。
+\end{importantbox}
+
+\begin{warningbox}{均衡不等于所有 experts 必须学成一样}
+目标是负载近似均匀，不是输出相同。过强的均衡权重可能压制有意义的 specialization；过弱又会导致热点 expert。实践中应同时监控主 loss、aux loss、expert token histogram、overflow rate 与 router entropy。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Selective precision 保护离散路由，较小初始化避免早期饱和，更强 expert dropout 处理下游过拟合，load-balancing loss 将可学习路由约束成硬件可执行的近均衡批次。
+

@@ -1,0 +1,69 @@
+\section{静态编译遇上动态路由：Capacity Factor 与 Token Dropping}
+
+到目前为止，router 看起来可以任意决定每个 expert 接收多少 token；但 XLA、Mesh TensorFlow 与加速器内核偏好静态 tensor shape。系统必须在执行前为每个 expert 预留固定槽位，这就把动态路由转化为一个容量规划问题。
+
+\lecturefigure{slide-13-static-graph-dynamic-architecture.jpg}{矛盾：静态编译图需要固定形状，而 router 产生动态 token 分配。}{Stanford Online 官方视频 00:13:30--00:14:37。}
+
+若一个 routing group 有 $T$ 个 tokens、$E$ 个 experts，capacity factor 为 $\gamma$，常用容量可写为：
+
+\[
+C=\left\lceil \gamma\frac{T}{E}\right\rceil.
+\]
+
+其中，$C$ 是每个 expert 预留的 token 槽位；$T/E$ 是完全均衡时的平均 token 数；$\gamma$ 是容量因子。$\gamma=1$ 几乎没有额外缓冲；$\gamma>1$ 降低 overflow，却增加 buffer、通信与可能的 padding 计算。
+
+\begin{importantbox}{Capacity factor 的三方权衡}
+提高 $\gamma$：token dropping 通常下降，但跨设备传输上限、接收缓冲和 FFN 批次上限上升。降低 $\gamma$：系统更便宜，却要求 router 更均衡，并接受部分 token 跳过 expert 计算。
+\end{importantbox}
+
+\lecturefigure{slide-14-expert-capacity-factor.jpg}{Capacity factor 1.0 与 1.5：额外槽位降低 overflow，但提高系统成本。}{Stanford Online 官方视频 00:14:38--00:15:55。}
+
+\begin{knowledgebox}{读图：先数 token，再数槽位}
+左图每个 expert 的槽位只覆盖理想均分，热门 expert 超出的 token 被丢弃；右图增加约 50\% 缓冲，更多 token 得到处理。比较时不要只看“是否丢 token”，还要问：为这些空槽位分配了多少显存、通信带宽和矩阵乘上限？
+\end{knowledgebox}
+
+概念性的 capacity-aware dispatch 如下。真实实现会把 token 按设备重排并通过 collective communication 交换；这里仅显示容量控制逻辑。
+
+\begin{lstlisting}[caption={带 expert capacity 的 top-1 dispatch 伪代码。}]
+def capacity_dispatch(tokens, expert_id, expert_count, capacity):
+    slots = [[] for _ in range(expert_count)]
+    residual = zeros_like(tokens)
+    for token, target in zip(tokens, expert_id):
+        if len(slots[target]) < capacity:
+            slots[target].append(token)
+        else:
+            residual[token.index] = token  # expert path is skipped
+    expert_outputs = run_batched_experts(slots)
+    return combine(expert_outputs) + residual
+\end{lstlisting}
+
+\subsection{“No Token Left Behind”为何没有成功}
+
+直觉上，丢 token 似乎一定伤害质量。作者尝试多阶段路由：若 top-1 expert 已满，就把 token 送到第二、第三选择，直到获得槽位。实验却没有提升，甚至可能变差。一个解释是，router 已经表达了“这个 token 最想去哪里”；强行使用低排名 expert 不一定比跳过该 expert 子层更好，因为残差路径仍然保留 token 表示。
+
+\lecturefigure{slide-15-no-token-left-behind.jpg}{No Token Left Behind：把 overflow token 继续路由到次优 experts 的多阶段方案。}{Stanford Online 官方视频 00:15:56--00:18:18。}
+
+\teachervoice{讲者明确把它称为令人意外的负结果：团队原本很乐观，以为“保证不丢 token”会更好，结果模型对 token dropping 相当稳健，次优 expert 的错误计算反而可能有害。高质量讲义应保留这种被实验否定的直觉，而不是只留下最终成功配方。}
+
+\begin{warningbox}{Dropped token 不是从网络中消失}
+在 Switch block 中，overflow token 通常跳过 expert FFN，但仍可沿 residual connection 继续传播。把 dropping 理解成“删除输入 token”会严重误读实验；真正缺失的是该层的 expert 变换。
+\end{warningbox}
+
+\subsection{Sparsity 与 adaptive computation 不同}
+
+Q\&A 中学生追问：既然不同 token 走不同 expert，这是否等于不同 token 使用不同计算量？两位讲者给出的区分是：本讲主要研究\textbf{不同参数、相近计算量}；adaptive computation 更强调不同 token 使用不同步数或不同 FLOPs。后者在 SPMD（Single Program Multiple Data）加速器上更难，因为设备希望批内样本执行规则相同的程序。
+
+\teachervoice{Irwan Bello 说，sparsity 与 adaptive computation 相关但分离：前者主要是每个样本使用不同参数，后者是每个样本使用不同计算量。Barret Zoph 的研究策略则是先把已有 LSTM MoE 迁移到 Transformer 并做稳，再逐步走向更一般的动态计算。}
+
+最终配方把 top-1、selective precision、较小初始化、expert dropout、load balance 与 capacity control 合并。任何只复现其中一个组件的实现，都不应声称复现了 Switch Transformer 的训练行为。
+
+\lecturefigure{slide-16-putting-it-all-together.jpg}{完整 Switch 配方：top-1 routing 加稳定性、正则化与负载控制。}{Stanford Online 官方视频 00:25:32--00:27:07。}
+
+\begin{importantbox}{实现审计清单}
+记录 sparse layer 频率、expert 数、capacity factor、overflow rate、aux-loss 权重、router precision、初始化缩放、expert dropout、dispatch 通信与每步耗时。缺少这些字段，单凭“top-1 MoE”无法解释结果差异。
+\end{importantbox}
+
+\subsection{本章小结}
+
+静态编译要求预先分配 expert capacity。Capacity factor 用系统成本换取更少 overflow；实验表明，合理 dropping 可能优于把 token 强制送往次优 expert。Sparsity 仍主要改变参数路径，不等于完全解决 adaptive computation。
+

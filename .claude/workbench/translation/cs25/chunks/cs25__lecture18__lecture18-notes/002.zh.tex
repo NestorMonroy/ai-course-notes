@@ -1,0 +1,80 @@
+\section{Sparse Distributed Memory：怎样写入并从噪声查询中读出}
+
+第一讲先不讨论 Transformer，而是构造一个联想记忆系统。目标不是用精确地址读取一条记录，而是让相近 query 仍能召回正确 pattern，同时获得高容量、故障容忍与分布式存储。SDM 的核心技巧是：固定一组稀疏 hard locations，让每次写入和读取都作用于 query 半径内的一群位置。
+
+\subsection{设计目标：容量、鲁棒性与 fault tolerance}
+
+需求页列出四项：high memory capacity、robustness to query noise、biological plausibility 与 fault tolerance。下一页把 sparse 和 distributed 分开：地址空间维度极高，实际神经元只占极小部分可能位置；但一个 pattern 会同时激活多个近邻位置，因此没有单个地址承担完整记忆。
+
+\lecturefigure{slide-04-brain-memory-requirements.jpg}{大脑式联想记忆的设计要求}{官方录像恢复幻灯片 V004；00:02:12}
+
+\lecturefigure{slide-05-sdm-unique.jpg}{SDM 的 sparse 与 distributed 两层含义}{官方录像恢复幻灯片 V005；00:02:48}
+
+\begin{knowledgebox}{术语表：address、pattern、value 与 hard location}
+\term{pattern} 是要写入或作为 query 的高维向量；\term{hard location} 是系统预置的稀疏地址；\term{address/key} 决定哪些位置被激活；\term{value} 是被写入并在查询时返回的内容。经典 auto-associative memory 中 key 与 value 可以相同，hetero-associative memory 中二者可以不同。
+\end{knowledgebox}
+
+设二进制地址空间为 $\{0,1\}^{n}$，第 $i$ 个 hard location 为 $h_i$，写入地址为 $p$，半径为 $d$。激活指示量为
+$$
+a_i(p)=\mathbf{1}\!\left[D_H(h_i,p)\le d\right],
+$$
+其中 $D_H$ 是 Hamming distance，$n$ 是向量维度，$d$ 控制激活位置数量。高维空间使多数随机向量彼此很远，局部半径内仍可包含足够 hard locations 完成分布式计算。
+
+\subsection{写入：近邻位置与 superposition}
+
+第一张写入图让绿色 pattern 激活半径内 hard locations；第二张加入橙色 pattern，两个写入半径可能重叠；第三张再加入蓝色 pattern，重叠位置同时保存多条 value 的贡献。superposition 不是把多条记忆拼接，而是在同一存储向量上累加，读取时再靠许多位置的统计汇总去噪。
+
+\lecturefigure{slide-06-sdm-write-pattern1.jpg}{SDM 写入第一条 pattern：激活半径内 hard locations}{官方录像恢复幻灯片 V006；00:03:26}
+
+\lecturefigure{slide-07-sdm-write-pattern2.jpg}{写入第二条 pattern：地址邻域可以重叠}{官方录像恢复幻灯片 V007；00:03:42}
+
+\lecturefigure{slide-08-sdm-write-superposition.jpg}{多条 pattern 在 hard locations 中叠加存储}{官方录像恢复幻灯片 V008；00:04:14}
+
+若第 $i$ 个位置保存向量计数器 $w_i$，把 value $v$ 写入地址 $p$ 可写为
+$$
+w_i\leftarrow w_i+a_i(p)\,v.
+$$
+其中 $v$ 可以是 bipolar 向量或实值向量，$a_i(p)$ 决定该位置是否参与。一个位置累积多条 $v$，容量与噪声来自同一机制：越多 pattern 共享位置，存储利用率越高，交叉干扰也越大。
+
+\begin{lstlisting}[caption={SDM 的分布式写入（概念伪代码）}]
+def sdm_write(hard_locations, counters, address, value, radius):
+    for index, location in enumerate(hard_locations):
+        if hamming(location, address) <= radius:
+            counters[index] += value
+\end{lstlisting}
+
+\teachervoice{讲者不断提醒观众先把这些“neuron”当抽象 hard locations，稍后才映射到 biology。这个顺序避免把一张二维圆圈图误解成真实脑内空间：图上的距离代表高维 Hamming distance，圆形只是教学投影。}
+
+\subsection{读取：从激活神经元到 pattern 交集}
+
+读操作有两种等价视角。neuron view 让 query 激活附近位置，把各位置存储向量相加，再逐维 majority vote；pattern view 则抽象掉 hard locations，直接看 query sphere 与各 write sphere 的交集大小。交集越大，说明越多位置同时在某条 pattern 写入时和当前 query 读取时被激活，该 pattern 的 value 权重越高。
+
+\lecturefigure{slide-09-sdm-read-neurons.jpg}{Neuron view：噪声 query 激活附近位置并汇总存储}{官方录像恢复幻灯片 V009；00:05:02}
+
+\lecturefigure{slide-10-sdm-read-patterns.jpg}{Pattern view：sphere intersection 决定各记忆权重}{官方录像恢复幻灯片 V010；00:05:40}
+
+\lecturefigure{slide-11-circle-intersection.jpg}{两个高维球的交集与距离}{官方录像恢复幻灯片 V011；00:05:56}
+
+读取的连续形式可写成
+$$
+r(q)=\sum_i a_i(q)w_i,
+\qquad
+\hat v_j=g(r_j)=\mathbf{1}[r_j>0],
+$$
+其中 $q$ 是 query，$r(q)$ 是激活位置的总读出，$g$ 是逐维阈值或 majority decoder。把写入式代入后，每个 pattern $p_\mu$ 对输出的贡献正比于
+$$
+I\!\left(D_H(p_\mu,q);d,n\right)
+=\left|B(p_\mu,d)\cap B(q,d)\right|,
+$$
+即两个 Hamming ball 的交集大小；$B(p,d)$ 表示以 $p$ 为中心、半径 $d$ 的球。
+
+\lecturefigure{slide-12-query-read-equation.jpg}{Query read 的四步公式：交集、加权、归一化与解码}{官方录像恢复幻灯片 V012；00:07:18}
+
+\begin{knowledgebox}{读图：为什么 noisy query 仍能恢复 pattern}
+query 不必等于原地址，只要仍与正确 pattern 的 sphere 大量重叠，就会激活许多曾写入该 value 的位置。随机错误改变少数 bit 时，正确交集通常仍比无关 pattern 大；majority vote 把独立噪声平均掉。失败发生在 pattern 太密、半径太大或 query 离原 pattern 太远时。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+SDM 用高维稀疏地址实现分布式写入，用 sphere intersection 实现内容寻址。写入半径同时控制容量和干扰；读取通过激活位置汇总与 majority decoding 去噪。下一章只需证明 intersection weight 具有类似 softmax 的指数形状，就能把这套记忆操作连接到 attention。
+

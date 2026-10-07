@@ -1,0 +1,79 @@
+\section{Alignment 与数据工程：行为适配不是知识凭空生成}
+
+语言底座训练完成后，SFT 与 preference optimization 决定模型怎样回答。讲者把这部分与 data engineering 放在一起，因为 alignment 的关键变量不是算法名字，而是 instruction、answer、preference pair 的质量、来源与覆盖。
+
+\subsection{SFT：高质量答案需要 domain experts}
+
+SFT（Supervised Fine-Tuning）仍是普通 teacher-forced cross entropy。给 instruction--response 对 $(x,y)$，目标为
+\[
+\mathcal{L}_{\text{SFT}}=-\sum_{t=1}^{|y|}\log \pi_\theta(y_t\mid x,y_{<t}).
+\]
+困难在数据：若希望模型写出可靠代码解释，标注者必须能写出可靠代码解释，而不是只完成低成本选择题。
+
+\lecturefigure{slide-10-sft.jpg}{SFT：expert annotation、distillation 与 weak-to-strong 问题}{Stanford Online 官方录像 00:27:01}
+
+\begin{knowledgebox}{Teacher-generated data 的两层边界}
+更强模型可以快速生成 instruction data，但学生会继承 teacher 的偏差、风格和盲区；若目标是独立竞争，依赖封闭 teacher 还带来许可、可复现性与 data provenance 问题。Weak-to-Strong 讨论的是弱监督下能否超过 supervisor，不等于“复制 teacher outputs 就必然超过 teacher”。
+\end{knowledgebox}
+
+\teachervoice{00:25:00--00:28:24，讲者反复强调 SFT 不是普通 crowdsourcing。高质量答案需要真正懂 domain 的人，这一点比把数据量写成一个数字更重要。}
+
+\subsection{RLHF 与 DPO：算法变简单，偏好假设没有消失}
+
+SFT 教模型模仿目标答案，却没有显式比较两个都“像答案”的输出。Preference optimization 因此回答下一个问题：当 chosen 与 rejected 只在帮助性、风格或安全性上有差别时，怎样把成对判断变成 policy update。PPO-based RLHF 与 DPO 的差异在优化路径，不在于是否需要定义偏好。
+
+PPO-style RLHF 通常先训练 reward model $r_\phi(x,y)$，再优化带 KL regularization 的 policy：
+\[
+\max_\theta\ \mathbb{E}_{y\sim\pi_\theta(\cdot\mid x)}[r_\phi(x,y)]
+-\beta D_{\mathrm{KL}}\!\left(\pi_\theta\,\|\,\pi_{\text{ref}}\right).
+\]
+DPO 直接用 chosen/rejected pair $(y^+,y^-)$ 优化
+\[
+\mathcal{L}_{\text{DPO}}
+=-\log\sigma\!\left(\beta\left[
+\log\frac{\pi_\theta(y^+\mid x)}{\pi_{\text{ref}}(y^+\mid x)}
+-\log\frac{\pi_\theta(y^-\mid x)}{\pi_{\text{ref}}(y^-\mid x)}
+\right]\right).
+\]
+
+\lecturefigure{slide-11-rlhf.jpg}{RLHF 与 DPO：reward model、PPO 难度和 pairwise objective}{Stanford Online 官方录像 00:28:24}
+
+\begin{warningbox}{DPO 没有消灭 reward modeling}
+DPO 不显式训练独立 reward model，但 preference pairs 仍隐式定义“什么更好”。pair 是否 on-policy、annotator 是否一致、prompt 是否覆盖真实使用、chosen/rejected 是否只差风格，都会改变学到的 reward geometry。
+\end{warningbox}
+
+\teachervoice{00:28:24--00:30:00，讲者认为 PPO 在 reward model 足够好时可能很强，但工程实现困难；他把 DPO 作为更易用的替代，同时口头提醒 pair quality 和 on-policy 性。}
+
+\subsection{Data--algorithm--architecture 可以编码相似 bias}
+
+这张 slide 是整节课最重要的研究方法论。CogQA 的 multi-hop question answering 曾使用 graph neural network，另一路使用 MCTS；当 long-context GPT 和 chain-of-thought 能把相关 documents 一次放入 context 时，同一个任务可改写成 data/context-level problem。
+
+\lecturefigure{slide-12-data-algorithm-architecture.jpg}{数据、算法与架构的可交换性：从 CogQA 到 long-context reasoning}{Stanford Online 官方录像 00:34:16}
+
+\begin{importantbox}{三种实现同一归纳偏置的层次}
+\begin{enumerate}
+  \item \textbf{Architecture：}把 graph structure、memory 或 routing 写进网络结构。
+  \item \textbf{Algorithm：}在 inference 时用 search、MCTS、retrieval 或 verifier 组织计算。
+  \item \textbf{Data/context：}把中间证据、失败路径或完整 documents 放入训练样本与上下文，让通用模型学习 procedure。
+\end{enumerate}
+越靠数据层通常越通用，但需要更强模型、更长 context 和更高质量样本。
+\end{importantbox}
+
+\begin{lstlisting}[caption={选择 data、algorithm 或 architecture 的决策框架}]
+if behavior_is_narrow_and_examples_are_available:
+    encode_with_data_and_evaluation()
+elif inference_needs_verifiable_search:
+    add_algorithmic_search_or_tools()
+elif bottleneck_is_general_and_repeats_across_tasks:
+    consider_architecture_change()
+always_measure(compute, latency, coverage, failure_modes)
+\end{lstlisting}
+
+\teachervoice{00:30:00--00:34:20，讲者为 data work 辩护：cleaning、filtering、synthesizing 不是“低级劳动”，而是当前模型公司最核心的研究工程。}
+
+\teachervoice{01:10:30--01:12:30，Q\&A 中他又补了一层：许多具体行为可以用 data 解决，但若有人找到能普遍增强拟合能力的 architecture update，仍然非常有价值。}
+
+\subsection{本章小结}
+
+SFT、RLHF、DPO 都不能脱离数据质量讨论。更一般地，同一 inductive bias 可以写进 architecture、algorithm 或 data/context；最简单的层次不一定最便宜，因为它可能要求更大 compute、更长 context 和更可靠 evaluation。
+

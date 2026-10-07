@@ -1,0 +1,54 @@
+\section{从巨型 U-Net 到可扩展 DiT}
+
+Transformer 的兴起并不是因为 U-Net 不能生成好图，而是 U-Net 演化成大量定制卷积、残差、注意力、上下采样和 skip 结构后，难以直接继承主流 Transformer 的缩放与系统优化。DiT 的价值首先是结构统一与生态复用。
+
+\subsection{U-Net 为什么越来越“巨型”}
+
+早期 DDPM 与 latent diffusion 主要使用 U-Net。其多尺度归纳偏置适合图像，但现代 text-to-image U-Net 已不再是简单的对称卷积网络，而是混合大量专用组件。本节沿着“一个成熟图像先验为何会变成工程负担”展开：先看多尺度路径带来的能力，再追踪专用 block、条件接口与分辨率配置怎样逐层累积复杂度。
+
+\lecturefigure{slide-15.jpg}{DDPM/LDM 时代由 U-Net 主导，后来逐步混入 Transformer blocks}{15}
+
+U-Net 通过降采样获得大感受野，再通过上采样恢复分辨率，skip connection 保存细节。文本条件通常经 cross-attention 注入中间层。它性能成熟，却让每个分辨率阶段拥有不同通道、block 数和注意力配置。
+
+\lecturefigure{slide-16.jpg}{巨型 U-Net 的组件：卷积 stem、downblocks、midblock、upblocks 与输出头}{16}
+
+输入卷积把 noisy latent 映射到 hidden channels；downblocks 逐步降低空间尺寸；midblock 处理最压缩表示；upblocks 结合 skip features 恢复细节。每个 block 还可能包含 ResNet、normalization、self/cross-attention 与采样算子。
+
+\lecturefigure{slide-17.jpg}{“Giant U-Net” 的工程痛点：配置庞大且难以保持统一}{17}
+
+配置截图的教学重点不是嘲笑参数多，而是显示 architecture surface area：通道数组、block 类型、attention head、cross-attention dimension、层数和采样方式都要协同。实验很容易一次改动多个变量，复现与优化也更困难。
+
+\lecturefigure{slide-18.jpg}{Downblock 内部由多种自定义 ResNet、Transformer 与采样模块组成}{18}
+
+自定义 block 能利用图像先验，但也阻碍标准 fused kernel、FlashAttention、QK-Norm 或 GQA 等优化直接复用。Fused kernel 指把多个 GPU 操作合并为一个 kernel，以减少 HBM（High Bandwidth Memory，高带宽显存）读写和 kernel launch overhead；结构越不规则，融合越难。
+
+\lecturefigure{slide-19.jpg}{完整 U-Net 展开后呈现复杂的多尺度数据流与 skip connections}{19}
+
+这张全景图应该沿分辨率读：左侧下采样、中央 bottleneck、右侧上采样，横向箭头是 skip。复杂度不只来自参数量，还来自 activation memory、不同尺寸 tensor 的调度和条件层分布。系统优化需要逐 block 特化。
+
+\begin{warningbox}{复杂不等于错误，统一也不等于更强}
+U-Net 的多尺度 inductive bias 在有限数据或特定延迟目标下仍可能有价值。DiT 的结构更整齐，但若 token 数巨大，注意力成本会迅速超过卷积。架构选择必须绑定分辨率、数据和硬件。
+\end{warningbox}
+
+\subsection{UViT 是过渡，DiT 是结构重写}
+
+UViT 尝试保留 U-Net 的层级与长 skip，同时把卷积块替换为 Transformer。原始 DiT 更进一步：把 noisy latent patchify 后送进近似标准 ViT encoder，不再维持完整的 U 形多尺度主干。
+
+\lecturefigure{slide-20.jpg}{UViT：用 Transformer/MLP 替换卷积块，并保留跨层长 skip}{20}
+
+UViT 说明 Transformer 可以承担 denoiser，但结构仍带有 U-Net 痕迹。长 skip 连接编码器与解码器阶段，序列长度和 hidden dimension 也可能随层变化。它是“Transformer 化 U-Net”，而不是“把生成写成标准 token 模型”。
+
+\lecturefigure{slide-21.jpg}{迁移到 DiT 的理由：缩放、生态复用、实现简洁与生成质量}{21}
+
+DiT 可直接吸收并行 MLP、QK-Norm、Grouped Query Attention（GQA）、RoPE 等 Transformer 进展。GQA 让多个 query heads 共享较少 key/value heads，以减少 KV 计算与存储；QK-Norm 则规范化 query/key，改善大模型训练稳定性。迁移的核心是获得持续演化的通用 backbone 生态。
+
+\teachervoice{00:14:44--00:21:54，老师把“为什么换 DiT”解释为工程与研究接口的统一：巨型 U-Net 由许多 custom blocks 组成，而 DiT 能直接继承 Transformer 社区的缩放、归一化、注意力和 kernel 进展。}
+
+\begin{knowledgebox}{第一次出现：Inductive bias}
+Inductive bias（归纳偏置）是架构预先编码的假设。U-Net 强调局部卷积与多尺度；DiT 更依赖数据学习 token 间关系。数据和算力增加时，较弱手工偏置可能更易扩展，但并非所有规模都获益。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+U-Net 的问题不是不能工作，而是现代实现高度定制，难以统一扩展。UViT 保留层级结构，原始 DiT 则把 denoising 转写为接近 ViT 的 token computation。下一章将逐项说明这个“看似小改动”需要哪些条件与初始化机制。
+

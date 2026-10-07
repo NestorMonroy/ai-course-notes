@@ -1,0 +1,98 @@
+\section{RL Finetuning：从模仿人类轨迹到优化生成质量}
+
+课堂把 SFT 的关键故障定位在 “from humans”：人工解法昂贵、覆盖有限，而且未必位于模型容易生成的区域。替代方案是让模型自己提出候选，使用可验证的最终结果筛选，再把成功轨迹反馈给模型。这个循环连接了 rejection sampling、self-training 与更一般的 reinforcement learning finetuning。
+
+\subsection{第一步：把数据源换成模型自己的分布}
+
+slide 19 先保留 SFT 的两步流程，再划掉“human-annotated”；slides 20--21 展示两种逐步增强：先最大化正确的模型生成轨迹，再同时降低错误轨迹的概率。核心不是“合成数据一定优于人类数据”，而是训练样本来自当前策略 $\pi_\theta$，因此更贴近模型实际会走到的状态。
+
+\lecturefigure{slide-19.jpg}{修复 SFT 泛化失败：先质疑人工轨迹这一数据来源}{19}
+
+\lecturefigure{slide-20.jpg}{RL finetuning 的正样本循环：模型生成、验证、再训练}{20}
+
+\lecturefigure{slide-21.jpg}{进一步区分正确与错误轨迹，强化相对偏好}{21}
+
+设模型对问题 $x$ 生成 $K$ 条轨迹 $y^{(k)}$，verifier 给出 $v(x,y^{(k)})\in\{0,1\}$。最简单的 rejection-sampling 更新只保留 $v=1$ 的样本：
+\[
+\mathcal D_{\text{RS}}=\{(x,y^{(k)}):v(x,y^{(k)})=1\},
+\qquad
+\mathcal L_{\text{RS}}=-\mathbb E_{(x,y)\sim\mathcal D_{\text{RS}}}\log p_\theta(y\mid x).
+\]
+其中 $K$ 决定探索宽度，$v$ 决定哪些轨迹进入训练集。循环多轮后，模型分布会向自己曾经成功生成的区域移动；但若 verifier 误判，错误轨迹也会被不断放大。
+
+\begin{lstlisting}[language=Python,caption={带答案解析与 verifier 的 rejection-sampling 数据生成}]
+def build_round(policy, problems, verifier, parse_answer, n=16):
+    accepted, rejected = [], []
+    for problem in problems:
+        for sample in policy.sample(problem, n=n):
+            answer = parse_answer(sample.text)
+            if answer is None:
+                rejected.append((problem, sample.text, "parse_error"))
+            elif verifier(problem, answer):
+                accepted.append((problem, sample.text))
+            else:
+                rejected.append((problem, sample.text, "wrong_answer"))
+    return accepted, rejected
+\end{lstlisting}
+
+\teachervoice{00:20:00--00:24:50，老师回忆第一次听到“机器生成的响应可以比人工数据更适合训练”时也很惊讶。实践经验：优势不来自“机器更聪明”，而来自样本与当前模型分布对齐，并且可以在改进后重新采样、形成迭代闭环。}
+
+\subsection{直接优化我们真正想要的东西}
+
+slides 22--24 把复杂算法压缩成一句话：先定义 generation quality，再做 gradient ascent。对策略 $\pi_\theta(y\mid x)$ 和奖励 $R(x,y)$，目标可以写成
+\[
+J(\theta)=\mathbb E_{x\sim\mathcal X,\,y\sim\pi_\theta(\cdot\mid x)}[R(x,y)],
+\qquad
+\nabla_\theta J
+=\mathbb E[R(x,y)\nabla_\theta\log\pi_\theta(y\mid x)].
+\]
+其中 $R$ 可以是数学答案正确性、代码测试通过率、翻译质量或学习到的偏好分数。公式强调奖励决定优化方向；policy gradient、group-relative 更新或过滤式 SFT 只是估计和实现该方向的不同方法。
+
+\lecturefigure{slide-22.jpg}{为什么采用模型生成轨迹：直接优化目标行为}{22}
+
+\lecturefigure{slide-23.jpg}{先定义 generation quality，其余工作才是求梯度}{23}
+
+\lecturefigure{slide-24.jpg}{RL finetuning 的抽象：对期望质量做梯度上升}{24}
+
+\begin{importantbox}{目标函数优先于算法名称}
+“用了 RL”本身没有说明系统在优化什么。必须先写清 reward、答案解析、采样分布、长度成本、无效输出处理与 KL/稳定约束，再讨论 PPO、GRPO、REINFORCE 或 rejection sampling。错误目标被优化得越好，系统越危险。
+\end{importantbox}
+
+讲义在质量示例中提到机器翻译指标，通常应写作 BLEU。指标只是代理：数学 exact match 可能忽略等价表达，代码单元测试可能漏掉隐藏边界，BLEU 可能偏好表面 n-gram 重合。真实目标与可计算 reward 之间的差距，就是 reward hacking 的入口。
+
+\subsection{Verifier 才是当前自动扩展的瓶颈}
+
+slide 25 引用 “Verification, the key to AI”，并给出明确判断：可靠 verifier 往往比具体 RL 算法更关键。设真实正确性为 $z\in\{0,1\}$，verifier 输出为 $v$。若 false-positive rate
+\[
+\alpha=P(v=1\mid z=0)
+\]
+不够低，生成规模越大，模型越容易搜索到“骗过验证器”的错误轨迹；若 false-negative rate
+\[
+\beta=P(v=0\mid z=1)
+\]
+过高，则多样但正确的解法被丢弃，训练分布会越来越窄。这里 $\alpha$ 控制错误污染，$\beta$ 控制正确覆盖，二者都应按任务难度和风险 slice 报告。
+
+\lecturefigure{slide-25.jpg}{可靠 verifier 是 RL reasoning 的核心基础设施}{25}
+
+\begin{warningbox}{“最终答案正确”不保证轨迹正确}
+结果 verifier 可能接受碰巧猜对、单位错误后抵消、使用泄漏信息或不可复现工具状态的轨迹。高风险训练应组合 outcome verifier、process checks、去污染检测、执行沙箱与人工抽样，而不是只看最后字符串。
+\end{warningbox}
+
+\teachervoice{00:27:30--00:30:20，老师强调在当前自动可验证任务上，最关键的是 verifier，而不是争论哪一种 RL 更新更漂亮。课堂提示：可扩展性的上限由“能否便宜、稳定地判断好坏”决定。}
+
+\subsection{推理训练到底扩展什么}
+
+slide 26 回到最初的理论：推理可以扩展 output length，而直接答案能力往往依赖 model depth。训练 reasoning model 时，“scale”至少有四个维度：参数量、训练问题数、每题采样数和最大轨迹长度。只报告总 FLOPs 会掩盖这些预算如何分配，也无法解释收益来自更强模型、更多探索还是更长计算。
+
+\lecturefigure{slide-26.jpg}{Scaling reasoning：区分输出长度与模型深度}{26}
+
+若每题采样 $K$ 条、平均长度 $T$，训练生成成本近似与 $KT$ 成正比；可接受样本率为 $q$ 时，获得一个正轨迹的期望成本约为 $KT/(Kq)=T/q$，但扩大 $K$ 会提高“至少找到一个正确轨迹”的概率 $1-(1-q)^K$。这解释了为什么稀疏奖励任务会迅速消耗推理预算，也说明 verifier 与课程难度必须共同设计。
+
+\begin{knowledgebox}{术语消化：SFT、Rejection Sampling、RL Finetuning}
+\textbf{SFT} 模仿给定参考序列；\textbf{rejection sampling} 从当前模型采样并只保留通过验证的轨迹；\textbf{RL finetuning} 更一般地直接优化期望奖励，可同时利用正负样本。三者可以组成连续管线，不应仅按论文名称划成互斥阵营。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+RL finetuning 的关键转向是：从“复现一条人类写出的轨迹”变为“在模型自己的候选分布中，依据可验证质量提高成功轨迹的概率”。它为推理扩展提供循环数据源，但也把 verifier 偏差、答案解析、奖励漏洞和采样成本推到系统中心。
+

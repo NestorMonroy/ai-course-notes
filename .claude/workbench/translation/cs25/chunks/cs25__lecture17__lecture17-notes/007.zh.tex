@@ -1,0 +1,80 @@
+\section{长蛋白质序列：Performer 与 Protein LM}
+
+临床章节主要挑战是知识、评价与风险；进入蛋白质后，第一道障碍变成序列长度和计算复杂度。氨基酸序列可以像 token 序列一样输入模型，但长蛋白质会让标准 attention 的 $n\times n$ 相关矩阵迅速占满计算与内存。Performer 在这里不是抽象的效率技巧，而是让更长生物序列可训练的前置条件。
+
+\subsection{为什么蛋白质需要长上下文}
+
+章节分隔页把视角从医生语言切换到分子语言。下一页指出，不同蛋白质的长度跨度很大，远距离氨基酸可能在折叠后彼此邻近并共同决定活性位点。只看固定小窗口可能错过这种依赖；直接使用全局 self-attention 又要付出二次复杂度。
+
+\lecturefigure{slide-44-section-proteins.jpg}{章节切换：蛋白质应用}{官方录像恢复幻灯片 V044；Stanford CS25 Lecture 17}
+
+\lecturefigure{slide-45-long-biological-sequences.jpg}{长生物序列带来的建模与计算问题}{官方录像恢复幻灯片 V045；Stanford CS25 Lecture 17}
+
+标准 scaled dot-product attention 为
+$$
+\operatorname{Attn}(Q,K,V)=
+\operatorname{softmax}\!\left(\frac{QK^{\top}}{\sqrt d}\right)V.
+$$
+其中 $Q,K,V\in\mathbb{R}^{n\times d}$ 分别是 query、key、value，$n$ 是序列长度，$d$ 是每个 head 的维度。瓶颈来自 $QK^{\top}\in\mathbb{R}^{n\times n}$：即使最终只需要 $n\times d$ 输出，也要显式或隐式处理所有位置对。
+
+\begin{warningbox}{长序列的困难不只是“显存不够”}
+二次 attention 同时增加训练时间、中间激活和通信压力。简单截断虽然省计算，却可能删除远距离 motif 或跨结构域关系；分块 attention 又可能把真正相关的位置隔开。效率方法的目标是在计算预算与全局信息之间做受控折衷。
+\end{warningbox}
+
+\subsection{Performer：用 kernel feature 重排计算}
+
+上一小节已经把瓶颈定位为完整的 $n\times n$ score matrix；本节进一步回答怎样在不把序列切碎的情况下改变计算顺序。Performer 页展示 FAVOR+ 思路：把 softmax kernel 近似为特征内积，让全局依赖仍能通过一个压缩统计量传播。读图时要同时看数学重排、随机近似误差与真实硬件曲线，而不能只把“linear attention”当作一个复杂度口号。
+$$
+\exp(q^{\top}k)\approx \phi(q)^{\top}\phi(k),
+$$
+再利用结合律把 $\phi(K)^{\top}V$ 先聚合，而不是构造完整 attention matrix。忽略归一化细节后，单个 query 的输出可写为
+$$
+\operatorname{Attn}(q_i,K,V)\approx
+\frac{\phi(q_i)^{\top}\left(\sum_j \phi(k_j)v_j^{\top}\right)}
+{\phi(q_i)^{\top}\left(\sum_j \phi(k_j)\right)}.
+$$
+其中 $\phi(\cdot)$ 是随机正特征映射，$q_i,k_j,v_j$ 分别表示第 $i$ 个 query 与第 $j$ 个 key/value。重排后不再保存 $n^2$ 个 pairwise score，时间和空间可随 $n$ 近似线性增长；代价是 kernel approximation 带来的方差与实现复杂度。
+
+\lecturefigure{slide-46-performer-kernel-attention.jpg}{Performer：以随机特征近似 softmax attention}{官方录像恢复幻灯片 V046；Stanford CS25 Lecture 17}
+
+\lecturefigure{slide-47-performer-speed-complexity.jpg}{Performer 的速度、内存与复杂度比较}{官方录像恢复幻灯片 V047；Stanford CS25 Lecture 17}
+
+\begin{lstlisting}[caption={线性化 attention 的计算顺序（示意）}]
+def performer_attention(query, key, value, phi):
+    q_features = phi(query)
+    k_features = phi(key)
+    kv_summary = k_features.T @ value
+    k_summary = k_features.sum(axis=0)
+    numerator = q_features @ kv_summary
+    denominator = q_features @ k_summary
+    return numerator / denominator[:, None]
+\end{lstlisting}
+
+\begin{knowledgebox}{读图：复杂度图应该怎样看}
+先固定模型维度与 batch，再沿横轴增加 sequence length；标准 attention 的时间和内存曲线更快上升，Performer 的增长更接近线性。图支持“长序列更可扩展”，却不证明所有长度、硬件和精度目标下都更快；随机特征数量、kernel 实现和常数项都会改变交叉点。
+\end{knowledgebox}
+
+从实现角度看，线性 attention 的收益取决于中间张量是否真正按重排后的顺序计算。如果代码为了调试仍显式生成 pairwise score，理论复杂度并不会兑现；如果随机 feature 数设置过大，$n r d$ 的常数项也可能超过优化良好的标准 attention。反之，在蛋白质这种长度分布很宽的任务里，可以按长度 bucket 选择实现：短序列使用精确 attention，长序列切换 Performer，并在一组可承受的样本上比较近似输出与精确输出。这样的验证把“更快”与“偏差可接受”绑定起来，避免只测吞吐而忽略模型行为改变。
+
+\teachervoice{讲者把 Performer 放在蛋白质章节开头，是因为生物序列在“开始做生物学推理之前”就会撞上二次 attention 成本。课堂重点不是背 FAVOR+ 名字，而是看到领域数据的长度分布会反向推动新的 attention algorithm。}
+
+\subsection{Protein LM 学到了什么}
+
+结果页展示语言模型在 protein sequence modeling 上的收益，attention visualization 页则把不同 amino acid 之间的注意力画出来。合理解释是：预训练迫使模型利用保守 motif、局部化学环境和较远残基关系来预测被遮盖位置，因此表示中出现与结构或功能相关的模式。
+
+\lecturefigure{slide-48-protein-lm-results.jpg}{Protein language modeling 的实验结果}{官方录像恢复幻灯片 V048；Stanford CS25 Lecture 17}
+
+\lecturefigure{slide-49-amino-acid-attention.jpg}{氨基酸之间的 attention pattern 与复杂依赖}{官方录像恢复幻灯片 V049；Stanford CS25 Lecture 17}
+
+\begin{warningbox}{Attention map 不是因果解释}
+高 attention weight 表示模型计算中某些位置发生强交互，不等于这对残基在真实蛋白质中直接接触，也不证明它们导致某项功能。可靠生物结论还需要结构数据、mutagenesis 或其他实验。可视化最适合提出假设和检查模型，而不是替代实验验证。
+\end{warningbox}
+
+\begin{importantbox}{Performer 案例的课程意义}
+当数据天然很长时，模型架构与算法复杂度会决定哪些科学问题可被提出。Performer 通过近似 kernel attention 扩大可处理的上下文；protein LM 则利用这些上下文学习统计规律。效率突破和领域发现是两层证据，不能合并为一个结论。
+\end{importantbox}
+
+\subsection{本章小结}
+
+蛋白质序列把 Transformer 的长上下文成本暴露得非常直接。Performer 通过随机特征与结合律避免完整 $n\times n$ attention matrix，使长序列训练更可行；protein LM 的表示和 attention pattern 可提供生物学线索，但仍需结构与实验验证。
+

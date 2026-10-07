@@ -1,0 +1,58 @@
+\section{Long Context：Quadratic Complexity 只是第一层问题}
+
+随着 context length 增长，attention 同时遭遇计算与 activation memory：$QK^\top$ 有 $n^2$ scores，softmax 中间量也要读写。课程把 long-context 方法分为固定局部/稀疏模式、content-based sparse routing、linear/factored approximation 与 external memory/retrieval；真正难点是算法结构能否映射到硬件。
+
+\subsection{两类瓶颈：Compute 与 Attention-logit Memory}
+
+标准 attention 的主要项为：
+\[
+\operatorname{FLOPs}_{\mathrm{score/value}}\approx 4n^2d_hH,
+\qquad \operatorname{Memory}_{\mathrm{logits}}=O(Hn^2).
+\]
+其中 $n$ 是 sequence length，$d_h$ 是 head dimension，$H$ 是 head count。即使总 FLOPs 还能接受，materialize 全部 logits 也可能先耗尽 HBM；FlashAttention 的关键正是避免把完整 score matrix 反复写回显存。
+
+\lecturefigure{slide-31-evolution-attention-challenges.jpg}{Attention 演化面对 quadratic compute 与 memory-bound 两个问题}{官方录像恢复幻灯片 V031；00:40:27}
+
+\begin{knowledgebox}{读图：两条问题不能用同一个数字概括}
+左侧架构图指向 attention，文字列出 quadratic complexity 与 memory bound。先区分运算量、activation 容量、memory bandwidth 和 kernel utilization；线性 FLOP 方法若产生不规则 gather/scatter，可能仍比 dense tiled kernel 慢。
+\end{knowledgebox}
+
+\subsection{Local、Sparse、Routing 与 LSH Patterns}
+
+固定 window 把每个 token 的候选邻居限制为 $w$，复杂度从 $O(n^2d)$ 降为 $O(nwd)$。多层 local pattern 可逐步传播信息；strided/global token 建立跨区连接；routing/LSH 根据内容近似找出高相似 token，尝试保留 full attention 中真正有权重的边。
+
+\lecturefigure{slide-32-long-context-patterns.jpg}{Local、sparse、routing 与 LSH attention pattern}{官方录像恢复幻灯片 V032；00:44:48}
+
+\begin{knowledgebox}{读图：连接图决定信息传播直径}
+先看每个 pattern 的 nonzero blocks，再问两个远 token 需要多少层才能通信。Local window 规则、kernel 友好但长程路径变长；routing/LSH 更 content-aware，却引入 clustering、sorting 和不规则 memory access。稀疏比例相同不代表速度相同。
+\end{knowledgebox}
+
+\teachervoice{讲者回忆 image/music sparse attention，并提出一种重要观察：多数层可以局部，只有靠后的少数层承担真正 long-distance modeling。Content-based sparsity 的理论吸引力很强，但 memory movement 往往吃掉 FLOP savings。}
+
+\subsection{Linear、Factored 与 External Memory}
+
+另一组方法改变 attention factorization 或引入 memory。Linear attention 用 kernel feature 把 $\operatorname{softmax}(QK^\top)V$ 重新结合；factored attention 把二维/长序列 interaction 分解；Memorizing Transformer 或 retrieval 则把部分历史放到外部 store，按 query 读取。
+
+\lecturefigure{slide-33-long-context-methods.jpg}{Linear、factored 与 retrieval/memory 路线}{官方录像恢复幻灯片 V033；00:44:54}
+
+\begin{knowledgebox}{术语消化：Long-context 方法在改哪一层}
+\begin{tabularx}{\textwidth}{@{}L{0.22\textwidth}X X@{}}
+\toprule
+路线 & 核心机制 & 主要风险 \\
+\midrule
+Local/fixed sparse & 预定义少量 attention edges & 可能错过内容相关远距边 \\
+Routing/LSH sparse & 按内容聚类或近邻检索 & 不规则访存、近似误差、复杂实现 \\
+Linear/factored & 改写或分解 attention kernel & 表达与 numerical stability 可能变化 \\
+External memory/retrieval & 把历史存储在模型外并按需读取 & index freshness、retrieval error 与 latency \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\begin{importantbox}{Long context 不等于有效使用 long context}
+能够接收 $n$ 个 token，只证明接口容量；还要测试远距离信息是否被检索、干扰是否增加、position 是否外推、答案是否依赖正确证据，以及 latency/throughput 是否可接受。
+\end{importantbox}
+
+\subsection{本章小结}
+
+Long-context attention 有两个正交瓶颈：pairwise compute 与 intermediate memory。Local/sparse/routing/linear/memory 路线分别改变连接图、近似方式或存储位置；任何复杂度结论都必须继续追问 kernel 与 hardware mapping。
+

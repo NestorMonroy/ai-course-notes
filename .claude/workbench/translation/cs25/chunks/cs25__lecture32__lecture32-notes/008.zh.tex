@@ -1,0 +1,97 @@
+\section{Evaluation 与 Tooling：先防 Contamination，再谈 Leaderboard}
+
+预训练结束并不意味着结果可信。代码 benchmark 尤其容易出现在 GitHub、教程和 instruction data 中；公开 leaderboard 还会诱导反复优化。课程因此主张多 benchmark、decontamination、membership test 与 time-split evaluation。
+
+\subsection{多 benchmark：一个分数无法描述 code model}
+
+第一张表同时比较 code completion、code reasoning、data science、math 与 repository tasks。模型 size 更大通常更强，但不同 tasks 的排序可能不同。评估必须绑定 model version、prompt、sampling、tests 与 execution environment。
+
+\lecturefigure{slide-64.jpg}{StarCoder/CodeLlama/DeepSeek 等模型的多 benchmark 对比}{Loubna Ben Allal 官方 deck，第 64 页}
+
+\lecturefigure{slide-65.jpg}{StarCoder2 3B/7B/15B 的任务分解结果}{Loubna Ben Allal 官方 deck，第 65 页}
+
+对于每个问题采样 $n$ 个 solutions，其中 $c$ 个通过 tests，pass@$k$ 的常用无偏估计为
+\[
+\operatorname{pass@}k=1-\frac{\binom{n-c}{k}}{\binom{n}{k}}.
+\]
+pass@1 更接近一次 completion；较大 $k$ 衡量多次尝试中至少一次成功，不能直接横比。
+
+\begin{warningbox}{Unit tests 只覆盖写出的行为}
+通过 tests 不保证 efficiency、security、style、undefined behavior、dependency correctness 或 hidden edge cases。若 tests 太弱，模型可生成看似正确却不可靠的代码。
+\end{warningbox}
+
+\teachervoice{00:44:20--00:46:20，讲者建议 release 时用尽可能多的 benchmarks：某一个可能有 contamination，多任务也能揭示模型行为分布，而不是只追单项 headline。}
+
+\subsection{Autocomplete 与 membership test：部署侧也要做 attribution}
+
+BigCode 还发布 VS Code extension 和 membership test。后者尝试判断 generated snippet 是否与 training data 相似，并向用户提示潜在来源。它是 provenance aid，而不是确定的 memorization proof。
+
+\lecturefigure{slide-66.jpg}{Code tooling：autocomplete extension 与 training-data membership test}{Loubna Ben Allal 官方 deck，第 66 页}
+
+\begin{knowledgebox}{Membership test 的边界}
+Exact match 高精度但漏掉改写；fuzzy match 会把 common idioms 误报；training corpus 不完整或版本不同又会产生 false negative。输出应是相似度与候选来源，不应写成法律结论。
+\end{knowledgebox}
+
+\teachervoice{00:45:00--00:47:00，讲者把 membership test 放在 code attribution 努力里：生成代码可能来自训练样本时，应给作者/用户一个可检查提示。}
+
+\subsection{Customize code model：预训练原则怎样缩小到单 GPU}
+
+Personal Copilot workflow 仍是 collect--filter--dedup--format--train--evaluate，只是从 full pretraining 变成 repository-specific continued pretraining 或 fine-tuning。LoRA 将权重更新写成低秩矩阵
+\[
+W'=W+BA,\qquad A\in\mathbb{R}^{r\times d},\ B\in\mathbb{R}^{d'\times r},\ r\ll d,
+\]
+只训练 $A,B$，显著减少 optimizer states 和梯度 memory。
+
+\lecturefigure{slide-67.jpg}{Customize Code Models：在私有 codebase 上训练 personal Copilot}{Loubna Ben Allal 官方 deck，第 67 页}
+
+\begin{lstlisting}[caption={小预算 code assistant 的可执行路径}]
+select_small_strong_base_with_code_and_long_context()
+collect_only_authorized_repository_data()
+deduplicate_and_split_by_repository_or_time()
+format_fim_and_repository_context_examples()
+fine_tune_with_peft_or_lora_on_one_gpu()
+evaluate_execution_latency_leakage_and_regressions()
+\end{lstlisting}
+
+\teachervoice{00:57:20--00:59:10，Q\&A 中讲者给单 GPU 建议：选强 base、curated data、quantized/on-device runtime 与 PEFT，而不是试图从头预训练。}
+
+\subsection{Leaderboards：界面很方便，protocol 更重要}
+
+公开 leaderboard 聚合 model scores，帮助发现候选；但每个 row 背后包含 model date、prompt、temperature、test harness、contamination policy 和 submission rules。截图是入口，不是可复现实验记录。
+
+\lecturefigure{slide-68.jpg}{Code leaderboards：模型比较的公共入口}{Loubna Ben Allal 官方 deck，第 68 页}
+
+\begin{knowledgebox}{Leaderboard 使用顺序}
+先看 benchmark version 和 cutoff，再看 model release/training date；确认 base/instruct、pass@1/pass@k、execution sandbox、prompt；最后才比较分数。若 protocol 不同，排名没有可解释性。
+\end{knowledgebox}
+
+\subsection{HumanEval overfitting：instruction tuning 也会污染}
+
+即使 pretraining 删除 HumanEval，instruction data 仍可能包含“实现一个函数并通过 tests”的近似题。模型可能学习 benchmark style 或见过语义等价问题，导致 public score 相对真实新题过高。
+
+\lecturefigure{slide-69.jpg}{Potential overfitting in HumanEval：公开 benchmark 与真实泛化差距}{Loubna Ben Allal 官方 deck，第 69 页}
+
+若训练样本 $x$ 与 benchmark $b$ 的 similarity $s(x,b)>\tau$，可标记潜在 overlap；但 semantic equivalence 不一定被 lexical detector 捕捉。decontamination 应结合 exact/fuzzy/code-structure/time metadata，并报告阈值。
+
+\begin{warningbox}{Instruction data 是 contamination 的第二入口}
+只清 pretraining corpus 不够。SFT、RLHF prompts、synthetic exercises、benchmark explanations 和 GitHub solutions 都可能泄漏 test pattern；每个 stage 都需要 provenance scan。
+\end{warningbox}
+
+\subsection{LiveCodeBench：用 release date 建立时间隔离}
+
+LiveCodeBench 定期抓取新 contest problems，并只用模型 release 之后的问题评估，降低训练中见过题目的概率。它还比较 full-history 与 post-cutoff score，若差异大，可能提示旧 benchmark overfit。
+
+\lecturefigure{slide-70.jpg}{LiveCodeBench：以 post-release problems 做 contamination-resistant evaluation}{Loubna Ben Allal 官方 deck，第 70 页}
+
+可将 time-split 定义为
+\[
+\mathcal{B}_{\text{valid}}(m)=\{b:\ t_{\text{problem}}(b)>t_{\text{release}}(m)\}.
+\]
+它减少直接时间泄漏，但模型可能基于未公开 checkpoint、网页提前出现题目或相似 templates，仍需谨慎。
+
+\teachervoice{00:49:00--00:52:40，讲者把 LiveCodeBench 作为重要解决方案：使用模型发布后出现的问题，观察一些模型在 uncontaminated slice 上是否仍保持表现。}
+
+\subsection{本章小结}
+
+可信 code evaluation 需要多任务、可执行 tests、明确 pass@k、数据/时间 decontamination、membership/attribution tools 和 repeated protocol。Leaderboard 是导航，time-split 与 source audit 才是对 contamination 的实质防线。
+

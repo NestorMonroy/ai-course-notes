@@ -1,0 +1,71 @@
+\section{RT-1：把多任务模仿学习写成实时 Transformer}
+
+RT-1 的设计不是从模型榜单开始，而是从一组现实约束倒推：已有 130,000 条示范需要被利用，新数据采集昂贵，通用 vision backbone 太慢，task 是语言条件，机器人还必须以稳定频率闭环控制。架构只有同时满足吞吐、时序、动作精度与泛化才有意义。
+
+\subsection{从 Agenda 进入 Skill Learning}
+
+Agenda 将 RT-1 放在第一项系统案例，因为所有高层 planner 最终都要调用可执行 skill。若低层 policy 只能完成三种动作，再强的 LLM 也只能对三种动作重新排列；因此课程先扩大 skill library，再讨论语言如何组合它们。
+
+\lecturefigure{slide-13-agenda-rt1.jpg}{Agenda：RT-1 作为机器人 foundation-model recipe 的 skill-learning 层}{官方录像恢复幻灯片 V013；Stanford CS25 Lecture 15}
+
+\subsection{First Principles：约束先于 Architecture}
+
+slide 14 汇总三类输入约束。模型必须 robust / generalize；off-the-shelf vision models 不能满足真实世界实时推理；数据带 language conditioning，需要 multi-modality。右侧 lesson 把这些约束映射为 attention 与 tokenization，而不是先选一个大 Transformer 再寻找应用。
+
+\lecturefigure{slide-14-rt1-first-principles.jpg}{RT-1 first principles：鲁棒性、实时视觉与语言条件共同决定架构}{官方录像恢复幻灯片 V014；Stanford CS25 Lecture 15}
+
+\begin{warningbox}{实时控制不是平均 latency}
+机器人控制关注 tail latency 和节拍稳定性。一次偶发长延迟可能让夹爪错过物体或控制器使用过时图像；因此论文中的 compact backbone、TokenLearner 和 decoder 设计不仅是省 FLOPs，更是在保护闭环时序。
+\end{warningbox}
+
+\subsection{RT-1 Architecture：图像、语言与动作 Token}
+
+RT-1 输入六帧图像历史和语言指令。图像经过 FiLM-conditioned EfficientNet 与 TokenLearner 压缩，再与语言条件一起进入 decoder-only Transformer，输出离散化动作 token。模型按自回归方式预测控制维度，使多模态控制可以写成统一序列 likelihood。
+
+\lecturefigure{slide-15-rt1-architecture.jpg}{RT-1 架构：FiLM EfficientNet、TokenLearner、Transformer 与 action tokens}{官方录像恢复幻灯片 V015；Brohan et al., 2022}
+
+若把输入序列写成 $x=(x_1,\ldots,x_n)$，其中包含 visual、language 和 action tokens，自回归目标为
+\begin{equation}
+p_{\theta}(x)=\prod_{j=1}^{n}p_{\theta}(x_j\mid x_{<j}).
+\end{equation}
+训练时只对 action token 计算主要控制损失，视觉和语言提供条件。这里的统一并不意味着三种模态信息量相同；TokenLearner 正是为了把图像的高维 patch 序列压到实时可处理范围。
+
+\subsection{Action Discretization 与 3 Hz Budget}
+
+连续动作维度被映射到 256 个 bins。若某一维动作 $a\in[a_{\min},a_{\max}]$，可用
+\begin{equation}
+b(a)=\operatorname{round}\left(
+255\frac{a-a_{\min}}{a_{\max}-a_{\min}}
+\right)
+\end{equation}
+得到离散 token，推理后再映射回连续控制。量化把多维回归变成 categorical prediction，便于 Transformer 解码，但也引入有限精度和多维 token 依赖。
+
+\lecturefigure{slide-16-rt1-design-takeaways.jpg}{RT-1 design takeaway：100 ms 推理、六帧历史、81→8 patch、256 bins、35M 参数}{官方录像恢复幻灯片 V016；Stanford CS25 Lecture 15}
+
+\begin{knowledgebox}{读图：三个不同时间尺度}
+控制循环约 3 Hz，即每步约 333 ms；模型前向预算约 100 ms，为传感、通信与执行留下空间；六帧历史只覆盖很短时间窗口，用于判断运动趋势而非长期任务记忆。35M 参数是实时部署权衡，不能与后来离线大 VLM 的参数量直接比较。
+\end{knowledgebox}
+
+\teachervoice{讲者反复回到 context length：若把每帧所有 image patches 都送入 Transformer，序列会立刻爆炸。TokenLearner 只保留当下任务相关的少量视觉 token，是“能够在机器人上跑起来”的必要条件，而不是可有可无的压缩技巧。}
+
+\begin{lstlisting}[caption={RT-1-style tokenized imitation loop},label={lst:rt1-loop}]
+for observation_history, instruction, expert_action in dataset:
+    image_features = film_efficientnet(observation_history, instruction)
+    visual_tokens = token_learner(image_features, output_tokens=8)
+    language_tokens = sentence_encoder(instruction)
+    action_tokens = discretize(expert_action, bins=256)
+
+    context = concat(language_tokens, visual_tokens)
+    loss = autoregressive_action_loss(transformer, context, action_tokens)
+    update(loss)
+
+def act(observation_history, instruction):
+    context = encode(observation_history, instruction)
+    predicted_tokens = transformer.decode(context)
+    return undiscretize(predicted_tokens)
+\end{lstlisting}
+
+\subsection{本章小结}
+
+RT-1 把多任务 imitation 写成 tokenized autoregressive control，但它的关键贡献同样是 resource accounting：六帧历史、TokenLearner 压缩、35M 参数和动作量化共同满足实时闭环。下一章要检查这些设计是否真的换来跨任务和跨场景泛化。
+

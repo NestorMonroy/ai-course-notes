@@ -1,0 +1,64 @@
+\section{Language to Rewards：让 LLM 写目标，而不是直接写动作}
+
+第二部分重新定义接口。若 LLM 直接生成 actuator-level code，语义错误会立即进入控制；若它直接生成 action tokens，又可能受训练 support 和离散精度限制。Language to Rewards 让 LLM 生成一个 reward function，低层 optimizer 再寻找满足 reward 和约束的 trajectory。
+
+\subsection{为什么 raw code / raw action 都可能是坏接口}
+
+标题页之后，失败例子比较两种直接接口：让模型写低层控制代码可能产生不可执行或危险逻辑；让模型吐出长串数字 action 又缺少稳定的物理语义和 feedback correction。真正的问题不是 LLM 会不会生成 token，而是哪种中间表示能保留语言意图、又让 controller 利用动力学。
+
+\lecturefigure{slide-40-language-to-rewards-title.jpg}{Language to Rewards for Robotic Skill Synthesis}{官方录像恢复幻灯片 V040；00:58:30}
+
+\lecturefigure{slide-41-naive-language-action-interface.jpg}{直接生成 code 或 action sequence 的脆弱性}{官方录像恢复幻灯片 V041；00:58:45}
+
+\lecturefigure{slide-42-interface-question.jpg}{核心问题：language 与 low-level action 的最佳接口是什么？}{官方录像恢复幻灯片 V042；00:58:51}
+
+\begin{importantbox}{Reward 是 specification，不是完整 policy}
+Reward function 描述“什么状态或行为更好”，policy/controller 决定“怎样到达”。把两者分开后，LLM 可使用语义知识写目标，MPC 可使用 dynamics、constraint 和当前 state 做闭环优化。但 reward misspecification 仍会产生 reward hacking，因此 specification 也需要检查与迭代。
+\end{importantbox}
+
+\subsection{Reward translator + motion controller}
+
+设语言 instruction 为 $g$，LLM 生成 reward program $R_\phi(s_t,a_t;g)$；controller 在 horizon $H$ 内求解
+$$
+\max_{a_{t:t+H-1}}
+\sum_{k=0}^{H-1}\gamma^k R_\phi(s_{t+k},a_{t+k};g)
+\quad\text{s.t.}\quad
+s_{t+k+1}=f(s_{t+k},a_{t+k}),
+$$
+并只执行第一个动作，再用新 observation 重新规划。这里 $\phi$ 表示 LLM 生成的 reward program，$\gamma$ 是时间折扣，$H$ 是 planning horizon，$f$ 是 simulator 或 learned dynamics。这个 receding-horizon loop 是 MPC 的核心。
+
+\lecturefigure{slide-43-language-to-reward-pipeline.jpg}{Language-to-Reward pipeline：LLM reward translator + motion controller}{官方录像恢复幻灯片 V043；01:00:15}
+
+\lecturefigure{slide-44-reward-translator-prompt.jpg}{Motion descriptor prompt 与生成 reward code}{官方录像恢复幻灯片 V044；01:01:15}
+
+\begin{lstlisting}[caption={Reward program 与 MPC 执行循环的概念伪代码}]
+instruction = "make the robot dog stand on two feet"
+reward_code = llm.generate_reward(instruction, robot_schema)
+reward = sandbox.compile_and_validate(reward_code)
+
+while not task_done:
+    state = observe_robot_and_scene()
+    action_plan = mpc.optimize(dynamics, reward, state, constraints)
+    execute(action_plan[0])
+    if user_feedback_available():
+        reward = revise_reward(reward, user_feedback())
+\end{lstlisting}
+
+\begin{warningbox}{生成 code 前必须有 sandbox 与 validation}
+LLM 生成的 reward code 可能引用不存在的 state、符号错误、数值爆炸、遗漏 safety constraint，或通过意外 shortcut 获得高 reward。实际系统需要 schema-restricted API、静态检查、unit tests、数值范围限制、timeout、simulator rollout 和 human approval，不能把任意 Python 直接部署到真实控制器。
+\end{warningbox}
+
+\subsection{MPC 保留了哪些传统机器人能力}
+
+MuJoCo MPC 页面展示 reward 改动后，optimizer 可实时合成新动作。与直接 action token 相比，MPC 显式使用 dynamics rollout，可加入 joint limit、collision、balance 和 energy 等约束，并在 observation 更新后重规划。它的代价是需要可用模型、在线优化计算与精心设计的 reward landscape。
+
+\lecturefigure{slide-45-mujoco-mpc-controller.jpg}{MuJoCo MPC：根据 reward 实时合成 controller}{官方录像恢复幻灯片 V045；01:01:33}
+
+\lecturefigure{slide-46-language-to-rewards-skill-set.jpg}{Language to Rewards 生成的 robot-dog 与 dexterous skills}{官方录像恢复幻灯片 V046；01:01:51}
+
+\teachervoice{讲者把这一接口概括为“LLM 做它擅长的 semantic translation，controller 做它擅长的 physical optimization”。这不是复古地放弃 end-to-end learning，而是明确每个组件的责任边界，让语言先验、动力学模型和安全约束可以同时存在。}
+
+\subsection{本章小结}
+
+Language to Rewards 把自然语言转成可优化的 objective，而非直接输出每个动作。Reward program 提供任务语义，MPC 提供闭环动力学与约束；系统可交互修改目标，但必须防止 reward misspecification 与不安全 code。
+

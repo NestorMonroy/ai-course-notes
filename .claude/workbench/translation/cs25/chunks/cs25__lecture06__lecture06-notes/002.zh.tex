@@ -1,0 +1,71 @@
+\section{Transformer 的优点与瓶颈：通用性为什么昂贵}
+
+前一节提出统一架构，本节解释为什么研究从 Transformer 出发。Transformer 的 attention 不强制局部连接，位置通常作为输入特征而不是固定计算拓扑，且大部分计算是规则矩阵乘法。这些性质让它比卷积更容易迁移到未知结构；代价是 raw input 越大，self-attention 的两两比较越昂贵。
+
+\lecturefigure{slide-03-improving-transformers.jpg}{Transformer 的通用 inductive bias 与输入规模瓶颈。}{Stanford Online 当前官方视频 00:05:10--00:06:01。}
+
+\begin{knowledgebox}{术语表：本讲的核心接口}
+\begin{tabularx}{\textwidth}{L{0.23\textwidth}X}
+\toprule
+术语 & 精确定义 \\
+\midrule
+non-local & 任意输入元素原则上都可直接相互注意，不预先限制在固定邻域。 \\
+position as feature & 坐标被编码进 token 特征，而不是用卷积核或图边硬限制连接。 \\
+latent array & 固定或较小数量的可学习向量，作为处理大输入的内部工作空间。 \\
+cross-attention & query 与 key/value 来自不同数组；此处 latent 查询原始输入。 \\
+output query & 指定“预测什么、在哪个位置、哪个模态或哪个任务”的 decoder 查询。 \\
+Fourier feature & 用多频率正弦/余弦把连续坐标映射成可学习的高频特征。 \\
+byte-level language & 直接以 UTF-8 bytes 等低层符号建模，不依赖子词 tokenizer。 \\
+optical flow & 对相邻帧中每个像素预测二维运动向量的稠密结构化输出。 \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+标准 attention 将输入 $X\in\mathbb{R}^{M\times d}$ 投影为 query、key 和 value：
+
+\[
+Q=XW_Q,\qquad K=XW_K,\qquad V=XW_V,
+\qquad
+\operatorname{Attn}(X)=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right)V.
+\]
+
+其中，$M$ 是输入元素数；$d$ 是表示维度；$W_Q,W_K,W_V$ 是投影矩阵；$d_k$ 是 key 维度。矩阵 $QK^\top$ 的形状为 $M\times M$，因此注意力分数计算和存储随 $M^2$ 增长。
+
+\lecturefigure{slide-04-standard-qkv-attention.jpg}{标准 QKV attention：每个输入元素与全部 key 比较。}{Stanford Online 当前官方视频 00:06:02--00:08:01。}
+
+\begin{importantbox}{Self-attention 的输入规模成本}
+忽略常数时，一层 attention 的核心分数成本约为 $\mathcal{O}(M^2d)$，注意力矩阵内存约为 $\mathcal{O}(M^2)$。若图像从 $224^2$ 像素扩大到视频或高分辨率多模态流，$M$ 的增长会迅速压倒模型深度扩展。
+\end{importantbox}
+
+\subsection{Non-locality：昂贵但通用的连接方式}
+
+卷积预设邻近像素更相关，能用局部 kernel 高效处理网格。Attention 则让远距离元素直接交互，因此可处理集合、长距离匹配和未知拓扑。讲者把 non-locality 视为通用性的关键，而不是需要完全消除的浪费。
+
+\lecturefigure{slide-05-why-non-locality.jpg}{Non-local attention 不预先规定局部邻域，卷积则以网格邻接限制连接。}{Stanford Online 当前官方视频 00:08:02--00:08:37。}
+
+\teachervoice{老师的判断不是“attention 永远优于 convolution”，而是两者位于不同 Pareto 点：已知图像结构时，卷积往往更快、更省数据；面对事件相机、细胞、点云或未知科学数组时，我们可能连正确的卷积邻域都不知道。}
+
+\subsection{Position as feature：把坐标交给学习，而不是写进连线}
+
+本节关注 non-locality 的配套条件：若 attention 对输入排列天然不敏感，模型必须获得位置才能重建空间、时间或序列关系。Perceiver 将坐标编码和内容拼接，让架构知道“这是哪里”，却不强制“只能与谁相连”。这比完全无位置更可用，也比固定局部 kernel 更弱假设。
+
+\lecturefigure{slide-06-why-featurize-position.jpg}{将位置编码成特征，使 attention 学习空间关系而非使用硬连接规则。}{Stanford Online 当前官方视频 00:08:38--00:09:29。}
+
+\begin{warningbox}{弱偏置不等于位置无关}
+若任务要求空间输出，模型仍必须区分坐标。不给位置会让不同排列不可辨；给位置但允许全局 attention，才是“弱化局部结构”，不是“删除结构”。
+\end{warningbox}
+
+\subsection{Scalability 与 generality 的张力}
+
+讲座把 convnet 与 Transformer 放在一张概念图上：convnet 对网格高度优化，复杂度可近似线性，但适用输入更窄；Transformer 适合一般集合，却承受二次 attention。Perceiver 的设计目标是保留非局部、位置特征化和权重共享，同时重写输入规模复杂度。
+
+\lecturefigure{slide-07-scalability-vs-generality.jpg}{ConvNet 与 Transformer 在输入结构假设和复杂度上的权衡。}{Stanford Online 当前官方视频 00:09:30--00:09:41。}
+
+\begin{knowledgebox}{读图：不是从左到右的“进化路线”}
+图中两端代表不同优化目标。若任务固定为图像分类且数据有限，convnet 的局部偏置可能更优；若输入结构变化频繁，Transformer/Perceiver 的统一接口可能降低开发成本。评价应同时包含质量、数据量、速度和跨域复用。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+Transformer 的通用性来自 non-local attention、位置特征化与共享矩阵计算，但 raw input self-attention 付出 $M^2$ 成本。Perceiver 要解决的正是“保留接口，缩小昂贵工作空间”。
+

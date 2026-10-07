@@ -1,0 +1,110 @@
+\section{四个 myths：从模型名字走向系统账本}
+
+课程中最具教学价值的部分，是连续拆解四个直觉错误。它们分别混淆 expert identity、total parameters、active compute 与 semantic specialization。本章逐个给出可计算的替代解释，并把 Q\&A 中的 memory、communication 与 throughput 补进来。
+
+\subsection{Myth 1：Mixtral 只有八个全局 experts}
+
+上一章已经说明 Mixtral 只在每层 MLP 路径引入稀疏 experts；这里首先纠正由“8x7B”命名诱发的全局角色想象。读下面的结构图时，应先区分“每层有几个可选 MLP”与“全模型有几个可跨层追踪的身份”，再判断 expert 编号能否承载语义。“8x7B”容易让人想象八个贯穿所有层的专家，实际却是每个 Transformer layer 都有八个 expert MLP；不同层的 expert 0 没有共享 identity。若有 $N=32$ 层，结构上存在 $32\times 8=256$ 个 layer-local expert modules。
+
+\lecturefigure{slide-14-myth-eight-experts.jpg}{Myth 1：每层都有八个 experts，而非八个全局 experts}{Stanford Online 官方录像 00:15:12}
+
+同一层内 expert label 具有 permutation symmetry。对任意 expert permutation $\pi$，若同时置换 expert weights 与 router output channel，函数保持不变：
+\[
+\sum_i g_i(x)E_i(x)=\sum_i g_{\pi(i)}'(x)E_{\pi(i)}'(x).
+\]
+因此“expert 3”只在固定 checkpoint、固定 layer、固定 labeling 下有意义，不能跨层或跨训练 run 比较编号。
+
+\teachervoice{00:14:15--00:15:09，Albert 说模型命名可能造成误解：每层八个专家，层内编号可置换；所以总共是许多 layer-local experts，而不是八个长期角色。}
+
+\begin{warningbox}{不要跨层追踪 expert 编号}
+Layer 15 的 expert 3 与 layer 31 的 expert 3 没有天然语义连续性。若研究“同一个 expert 的成长”，必须先定义可比 alignment，而不是只比较数组下标。
+\end{warningbox}
+
+\subsection{Myth 2：\texorpdfstring{$8\times 7\mathrm{B}=56\mathrm{B}$}{8 x 7B = 56B} 就是精确参数量}
+
+简单乘法忽略 shared embeddings、attention、normalization 和 router。课程给出约 46.7B total parameters 与 12.9B active parameters。真正需要记住的不是小数，而是 decomposition：总参数计算所有 expert weights，活跃参数只计算当前 token 选中的两个 experts，加上始终执行的 shared parts。
+
+\lecturefigure{slide-15-myth-56b.jpg}{Myth 2：shared attention 使总参数不是简单的 56B}{Stanford Online 官方录像 00:15:37}
+
+定义 expert fraction
+\[
+\rho=\frac{kP_e}{P_s+kP_e},
+\]
+它表示活跃路径中 expert MLP 占比。即使 $k/E=1/4$，整体 active/total ratio 也不严格是四分之一，因为 shared parameters 在分子分母都出现。
+
+\begin{importantbox}{参数量报告的最小完整格式}
+至少同时报告：total parameters、active parameters per token、number of experts $E$、top-$k$、shared attention 配置和精度。只写“13B-class”会隐藏 46.7B 权重驻留；只写“47B model”又会隐藏每 token 稀疏执行。
+\end{importantbox}
+
+\teachervoice{00:15:09--00:15:41，讲者纠正 56B 说法：attention 与 gating 共享，整体约 46.7B；每个 token 约看到 12.9B active parameters，而不是 14B。}
+
+\subsection{Myth 3：cost 与 active parameters 成正比}
+
+如果模型只在单卡上顺序执行，active parameters 是 FLOPs 的重要 proxy；一旦 experts sharding 到多卡，token 必须根据 router 决策重排并发送。Sharding（分片）指把不同 expert weights 放在不同 devices 上，使每卡不再复制全部 experts；它节省每卡存储，却引入 dispatch/combine communication。
+
+\lecturefigure{slide-16-myth-cost-active.jpg}{Myth 3：active parameters 不能代表全部 serving cost}{Stanford Online 官方录像 00:16:42}
+
+一个 batch 有 $T$ 个 tokens，expert $i$ 接收 $n_i$ 个 token，则理想均匀负载为 $T k/E$。定义 imbalance ratio
+\[
+I=\frac{\max_i n_i}{Tk/E}.
+\]
+$I=1$ 表示最均匀；$I>1$ 表示最忙 expert 超过平均。并行 step 往往由 $\max_i n_i$ 决定，因此少数热点可让其他 devices 空等。
+
+\begin{knowledgebox}{首次使用：expert parallel all-to-all}
+Expert parallelism 把 experts 分片到 ranks。Dispatch all-to-all 先把每个 token 发到目标 expert 所在 rank；expert 计算后，combine all-to-all 把输出送回原 rank。跨 node 通信通常比同 node GPU interconnect 更慢，所以 topology 与 placement 会改变 latency。
+\end{knowledgebox}
+
+\teachervoice{00:15:41--00:16:49，Albert 明确反对把 cost 与 active parameter count 绑定。动态 routing 需要发送 token，无法预先固定路径，所以实际 serving 比同 active-size dense model 多出通信成本。}
+
+\subsection{Inference load balance：最慢 expert 决定这一轮何时结束}
+
+负载平衡不只是 training auxiliary loss。Inference 时真实 prompt distribution 可能让 router 偏向少数 experts，形成 straggler。即使平均计算量正确，只要某个 expert queue 过长，整个 batch 的 combine 阶段就必须等待它完成。
+
+\lecturefigure{slide-17-inference-load-balance.jpg}{开放问题：怎样在 inference 时平衡 expert loads}{Stanford Online 官方录像 00:17:36}
+
+常见 capacity 表达为
+\[
+C=\left\lceil \alpha\frac{Tk}{E}\right\rceil,
+\]
+其中 $\alpha\ge 1$ 是 capacity factor。若 expert 收到超过 $C$ 的 token，可以 drop、reroute 或延迟处理；每种策略都会在 quality、latency 与 determinism 间交换。
+
+\begin{warningbox}{训练均匀不保证线上均匀}
+Training data 的 router distribution 可能接近均匀，生产 prompt 仍可能集中在某些模式。线上应记录 per-expert token count、queue time、drop/reroute rate 和 tail latency，而不是只看平均 tokens/expert。
+\end{warningbox}
+
+\teachervoice{00:16:49--00:17:36，讲者把 inference load balance 描述为等待最慢 expert 的问题，并提到 capacity-aware neighbor routing、mixture of depths 等探索。}
+
+\subsection{Compressing SMoEs：量化、offload 与 sparsification 不是一回事}
+
+课程把压缩作为 open question，而不是已经完成的 recipe。Quantization（量化）降低每个 weight 的 bit 数；CPU offload 把部分 experts 从 GPU HBM 移到 CPU DRAM，需要时传输；sparsification 则尝试删除或置零 expert 内部不重要权重。这三者优化的资源不同，代价也不同。
+
+\lecturefigure{slide-18-compressing-smoe.jpg}{开放问题：能否把 SMoE 压缩到极小内存}{Stanford Online 官方录像 00:19:07}
+
+若 total parameters 为 $P$，每参数 $b$ bit，理想权重存储下界为
+\[
+M_{\text{weights}}=\frac{Pb}{8}\ \text{bytes}.
+\]
+实际还要加 scale/zero-point、KV cache、activation workspace、router buffers 和 framework metadata。Offload 则增加近似传输时间
+\[
+t_{\text{transfer}}\approx \frac{M_{\text{moved}}}{B_{\text{CPU--GPU}}},
+\]
+其中 $B_{\text{CPU--GPU}}$ 是有效互连带宽。
+
+\begin{knowledgebox}{术语消化：三类压缩}
+\begin{tabularx}{\textwidth}{L{0.18\textwidth} L{0.24\textwidth} X}
+\toprule
+方法 & 主要节省 & 主要风险 \\
+\midrule
+Quantization & 每个 weight 的 bytes & 精度损失、dequant kernel、scale overhead \\
+Offload & GPU resident memory & PCIe/NVLink transfer、cache miss、tail latency \\
+Sparsification & 有效 nonzero weights/FLOPs & 不规则 kernel、质量退化、重新训练 \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\teachervoice{00:17:36--00:19:15，Albert 引用社区对极端压缩的乐观猜测，但承认截至讲课时还没有看到令人信服的 extreme SMoE sparsification 结果；这是一条研究议程，不是发布承诺。}
+
+\subsection{本章小结}
+
+四个 myth 的共同根源，是把名称当成系统模型。正确替代是：experts 是 layer-local 且可置换；total 与 active parameters 必须分开；serving cost 还包含 communication 与 imbalance；semantic domain specialization 既非必要也未被 routing 图证明。Load balance 与 compression 则把这些概念落到真实硬件约束。
+

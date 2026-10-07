@@ -1,0 +1,115 @@
+\section{Context、multi-context 与 near-shallow caching}
+
+前半讲回答“参数怎样起步”，这一章回答“计算怎样少重复”。课程认为固定超长 context、document packing 与可变长度数据之间存在错配；SAFFU 的矩阵形状允许按 context length 选择参数子块，再结合 frozen embedding 缓存底层 pairwise comparisons。
+
+\subsection{长窗口不自动包含更多有用信息}
+
+固定 context window $K_{\max}$ 的 attention cost 近似
+\[
+C_{\text{attn}}=\Theta(BK_{\max}^{2}d),
+\]
+其中 $B$ 是 batch size，$d$ 是 hidden dimension。如果大多数文档长度 $K_m\ll K_{\max}$，padding token 仍会占矩阵位置。更长窗口增加容量，却不保证每个样本真的提供更多相关 context。
+
+\lecturefigure{slide-11-longer-contexts.jpg}{长窗口是任意工程上限，不等于每个样本都需要同样 context}{Stanford Online 官方录像 00:34:22}
+
+\begin{knowledgebox}{Context 至少有三种含义}
+\textbf{Block context} 是模型一次接收的固定 token 数；\textbf{document context} 是同一文档中真实相关的前后文；\textbf{linguistic/radial context} 是围绕目标 token 的统计邻域。把三者都叫 context，会掩盖 padding、packing 和建模假设的差异。
+\end{knowledgebox}
+
+\teachervoice{00:32:20--00:34:55，Williams 认为更长窗口会显著增加成本，却不必然带来更多信息；context complexity 应由数据承载的信息决定，而不是由单一 block size 决定。}
+
+\subsection{Multi-context SAFFU：为不同长度准备参数分支}
+
+上一节已经说明固定最大窗口会让短样本支付无效 quadratic work；multi-context design 的回答不是把所有文档硬塞进同一 block，而是让模型根据样本长度选择最小可容纳分支。读架构图时先比较各 branch 的 context width 和参数共享位置，再看它们如何汇入同一个输出空间。课程为不同 context widths $b\in\mathcal B$ 配置 $W_b,U_b$，最后映射到共享输出。若样本长度为 $K_m$，选择满足 $b\ge K_m$ 的最小分支，可写成
+\[
+b^*(m)=\min\{b\in\mathcal B:b\ge K_m\},
+\]
+\[
+\hat y_m=\operatorname{softmax}\!\left(
+\operatorname{softmax}(x_{m,h}W_{b^*}X_m^\top)X_mU_{b^*}O
+\right).
+\]
+
+\lecturefigure{slide-12-multicontext-design.jpg}{Multi-context SAFFU：按 context width 选择分支}{Stanford Online 官方录像 00:36:29}
+
+\begin{importantbox}{动态分支的收益与代价}
+收益是短样本不必支付最长窗口的完整 quadratic cost；代价是要维护多组参数或可切片参数、构造 length-aware batches，并确保不同分支输出落在兼容表示空间。
+\end{importantbox}
+
+\begin{lstlisting}[caption={Length-aware dynamic context batching 伪代码}]
+lengths = measure_document_lengths(dataset)
+buckets = bucket_by_supported_context(lengths, widths=[128, 256, 512, 1024])
+
+for width, batch in buckets:
+    x = pad_only_to(batch, width)
+    weights = saffu_parameters.for_width(width)
+    loss = language_model_loss(x, weights)
+    update_trainable_layers(loss)
+\end{lstlisting}
+
+\teachervoice{00:34:55--00:37:34，讲者解释 multi-context branch 的关键是 modified attention matrix 可按长度取参数子集；标准低维 Q/K projection 并不自然对应这种切片。}
+
+\subsection{Embedding brittleness：唯一编码不等于相关表示}
+
+Bit-cipher 的唯一性使初始化可复现，但两词共享若干 bits 不一定等价于语义相关。课程提出利用 radial co-occurrence 改善 embedding：围绕 token 的不同半径统计共同出现，再把这些相关性聚合到 deterministic code 上。
+
+\lecturefigure{slide-13-embedding-brittleness.jpg}{从 bit identity 走向 radial co-occurrence embedding}{Stanford Online 官方录像 00:37:34}
+
+可将第 $r$ 个 radius 的共现矩阵记为 $B^{(r)}$，一种抽象聚合形式是
+\[
+E_i=\operatorname{normalize}\!\left(
+\operatorname{concat}_{r\in\mathcal R}
+\sum_j B^{(r)}_{i,j}e_j
+\right).
+\]
+这里 $e_j$ 是 bit-cipher identity vector，$E_i$ 才吸收局部统计关系。实际论文中的 aggregation 与 weighting 需按实现复现，不能由本式替代。
+
+\begin{warningbox}{不要把“可解释 bit”误当成语义轴}
+单个 bit 的开关规则由编码算法决定，不必对应 noun、tense、sentiment 等人类概念。语义是否形成，应通过 probing、nearest neighbors 与下游任务验证。
+\end{warningbox}
+
+\teachervoice{00:37:34--00:39:41，讲者指出 naive bit assignment 虽然稳定，却不能消除 embedding brittleness；需要 radial co-occurrence 等统计把相关性重新注入表示。}
+
+\subsection{Caching comparisons：速度收益的核心条件}
+
+若 embedding matrix $E$ 固定，第一层 context comparisons
+\[
+C_{i,j}=e_i^\top e_j
+\]
+只由 token identities 决定，可以离线预计算到 lookup table。训练或推理时根据 token IDs 直接读取 $C$，再应用 $W$ 和 softmax。这样省去重复 dot products，但不省后续 weighting、aggregation 和上层网络。
+
+\lecturefigure{slide-14-caching-vector-comparisons.jpg}{冻结 embedding 后缓存第一层 vector comparisons}{Stanford Online 官方录像 00:39:41}
+
+\begin{importantbox}{Cache invalidation rule}
+只要 embedding 更新为 $E'\neq E$，旧缓存 $C=EE^\top$ 就不再等于 $E'E'^\top$。因此训练阶段要么冻结 embedding，要么周期性重建 cache，并把重建成本计入总训练时间。
+\end{importantbox}
+
+\begin{knowledgebox}{内存层级不能省略}
+完整 $V\times V$ comparison table 可能远大于 embedding 本身，不能默认全部驻留内存。实现需要稀疏/分块缓存、按 batch gather，或只缓存高频 pair。CPU DRAM（Dynamic Random-Access Memory，主存）容量较大但延迟高；GPU HBM（High Bandwidth Memory，高带宽显存）更快但更昂贵；片上 SRAM（Static Random-Access Memory，缓存/共享存储）最快却最小。
+\end{knowledgebox}
+
+\teachervoice{00:39:41--00:41:48，Williams 把缓存描述为 near-shallow 的主要成本节省：embedding 不更新时，底层 comparisons 可预计算；一旦 vectors thaw 并更新，缓存假设就失效。}
+
+\subsection{Packing 与 dynamic context：效率技术不等于 context model}
+
+Packing 把多个短文档放入同一长 block，并用 mask 防止跨文档 attention。它减少 padding 和 batch 数，但仍构造长度 $K_{\max}$ 的 quadratic matrix。Dynamic context 则让短文档进入更短 branch，近似成本
+\[
+C_{\text{dynamic}}\propto \sum_{m=1}^{B}K_m^2d,
+\qquad
+C_{\text{fixed}}\propto BK_{\max}^2d.
+\]
+
+\lecturefigure{slide-15-packing-contexts.jpg}{Packing、padding 与动态 context 的取舍}{Stanford Online 官方录像 00:42:14}
+
+\begin{warningbox}{课程没有给出 matched packing benchmark}
+Dynamic context 是否更快，取决于 kernel efficiency、bucket fragmentation、batch size、mask implementation 和硬件。讲者在 Q\&A 明确说尚未与大型模型中的 oracle packing 做直接对照，因此这里只能保留机制分析与研究判断。
+\end{warningbox}
+
+\teachervoice{00:42:38--00:45:55，讲者认为 packing 用无关文档填满窗口，是有效率但不忠实的 context 组织；dynamic length batching 让短文档只使用更小参数子集。}
+
+\teachervoice{01:16:20--01:19:00，Q\&A 进一步承认没有进行 matched large-model comparison；packing 与 dynamic blocks 的相对收益仍需要专门实验。}
+
+\subsection{本章小结}
+
+Near-shallow 效率来自两件事：按真实长度减少无效 quadratic work，以及在 embedding 固定时复用底层 comparisons。两者都不是免费优化；动态分支增加模型与 batching 复杂度，缓存则引入容量和失效问题。
+

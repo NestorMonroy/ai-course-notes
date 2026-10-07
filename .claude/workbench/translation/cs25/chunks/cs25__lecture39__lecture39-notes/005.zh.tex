@@ -1,0 +1,115 @@
+\section{Masked Modeling、空间上下文与虚拟细胞}
+
+有了高维空间数据，下一问是如何把它变成训练任务。课堂选择 masked modeling：随机隐藏部分基因计数，让模型根据可见基因和上下文恢复它们。这个目标既能在没有治疗标签时利用大规模观测数据，也为后面的 prompt、imputation 与 counterfactual 提供统一接口。
+
+\subsection{从基因计数到 token}
+
+“Autoencoder”一词容易让人想到压缩整张图再重建像素；这里更接近 masked language modeling：基因身份和计数被离散或嵌入成 token，模型只预测被遮蔽部分。下面先明确 token、mask 和条件变量，再讨论为什么计数分布、基因顺序与部署时可见信息都会改变训练目标的含义。
+
+\lecturefigure{slide-179-masked-autoencoder.jpg}{Masked autoencoding：token 化、部分遮蔽、Transformer 主干与解码}{00:32:36}
+
+流程从 gene/count 表开始，经 tokenization 与 partial masking 进入主干，最后恢复 masked tokens。若遮蔽集合为 $\mathcal{M}$、可见集合为 $\bar{\mathcal{M}}$，目标可写为
+\[
+\mathcal{L}_{\mathrm{mask}}
+=-\sum_{j\in\mathcal{M}}
+\log p_\theta(x_j\mid x_{\bar{\mathcal{M}}},c),
+\]
+其中 $c$ 可包含空间邻域、患者或其他模态。损失函数的分布形式应匹配 count data，而不是默认高斯像素误差。
+
+\lecturefigure{slide-182-token-masking.jpg}{把 gene/read 对变成序列，并对部分计数施加 MASK}{00:34:06}
+
+图中每个 token 同时携带基因身份与读数。基因顺序本身没有自然语言那样的句法，因此 positional encoding 需要谨慎：可按固定 gene vocabulary 排列，也可把基因作为集合处理。若读数被粗暴离散，稀有但重要的表达变化可能丢失；若保留连续值，输出分布与归一化又更复杂。
+
+\lecturefigure{slide-184-prompted-inference.jpg}{推理时用少量已知基因作为 prompt，预测其余读数}{00:34:57}
+
+课堂把已知标志物写成提示，例如“这是一个 T cell，并给出若干 marker”，其余位置全部 mask。模型输出不是自由文本，而是条件基因表达分布。Prompt 在这里表示结构化测量条件，不能直接套用语言模型中自然语言指令的所有直觉。
+
+\begin{lstlisting}[language=Python,caption={掩码基因建模：只在隐藏位置计算监督信号}]
+def masked_gene_step(gene_ids, counts, context, mask):
+    visible_counts = counts.clone()
+    visible_counts[mask] = MASK_VALUE
+    hidden = transformer(gene_ids, visible_counts, context)
+    predicted_distribution = decoder(hidden[mask], gene_ids[mask])
+    return count_negative_log_likelihood(
+        predicted_distribution, counts[mask]
+    )
+\end{lstlisting}
+
+\begin{warningbox}{Perplexity 不适合被无解释地搬到计数预测}
+Perplexity（PPL）是交叉熵的指数，即 $\operatorname{PPL}=\exp(\text{cross-entropy})$，可直观理解为“每个位置的有效选项数”，但它依赖离散输出空间。基因计数若使用连续或负二项分布，应报告相应 likelihood、校准和生物误差，而不是只给一个语言模型式 perplexity。
+\end{warningbox}
+
+\subsection{空间邻域作为 disambiguation}
+
+单个细胞的少量 marker 可能对应多个状态；邻近细胞、组织区域和微环境提供额外证据。课堂把八个近邻压缩成一个条件 token，再通过 adaptive LayerNorm、额外 token 或 cross-attention 注入主干。这个设计把前面的 disambiguation 具体化：目标细胞自身是待解释流，空间生态是减少歧义的条件流。
+
+\lecturefigure{slide-186-spatial-neighborhood-conditioning.jpg}{空间邻域经过 Transformer bottleneck 后条件化目标细胞}{00:36:25}
+
+若目标细胞表示为 $h_i$，邻域为 $\mathcal{N}(i)$，可写成
+\[
+c_i=f_\phi\!\left(\{h_j:j\in\mathcal{N}(i)\}\right),\qquad
+\hat{x}_{i,\mathcal M}=g_\theta(h_i,c_i).
+\]
+$f_\phi$ 是邻域编码器，$c_i$ 是压缩条件。压缩形成 information bottleneck：提高效率，却可能遗漏稀有邻居或远距离结构，因此邻域大小和聚合方式是实验变量。
+
+\teachervoice{00:35:05--00:36:24，老师说团队试过 adaptive LayerNorm、追加 token 和 cross-attention，“它们都能工作，有些只是更高效”。更稳定的结论是空间上下文显著降低 backbone loss，而不是某个融合名称获胜。}
+
+\begin{importantbox}{空间上下文为什么能消歧}
+如果一个细胞只表达有限 marker，单看自身可能无法区分状态；若周围七个细胞都呈细胞毒 T 细胞特征，该邻域会改变后验概率。这里的多模态不是不同文件格式，而是“目标细胞自身”与“空间生态”两种信息源。
+\end{importantbox}
+
+\subsection{大规模虚拟细胞推理}
+
+训练完成后，系统可以在患者组织的许多位置反复设置条件，询问“若某类细胞位于这里，它可能表达什么”。这些推理被称为 virtual cell simulations，但它们仍是模型条件预测，不是实验室中真正生成的细胞。
+
+\lecturefigure{slide-192-virtual-cell-inference.jpg}{在组织空间中批量查询虚拟细胞表达状态}{00:37:26}
+
+左侧是真实组织，中央选择空间位置和邻域，右侧逐步填充某基因的预测。讲者报告当时已运行十亿量级查询，这说明推理吞吐量很高；但查询数不是独立生物证据数。大量相关位置共享同一患者、同一模型偏差和相似邻域。
+
+\lecturefigure{slide-194-virtual-cell-model.jpg}{虚拟细胞模型总览：从组织位置、prompt 到基因表达图}{00:37:59}
+
+总览图把“prompt + neighborhood + backbone + decoder”连成闭环。正确读法是：模型在特定条件下生成一张假设性表达地图；错误读法是：模型已经观测到了未来细胞。任何下游药物排序都需要模型不确定性、对照基因和实验复核。
+
+\lecturefigure{slide-197-cellporter-ui.jpg}{Cellporter 界面把虚拟细胞预测组织成可探索工具}{00:39:49}
+
+界面允许研究者选择组织、细胞或基因并比较预测。工具化很重要，因为科学家需要快速形成可检验假设；但 UI 的流畅性不会提高模型证据等级。应在界面中暴露置信区间、训练分布距离、测量缺失和实际验证状态，而不只显示漂亮热图。
+
+\subsection{反事实敲除：从预测到假设生成}
+
+Counterfactual（反事实）问题改变一个输入条件，再比较输出。这里通过假设性 gene knockout 观察组织预测如何变化。它比静态相关图更接近干预思维，但模型内部干预仍不等于现实生物干预。
+
+\lecturefigure{slide-199-gene17-knockout.jpg}{Gene 17 敲除后的空间预测变化}{00:39:59}
+
+图中左侧是组织位置，右侧柱状图比较不同输出的变化。首先应看零点两侧：蓝色与红色表示预测下降或上升；其次要看效应是否集中于特定区域和细胞类型。若模型只学到共表达相关性，敲除输入 token 也可能产生看似合理但非因果的级联。
+
+\lecturefigure{slide-205-gene20-knockout.jpg}{另一基因敲除产生不同的空间与输出模式}{00:40:52}
+
+第二个例子说明反事实不是固定模板：不同基因应影响不同位置和下游读数。比较多个 intervention 可帮助发现候选机制，并检查模型是否对所有扰动都给出同质反应。真正验证仍需 CRISPR、药物处理或其他实验改变现实系统。
+
+反事实差异可记为
+\[
+\Delta_k(x)=
+\mathbb{E}_\theta[Y\mid X=x,\operatorname{do}_{\text{model}}(G_k=0)]
+-\mathbb{E}_\theta[Y\mid X=x].
+\]
+这里特意写成 $\operatorname{do}_{\text{model}}$：它是模型中的输入干预，不应与现实因果图上的 $\operatorname{do}$ 混为一谈。
+
+\begin{warningbox}{Model counterfactual 不是 causal effect}
+模型敲掉一个 gene token 后的变化，只说明模型如何使用该信息。要声称生物因果效应，还需真实干预、混杂控制、重复实验和跨患者验证。模型反事实最适合作为实验优先级工具。
+\end{warningbox}
+
+\begin{lstlisting}[language=Python,caption={虚拟细胞反事实：保留患者与邻域，只改变候选干预}]
+def virtual_cell_counterfactual(patient, location, prompt, intervention):
+    neighborhood = load_spatial_neighbors(patient, location)
+    baseline = model.predict(prompt, neighborhood)
+    modified_prompt = apply_intervention(prompt, intervention)
+    counterfactual = model.predict(modified_prompt, neighborhood)
+    return counterfactual - baseline
+\end{lstlisting}
+
+\teachervoice{00:38:42--00:43:34，课堂问题追问样本是否足够、怎样验证。老师没有把训练 loss 当作终点，而是强调 held-out patient、定向测量与后续实验；这正是虚拟细胞结果的证据边界。}
+
+\subsection{本章小结}
+
+Masked modeling 把基因计数学习转为条件恢复任务，空间邻域提供消歧信息，虚拟细胞推理把同一模型变成大规模查询接口。反事实敲除可用于生成假设，但其输出属于模型内条件变化，必须经过现实干预才能升级为因果证据。
+

@@ -1,0 +1,162 @@
+\section{nanoGPT：从字符到可生成的 Decoder-only Transformer}
+
+前面的图解释仍可能停留在直觉。本章沿 Karpathy 的 nanoGPT walkthrough，把文本、token、batch、block、loss、mask 与 generation 连成一条可运行路径。目标不是记住一份 300 行代码，而是能够在每个 tensor 维度上回答：它代表哪些独立样本、哪些时间位置、哪些 heads，以及哪些 features。
+
+\subsection{证据边界与 Tiny Shakespeare}
+
+Karpathy 介绍 nanoGPT 时强调两点：代码足够小，能让学生读完；实现又足够认真，在当时可用 8 张 GPU 训练约 38 小时复现 GPT-2 级实验。课堂演示使用 Tiny Shakespeare 和字符 tokenizer，是为了暴露机制，不代表生产 GPT 也使用相同 vocabulary 或算力配置。
+
+\lecturefigure{slide-32-nanogpt.jpg}{nanoGPT：极简、可读、仍能进行严肃 GPT 复现实验。}{Stanford Online 官方视频 00:31:01--00:31:30。}
+
+\teachervoice{Karpathy 先承认图类比“今天早上才想出来”，随后立刻切到 executable implementation。这种顺序值得学习：直觉负责提出可检查的问题，代码与 tensor shape 负责防止直觉失控。}
+
+\lecturefigure{slide-33-tiny-shakespeare-dataset.jpg}{Tiny Shakespeare：把剧本文本拼成约 1 MB 的字符序列。}{Stanford Online 官方视频 00:31:31--00:32:00。}
+
+语言模型并不直接读取“意义”，而读取离散 symbol ID。对字符集合 $\mathcal V$ 建立映射 $\operatorname{encode}:\mathcal V\to\{0,\ldots,|\mathcal V|-1\}$，整份文本变成一维整数序列。模型学习的是在这个编码与训练分布下的条件概率；“无限 Shakespeare”只是不断从 learned conditional distribution 采样。
+
+\subsection{Tokenization、文档边界与输入序列}
+
+\term{token} 是模型处理的离散基本单元，可能是字符、subword、patch 或其他 element；\term{vocabulary} 是可用 token 的集合。字符 tokenization 简单且没有 unknown word，却让序列更长；subword tokenization 缩短序列，但编码规则更复杂。Embedding 将 token ID 映射成 $d$ 维向量。
+
+\lecturefigure{slide-34-character-tokenization.jpg}{字符 tokenizer：建立字符与整数 ID 的双向映射。}{Stanford Online 官方视频 00:32:00--00:32:31。}
+
+\begin{knowledgebox}{读图：encode/decode 不等于模型推理}
+Tokenizer 只是 deterministic interface：\texttt{encode} 把字符串变成整数，\texttt{decode} 做逆映射；真正的概率建模发生在 embedding、Transformer blocks 与 output head 中。字符 ID 的数值大小没有语义，ID 7 并不比 ID 3 “更大”。
+\end{knowledgebox}
+
+\lecturefigure{slide-35-tokenized-data.jpg}{Tokenized data：长文本成为一条一维整数 stream。}{Stanford Online 官方视频 00:32:27--00:33:00。}
+
+多个独立文档可以用 special end-of-text token 分隔。课堂口头说模型应学会在边界“wipe memory”，更准确的表述是：边界 token 向模型提供分段信号；若 attention mask 仍允许跨边界读取，模型是否忽略前文取决于训练数据、目标和学到的权重，而不是 token 自动清空某个 RNN hidden state。
+
+\begin{lstlisting}[caption={Tiny Shakespeare 的字符编码与 shifted batch 构造。}]
+chars = sorted(list(set(text)))
+stoi = {ch: i for i, ch in enumerate(chars)}
+encode = lambda s: [stoi[ch] for ch in s]
+data = torch.tensor(encode(text), dtype=torch.long)
+
+def get_batch(data, batch_size, block_size):
+    starts = torch.randint(len(data) - block_size - 1,
+                           (batch_size,))
+    x = torch.stack([data[i:i + block_size] for i in starts])
+    y = torch.stack([data[i + 1:i + block_size + 1]
+                     for i in starts])
+    return x, y
+\end{lstlisting}
+
+\subsection{Batch size 与 block size：不要把两个维度混掉}
+
+\term{block size} 是一次 forward pass 中每个序列的最大 context length；\term{batch size} 是并行处理的独立序列数量。若 $B=4,T=8$，输入 $X\in\mathbb N^{4\times8}$ 包含四个互不通信的八-token 片段。GPU 并行发生在 batch、time、head 与 feature 等多个维度，但 attention 不应跨 batch element 交换信息。
+
+\lecturefigure{slide-36-batch-construction.jpg}{从一维 token stream 随机裁出 $B\times T$ 训练批次。}{Stanford Online 官方视频 00:33:00--00:33:38。}
+
+\begin{knowledgebox}{读图：四条横线不是一条更长的序列}
+每一行是独立样本，起点从数据 stream 随机采样；每行长度由 block size 控制。把 batch 维误当成 time 维会造成样本间信息泄漏。增大 batch 主要改善硬件利用率和梯度估计，增大 block size 才会扩展单个样本可直接使用的上下文，并显著增加 attention 计算与显存。
+\end{knowledgebox}
+
+\lecturefigure{slide-37-input-target-tensors.jpg}{Input/target tensors：目标是输入在时间上右移一位。}{Stanford Online 官方视频 00:33:38--00:35:00。}
+
+对每个位置 $t$，输入 prefix 是 $x_{\le t}$，监督标签是 $x_{t+1}$。因此一个长度 $T$ 的 chunk 同时提供 $T$ 个 next-token 训练例。若 logits 为 $z_{b,t,v}$，标签为 $y_{b,t}$，平均 cross-entropy 为
+
+\[
+\mathcal L=-\frac{1}{BT}\sum_{b=1}^{B}\sum_{t=1}^{T}
+\log\frac{\exp z_{b,t,y_{b,t}}}{\sum_{v\in\mathcal V}\exp z_{b,t,v}}.
+\]
+
+其中，$v$ 遍历 vocabulary。训练一次 forward 就监督所有时间位置，而生成时仍需逐 token 追加。
+
+\subsection{Embedding、Block 与 residual stream}
+
+Token embedding $E_{\text{tok}}[x_t]$ 提供“是什么”，position embedding $E_{\text{pos}}[t]$ 提供“在哪里”：
+
+\[
+\mathbf x_t^{(0)}=E_{\text{tok}}[x_t]+E_{\text{pos}}[t].
+\]
+
+这些 states 进入重复 blocks，最后经 LayerNorm 和线性 language-model head 输出 vocabulary logits。Decoder-only 表示没有独立 encoder 与 cross-attention，不表示模型“没有 decoder block”。
+
+\lecturefigure{slide-38-decoder-missing-gpt.jpg}{Decoder-only GPT：保留 masked self-attention 与 MLP，去掉 encoder/cross-attention。}{Stanford Online 官方视频 00:35:00--00:38:31。}
+
+\begin{knowledgebox}{读图：红色标注是在做架构减法}
+原始 Transformer decoder 每层包含 masked self-attention、cross-attention 和 feed-forward。GPT 没有源序列 encoder，因此删除 cross-attention；剩余 causal self-attention 负责从左侧 context 收集信息，MLP 负责每个 token 的局部变换。Output head 把最终 hidden state 映射到下一个 token 的 logits。
+\end{knowledgebox}
+
+\lecturefigure{slide-39-block-module.jpg}{nanoGPT Block：pre-norm attention 与 MLP 的两次 residual update。}{Stanford Online 官方视频 00:37:08--00:38:31。}
+
+Residual connection 把子层输出加回主 stream，使梯度拥有短路径；\term{LayerNorm} 在 feature 维归一化单个 token state，稳定不同层的尺度；\term{pre-norm} 表示先归一化再进入子层。Block 的参数在不同 token 位置共享，因此同一个计算规则可作用于任意位置表示。
+
+\lecturefigure{slide-40-mlp-module.jpg}{Per-token MLP：线性升维、GELU、线性投影与 dropout。}{Stanford Online 官方视频 00:38:31--00:38:55。}
+
+\term{GELU} 是平滑非线性激活。经典 feed-forward network 把 residual width $d$ 扩到约 $4d$，再投影回 $d$。MLP 不跨 token 读取信息，因此它的所有 token 计算可完全并行；但不同 token 输入已经通过 attention 混合了上下文，所以同一个 MLP 会对不同语境产生不同输出。
+
+\subsection{Causal self-attention：mask 防止答案泄漏}
+
+若位置 $t$ 能读取未来位置 $s>t$，训练标签已经出现在输入 tensor 的右侧，模型会作弊。Causal mask 定义
+
+\[
+M_{t,s}=\begin{cases}
+0,&s\le t,\\
+-\infty,&s>t.
+\end{cases}
+\]
+
+加到 logits 后再 softmax，未来位置的概率变为零。Mask 是训练目标的一部分：它让并行计算所有位置仍然遵守 left-to-right factorization。
+
+\lecturefigure{slide-41-full-implementation.jpg}{CausalSelfAttention 全实现：Q/K/V reshape、mask、softmax、value aggregation 与 projection。}{Stanford Online 官方视频 00:38:55--00:41:34。}
+
+\begin{knowledgebox}{读图：高维 tensor 只是同一算法的批处理}
+实现把 $X$ 投影后 reshape 为 batch $B$、heads $H$、time $T$、head feature $d_h$。矩阵乘法一次完成所有 batch、head 和位置的 query-key dot products；\texttt{masked\_fill} 把未来 logits 设为 $-\infty$；softmax 得 weights；weights 再乘 values。transpose/contiguous/view 主要在重排维度，不是新的学习机制。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={带形状注释的最小 causal self-attention forward。}]
+def forward(self, x):
+    B, T, C = x.shape
+    q = self.q(x).view(B, T, self.n_head, C // self.n_head)
+    k = self.k(x).view(B, T, self.n_head, C // self.n_head)
+    v = self.v(x).view(B, T, self.n_head, C // self.n_head)
+    q, k, v = (z.transpose(1, 2) for z in (q, k, v))
+
+    scores = q @ k.transpose(-2, -1) / math.sqrt(k.size(-1))
+    scores = scores.masked_fill(self.causal[:, :, :T, :T] == 0,
+                                float("-inf"))
+    weights = torch.softmax(scores, dim=-1)
+    y = weights @ v
+    y = y.transpose(1, 2).contiguous().view(B, T, C)
+    return self.proj(y)
+\end{lstlisting}
+
+\subsection{训练曲线与 autoregressive generation}
+
+前面已经构造了训练 loss，本节把“loss 下降”和“文本生成”连接起来，并明确两者能证明什么。训练曲线下降说明模型更好地预测 held-out token，但不自动证明语法、事实或推理能力。对 Tiny Shakespeare，较低 loss 会让输出逐渐学到角色名、换行、词形与戏剧格式；因为数据小、字符级 context 有限，生成仍可能局部流畅而全局无意义。读图时应先看优化目标是否改善，再检查采样文本呈现的是局部统计、长程结构还是记忆复现。
+
+\lecturefigure{slide-42-training-loss.jpg}{训练 loss 下降：next-character prediction 持续改善。}{Stanford Online 官方视频 00:41:34--00:41:43。}
+
+\begin{warningbox}{读图：loss 是目标函数证据，不是通用智能刻度}
+Cross-entropy 衡量真实下一个 token 的对数概率。它支持“模型更贴合该数据分布”的结论，却不能单独证明长期一致性、事实正确、鲁棒性或安全性。训练与验证曲线还应分开阅读，以识别 memorization 与 generalization。
+\end{warningbox}
+
+\lecturefigure{slide-43-fake-shakespeare-output.jpg}{采样生成的“假莎士比亚”：格式与局部统计已被模型吸收。}{Stanford Online 官方视频 00:41:41--00:43:12。}
+
+生成从起始 token 开始，每次取最后位置 logits、采样新 token、追加到 context 并重复。设最大 context 为 $T_{\max}$，则第 $n$ 步只保留最近窗口：
+
+\[
+\hat x_{n+1}\sim p_\theta(\cdot\mid \hat x_{\max(1,n-T_{\max}+1):n}).
+\]
+
+\begin{lstlisting}[caption={带有限 context cropping 的 autoregressive generation。}]
+@torch.no_grad()
+def generate(model, ids, max_new_tokens, block_size):
+    for _ in range(max_new_tokens):
+        context = ids[:, -block_size:]
+        logits, _ = model(context)
+        probs = torch.softmax(logits[:, -1, :], dim=-1)
+        next_id = torch.multinomial(probs, num_samples=1)
+        ids = torch.cat((ids, next_id), dim=1)
+    return ids
+\end{lstlisting}
+
+\teachervoice{课堂把 block size 8 的 toy model 一步步“喂回”预测字符：context 从 1 增长到 8，超过后窗口开始滑动。这个演示比只说“自回归”更重要，因为它暴露了训练并行、生成串行与有限 context 三者之间的张力。}
+
+\subsection{本章小结}
+
+nanoGPT 路径把抽象机制落到 tensor：文本经 tokenizer 变成 ID stream；随机裁剪形成 $B\times T$ batch；输入与目标错一位；token/position embedding 进入重复 decoder blocks；causal mask 防止未来泄漏；cross-entropy 训练所有位置；generation 再逐 token 采样并受 block size 限制。
+

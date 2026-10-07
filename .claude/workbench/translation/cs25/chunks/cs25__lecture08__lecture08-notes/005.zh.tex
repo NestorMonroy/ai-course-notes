@@ -1,0 +1,87 @@
+\section{QK 与 OV Circuits：一层模型究竟学了什么规则}
+
+上一节只把 $A^h$ 当作给定矩阵，现在需要解释 pattern 如何产生。对 row-vector convention，定义
+\[
+W_{QK}^h=W_Q^h(W_K^h)^{\top},
+\qquad
+A^h=\operatorname{softmax}\!\left(XW_{QK}^hX^{\top}+M_{\mathrm{causal}}\right).
+\]
+
+\begin{itemize}
+  \item $W_{QK}^h$：决定 destination/query 与 source/key 的 compatibility；
+  \item $W_{OV}^h$：决定 source residual 被映射成什么写入；
+  \item $M_{\mathrm{causal}}$：屏蔽未来 positions；
+  \item 一个 head 的功能必须同时描述 routing 与 writing。
+\end{itemize}
+
+\lecturefigure{slide-17-attention-pattern-qk.jpg}{Attention pattern 的计算：QK circuit 将 token/residual pairs 映射为 routing scores。}{Stanford Online 官方视频 00:20:08--00:20:39。}
+
+\subsection{把 QK/OV 都投影到 vocabulary space}
+
+若忽略 contextual residual contribution，可定义有效 token-space matrices：
+\[
+M_{QK}^h=W_EW_{QK}^hW_E^{\top},
+\qquad
+M_{OV}^h=W_EW_{OV}^hW_U.
+\]
+
+\begin{itemize}
+  \item $M_{QK}^h[a,b]$：destination token $a$ 对 source token $b$ 的相对偏好；
+  \item $M_{OV}^h[b,c]$：读取 source token $b$ 后对 output token $c$ 的 logit effect；
+  \item 两个矩阵都是 vocabulary-sized，通常巨大；
+  \item positional embedding 与 prior-layer residual 会让实际 score 超出纯 token lookup。
+\end{itemize}
+
+\lecturefigure{slide-18-vocabulary-square-matrices.jpg}{QK 与 OV 折叠后都是 vocabulary-sized square matrices。}{Stanford Online 官方视频 00:20:40--00:24:29。}
+
+\lecturefigure{slide-19-qk-ov-circuits.jpg}{Head 的两半：QK 连接 source/destination，OV 连接 attended token/output token。}{Stanford Online 官方视频 00:24:30--00:24:45。}
+
+\begin{knowledgebox}{读图：不要把四种 token 角色混成两个}
+Source token 是被读取位置的内容；destination token 是当前更新的位置；out token 是 head 写入后被提升或压低的预测 token；最终 next token 还要经过其他 paths 共同决定。QK 主要连接前两者，OV 主要连接 source 与 out。
+\end{knowledgebox}
+
+\teachervoice{讲者的直觉是 OV 更直接接受 output loss supervision：它决定写入哪些 logits；QK 通过“应该去哪里取信息”被间接训练。这个区分帮助读 dense matrix，但不意味着 QK 完全 unsupervised。}
+
+\subsection{Skip Trigram：一层 head 的基本规则}
+
+One-layer attention head 只能依据当前 destination representation 与候选 source representation 选择位置，然后用 source token 决定 output。它因此自然形成 skip-trigram rule：
+\[
+(\text{source token},\ \text{destination token})
+\longrightarrow \text{out token}.
+\]
+例如 destination 看到 “looks”，QK 可能偏向 earlier “perfect”，OV 再提升 “perfect” 或与之相关的 completion。
+
+\lecturefigure{slide-20-skip-trigram-examples.jpg}{QK/OV 组合形成 example skip trigrams。}{Stanford Online 官方视频 00:24:46--00:25:05。}
+
+\lecturefigure{slide-21-qk-source-destination.jpg}{QK circuit 明确链接 source token 与 destination token。}{Stanford Online 官方视频 00:25:06--00:27:47。}
+
+\begin{importantbox}{为什么叫 skip trigram}
+普通 trigram 依赖连续两个过去 tokens；这里 source 与 destination 可以相隔很远，中间被“skip”。规则仍只使用两个 token identities 决定第三个 output，因此表达力有限。
+\end{importantbox}
+
+\subsection{有限表达力会产生外部看来很奇怪的 bug}
+
+模型希望利用长距离 context，却只有 source/destination token pair 这个接口。它可能学到统计上常有用、但缺乏更丰富条件的规则，例如看到 rare technical token 后在若干可能位置盲目提升重复 token；当同一个 pair 在不同语境应产生不同 completion 时，one-layer head 无法区分。
+
+\lecturefigure{slide-22-correct-skip-trigrams.jpg}{模型学到的“正确”skip trigrams 与受限规则。}{Stanford Online 官方视频 00:27:48--00:32:33。}
+
+\lecturefigure{slide-23-qk-ov-composition-patterns.jpg}{一层模型可表达的 pattern family：source/destination matching 与 output mapping。}{Stanford Online 官方视频 00:32:34--00:32:57。}
+
+\lecturefigure{slide-24-positional-circuits.jpg}{部分 heads 主要编码 positional relations，而非纯语义 token pairs。}{Stanford Online 官方视频 00:32:58--00:33:31。}
+
+\begin{knowledgebox}{读图：Primarily Positional 不等于“无意义”}
+Local/previous-token/offset heads 可以为后续 heads 移动位置标签、短语状态或邻接信息。单独看它们对 logits 的 marginal effect 可能不大，但在多层 composition 中可能成为关键 upstream component。
+\end{knowledgebox}
+
+\subsection{One-layer model 的行为边界}
+
+一层 attention-only models 确实会获得少量 ICL，课堂给出的量级约为 $0.1$ nats，而不是两层模型约 $0.4$ nats；它们也不经历前述 sharp phase change。这个差异提示：单 head 的 skip-trigram rules 不足以实现更强 pattern completion，需要多层 composition。
+
+\lecturefigure{slide-25-one-layer-summary.jpg}{One-layer summary：QK/OV 可解释、skip trigrams 有用但受限、固定 pattern 后线性。}{Stanford Online 官方视频 00:33:32--00:33:57。}
+
+\teachervoice{Olah 说 Transformers “desperately want” to use long context，因为远处信息能减少大量 entropy；一层模型被架构限制，只能用容易出 bug 的粗糙规则去追求这个目标。}
+
+\subsection{本章小结}
+
+QK circuit 决定 source/destination routing，OV circuit 决定 attended token 对 output logits 的写入。一层模型因此可被读成 skip-trigram 与 positional rules；这些 rules 能利用长 context，却缺少根据前文动态构造 richer match 的能力。
+

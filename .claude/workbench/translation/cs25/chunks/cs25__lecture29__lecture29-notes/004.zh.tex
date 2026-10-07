@@ -1,0 +1,66 @@
+\section{为什么 MoE-fy MLP：性能证据与工作假设}
+
+上一章解释“怎样路由”，本章追问“为什么优先扩 MLP”。讲者采用一个常见但未证明的分工直觉：MLP 更像知识存储，attention 更像组合与算法。若这个直觉有部分成立，扩大 MLP capacity 应对 knowledge-heavy tasks 更有帮助；课程随后用两组 benchmark 图检验这种趋势，并提出 MoE-fying attention 的反问题。
+
+\subsection{MLP 存知识、attention 做算法：有用但危险的直觉}
+
+这张 slide 的价值在于明确写出假设，而不是证明假设。Transformer 的知识和计算分布在 embeddings、attention、MLP、normalization 与 residual interactions 中；把功能二分可以组织实验，但不能据此断言某个 layer 或 expert 只负责一种认知功能。
+
+\lecturefigure{slide-10-why-moe-mlp.jpg}{为什么优先 MoE-fy MLP：knowledge-versus-reasoning 的工作假设}{Stanford Online 官方录像 00:10:58}
+
+\begin{warningbox}{不要把机制直觉写成定位定理}
+即使 MLP 扩容与 knowledge benchmark 同时提升，也不能推出“知识只存在 MLP”。参数更多、训练动态变化、router regularization 和数据利用都可能影响结果。可靠表述应是：本讲用该直觉提出预测，再看任务类别是否大致符合。
+\end{warningbox}
+
+\teachervoice{00:10:32--00:11:44，Albert 直接称这一区分为 conventional wisdom，并预期 MoE-fying MLP 最明显地提高 knowledge；他没有把它包装成严格神经科学结论。}
+
+\subsection{Category bars：知识任务增益最大，但不是唯一增益}
+
+柱状图比较 Mistral 7B、Mixtral 8x7B 与若干 Llama 2 baselines。读图时先按 category 分组，再比较同家族 dense/sparse 差值；不要先看总平均。讲者观察到 knowledge-heavy tasks 的提升最明显，reasoning/comprehension 也有提升但幅度较小。
+
+\lecturefigure{slide-11-mixtral-performance-bars.jpg}{Mixtral 8x7B 在不同任务类别上的 release-time benchmark}{Stanford Online 官方录像 00:11:41}
+
+若某任务分数为 $s_m$，同 baseline 分数为 $s_b$，可用相对增益
+\[
+\Delta_{\mathrm{rel}}=\frac{s_m-s_b}{|s_b|+\epsilon}
+\]
+比较不同量纲，但它仍不解决 benchmark saturation、prompt sensitivity 或 contamination。图的教学结论是“增益分布不均”，而不是“知识与推理已被完全分离”。
+
+\begin{knowledgebox}{读图：四步避免 category cherry-picking}
+第一，确认每组是否使用同一 evaluation harness；第二，区分 accuracy、exact match 等 metric；第三，看同家族 Mistral 7B 到 Mixtral 的差值；第四，再看是否跨类别一致。只挑最大柱会夸大 MoE 的普适性。
+\end{knowledgebox}
+
+\subsection{Active-parameter plot：横轴不是 total model size}
+
+第二组图把横轴设为 active parameters，强调 Mixtral 每 token 约使用 12.9B 参数，却处在更优 performance region。这个坐标回答“相近活跃计算得到多少质量”，并不回答“checkpoint 多大”“显存占多少”或“all-to-all 多贵”。因此它支持 capacity-to-compute 论点，不支持 capacity-to-memory 论点。
+
+\lecturefigure{slide-12-mixtral-performance-plots.jpg}{Active parameters 与不同任务性能的 cost-performance 图}{Stanford Online 官方录像 00:12:34}
+
+一个更完整但仍简化的 serving cost 可写成
+\[
+C_{\text{serve}}\approx C_{\text{shared}}+kC_{\text{expert}}+C_{\text{router}}+C_{\text{dispatch}}+C_{\text{imbalance}},
+\]
+其中前两项接近计算，后三项是路由、通信与等待。Active parameters 只近似前两项，不能代表全部 latency 或 dollar cost。
+
+\begin{warningbox}{图中 Pareto frontier 不含所有生产变量}
+Benchmark quality 与 active parameters 构成的 Pareto 图没有纳入 HBM residency、interconnect、batch size、quantization、kernel maturity 和 tail latency。工程选型必须另开系统账本。
+\end{warningbox}
+
+\teachervoice{00:11:44--00:12:38，讲者亲自解释横轴是 active parameters，纵轴是各类任务性能；他强调 knowledge 类别从 Mistral 7B 到 Mixtral 的提升尤其大。}
+
+\subsection{为什么不 MoE-fy attention：稳定性先于想象力}
+
+既然扩 MLP capacity 有效，自然问题是把 Q/K/V projection 也变成 switch layers。课程指出这条路线早已有实验，但数值稳定性是现实障碍：某些设置在 fp32 可训练，换到 bf16 会 diverge。由于现代大模型训练依赖低精度效率，能否稳定训练比纸面参数节省更关键。
+
+\lecturefigure{slide-13-moe-attention-question.jpg}{开放问题：把 attention projection 也改成 MoE}{Stanford Online 官方录像 00:14:06}
+
+\begin{knowledgebox}{背景概念：bf16 stability}
+bf16 保留与 fp32 相同数量级的 exponent bits，但 mantissa 更短，乘加、softmax、normalization 与 router logits 的舍入误差更明显。训练是否 diverge 取决于 scaling、normalization、optimizer、initialization 和 kernel implementation，不能只归因于“低精度不好”。
+\end{knowledgebox}
+
+\teachervoice{00:12:38--00:14:03，Albert 把 MoE attention 留作明确 open research question：已有尝试在 bf16 下可能 diverge，未来需要更好的 normalization 或稳定化技术。}
+
+\subsection{本章小结}
+
+性能图支持一个有限结论：在相近 active parameters 下，Mixtral 的 capacity-to-compute tradeoff 很强，knowledge-heavy tasks 的增益尤其突出。它们不证明 MLP 独占知识，也不证明 active parameter 等于真实服务成本。MoE-fying attention 则提醒我们：结构扩展必须穿过低精度稳定性这一工程门槛。
+

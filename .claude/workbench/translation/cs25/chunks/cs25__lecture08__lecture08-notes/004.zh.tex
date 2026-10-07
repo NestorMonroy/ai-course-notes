@@ -1,0 +1,107 @@
+\section{一层 Attention-Only Transformer：先把模型化成可加路径}
+
+为得到精确代数，Olah 暂时移除 MLP、LayerNorm 与 bias，只保留一层 multi-head attention、residual connection、token embedding 与 unembedding。这不是现代 LLM 的完整架构，而是一个实验台：如果连这个系统都不能分解，就更难解释大型模型。
+
+\lecturefigure{slide-11-one-layer-simplifications.jpg}{分析假设：one layer、attention-only、无 LayerNorm、无 bias。}{Stanford Online 官方视频 00:15:32--00:15:59。}
+
+\begin{warningbox}{Toy model 的作用与边界}
+简化模型允许把每个 path 写成矩阵乘法并做近乎完整 accounting。它能发现 reusable concept，但不能证明相同公式在带 MLP、RMSNorm、RoPE、GQA 与数百层的模型中仍按同样方式主导行为。
+\end{warningbox}
+
+\subsection{Residual stream 形式}
+
+令 token one-hot matrix 为 $T\in\mathbb{R}^{n\times |V|}$，embedding 为 $W_E\in\mathbb{R}^{|V|\times d}$，unembedding 为 $W_U\in\mathbb{R}^{d\times |V|}$。初始 residual stream 为
+\[
+X_0=T W_E.
+\]
+一层 attention-only model 写作
+\[
+X_1=X_0+\sum_{h\in H}A^h(X_0)X_0W_{OV}^h,
+\qquad
+\mathrm{logits}=X_1W_U.
+\]
+
+\begin{itemize}
+  \item $A^h\in\mathbb{R}^{n\times n}$：head $h$ 的 attention pattern；
+  \item $W_{OV}^h=W_V^hW_O^h\in\mathbb{R}^{d\times d}$：value/output 合成矩阵；
+  \item residual identity path 保留当前位置原表示；
+  \item 每个 head 的输出以加法写回 shared residual stream。
+\end{itemize}
+
+\begin{knowledgebox}{术语消化：电路分析中的对象层级}
+\small
+\begin{tabularx}{\textwidth}{L{0.22\textwidth}L{0.28\textwidth}X}
+\toprule
+术语 & 它回答的问题 & 本讲中的作用 \\
+\midrule
+Residual stream & 各层共享的当前表示存在哪里？ & 它像公共工作区；输入表示、各注意力头与后续层都通过加法读取或写入同一组位置向量。 \\
+Attention pattern $A$ & 信息从哪个 source position 流向哪个 destination position？ & 它是 position-to-position routing，不直接说明被搬运的 feature 内容。 \\
+QK circuit & 为什么当前位置会关注某个历史位置？ & $W_{QK}=W_QW_K^{\top}$ 定义 query--key compatibility，是 ``where to read'' 的参数化规则。 \\
+OV circuit & 读到信息后，head 会写入什么？ & $W_{OV}=W_VW_O$ 把 source feature 转成 residual update，并可进一步折叠到 output-token logits。 \\
+Path composition & 一个结果经过了哪些组件？ & 把 residual、第一层 head 与第二层 head 的连续作用展开，区分 direct、single-head 与 composed paths。 \\
+Virtual head & 两个真实 heads 的组合是否形成新功能？ & 它是跨层矩阵乘积产生的 effective circuit，不是模型中新增的一组参数。 \\
+Induction head & 模型怎样实现 $[A][B]\ldots[A]\mapsto[B]$？ & 前层移动 previous-token information，后层在相似历史情境后复制 continuation。 \\
+Ablation & 候选 circuit 只是相关，还是对行为有因果贡献？ & 移除或替换某个 head/path，再测 ICL score 的变化；结论只覆盖所用干预和 metric。 \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\lecturefigure{slide-12-attention-only-model-algebra.jpg}{Attention-only Transformer 的 embedding、head、residual 与 unembedding 代数。}{Stanford Online 官方视频 00:16:00--00:18:13。}
+
+\teachervoice{讲者认为传统 $Q,K,V,O$ 写法容易遮住 head 的结构。更有用的拆法是：$A$ 负责决定信息从哪里移动到哪里，$W_{OV}$ 负责决定究竟移动什么内容。}
+
+\subsection{Attention head 作为两个独立轴的算子}
+
+把 sequence-position mixing 与 feature-channel mapping 分开，可以把 head 看作 tensor/Kronecker product：
+\[
+h(X)=A^h(X)XW_{OV}^h
+\quad\Longleftrightarrow\quad
+\mathcal{H}^h=A^h\otimes W_{OV}^h.
+\]
+
+\begin{itemize}
+  \item 左乘 $A^h$：在 positions 之间做 weighted sum；
+  \item 右乘 $W_{OV}^h$：在 residual feature space 中读写；
+  \item 两者的参数与语义可分别检查；
+  \item 但 $A^h$ 本身依赖输入，因此完整 head 仍非线性。
+\end{itemize}
+
+\lecturefigure{slide-13-attention-head-tensor-product.jpg}{单个 attention head：position mixing $A^h$ 与 content map $W_{OV}^h$。}{Stanford Online 官方视频 00:18:14--00:18:31。}
+
+\lecturefigure{slide-14-attention-layer-sum.jpg}{一层 attention：identity residual path 加上全部 head operators。}{Stanford Online 官方视频 00:18:32--00:19:25。}
+
+这张图中 $I$ 不是普通装饰，而是 residual path。它让 token 的原始表示可以直接到达 unembedding，也让后续多层展开自然形成“选择某一层 head 或绕过它”的 path combinatorics。
+
+\subsection{Fold embedding 与 unembedding}
+
+前面已经把一个 head 拆成 position routing 与 feature mapping，但读者最终关心的是 output-token logits，而不是抽象 residual coordinates。本节因此把输入端 embedding 和输出端 unembedding 折叠进各条路径，直接追问：某个 source token 被读取后，会提高或压低哪些候选 next tokens？这种 token-to-token 表示也为后面的 QK/OV circuit 检查建立统一接口。
+
+把 $W_E$、$W_U$ 与每个 head 合并，可以直接得到 vocabulary-to-vocabulary map：
+\[
+\mathrm{logits}
+=T W_EW_U
++\sum_h A^h(T)
+T\underbrace{W_EW_{OV}^hW_U}_{M_{OV}^h}.
+\]
+
+\begin{itemize}
+  \item $W_EW_U$：direct path，主要存储 bigram-like statistics；
+  \item $M_{OV}^h\in\mathbb{R}^{|V|\times |V|}$：看到某 source token 后，该 head 对 output-token logits 的影响；
+  \item $A^h$ 决定从哪个 source position 读取；
+  \item one-layer model 的可解释单元因此变成“attention pattern × token-to-token map”。
+\end{itemize}
+
+\lecturefigure{slide-15-fold-embedding-unembedding.jpg}{将 embedding/unembedding 折叠后，模型分为 direct/bigram path 与 head paths。}{Stanford Online 官方视频 00:19:26--00:19:35。}
+
+\lecturefigure{slide-16-fixed-pattern-linearity.jpg}{关键观察：若固定 attention patterns，one-layer attention-only model 对输入是线性的。}{Stanford Online 官方视频 00:19:36--00:20:07。}
+
+\begin{importantbox}{“固定 pattern 后线性”意味着什么}
+完整模型仍通过 softmax attention 依赖输入而非线性；但对某个具体 prompt 或一小类稳定 pattern，我们可以暂时把 $A^h$ 当常量，再用线性代数分析 content path。Mechanistic analysis 常利用这种局部条件化，而不是声称 Transformer 全局线性。
+\end{importantbox}
+
+\teachervoice{Olah 的方法论是：只要能把某一部分固定并转成线性，就获得了强大的解释工具。关键是诚实记录“固定了什么”，不能把 conditional linearity 偷换成 global linearity。}
+
+\subsection{本章小结}
+
+一层 attention-only Transformer 可以展开成 residual direct path 与每个 head 的加法项。Tensor-product 视角把“哪里读写”与“读写什么”分开；折叠 embedding/unembedding 后，每个 head 对 vocabulary logits 的作用可以直接检查。
+

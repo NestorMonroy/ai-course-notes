@@ -1,0 +1,82 @@
+\section{Maieutic Prompting：从解释生成到全局一致性}
+
+第一项研究从一个常见错觉开始：模型能给出解释，所以它似乎“知道”答案。但同一模型可能在下一句否定自己刚刚给出的理由。Maieutic Prompting 不直接相信第一条 chain，而是递归探索支持与反对解释，再用 logic 选择内部更一致的赋值。
+
+\subsection{Language Models 只是 Sometimes Amazing}
+
+第一个例子让 GPT-3 解释“从美国西海岸一直向西走，最终能否到达东海岸”。模型用地球是圆的给出正确解释；这个成功展示了语言模型能组合隐含知识，却不能告诉我们它在邻近问题上是否稳定。看图时应把“答对”理解为一个 sample，而不是关于模型知识边界的完整测量。
+
+\lecturefigure{slide-03-language-models-sometimes-amazing.jpg}{语言模型有时能生成连贯且正确的常识解释}{官方录像恢复幻灯片 V003；Stanford CS25 Lecture 16}
+
+下一页把同类 true/false 问题并排，模型会在“蝴蝶是否有三只翅膀”等例子中先说四只翅膀、随后又给出与自身解释冲突的真假判断。重点不是某个常识事实难，而是输出之间缺少 consistency contract：每次生成都像局部文本补全，没有被迫维护一个共享 belief state。
+
+\lecturefigure{slide-04-language-models-reasoning-failures.jpg}{邻近问题暴露 explanation 与 final answer 的自相矛盾}{官方录像恢复幻灯片 V004；Stanford CS25 Lecture 16}
+
+\begin{warningbox}{解释不自动等于 Faithful Reasoning}
+语言模型给出的 explanation 可能只是与答案共同生成的文本。即使解释语法正确，也可能与其他解释冲突、引用错误事实，或在 prompt 改写后翻转。Maieutic 首先改善的是内部逻辑一致性，不是对世界真值的完全校验。
+\end{warningbox}
+
+\teachervoice{讲者把语言模型比作“lemons”，又说只挑成功例子时它会像“cherries”。这个玩笑提醒我们：demo selection 本身就是 evaluation bias。真正的问题不是能否找到一个漂亮回答，而是错误是否具有可预测结构。}
+
+\subsection{递归构建 Explanation Tree}
+
+Maieutic 方法对原命题 $q$ 与否定命题 $\neg q$ 都要求模型生成解释，并继续询问每条解释为什么成立或不成立。这样得到的不是一条 chain-of-thought，而是一张局部 argument graph。读图时先找根节点，再比较支持、反对与互相冲突的分支；搜索深度越大，候选更多，计算和噪声也随之增长。
+
+\lecturefigure{slide-05-maieutic-logic-tree-example.jpg}{Maieutic tree：同时展开命题、否定命题与递归解释}{官方录像恢复幻灯片 V005；Jung et al., 2022}
+
+下一张 slide 展示 abductive generation：给定结论，模型提出可能使它成立或不成立的原因。这一步利用 LM 的生成广度，不要求模型立刻提交唯一答案。系统先把语言空间展开为候选 explanation nodes，再在后续阶段判断哪些组合能共同成立。
+
+\lecturefigure{slide-06-maieutic-abductive-generation.jpg}{Abductive generation：为正反命题生成可检验解释}{官方录像恢复幻灯片 V006；Jung et al., 2022}
+
+设命题节点为 $v_i$，布尔赋值 $z_i\in\{0,1\}$ 表示系统最终是否接受它。若 explanation $e_j$ 支持 claim $c_j$，可以写成蕴含约束
+\begin{equation}
+z_{e_j}\Rightarrow z_{c_j},
+\end{equation}
+而命题与显式否定应满足
+\begin{equation}
+z_q+z_{\neg q}=1.
+\end{equation}
+这里的 $z_q$ 不是概率，而是全局求解后的逻辑选择；概率只用于给约束加权。
+
+\begin{lstlisting}[caption={Maieutic Prompting 的递归解释与全局一致性伪代码}]
+def maieutic_reason(question, depth, language_model):
+    graph = expand_both(question, negate(question), depth, language_model)
+    clauses = []
+    for explanation, claim, confidence in graph.edges:
+        clauses.append(weighted_implication(explanation, claim, confidence))
+    clauses.append(exactly_one(question, negate(question)))
+    assignment = weighted_maxsat(clauses)
+    return assignment[question], graph, assignment
+\end{lstlisting}
+
+\subsection{从 Local Confidence 到 Weighted MaxSAT}
+
+递归树仍可能包含互相冲突的分支，因此需要一个 global inference step。Weighted MaxSAT（加权最大可满足性）是在一组布尔 clauses 中寻找满足总权重最大的赋值；它不是让所有句子都成立，而是在冲突不可避免时保留更可信、更相容的集合。
+
+\lecturefigure{slide-07-maieutic-inference-objective.jpg}{Maieutic inference：把 explanation graph 转成加权逻辑优化}{官方录像恢复幻灯片 V007；Jung et al., 2022}
+
+若第 $j$ 个 clause 为 $C_j(z)$，置信权重为 $w_j$，求解目标可写为
+\begin{equation}
+z^*=\arg\max_{z\in\{0,1\}^{|V|}}
+\sum_j w_j\,\mathbf{1}\!\left[C_j(z)=\mathrm{true}\right].
+\end{equation}
+常见做法把模型置信度 $p_j$ 转为 log-odds，$w_j=\log\frac{p_j}{1-p_j}$。$V$ 是 explanation graph 的节点集合，$\mathbf{1}[\cdot]$ 是指示函数。优化保证的是给定 clauses 下的相对一致性；若所有候选都建立在错误常识上，MaxSAT 仍可能稳定地选错。
+
+\begin{knowledgebox}{Neural 与 Symbolic 各负责什么}
+LM 负责开放式生成，覆盖模型可能知道的解释；symbolic solver 负责跨分支维护约束。前者解决 recall，后者改善 consistency。若只用 solver，没有候选知识；若只用 LM，没有全局一致性。
+\end{knowledgebox}
+
+\subsection{结果：读柱状图时要看 Dataset 也要看 Task}
+
+结果 slide 比较 CSQA 2.0、CREAK 与 Com2Sense 等 true/false benchmarks。Maieutic 在多个数据集上优于 direct prompting 与若干 self-consistency baseline，说明递归解释加全局约束可以把 latent knowledge 更稳定地转成答案。读图时先比较同一数据集内的方法差异，再看不同数据集的 absolute level；不同 benchmark 的采样和 difficulty 不可直接横比。
+
+\lecturefigure{slide-08-maieutic-results.jpg}{Maieutic Prompting 在多个常识真假判断数据集上的结果}{官方录像恢复幻灯片 V008；Jung et al., 2022}
+
+\begin{warningbox}{这张图没有证明什么}
+它没有证明生成解释是 faithful，也没有证明模型拥有完整世界模型；它只证明在这些任务与 prompt 设置下，搜索更多解释并加入逻辑一致性能够提高最终判断。部署还要计算 latency、token cost、solver cost 与 adversarial robustness。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Maieutic Prompting 把单次回答改造成 candidate generation 加 global consistency。它保留 LM 的生成能力，又承认局部输出会冲突。最重要的教学结论是：逻辑结构能够改善模型使用已有知识的方式，却不能凭空补上缺失或错误的世界知识。
+

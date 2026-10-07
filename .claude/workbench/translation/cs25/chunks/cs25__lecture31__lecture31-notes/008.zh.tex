@@ -1,0 +1,91 @@
+\section{Diffusion 与 Transformer：目标函数换了，系统经验仍然复用}
+
+Diffusion 不按 token 顺序预测图像，而是在多个 noise levels 上学习去噪 vector field。它让每一步都处理整张 latent，GPU utilization 通常优于 batch-one autoregressive decoding；随后 DiT 又把 denoiser 从 U-Net 换回 Transformer，显示“objective 改变”不等于 Transformer 退出。
+
+\subsection{DDPM：forward 加噪，reverse 学去噪}
+
+上一章的 autoregressive model 必须沿 image-token sequence 串行生成；本节改换问题表述，不再问“下一个 token 是什么”，而是问“给定某个 noise level，怎样把整张 noisy latent 推回更干净的方向”。读公式时要同时区分人为定义的 forward corruption 与模型学习的 reverse denoising。
+
+定义 noise schedule $\beta_t$、$\alpha_t=1-\beta_t$、$\bar\alpha_t=\prod_{s=1}^{t}\alpha_s$，forward process 有闭式采样：
+\[
+q(x_t\mid x_0)=\mathcal{N}\!\left(\sqrt{\bar\alpha_t}x_0,(1-\bar\alpha_t)I\right),
+\quad
+x_t=\sqrt{\bar\alpha_t}x_0+\sqrt{1-\bar\alpha_t}\epsilon.
+\]
+模型常预测 $\epsilon$：
+\[
+\mathcal{L}_{\text{simple}}=\mathbb{E}_{x_0,t,\epsilon}
+\left[\|\epsilon-\epsilon_\theta(x_t,t,c)\|_2^2\right],
+\]
+其中 $c$ 是 text condition。
+
+\lecturefigure{slide-24-diffusion-ddpm.jpg}{DDPM：noise schedule、denoising network 与并行整图计算}{Stanford Online 官方录像 00:52:11}
+
+\begin{knowledgebox}{为什么 diffusion 更容易吃满 GPU}
+每个 denoising step 同时更新整张 latent，矩阵规模大、并行度高；autoregressive image model 在 batch 很小时每步只产生一个 token，kernel launch 和 memory movement 难以充分摊销。diffusion 仍需多 steps，但每步硬件利用率通常更好。
+\end{knowledgebox}
+
+\teachervoice{01:12:30--01:15:00，Q\&A 中讲者拒绝把结论说成“不可能”：足够大的 autoregressive model 也能生成高质量图像；他更确定的是 sequential latency 与二维远距离关系带来的 practical disadvantage。}
+
+\subsection{Relay Diffusion：跨分辨率不能只复制同一个独立噪声}
+
+同一 nominal noise level 在不同 resolution 上的视觉模糊程度不同，因为自然图像信号具有空间相关性，而 standard Gaussian noise 常按 pixel 独立。Relay Diffusion 用 correlated/block noise 匹配尺度，使 coarse-to-fine stages 在频率和 SNR 上更一致。
+
+\lecturefigure{slide-25-relay-diffusion.jpg}{Relay Diffusion：解耦 noise schedule、network 与 resolution}{Stanford Online 官方录像 00:54:49}
+
+若 block size 为 $k$，可把高分辨率 noise 写成低分辨率 noise 的上采样与 residual：
+\[
+\epsilon_h=U_k(\epsilon_l)+\lambda\epsilon_{\text{res}},
+\]
+并通过 $\lambda$ 调整不同频段的 variance，使 coarse stage 与 fine stage 的 signal-to-noise ratio 更可比。它不是简单 resize image，而是重新定义跨分辨率的 stochastic path。
+
+\begin{warningbox}{“SNR 对齐”依赖 schedule 与 data spectrum}
+block-correlated noise 的有效性要在具体 resolution、latent encoder、noise schedule 和训练数据上验证。它提供机制解释，不意味着所有 coarse-to-fine diffusion 都可直接复用同一超参数。
+\end{warningbox}
+
+\teachervoice{00:52:11--00:55:16，讲者强调低分辨率与高分辨率在相同独立 noise 下并不具有相同感知难度，Relay 的核心是把 resolution 从 schedule 中解耦。}
+
+\subsection{CogView3：scale-up 与 distillation 都是系统组成}
+
+Relay Diffusion 解决的是跨分辨率 schedule；要把这一机制变成可用 text-to-image system，还必须同时扩大模型与数据，并把昂贵 teacher sampling 压缩到更少 steps。CogView3 正是这一步系统化扩展，并在 slide 上报告 distilled model 的 $1024\!\times\!1024$ 图像生成速度。速度数字必须同时绑定硬件、实现、sampling step、batch 与质量设置。
+
+\lecturefigure{slide-26-cogview3.jpg}{CogView3：扩大 Relay Diffusion 并通过 distillation 加速}{Stanford Online 官方录像 00:55:16}
+
+\begin{importantbox}{Distillation 的目标不是只减少参数}
+Diffusion distillation 常把多步 teacher trajectory 压成更少 sampling steps。真正优化对象是 end-to-end latency 与 quality tradeoff；参数量不变也可能通过减少 function evaluations 大幅加速。
+\end{importantbox}
+
+\subsection{DiT：把 denoiser 换成 Transformer}
+
+DiT 将 latent patches 当作 tokens，并用 adaptive LayerNorm 接入 timestep/class condition。若普通 normalization 为 $\operatorname{LN}(h)$，adaLN 可写成
+\[
+\operatorname{adaLN}(h;c)=\gamma(c)\odot\operatorname{LN}(h)+\beta(c),
+\]
+其中 $c$ 由 timestep 和条件 embedding 产生。这样每层都能根据 noise level 调整 feature scale 与 shift。
+
+\lecturefigure{slide-27-diffusion-transformer.jpg}{DiT：以 Transformer blocks 和 adaptive normalization 替代 U-Net}{Stanford Online 官方录像 00:57:02}
+
+\begin{knowledgebox}{AdaLN 与 cross attention 的差别}
+cross attention 让 image tokens 查询一组 condition tokens；adaLN 则把 condition 压成每层 scale/shift/gate。前者保留 token-level 对齐，后者更像全局调制。实际系统可同时使用两者。
+\end{knowledgebox}
+
+\teachervoice{00:55:16--00:57:43，讲者注意到 timestep 输入只是很小的 condition，却可能通过大 MLP 生成每层调制参数；他把这视为仍有简化空间的工程设计。}
+
+\subsection{Stable Diffusion 3 与 MM-DiT：text/image experts 再次出现}
+
+MM-DiT 为 text 和 image tokens 保留分开的 parameter paths，再通过 attention 交互。可抽象为
+\[
+Q_t=H_tW_Q^{(t)},\quad Q_i=H_iW_Q^{(i)},
+\]
+而 joint attention 在拼接的 $K,V$ 上交换信息。它与 CogVLM 的共同思想是 modality-specific transformations，不同之处在于任务是 diffusion denoising 而非 autoregressive response。
+
+\lecturefigure{slide-28-stable-diffusion3-mmdit.jpg}{Stable Diffusion 3：MM-DiT 的 text/image expert paths}{Stanford Online 官方录像 00:57:43}
+
+\begin{warningbox}{相似模块名不等于相同训练问题}
+CogVLM 的 vision experts 服务 image-conditioned language modeling；MM-DiT 的 modality paths 服务 rectified flow/diffusion denoising。参数分流是共享设计模式，但 loss、sequence、condition 和 evaluation 完全不同。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Diffusion 赢得 practical image generation，主要来自整图并行、连续 latent 与更合适的空间建模路径。Relay 处理跨分辨率 noise，distillation 减少 sampling steps，DiT/MM-DiT 又把 Transformer 引回 denoiser。目标函数和系统路径共同决定最终效率。
+

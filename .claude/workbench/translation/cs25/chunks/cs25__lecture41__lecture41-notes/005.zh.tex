@@ -1,0 +1,54 @@
+\section{数据清洗与渐进训练也是架构}
+
+前一章给出可扩展 backbone，本章解释为什么同一架构仍可能训练失败。视频规模化依赖高质量运动、视觉清晰、去重、内容筛选和细粒度 caption；训练还必须从便宜任务逐步走向长时高分辨率。数据 pipeline 与 curriculum 决定模型看见什么、以什么成本看见。
+
+\subsection{从海量视频到可训练 clip--prompt pairs}
+
+Movie Gen 的数据流程不是随机抓取后直接训练，而是逐级收窄。读图时应从左到右追踪每个过滤器解决的失败：视觉过滤去掉低质量，运动过滤去掉静止或抖动，内容过滤处理重复与采样，captioning 把相机和运动写入文本条件。
+
+\lecturefigure{slide-247-data-curation.jpg}{视频数据清洗：视觉、运动、内容过滤与细粒度 captioning}{00:39:11}
+
+若训练分布中大量视频低清、无运动、带边框或 caption 只描述主体不描述动作，模型即使扩大也只会更好地拟合错误目标。数据清洗与 scaling law 绑定：当有效数据质量变化时，validation loss 与 compute-optimal 关系也会改变。
+
+\begin{importantbox}{caption 是视频监督的一部分}
+视频 prompt 不应只写“一个人、一辆车”，还要表达动作顺序、相机运动、速度和交互。caption 缺失时间关系时，模型无法从文本监督中学会精确执行多阶段事件；这也是长 prompt 失败的重要来源。
+\end{importantbox}
+
+\begin{warningbox}{长尾出现过，不等于可以可靠控制}
+互联网规模数据可能包含某个稀有概念，但出现次数、caption 质量和上下文分布决定它是否可控。pretraining 提供覆盖，post-training 或任务数据提供稳定调用；不能把“数据里见过”当成“模型会按指令执行”。
+\end{warningbox}
+
+\teachervoice{00:35:20--00:39:11，老师直接说 scaling laws 依赖数据被清理；若数据不干净，规律不成立，输出质量也不会随规模自动改善。}
+
+\subsection{渐进 curriculum：先便宜地学，再昂贵地精炼}
+
+直接用 768p、16 秒、16 fps 训练全部阶段会浪费大量 compute，也更难稳定。Movie Gen 先用图像和低分辨率视频建立语义与基本运动，再逐步提高分辨率、长度，并分出 personalization、T2V finetuning 与 video-to-video 等路径。
+
+\lecturefigure{slide-250-progressive-training.jpg}{训练 recipe：256p 图像、联合预训练、768p 视频与任务分支}{00:40:58}
+
+可把 curriculum 抽象为一组 workload $w_k=(r_k,f_k,T_k,b_k)$，分别表示分辨率、帧率、时长和 batch。阶段目标是
+\[
+\theta_{k+1}=\operatorname{Train}(\theta_k,\mathcal D_k,w_k),
+\qquad
+\operatorname{cost}(w_{k+1})>\operatorname{cost}(w_k),
+\]
+即用上一阶段参数初始化更昂贵阶段。这里不是定理，而是工程 recipe：先以高吞吐学习广泛分布，再把预算集中到最终质量。
+
+\begin{lstlisting}[language=Python,caption={渐进式图像/视频训练的概念流程}]
+model = train(text_to_image_256p, model=None)
+model = train(joint_image_video_256_to_768p, model=model)
+video_model = finetune(text_to_video_768p_16s, model=model)
+edit_model = finetune(video_to_video_pairs, model=model)
+personalized_model = finetune(identity_conditioned_pairs, model=model)
+\end{lstlisting}
+
+\begin{knowledgebox}{73K context 如何进入训练成本}
+更长视频让 token 数近似随帧数线性增长，但全注意力计算随 $N^2$ 增长。若其他设置不变，把时长从 16 秒翻倍到 32 秒会让 token 数约翻倍、attention 主项约变为四倍；这就是长视频首先是系统问题的原因。
+\end{knowledgebox}
+
+\teachervoice{00:39:11--00:40:58，老师把训练流程解释为 convergence-speed 优化：先做便宜的 256p 图像/视频学习，再提高到 768p 和长视频，最后按任务分支后训练。}
+
+\subsection{本章小结}
+
+规模化只有在数据质量可控时才有意义。Movie Gen 用视觉、运动、内容和 caption 过滤构造训练 pairs，再用渐进 curriculum 从便宜图像任务过渡到高分辨率长视频与应用分支。数据与 curriculum 不只是外围 recipe，而是决定模型能力边界的系统组件。
+

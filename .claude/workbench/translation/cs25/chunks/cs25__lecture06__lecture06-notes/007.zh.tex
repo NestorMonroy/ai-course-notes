@@ -1,0 +1,94 @@
+\section{Optical Flow：用 Output Queries 解码稠密运动场}
+
+语言输出仍是一维序列，optical flow 则要求对每个像素预测二维运动向量，是检验 structured output scaling 的强案例。模型输入两帧图像，输出 dense vector field；训练数据有限且真实标注昂贵，因此 synthetic-to-real transfer 与 inductive bias 尤其关键。
+
+\subsection{任务与指标}
+
+Optical flow $F(x,y)=(u(x,y),v(x,y))$ 描述像素从第一帧到第二帧的水平与垂直位移。常用 end-point error（EPE）为：
+
+\[
+\operatorname{EPE}=\frac{1}{HW}\sum_{x,y}\sqrt{(u-\hat u)^2+(v-\hat v)^2}.
+\]
+
+其中，$H,W$ 是图像高宽；$(u,v)$ 是 ground-truth flow；$(\hat u,\hat v)$ 是预测；EPE 越低越好。颜色轮通常用 hue 表示方向、饱和度/亮度表示速度大小。
+
+\lecturefigure{slide-28-optical-flow-definition.jpg}{Optical flow：对相邻帧的每个像素预测二维运动向量。}{Stanford Online 当前官方视频 00:48:44--00:49:15。}
+
+\begin{knowledgebox}{读图：光流颜色不是物体类别}
+相似颜色表示相似运动方向和速度，而不是语义类别。物体内部颜色一致说明运动场平滑；边界突变可能对应遮挡、深度变化或独立运动。
+\end{knowledgebox}
+
+\subsection{Transfer protocol：只在 AutoFlow 训练}
+
+本节先固定数据协议，再阅读模型排名。讲座强调没有大规模真实 dense flow 数据。模型在 AutoFlow 合成场景训练，再不 fine-tune 地评估 Sintel clean/final 与 KITTI。这样测量的是跨渲染与真实驾驶域的 transfer，而不是在每个 benchmark 上拟合。
+
+\lecturefigure{slide-29-optical-flow-transfer-task.jpg}{Optical-flow transfer：AutoFlow 训练，Sintel/KITTI 零 fine-tuning 评估。}{Stanford Online 当前官方视频 00:49:16--00:50:05。}
+
+\begin{warningbox}{不同数据集的 EPE 不能混成一个数}
+Sintel clean/final 使用不同渲染复杂度，KITTI 来自驾驶场景与稀疏 LiDAR 约束。应分别报告三列，不能把平均值当作统一真实世界质量。
+\end{warningbox}
+
+\teachervoice{Q\&A 解释了 ground truth：Sintel 是开放 CGI 电影，可由场景状态计算像素对应；KITTI 使用 LiDAR 深度与相机运动估计对应。Dense optical-flow 标注非常昂贵，这也是 synthetic training 必要的原因。}
+
+\subsection{与 RAFT 对照：弱偏置为什么令人意外}
+
+RAFT 显式构造 all-pairs correlation volume，并通过多尺度或局部 gather 迭代更新 flow。它把 optical-flow 匹配结构写进架构。Perceiver IO 则把两帧特征编码进 input array，用 latent bottleneck 处理，再由每像素 output query 解码 flow。
+
+\lecturefigure{slide-30-raft-comparison.jpg}{RAFT 的 correlation volume 与局部迭代更新：强 optical-flow inductive bias。}{Stanford Online 当前官方视频 00:50:06--00:50:31。}
+
+讲者原本预计 Perceiver IO 会因弱偏置而过拟合 synthetic data，或无法学会 correspondence。实际模型“out of the box”获得有竞争力结果，说明大数据和 attention 可以学习部分匹配结构；但这不代表其速度或小数据效率优于 RAFT。
+
+\lecturefigure{slide-31-perceiver-io-optical-flow.jpg}{Perceiver IO optical flow：双帧输入、latent processor 与每像素 flow queries。}{Stanford Online 当前官方视频 00:50:48--00:51:13。}
+
+\teachervoice{这页最重要的是作者的先验被实验修正：他们预期弱 inductive bias 会严重过拟合，却发现模型直接可用。高质量结论应写成“比预期更能迁移”，而不是“领域偏置从此不需要”。}
+
+\begin{importantbox}{Optical flow 如何映射到 Perceiver IO}
+Input rows 编码两帧像素、位置与帧 ID；latents 汇总跨帧全局信息；每个目标像素建立 output query；decoder 输出两个通道 $(\hat u,\hat v)$。任务变化主要体现在输入 tags、output queries 和 loss。
+\end{importantbox}
+
+\subsection{定量与质性结果}
+
+结果表比较 PWCNet、RAFT 与 Perceiver IO 在 Sintel clean/final 和 KITTI 上的 EPE。读表时要先确认所有模型是否只在 AutoFlow 训练，以及是否使用 benchmark fine-tuning；讲座明确说这里不 fine-tune，避免小测试集过拟合。
+
+\lecturefigure{slide-32-optical-flow-results.jpg}{AutoFlow 训练后在 Sintel clean/final 与 KITTI 的 EPE 对比。}{Stanford Online 当前官方视频 00:51:14--00:51:37。}
+
+\begin{knowledgebox}{读表：EPE 越小越好，但平均误差不够}
+还应检查运动边界、小物体、快速运动、遮挡与纹理缺失区域。两个模型 EPE 接近时，错误分布和稳定性可能完全不同；真实应用还需要 latency 与置信度。
+\end{knowledgebox}
+
+第一组质性图包含人物舞蹈和快速手部/物体运动。彩色 vector field 若在同一运动物体内部连续、在边界处切换，说明模型捕捉到区域运动；高亮空洞或颜色噪声则提示遮挡和细节失败。
+
+\lecturefigure{slide-33-qualitative-optical-flow-animals.jpg}{真实场景 optical-flow 示例一：人物与快速局部运动。}{Stanford Online 当前官方视频 00:51:38--00:51:49。}
+
+第二组展示远处快速运动与局部放大。小目标只占少量 pixels，对 latent bottleneck 是高压测试：全局压缩必须保留弱小但任务关键的 motion evidence，decoder query 才能重建。
+
+\lecturefigure{slide-34-qualitative-optical-flow-skater.jpg}{真实场景 optical-flow 示例二：小目标、远距离与局部放大。}{Stanford Online 当前官方视频 00:51:50--00:52:19。}
+
+\begin{warningbox}{质性图不能替代 benchmark}
+公开视频通常挑选可读案例，且颜色轮会掩盖小数值差异。应结合完整测试集 EPE、failure slices、置信度和视频时间一致性，而不是凭几张漂亮 flow map 下结论。
+\end{warningbox}
+
+\subsection{Very large outputs 与 multimodal autoencoding}
+
+Perceiver IO 可以为视频的每帧、每像素、每通道构造 queries，输出数可达数百万。输入先压成少量 latents，再由大量 queries 解码；这等价于用 latent 作为共享压缩表示。输出成本仍为 $\mathcal{O}(ON)$，因此 decoder query batching 和内存是实际工程问题。
+
+\lecturefigure{slide-35-decoding-very-large-outputs.jpg}{从固定 latent state 解码超大视频输出数组。}{Stanford Online 当前官方视频 00:52:20--00:53:05。}
+
+若重建图像峰值为 $I_{\max}$、均方误差为 MSE，PSNR 定义为：
+
+\[
+\operatorname{PSNR}=10\log_{10}\left(\frac{I_{\max}^2}{\operatorname{MSE}}\right).
+\]
+
+其中，PSNR 越高表示像素误差越小；它不完全对应感知质量。表格同时报告 compression ratio、video/audio PSNR 与分类准确率，用于观察 latent 数减少后重建和语义任务如何退化。
+
+\lecturefigure{slide-36-quantitative-autoencoding.jpg}{Multimodal autoencoding 的压缩率、视频/音频 PSNR 与 top-5 accuracy。}{Stanford Online 当前官方视频 00:53:06--00:56:13。}
+
+\begin{knowledgebox}{读表：压缩比是共享瓶颈的压力测试}
+减少 latents 会提高 compression ratio，但可能降低像素/音频重建；分类准确率可能下降更慢，因为语义任务不需要保留全部细节。这揭示 latent representation 对不同任务的信息需求不同。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+Optical flow 展示 Perceiver IO 能解码每像素结构化输出，并在 synthetic-to-real transfer 中取得竞争结果。EPE、质性 flow、output-query 成本和 compression tradeoff 必须一起解释，弱偏置的成功不等于强专用模型失去价值。
+

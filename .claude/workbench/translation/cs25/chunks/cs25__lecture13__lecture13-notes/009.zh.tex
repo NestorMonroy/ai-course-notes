@@ -1,0 +1,69 @@
+\section{Self-Consistency：用采样预算换可靠性}
+
+单条 CoT 仍可能在早期走错方向。Self-consistency 不要求模型修改同一条 reasoning path，而是在非零 temperature 下采样多条路径，再对 final answer 投票。若正确答案能由多种有效路径到达，而错误路径较分散，majority vote 就能提升可靠度。
+
+\subsection{从一条路径到答案边缘化}
+
+设 $z$ 是 reasoning path、$a$ 是 final answer。理想上希望比较
+\[
+p(a\mid q)=\sum_z p(a,z\mid q),
+\]
+但无法枚举所有 $z$。Self-consistency 从模型采样 $M$ 条路径 $z^{(1)},\ldots,z^{(M)}$，提取对应答案 $a^{(m)}$，用经验票数近似最可能答案：
+\[
+\hat a=\arg\max_a \sum_{m=1}^{M}\mathbf{1}\!\left[a^{(m)}=a\right].
+\]
+它更接近对答案做 marginalization，而不是选择单条最高概率文本。
+
+\lecturefigure{slide-31.jpg}{Self-consistency：采样多条 CoT 路径并对最终答案多数投票}{官方课件第 31 页；Wang et al., ICLR 2023}
+
+\begin{knowledgebox}{读图：路径多样性与答案一致性要同时存在}
+图中同一题产生多条自然语言推导，其中部分路径错误，但正确答案在不同有效推导中重复出现。若 temperature 太低，所有样本几乎相同，投票没有新增信息；若太高，路径失去任务约束，答案噪声上升。Self-consistency 的收益来自相关但不完全相同的样本集合。
+\end{knowledgebox}
+
+Temperature $T$ 调整 next-token distribution：
+\[
+p_T(x_i)=\frac{\exp(\ell_i/T)}{\sum_j\exp(\ell_j/T)},
+\]
+其中 $\ell_i$ 是 token logit。$T\to 0$ 接近 greedy decoding，较大 $T$ 提高低概率 token 的机会并增加路径 diversity；它不是简单的“正确度旋钮”，需要与 sample count、answer extraction 和 task difficulty 联合调节。
+
+\begin{lstlisting}[caption={Self-consistency 的最小实现框架}]
+from collections import Counter
+
+def self_consistent_answer(model, prompt, samples=16, temperature=0.7):
+    answers = []
+    for _ in range(samples):
+        trace = model.generate(prompt, temperature=temperature)
+        answers.append(extract_final_answer(trace))
+    return Counter(answers).most_common(1)[0][0]
+\end{lstlisting}
+
+\subsection{结果：简单技巧为何有大增益}
+
+课件展示多个 reasoning benchmarks 的 greedy CoT 与 self-consistency 对比。课堂特别举 GSM8K 约从 56 提高到 74 的例子，说明 inference-time sampling 可以获得与训练改进同量级的收益；代价是每道题需要生成多条长 reasoning traces。
+
+\lecturefigure{slide-32.jpg}{Self-consistency 在多个 benchmark 上提升 CoT 性能}{官方课件第 32 页；Wang et al., 2022}
+
+\begin{knowledgebox}{读图：Accuracy 提升背后是成倍 inference cost}
+每组柱形比较 greedy CoT 与 self-consistency。纵轴提高说明投票过滤了一部分路径级错误，但横向比较还应加入 generated tokens、latency 与 API cost。课堂展示的设置可能采样约 40 条，讲者同时指出不少 dataset 用约 16 条已能获得良好收益，最佳预算依任务而变。
+\end{knowledgebox}
+
+\begin{warningbox}{多数票要求“错误不要高度相关”}
+若模型在某类题上系统性误解概念，采样 100 条也可能得到 100 条相似错答。Self-consistency 更适合路径级 stochastic errors，而不是缺失知识、错误问题定义或被污染的 answer extractor。部署时应画 accuracy--cost curve，而不是只报最高样本数结果。
+\end{warningbox}
+
+\teachervoice{学生询问需要多少条 chain，讲者回答取决于 dataset，约 16 条常能看到收益；随后他把 temperature 解释为从 learned distribution 中随机选择下一个 token，而不是总取最高概率 token。课堂同时明确，这种方法增加 inference-time compute。}
+
+\subsection{Self-consistency 也可能涌现}
+
+如果 base model 尚不能生成有意义的 CoT，多采样只会得到许多不稳定或一致错误的路径。因此 self-consistency 与 greedy CoT 的差距本身也随规模增大：先要有足够强的 path generator，投票才有可利用的正确信号。
+
+\lecturefigure{slide-33.jpg}{Self-consistency 的收益随模型规模扩大而出现}{官方课件第 33 页；Wang et al., 2022}
+
+\begin{knowledgebox}{读图：两层门槛叠加}
+第一层门槛是模型能否通过 CoT 生成偶尔正确的完整路径；第二层门槛是正确答案的概率质量是否足以在多样样本中形成 plurality。小模型两层都未满足时，self-consistency delta 接近零；大模型跨过后，采样预算才转化为性能。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+Self-consistency 用多路径采样近似答案边缘化，以 inference cost 换 accuracy。Temperature 提供 diversity，majority vote 聚合 final answer；方法成功依赖 base model、任务结构、错误相关性和 sample budget，因此它同样具有 scale-dependent 有效区间。
+

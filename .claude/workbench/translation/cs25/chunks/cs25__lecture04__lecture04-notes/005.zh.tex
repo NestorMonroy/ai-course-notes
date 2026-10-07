@@ -1,0 +1,70 @@
+\section{Forward pass：embedding、历史与非 Markov 条件}
+
+架构图容易给人一种“只要把三种 token 串起来即可”的错觉。实际上，embedding 如何组合、哪些 hidden state 用于解码、context window 包含什么，以及是否允许历史影响同一 state 的动作，都会改变学习到的函数。本节把 slide 和课堂 Q\&A 还原成可实现的 forward pass。
+
+\subsection{输入、输出与 context window}
+
+模型输入是长度不超过 $K$ 个 timestep 的局部轨迹窗口；若按 token 计数，则最多包含约 $3K$ 个 return/state/action token。输出是对应 action 位置的预测序列：
+\[
+(\widehat{a}_1,\widehat{a}_2,\ldots,\widehat{a}_T)
+=f_{\theta}(\widehat{R}_{1:T},s_{1:T},a_{1:T-1}).
+\]
+这里右侧不含真实的当前 action $a_T$，否则会产生 label leakage。训练实现通常通过 shift 或选择特定 hidden positions 避免泄漏。
+
+\lecturefigure{slide-09-forward-pass.jpg}{Forward pass：输入 return/state/action 序列，输出预测 action，并在长度 $K$ 的 context 上计算 attention。}{Stanford Online 官方视频 14:56。}
+
+\begin{importantbox}{Context length 的计算代价}
+标准 self-attention 对 token 数的时间和中间矩阵开销近似为 $O((3K)^2)$。增大 $K$ 可以提供更长历史，却会增加显存、延迟与优化难度。后文的 $K=1$ ablation 检验历史是否真正贡献性能，而不是只把更大模型当作答案。
+\end{importantbox}
+
+\subsection{Embedding 相加与 concatenation 不等价}
+
+设 state embedding、token-type embedding 与 timestep embedding 分别为 $e_s(s_t)$、$e_{\mathrm{type}}$ 和 $e_t(t)$，一种实现是
+\[
+x_t^{(s)}=e_s(s_t)+e_{\mathrm{type}=s}+e_t(t).
+\]
+相加要求各向量维度相同，相当于在同一表示空间中平移；concatenation 则扩大维度，再由后续层学习如何组合。二者都可表达信息，但参数量、几何结构和 inductive bias 不同。
+
+\teachervoice{课堂 Q\&A 专门追问了“加法还是拼接”。讲者回答：两者是不同的函数编码选择；原实现采用 addition，并观察到它更合适。讲义提醒：不要把 embedding 相加理解成丢失身份，token type 和 timestep 仍通过可学习向量进入表示。}
+
+\subsection{代码层面的 forward pass}
+
+前面的公式说明了 token 由哪些向量相加，却还没有回答实现中如何把三条时间序列交错、怎样保证当前 action 不泄漏，以及 decoder 应读取哪个 hidden position。原 slide 用代码片段补上这条数据流。下面的等价伪代码依次展开 embedding、stacking、causal attention 与 action head；它只表达机制，不绑定具体 repository API，也不隐藏 padding 和位置选择这两个最容易出错的环节。
+
+\lecturefigure{slide-10-forward-pass-code.jpg}{讲座中的 Decision Transformer forward-pass 代码片段。}{Stanford Online 官方视频 17:24。}
+
+\begin{lstlisting}[caption={Decision Transformer forward pass 的最小伪代码},label={lst:dt-forward}]
+def forward(returns_to_go, states, actions, timesteps, mask):
+    time_emb = embed_time(timesteps)
+    return_emb = embed_return(returns_to_go) + time_emb
+    state_emb = embed_state(states) + time_emb
+    action_emb = embed_action(actions) + time_emb
+
+    tokens = interleave(return_emb, state_emb, action_emb)
+    hidden = causal_transformer(tokens, attention_mask=mask)
+
+    state_hidden = hidden[:, state_token_positions]
+    action_pred = action_head(state_hidden)
+    return action_pred
+\end{lstlisting}
+
+代码中的 \texttt{interleave} 按 $(R,s,a)$ 顺序交错 token；\texttt{state\_token\_positions} 表示在看过当前 return 与 state 后、尚未看到当前 action 的位置取 hidden state。真实实现还要处理不同 state/action shape、padding mask、continuous/discrete head 与 sequence truncation。
+
+\subsection{为什么 non-Markov 是有意设计}
+
+Markov property 假设当前 state 已包含预测未来所需的全部信息，因此最优 policy 可以只依赖 $s_t$。但很多观测其实是 observation $o_t$，只看见隐藏状态的一部分；历史 $o_{<t},a_{<t}$ 能帮助推断被遮蔽的信息。Decision Transformer 显式保留 history，允许“相同观测、不同来路”对应不同 action。
+
+\begin{knowledgebox}{Partial observability（部分可观测）}
+若真实环境状态为 $z_t$，模型只能看到 $o_t=g(z_t)$，则不同 $z_t$ 可能映射到相同 $o_t$。历史轨迹可作为 belief-state 的近似：模型通过此前观测和动作推断当前隐藏状态。此时 non-Markov conditioning 不是违反理论，而是在 observation 不充分时补足信息。
+\end{knowledgebox}
+
+\teachervoice{学生追问：同一个 state 在不同 timestep 加上不同时间 embedding，会不会破坏 Markov 性？讲者明确回答“是的，这里就是有意 non-Markov”，因为 action prediction 和 partial observability 可能需要历史。若任务确实完全 Markov，context ablation 应帮助判断历史是否只是冗余。}
+
+\begin{warningbox}{History 也可能记住错误相关性}
+更长 context 可以恢复隐藏状态，也可以让模型依赖数据收集过程中的偶然模式，例如某个 behavior policy 的节奏、episode 长度或特定时间位置。必须用跨 policy、跨初始状态和 context ablation 验证历史带来的是可迁移信息，而非日志指纹。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Forward pass 的关键不只是 Transformer block，而是 token 交错、embedding 组合、label shift、context mask 和 action head。Non-Markov history 在部分可观测任务中可能是优势，但更长历史也增加计算和 spurious correlation 风险。
+

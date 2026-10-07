@@ -1,0 +1,123 @@
+\section{Application-only edge learning：让本地开关自己收集数据}
+
+课程后半把抽象架构落到一个极小任务：语音控制开关。目标不是做一个通用 assistant，而是验证模型能否在 air-gapped 环境中从零收集本地 user data、学习 binary action，并在 microprocessor 上完成训练与推理。
+
+\subsection{不用通用 pretraining：任务数据从哪里来}
+
+Application-only pipeline 从用户真实交互构造监督数据。系统监听语音、做 automatic speech recognition（ASR，自动语音识别）、在模型不确定时让用户实际操作开关，再把 transcript 与 action 配对。它避免先收集大规模指令语料，但必须处理错误 transcription、label delay 与行为分布极窄的问题。
+
+\lecturefigure{slide-21-application-only-training.jpg}{只用应用交互数据训练 PLM 的整体流程}{Stanford Online 官方录像 00:55:21}
+
+\begin{importantbox}{Air-gapped 的准确含义}
+Air-gapped 指设备训练/推理不依赖网络连接，数据不离开本地环境。它不自动等于安全：麦克风权限、固件更新、物理访问、模型文件和日志仍需威胁建模。
+\end{importantbox}
+
+\teachervoice{00:55:21--00:58:34，讲者把任务拆成 listen、transcribe、operate、learn：没有现成 generic pretraining，label 来自用户在需要时实际拨动开关。}
+
+\subsection{Self-supervised interaction：这里的“self”来自环境反馈}
+
+Slide 使用 self-supervised 一词，但严格说系统仍得到 action labels；只是标签由本地交互自然产生，而非事先人工标注 corpus。设 transcript feature 为 $x_t$，用户动作 $y_t\in\{0,1\}$，可用 binary cross-entropy
+\[
+\mathcal L_t=-y_t\log p_\theta(y_t=1\mid x_t)
+-(1-y_t)\log\bigl(1-p_\theta(y_t=1\mid x_t)\bigr).
+\]
+
+\lecturefigure{slide-22-self-supervised-voice.jpg}{语音交互任务的 listen--transcribe--operate--learn 分解}{Stanford Online 官方录像 00:56:53}
+
+\begin{warningbox}{ASR error 会成为 label noise}
+用户说的是一个句子，模型训练看到的是 ASR transcript。如果转写错了但动作标签正确，数据对会把错误文本绑定到动作。评估必须记录 word error rate、口音/噪声条件，并保留原音频或可审计的对齐信息。
+\end{warningbox}
+
+\subsection{Smart data collection：只在信息不足时请求动作}
+
+上一节只列出 listen、transcribe、operate、learn 四个组件，本节把它们组织成会主动获取标签的闭环。关键问题不是“麦克风怎样录音”，而是何时相信模型预测、何时向用户或物理开关索取监督，以及新样本怎样回流而不放大旧错误。系统不是被动等待固定 dataset，而是在交互中形成一个 local active-learning loop：模型听到指令后给出预测；若 confidence 低或用户纠正，就请求或观察真实动作并加入训练集。
+
+\lecturefigure{slide-23-smart-data-collection.jpg}{用户、麦克风、ASR、模型与开关形成的本地学习闭环}{Stanford Online 官方录像 00:58:34}
+
+\begin{lstlisting}[caption={本地语音开关的交互学习状态机}]
+while device_is_on:
+    audio = microphone.listen()
+    transcript = asr.transcribe(audio)
+    action, confidence = model.predict(transcript)
+
+    if confidence < threshold or user_overrides(action):
+        label = observe_physical_switch()
+        local_dataset.append(transcript, label)
+        model.update(local_dataset.recent_examples())
+    else:
+        controller.execute(action)
+\end{lstlisting}
+
+\begin{knowledgebox}{Online learning 的三个风险}
+\begin{enumerate}
+  \item \textbf{Feedback loop：}模型错误可能影响用户行为，随后又被当作新数据。
+  \item \textbf{Catastrophic forgetting：}只训练近期命令可能忘掉早期表达。
+  \item \textbf{User drift：}说话方式、环境噪声和设备用途会随时间改变。
+\end{enumerate}
+课堂没有给出这些问题的完整解法，因此复现时必须额外设计 replay、holdout 与 rollback。
+\end{knowledgebox}
+
+\teachervoice{00:58:34--01:00:10，Williams 把数据收集描述为交互闭环：系统本地监听和转写，只有需要监督时才让用户操作，从而逐步积累 directive/action pairs。}
+
+\subsection{Dialogue representation：把 binary action 写成语言序列}
+
+交互闭环解决了标签从哪里来，接下来还要决定数据以什么形式进入模型。课程没有为开关单独设计一个完全不同的 classifier，而是把用户命令和设备动作串成 dialogue，让同一 character/token language model 读取 utterance 并预测结构化 action token。读 Slide 24 时应先找输入/输出边界，再判断这种统一格式带来的扩展性是否值得额外序列开销。该表示也可能浪费容量在固定模板文本上。
+
+\lecturefigure{slide-24-dialogue-data.jpg}{开关交互被表示成 user/device dialogue}{Stanford Online 官方录像 01:02:15}
+
+可抽象成序列
+\[
+s_t=[\texttt{USER}:u_t,\ \texttt{DEVICE}:a_t],
+\]
+其中 $u_t$ 是 transcript，$a_t\in\{\texttt{ON},\texttt{OFF},\texttt{NOOP}\}$。若目标只是控制，直接 classifier 更轻；若未来要生成 clarification 或 reply，dialogue formulation 才提供扩展空间。
+
+\begin{warningbox}{Binary switch 不等于 general dialogue}
+模型只需在极窄 action space 中预测 ON/OFF/NOOP。命令表述多样性可以很高，但输出复杂度仍远低于开放式语言生成。
+\end{warningbox}
+
+\subsection{Potato 与 orange：edge 配置仍需完整系统账本}
+
+课堂给出两种小配置。Potato 使用更小 vocabulary/embedding/context，在 Le Potato 上训练；orange 稍大，目标是降低 latency 并提高预测。表中参数量只是 weight count，还需加入 ASR、audio buffering、runtime 与模型更新内存。
+
+\lecturefigure{slide-25-potato-configs.jpg}{Potato 与 orange PLM 的 edge configuration}{Stanford Online 官方录像 01:02:38}
+
+\begin{knowledgebox}{Edge controller 的端到端 latency}
+\[
+T_{\text{interaction}}=T_{\text{audio}}+T_{\text{ASR}}+T_{\text{model}}
++T_{\text{controller}}+T_{\text{actuator}}.
+\]
+只优化 $T_{\text{model}}$ 不一定让用户感觉更快。课堂演示的多秒延迟可能主要来自 transcription、CPU inference 或串行调用，需要 profiler 分解。
+\end{knowledgebox}
+
+\teachervoice{01:00:10--01:02:48，讲者说明最小 character-level potato PLM 大约用 20 分钟交互学会 directives；更大配置能提高预测，却增加资源和响应成本。}
+
+\subsection{Emergent positive performance：样本够了才出现可用预测}
+
+结果表显示早期数据不足时，positive/negative predictions 接近无意义；积累到一定交互量后，正确 action prediction 明显上升。这里的 emergence 是一个小任务的 sample-threshold phenomenon，不是大模型 benchmark 中的跨任务 emergent ability。
+
+\lecturefigure{slide-26-emergent-positive-performance.jpg}{随本地交互样本增加出现的开关预测能力}{Stanford Online 官方录像 01:02:48}
+
+\begin{importantbox}{如何验证不是 class imbalance 假象}
+报告 ON/OFF/NOOP 每类样本数、balanced accuracy、precision/recall、confusion matrix、按用户拆分的 holdout，以及 never-seen paraphrases。若多数时候开关保持不变，单看 accuracy 可能被 majority class 放大。
+\end{importantbox}
+
+\teachervoice{01:02:48--01:04:08，Williams 说一开始没有足够数据时模型几乎无从预测；样本积累后能力会跳升。但 Le Potato 每次交互仍需数秒，prototype 可行却令人等待。}
+
+\subsection{Where next：可行性之后还有很长工程路径}
+
+最后一张教学 slide 把本地 PLM 视为 edge-trainable controller。未来包括设备 talk-back、更一般的 phone actions、传统 attention 与 SAFFU 的 hybrid、改进 bit-cipher、不同 layer warm starts、larger evaluation 和 BabyLM challenge。
+
+\lecturefigure{slide-27-where-next.jpg}{从 binary switch 走向更一般本地控制器的开放议程}{Stanford Online 官方录像 01:04:12}
+
+\begin{warningbox}{课堂结束时仍没有公开实现}
+Q\&A 说代码要等论文和 evaluation infrastructure 完成后再发布。任何复现都不能假设存在成熟 SDK、标准 benchmark adapter 或可直接下载的 checkpoint。
+\end{warningbox}
+
+\teachervoice{01:04:11--01:06:50，讲者把 binary switch 称为起点，不是终点；conversation role、phone actions、hybrid attention、better bit-cipher、larger models 与标准评测都还是 work in progress。}
+
+\teachervoice{01:19:02--01:19:41，最终 Q\&A 说明公开 SAFFU implementation 当时尚不存在，主要阻碍是非标准 architecture 所需的 evaluation functions 还未建设完成。}
+
+\subsection{本章小结}
+
+Le Potato 实验说明极小任务可以在本地从交互数据起步，并在约 20 分钟内出现有用 prediction。它同时暴露了真实限制：ASR noise、窄 action space、class balance、multi-second latency、没有标准 evaluation 和没有公开实现。
+

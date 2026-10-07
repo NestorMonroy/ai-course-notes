@@ -1,0 +1,74 @@
+\section{Inverse 与 U-shaped Scaling：隐藏子任务如何互相干扰}
+
+前一章讨论“晚出现”，本章讨论“先变差再变好”。这类曲线最容易被误解为训练失败；Jason 的例子表明，整体任务可能由多个能力竞争决定。一个中等模型学会了纠正名言，却还没学会服从 ``repeat after me''，于是比更小模型表现更差；更大模型同时具备两者后又恢复正确。
+
+\subsection{一条曲线背后可能有多个策略}
+
+本节先看现象。Inverse scaling 指规模增加时任务分数下降；U-shaped scaling 指分数先下降、后回升。曲线形状本身不能告诉我们是优化退化、数据冲突还是子任务竞争，因此需要构造可解释 prompt，把可能的策略逐一拆开。
+
+\lecturefigure{jason-slide-016.jpg}{直觉四：精心选择任务会得到 inverse 或 U-shaped scaling}{Jason Wei official deck, p.~16}
+
+\begin{knowledgebox}{术语消化：inverse 与 U-shaped}
+\begin{tabularx}{\textwidth}{L{0.23\textwidth} X}
+\toprule
+术语 & 课程中的含义 \\
+\midrule
+Inverse scaling & 增加模型规模或计算后，某个定义好的任务 metric 反而下降。 \\
+U-shaped scaling & 同一 metric 随规模先下降再上升，说明不同能力或策略在不同区间占主导。 \\
+Task selection & 选择能区分竞争策略的 prompt，而不是只挑平均性能最高的 benchmark。 \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\lecturefigure{jason-slide-017.jpg}{小模型复述错误词，中等模型擅自修正名言，大模型重新遵循指令}{Jason Wei official deck, p.~17}
+
+读图时先把 ``glib'' 与 ``gold'' 分开。目标不是补全著名名言，而是服从用户要求、重复故意写错的句子。小模型因为不知道名言而“误打误撞”复述；中等模型知道名言却忽略 instruction；大模型既识别名言又能把 instruction 置于默认补全倾向之上。
+
+\subsection{把总任务拆成 repeat、repair 与 instruction following}
+
+上一页给出三种行为，本节把它们显式写成子任务。只有当模型能复述文本、识别名言错误、并判断当前指令优先级时，才会稳定输出 ``glib''。这说明最终 accuracy 是能力组合的函数，而不是单一“聪明程度”的单调测量。
+
+\lecturefigure{jason-slide-018.jpg}{三个隐藏子任务的 scaling curve 解释总体 U 形}{Jason Wei official deck, p.~18}
+
+可把最终行为简化为
+\[
+\hat{y}=f\bigl(R(C),Q(C),I(C)\bigr),
+\]
+其中 $R(C)$ 表示复述能力，$Q(C)$ 表示修复熟悉名言的倾向，$I(C)$ 表示遵循显式指令的能力，$f$ 是三者的决策组合。小模型可能有高 $R$、低 $Q$、低 $I$；中等模型高 $R$、高 $Q$、低 $I$；大模型三者都高，并由 $I$ 决定不修正用户文本。
+
+\begin{warningbox}{不要把 U 形自动解释成“模型先学坏再学好”}
+分数下降可能是一个新能力压过旧策略，而不是底层表示整体退化。正确诊断需要对子能力分别评测，并检查 prompt 中哪个目标应该优先。单一 accuracy 会把“知道名言但不听指令”和“完全不知道名言”压成同一个错/对标签。
+\end{warningbox}
+
+\teachervoice{Jason 在 00:21:21--00:23:56 逐个画出三个子任务的曲线，再回到总任务解释 U 形。这是整场讲座最可复用的分析动作：遇到怪曲线时，先问 metric 混合了哪些策略。}
+
+\subsection{研究实践：永远不要只画一个点}
+
+有了子任务分解，最后一步是把实验干预也放到规模轴上。某种 fine-tuning、数据过滤或 prompt 方法在一个预算点领先 baseline，并不说明继续增加数据仍有效。至少需要多个点判断曲线是在饱和、保持斜率还是加速分离；还要在相同数据定义和评测协议下重复实验，避免把随机初始化或样本选择造成的单点波动误认成方法优势。
+
+\lecturefigure{jason-slide-019.jpg}{一般研究建议：画 scaling curves，而不是只报告单点改进}{Jason Wei official deck, p.~19}
+
+\begin{lstlisting}[caption={比较研究干预与 baseline 的 scaling curve}]
+budgets = [0.25, 0.5, 1.0, 2.0]
+for budget in budgets:
+    baseline = train(config="baseline", budget=budget)
+    method = train(config="intervention", budget=budget)
+    log(budget, evaluate(baseline), evaluate(method))
+fit_curve_and_report_uncertainty()
+\end{lstlisting}
+
+\begin{importantbox}{一张 scaling curve 至少回答三件事}
+\begin{enumerate}
+  \item \textbf{Data efficiency}：方法是否只把同样性能提前到更小预算？
+  \item \textbf{Asymptote}：优势是否很快饱和，继续投入也不再扩大？
+  \item \textbf{Slope}：方法是否改变增长斜率，使更大规模的收益更强？
+\end{enumerate}
+单点结果无法区分这三种情况。
+\end{importantbox}
+
+\teachervoice{00:23:59--00:25:51 的结论非常朴素：``just plot scaling curves''。它不是要求每个学生训练 frontier model，而是要求在自己可承受的预算区间内做分层实验，避免把偶然点当成趋势。}
+
+\subsection{本章小结}
+
+Inverse 与 U-shaped scaling 往往提示 metric 背后存在竞争策略。通过可解释 prompt、子能力评测和多预算曲线，研究者能把“奇怪现象”改写成可检验假设。Jason 的第一场讲座到这里形成完整闭环：看数据、识别潜在任务、拆解 loss、画 scaling curve，并明确标注 metric 与证据边界。
+

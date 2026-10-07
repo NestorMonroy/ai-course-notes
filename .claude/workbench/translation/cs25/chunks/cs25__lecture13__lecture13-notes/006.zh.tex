@@ -1,0 +1,78 @@
+\section{Chain-of-Thought：把答案 Token 变成推理轨迹}
+
+课件后半从“模型能做什么”转向“怎样让已有能力变得可用”。标准 few-shot prompt 只示范 question--answer；CoT prompt 则示范 question--intermediate reasoning--answer，让模型在生成最终答案前产生一串可组合的中间 token。它既是 interface design，也增加了 sequential inference computation。
+
+\subsection{研究动机：复杂任务不能只给半秒}
+
+容易任务可能只需一个 label，复杂 arithmetic、symbolic reasoning 或 commonsense task 则需要保存中间状态。课堂的直觉是：如果人类解题会写步骤，那么要求 autoregressive model 立即输出一个 final token，相当于不给它展开计算的时间。
+
+\lecturefigure{slide-20.jpg}{Chain-of-Thought Prompting 论文与公开演示背景}{官方课件第 20 页；Wei et al., NeurIPS 2022}
+
+这张过渡页把论文、团队与 Google I/O 展示放在一起，说明 CoT 当时已从研究原型进入公众视野。对讲义而言，重要的不是发布场景，而是下一张图中非常小的 interface change：是否把 reasoning path 放进 exemplar。
+
+\lecturefigure{slide-21.jpg}{Standard prompting 与 chain-of-thought prompting 的结构差异}{官方课件第 21 页；Wei et al., 2022}
+
+\begin{knowledgebox}{读图：唯一新增的是可模仿的中间过程}
+左侧 standard prompt 只展示 question 与 final answer，模型面对新题时直接猜结果；右侧 CoT prompt 在示例答案中写出计算步骤，模型于是继续生成类似 reasoning path，再给 final answer。它没有更新 weights，也没有调用外部 calculator；变化发生在 context 与生成长度上。
+\end{knowledgebox}
+
+从概率分解看，标准答案生成可写为 $p(a\mid q,e)$，其中 $q$ 是问题、$e$ 是 exemplars。CoT 引入中间 token 序列 $z=(z_1,\ldots,z_m)$：
+\[
+p(a,z\mid q,e)=\prod_{i=1}^{m}p(z_i\mid q,e,z_{<i})\;p(a\mid q,e,z).
+\]
+中间序列让模型把乘法、状态更新和子结论逐步写入 context；这是一种机制直觉，不保证文本步骤忠实对应内部计算，也不保证每个步骤都正确。
+
+\begin{lstlisting}[caption={标准 few-shot 与 CoT prompt 的最小差别}]
+standard = """Q: There are 15 trees and later 21. How many added?
+A: 6
+Q: 23 apples, use 20, buy 6. How many remain?
+A:"""
+
+cot = """Q: There are 15 trees and later 21. How many added?
+A: 21 - 15 = 6. The answer is 6.
+Q: 23 apples, use 20, buy 6. How many remain?
+A:"""
+\end{lstlisting}
+
+\teachervoice{讲者把 CoT 比作老师要求学生 ``show your work''。他后面又补充：给人一道难题却要求半秒内报答案并不公平；中间 token 为模型提供了展开顺序计算的空间，但为什么自然语言步骤如此有效，在 2023 年仍是开放问题。}
+
+\subsection{现场 Demo：同一题从 33 变成 9}
+
+官方 deck 的 ``CoT demo'' 页只是一张标题，因此必须回到录像。现场使用同一个 arithmetic task：食堂有 23 个 apples，用掉 20 个，又买入 6 个。无 CoT exemplars 时，text-davinci-001 直接输出 33；切换到带中间推导的 preset 后，模型写出 $23-20=3$、$3+6=9$ 并得到正确答案。
+
+\lecturefigure{slide-22.jpg}{课堂从课件切换到 OpenAI Playground 的 CoT demo}{官方课件第 22 页}
+
+这张稀疏过渡页本身没有结果，却标记了证据来源的变化：接下来的两张图不是论文插图，而是同一场课堂中的 live system state。对比必须保留 model、temperature、task 与 prompt preset，不能只截一张成功画面。
+
+\videofigure{demo-no-cot-math-wrong.jpg}{无 CoT：模型直接回答 33，未正确组合“用掉 20、买入 6”}{官方视频 00:39:54}
+
+\begin{knowledgebox}{读图：失败不是简单算错一个加法}
+上方三个 exemplar 都是 question--short answer，模型对新题也沿用“直接给数字”的模式。33 很可能来自把 23 与部分变化量做了错误组合；由于没有可见中间状态，我们无法定位错误发生在 subtraction、addition 还是题意解析。这正是 only-final-answer interface 的诊断盲区。
+\end{knowledgebox}
+
+\videofigure{demo-cot-math-correct.jpg}{有 CoT：模型先算剩余 3，再加新买的 6，最终得到 9}{官方视频 00:40:17}
+
+\begin{knowledgebox}{读图：成功来自可检查的状态更新}
+CoT preset 的 exemplars 先把每个数量变化写成算式。新题输出依次保留初始数量、消耗量、剩余量和新增量，因此读者能检查 $23-20=3$ 与 $3+6=9$ 两个局部步骤。图支持“这次 prompt 让该模型答对并暴露步骤”，却不证明步骤一定忠实反映模型内部因果过程。
+\end{knowledgebox}
+
+课堂还演示 last-letter concatenation：standard prompt 对 ``Elon Musk'' 输出 `sk`，CoT 先取 Elon 的末字母 `n`、Musk 的末字母 `k`，再输出 `nk`。这说明作用对象不局限于 arithmetic，而是任何可以拆为可生成中间状态的 task。
+
+\subsection{CoT 的收益为什么也随规模涌现}
+
+有中间步骤并不保证小模型受益。小模型可能在更长输出中累计错误，或者根本无法从 exemplar 抽象出 decomposition rule；大模型则更可能正确生成每一步，因此 CoT 与 standard prompting 的 delta 会随规模扩大。
+
+\lecturefigure{slide-23.jpg}{GSM8K 与 StrategyQA：CoT 增益在足够大模型上出现}{官方课件第 23 页；Wei et al., 2022}
+
+\begin{knowledgebox}{读图：比较同一规模下的 standard 与 CoT}
+横轴是模型规模，纵轴分别是 grade-school math 与 commonsense reasoning performance。小模型处两种 prompt 都低，甚至 CoT 不占优势；进入更大模型区域后，CoT 曲线明显上升并超过当时 fine-tuned state of the art。关键证据是随规模增长的 interaction effect，而不只是最大模型的单一高分。
+\end{knowledgebox}
+
+\begin{warningbox}{CoT 文本不是自动可信的解释}
+模型可以得到正确答案却写出错误步骤，也可以写出流畅步骤但最终错误。CoT 提高了可观察性与任务性能，却不能直接当作 mechanistic interpretability。需要用 step verification、answer checking、counterfactual prompts 或外部 tools 进一步验证。
+\end{warningbox}
+
+\subsection{本章小结}
+
+CoT 的本质是让 frozen model 在回答前生成可组合的中间 token。现场 demo 展示了同题对照，GSM8K/StrategyQA 曲线展示了 scale interaction。它是 inference interface，不是 weight update；它增加 sequential computation，却不能保证 reasoning trace 忠实或正确。
+

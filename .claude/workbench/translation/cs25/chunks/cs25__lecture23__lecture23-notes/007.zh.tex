@@ -1,0 +1,93 @@
+\section{MoE、过拟合与课程学习}
+
+当两百语言和大量方向共享模型时，dense 网络的固定容量要同时服务差异巨大的任务。Mixture of Experts（MoE）用条件路由扩大参数容量，但稀疏专家也更容易让低资源任务找到一条可记忆训练集的专门路径。课堂因此把 MoE 与 dropout、Expert Output Masking 和 curriculum learning 连续讲解。
+
+\subsection{Token-level MoE：条件容量而非免费容量}
+
+MoE 在部分 feed-forward 层放置多个 expert，每个 token 只路由到少数专家。总参数量可以很大，而每个 token 的实际计算较稀疏。不同语言或结构可能形成一定 specialization，从而减少所有任务挤在同一 dense 子层中的 interference。
+
+\lecturefigure{slide-28-moe-architecture.jpg}{Token-level Mixture of Experts 的容量、干扰与过拟合权衡}{Stanford 课堂视频 00:27:45}
+
+\begin{knowledgebox}{读图：三条 bullet 是一条因果链}
+Token-level MoE 增加条件容量，可能让语言共享与专家化并存；专家路径可以降低一部分 interference；但低资源 token 反复进入少数专家时，额外容量会更快记住小数据。MoE 解决容量竞争，却把 regularization 变成更核心的问题。
+\end{knowledgebox}
+
+设 token 表示为 $h$，有 $E$ 个专家 $f_e$，路由器给出权重 $g_e(h)$，Top-$k$ 专家集合为 $\mathcal{T}_k(h)$，则 MoE 输出可写为
+\[
+\operatorname{MoE}(h)=\sum_{e\in\mathcal{T}_k(h)} g_e(h)f_e(h).
+\]
+$E$ 表示专家总数，$k$ 表示每个 token 激活的专家数，$f_e$ 是 expert FFN，$g_e(h)$ 是归一化路由权重。总参数随 $E$ 增加，但单 token 计算主要随 $k$ 增加。
+
+\begin{knowledgebox}{术语消化：MoE 组件}
+\begin{tabularx}{\textwidth}{@{}L{0.21\textwidth}L{0.26\textwidth}X@{}}
+\toprule
+术语 & 机制 & 风险/课程关系 \\
+\midrule
+Expert & 独立 FFN 子网络 & 形成条件容量，也可能记忆小任务 \\
+Router / gate & 为 token 选择专家 & 路由偏置会集中负载或固化语言分工 \\
+Top-$k$ routing & 只激活少量专家 & 控制计算量，但需要 load balancing \\
+Language interference & 任务更新互相伤害 & 共享过强时低资源语言被高资源梯度淹没 \\
+Overfitting & 训练继续、验证变差 & 低资源方向更早出现，需要正则与调度 \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{Dense dropout、MoE dropout 与 EOM}
+
+课堂的三联图比较 dense model、MoE 加普通 dropout，以及 MoE 加 Expert Output Masking（EOM）。普通 dropout 对 dense 模型有效，却不足以完全抑制 MoE 低资源方向过拟合；EOM 随机屏蔽一部分 token 的 expert output，使路由得到的专门容量不能在每次更新中都被依赖。
+
+\lecturefigure{slide-29-dropout-eom-results.jpg}{Dense、MoE、dropout 与 Expert Output Masking 的验证曲线}{Stanford 课堂视频 00:29:18}
+
+\begin{knowledgebox}{读图：上排低资源、下排高资源，先看曲线拐点}
+横轴是训练 updates，纵轴包含质量或验证 perplexity。低资源方向会更早出现“继续训练但验证变差”的拐点；高资源方向通常能持续受益。EOM 的目标不是让训练更快，而是推迟低资源过拟合，同时尽量保留 MoE 容量优势。
+\end{knowledgebox}
+
+对 token $t$ 和被选专家 $e$，EOM 可抽象为
+\[
+\widetilde{f}_e(h_t)=m_{t,e}f_e(h_t),\qquad
+m_{t,e}\sim\operatorname{Bernoulli}(1-p_{\text{eom}}).
+\]
+$m_{t,e}$ 是随机 mask，$p_{\text{eom}}$ 是屏蔽概率，$f_e(h_t)$ 是专家输出。真实实现与 Top-$k$ 组合更细致，但核心是随机跳过部分 expert contribution，而不是只对最终 dense activation 做普通 dropout。
+
+\begin{warningbox}{EOM 不是“关闭坏专家”}
+Mask 是训练时随机正则，不是根据语言质量永久禁用某个专家。它降低模型对固定 token-expert 路径的依赖；若把它理解成静态 expert pruning，就会误读曲线与部署行为。
+\end{warningbox}
+
+\teachervoice{Fan 用 very easy to overfit 形容 MoE 的额外容量。课堂不是把 MoE 当作无条件优于 dense 的架构，而是把它和低资源 regularization 一起视为同一个设计。}
+
+\subsection{Curriculum learning：按过拟合时间安排进入训练}
+
+本节从空间正则转向时间调度。不同语言对的数据量与可训练时长不同。NLLB 先观察无 curriculum 训练中每个方向何时开始过拟合，再把方向分桶；越早过拟合的方向越晚加入训练，使其经历更少 updates，高资源方向则更早进入、训练更久。
+
+\lecturefigure{slide-30-curriculum-learning.jpg}{根据语言对过拟合时间分桶并分阶段加入训练}{Stanford 课堂视频 00:30:21}
+
+\begin{knowledgebox}{读图：schedule 的依据是验证行为，不只是样本数}
+语言对数据少通常更早过拟合，但相同样本数也可能因噪声、脚本或迁移效果表现不同。课堂方案先测量 overfitting onset，再设 bucket 和 introduction time。这样 curriculum 是经验诊断驱动，而不是固定地“先高资源、后低资源”。
+\end{knowledgebox}
+
+设总训练步数为 $T$，语言对 $d$ 在基线训练中约经过 $k_d$ 步后开始过拟合，则可把它安排在
+\[
+t_{\text{start}}(d)=T-k_d
+\]
+时加入。$t_{\text{start}}(d)$ 是加入时刻，$T$ 是总步数，$k_d$ 是该方向可承受的训练窗口。实际系统使用分桶中位数而非每方向独立时间，以降低调度复杂度。
+
+\begin{lstlisting}[caption={基于验证集过拟合时间的 phased curriculum}]
+baseline = train_without_curriculum(all_directions)
+for direction in all_directions:
+    onset[direction] = first_overfitting_step(baseline.validation(direction))
+
+buckets = cluster_by_onset(onset)
+model = initialize_model()
+for step in range(total_steps):
+    active = directions_whose_bucket_has_started(step, buckets)
+    model.update(sample_batch(active))
+\end{lstlisting}
+
+\begin{warningbox}{Curriculum 与 EOM 不是简单相加必然更好}
+NLLB 论文中的 ablation 显示，在较小设置里 EOM 已缓解过拟合时，再加 curriculum 可能无益甚至略降；在完整大规模设置中组合又能改善低资源方向。结论应绑定模型、数据和训练规模，不能写成普适配方。
+\end{warningbox}
+
+\subsection{本章小结}
+
+MoE 用 token-level routing 增加条件容量并缓解干扰，却放大低资源过拟合。EOM 对 expert output 做随机正则，curriculum 则按验证集过拟合时间控制训练窗口；两者效果依赖具体规模与数据条件。
+

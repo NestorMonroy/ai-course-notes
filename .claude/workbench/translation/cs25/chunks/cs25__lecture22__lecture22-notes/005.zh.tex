@@ -1,0 +1,85 @@
+\section{Preference Data：把“更好”变成可训练标签}
+
+Demonstration 告诉模型如何回答，preference data 则要求人或 judge 比较多个回答。它新增了 task entropy、对话长度、价值优先级与 rating scale 等自由度，因此不能把 SFT data collection 原样复制过来。
+
+\subsection{Helpfulness 与 Harmlessness 的标注界面}
+
+Preference sample 通常包含同一 prompt 下的多个 model responses，以及 chosen/rejected 或 rank/margin label。标注员不必重写答案，但需要稳定地解释“更 helpful、更 truthful 或更 harmless”。
+
+\lecturefigure{slide-23.jpg}{Human preference data 的 helpfulness 与 harmlessness 界面}{官方幻灯片 p.23}
+
+\begin{knowledgebox}{读图：label 是比较结果，不是事实真值}
+界面把人类判断压成 pairwise choice 或 ordinal score。对事实题，正确性可检查；对写作、建议和 brainstorming，偏好会受风格、长度和个人价值影响。因此 preference label 是 protocol-dependent measurement。
+\end{knowledgebox}
+
+\lecturefigure{slide-24.jpg}{Preference dataset 的五类 desiderata}{官方幻灯片 p.24}
+
+\begin{importantbox}{Preference collection 的五个旋钮}
+Task distribution 决定比较什么；length distribution 决定阅读负担与上下文；single/multi-turn 决定依赖历史的程度；helpfulness/honesty/harmlessness 决定价值优先级；rating/ranking scale 决定 label resolution。任何一个旋钮变化都可能改变 reward model。
+\end{importantbox}
+
+\teachervoice{讲者明确把 preference data 视为“另一个数据设计问题”。同样的 prompts 若改成多轮、改价值 tie-break rule 或改 rating scale，就会产生不同监督信号。}
+
+\subsection{Pilot：先测标注流程，再大规模采购}
+
+团队先让不同 vendor 对 300 个 Self-Instruct prompts 做 pilot，并使用 Anthropic 模板。Pilot 的目标不只是比较供应商，还要暴露 interface、guideline 与 model endpoint 是否会制造系统性 label 偏差。
+
+\lecturefigure{slide-25.jpg}{300 prompts 的 preference collection pilot}{官方幻灯片 p.25}
+
+\begin{knowledgebox}{读图：pilot 是 measurement system test}
+左侧是标注模板，右侧是 vendor/task 结果表。应先检查不同供应商是否理解同一 scale、tie rate 是否异常、某些 task 是否难以判断，再决定扩大规模。若 measurement 不稳定，增加样本只会更精确地重复偏差。
+\end{knowledgebox}
+
+\lecturefigure{slide-26.jpg}{Pilot preference data 的 task confusion/distribution diagnostics}{官方幻灯片 p.26}
+
+\begin{knowledgebox}{读图：矩阵展示任务覆盖与混淆}
+对角区域表示 intended category，非对角项提示 task definition 或 prompt classification 不一致。先看哪些类别互相混淆，再判断 label noise 来自 annotator、taxonomy 还是 prompt 本身；矩阵不能单独证明回答质量。
+\end{knowledgebox}
+
+\subsection{20K Dialogues、80K Prompts 与 Multi-turn 约束}
+
+大规模 collection 目标是约 20K dialogues、总计约 80K prompts。任务分布故意包含 generation、coding、math、QA 等不同 entropy；完整对话小于 2,048 tokens，平均约四轮，以适配当时模型 context 并保持真实 follow-up。
+
+\lecturefigure{slide-27.jpg}{Preference dataset 的 20K dialogues 与任务分配}{官方幻灯片 p.27}
+
+\begin{knowledgebox}{读图：20K 与 80K 描述不同计数单位}
+20K 是 dialogue 数，80K 是多轮中的 prompt 数；若平均四轮，两者数量级自然相连。训练或成本报告必须说明 unit，否则会把一段四轮对话误算成一条或四条不一致的样本。
+\end{knowledgebox}
+
+\teachervoice{团队增加 math、coding、closed QA 等低熵任务，是因为它们更容易判断正确与否；creative generation 虽更贴近聊天，却可能存在许多合理答案，使人类偏好一致性下降。}
+
+\begin{lstlisting}[caption={把 multi-turn chosen/rejected conversation 转成 DPO batch 的概念结构}]
+def build_preference_example(dialogue, chosen, rejected, margin):
+    return {
+        "prompt": render_history(dialogue),
+        "chosen": chosen,
+        "rejected": rejected,
+        "preference_margin": margin,
+        "turn_count": len(dialogue),
+    }
+\end{lstlisting}
+
+\lecturefigure{slide-28.jpg}{Preference collection 的长度、轮数、价值与 rating policy}{官方幻灯片 p.28}
+
+\begin{knowledgebox}{读图：constraints 同时服务模型与标注员}
+2,048-token cap 避免超出模型 context，也限制标注阅读成本；四轮平均提供 follow-up，又不让整段过长。团队优先 helpfulness 而非 harmlessness，是 capability-stage choice，不能被解读为安全优先级的普适原则。
+\end{knowledgebox}
+
+\teachervoice{Preference collection 不是一次性交付：团队每周拿到数据、微调模型，再把更好的 endpoint 交给 vendor 继续生成下一周 pair。Annotator 面对的 policy 会持续变化，因此 dataset 是一个 co-evolving process。}
+
+\subsection{Chosen、Rejected 与 Preference Margin}
+
+上一小节说明了 collection 的规模、轮数与价值优先级，本节转向单条训练记录内部，解释 winner、loser 与 margin 各自携带什么信息。读例子时先找两个回答真正分歧的局部，再看 margin 是否与分歧强度一致。课堂展示的多轮例子强调，chosen 与 rejected 可能都很好；margin 表示偏好强度而不是绝对分数。强 margin 的 pair 适合学明显错误，弱 margin 的 pair 则携带细粒度 style/value 信号，也更容易包含 annotator noise。
+
+\lecturefigure{slide-29.jpg}{Multi-turn chosen/rejected preference examples 与 margin}{官方幻灯片 p.29}
+
+\begin{knowledgebox}{读图：先找分歧点，再读 margin}
+左例在角色模仿与潜在威胁处理上差异明显，margin 较大；右例是周年文本，两答都可用，只在遗漏细节与措辞上有小差异。Pairwise data 的信息量来自“哪里不同”，不是只看 winner 文本。
+\end{knowledgebox}
+
+\teachervoice{团队先用 Anthropic 1--8 scale，随后改成 Llama-2 式 winner + 1--4 margin，因为后者更容易解释“谁更好、好多少”。Scale change 会改变 label distribution，因此它本身也是实验变量。}
+
+\subsection{本章小结}
+
+Preference data 把开放式质量压成 protocol-dependent 比较标签。有效 collection 需要 task entropy、multi-turn context、价值 tie-break rule、rating scale 与迭代 endpoint 的联合设计。
+

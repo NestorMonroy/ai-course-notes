@@ -1,0 +1,87 @@
+\section{把 Llama 改造成视频生成 Transformer}
+
+表示和学习目标确定后，才轮到 backbone。Movie Gen 没有把语言模型权重直接迁移到视频，而是选择熟悉的 Llama-style block 与训练基础设施，从随机初始化开始训练。为了适应条件 Flow Matching，它增加文本 cross-attention、timestep AdaLN，并把 causal GQA 改为 full bidirectional MHA。
+
+\subsection{为什么选择 Llama 形状，而不是 Llama 权重}
+
+讲者的工程判断是“选择已经知道如何扩展的形状”。Llama-style Transformer 的 kernel、并行策略、监控和故障经验都成熟；这些基础设施价值可能大于某个专用视觉模块的局部优势。下面的 llama 图是架构比喻，不是语言知识迁移证据。
+
+\lecturefigure{slide-193-llama-backbone.jpg}{把视频 latent patch 化后送入随机初始化的 Llama-style Transformer}{00:27:15}
+
+\begin{warningbox}{Movie Gen 不是“把 Llama 微调成视频模型”}
+本项目使用随机初始化的 Llama-style backbone。课堂上有人询问是否从 pretrained Llama 初始化，老师明确回答没有在该项目中尝试。不同模态和不同目标之间能否迁移，仍是开放研究问题。
+\end{warningbox}
+
+\teachervoice{00:25:12--00:27:15，老师说选择 Llama 形状的主要原因是扩展路径和基础设施已经熟悉；这并不意味着文本预训练权重被用于 Movie Gen。}
+
+\subsection{改造一：文本通过 cross-attention 进入}
+
+前一节选择了 Llama-style 主干，本节开始逐项补回生成条件。视频 token 与文本 token 长度不同，且文本不需要跟随 Flow Matching 加噪；核心问题是怎样让每个视频位置读取相关词义，又不把长 prompt 压成单一向量。Movie Gen 用三个互补文本 encoder 产生条件表示，再让视频流通过 cross-attention 读取它们。
+
+\lecturefigure{slide-194-text-conditioning.jpg}{三个文本表示拼接后，通过 cross-attention 条件化视频 Transformer}{00:29:23}
+
+对视频 hidden states $H$ 与文本表示 $P$，cross-attention 可写为
+\[
+Q=HW_Q,\quad K=PW_K,\quad V=PW_V,
+\qquad
+\operatorname{CA}(H,P)=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt d}\right)V.
+\]
+$W_Q,W_K,W_V$ 是投影矩阵，$d$ 是 head dimension。输出长度仍等于视频 token 数；文本作为条件 memory，不被同一层反向加噪。
+
+\begin{knowledgebox}{为什么需要多个 text encoders}
+不同 encoder 擅长不同尺度：有的提供全局语义，有的保留长 prompt 和词级关系，有的与视觉语义对齐。拼接多个表示增加条件容量，也增加显存、延迟和接口复杂度；其收益必须通过消融验证。
+\end{knowledgebox}
+
+\subsection{改造二：AdaLN 把时间步写入每个 block}
+
+文本路径已经回答“生成什么”，本节转向“当前去噪到哪里”。这两类条件的信息结构不同，因此不应机械共用同一接口。Movie Gen 沿用 DiT 的 Adaptive LayerNorm（AdaLN，自适应层归一化），由时间 embedding 产生 scale 与 shift，使同一 block 在不同噪声水平执行不同计算。
+
+\lecturefigure{slide-195-adaptive-layernorm.jpg}{AdaLN 用 timestep 生成每层的 scale 与 shift}{00:30:04}
+
+若 $h$ 是 token hidden state，$e_t$ 是时间 embedding，则
+\[
+\operatorname{AdaLN}(h;t)
+=\gamma(e_t)\odot\operatorname{LN}(h)+\beta(e_t),
+\]
+其中 $\gamma,\beta$ 是小网络输出，$\odot$ 是逐元素乘法。AdaLN 的成本不随文本长度增长，适合低维 timestep 条件；文本仍由 cross-attention 保留序列结构。
+
+\begin{importantbox}{条件接口按信息结构分工}
+长序列文本需要可选择的 token-to-token 读取，因此走 cross-attention；单个连续时间变量只需调制每层统计，因此走 AdaLN。把所有条件压成一个向量或全部拼成 token，都会丢失这种结构化分工。
+\end{importantbox}
+
+\subsection{改造三：从 causal GQA 到 bidirectional MHA}
+
+语言模型只能看左侧 token，因为目标是预测下一个词；Flow Matching 要同时更新整段 noisy latent，因此没有 causal 顺序。Movie Gen 使用 full bidirectional attention，并选择 MHA 而非 GQA，使每个 query head 保留自己的 key/value heads。
+
+\lecturefigure{slide-196-bidirectional-attention.jpg}{视频 Flow Matching 使用双向注意力，而不是语言模型的 causal mask}{00:30:38}
+
+\begin{knowledgebox}{第一次出现：MHA 与 GQA}
+MHA（Multi-Head Attention）为每个 query head 配置独立 K/V heads；GQA（Grouped-Query Attention）让多个 query heads 共享较少 K/V heads，主要降低 autoregressive KV cache。Movie Gen 不是逐 token 自回归生成，训练时也不依赖长期 KV cache，因此采用表达更充分的双向 MHA。
+\end{knowledgebox}
+
+\subsection{完整架构与 73K-token 系统成本}
+
+把 TAE、patchify、噪声、文本条件、timestep 与 decoder 串起来，才得到完整生成系统。读图时应从左到右追踪数据形状：视频先编码为 latent，latent 与高斯噪声形成 $X_t$，Transformer 预测速度，最后 TAE decoder 返回像素视频。
+
+\lecturefigure{slide-244-full-architecture.jpg}{Movie Gen Video 完整架构：TAE、patchify、条件 Transformer 与 decoder}{00:35:12}
+
+全注意力主项近似
+\[
+\operatorname{FLOPs}_{\mathrm{attn}}=O(LN^2d),
+\qquad
+\operatorname{Memory}_{\mathrm{attn}}=O(N^2),
+\]
+其中 $L$ 是层数，$N$ 是序列长度，$d$ 是 head dimension。$N=73{,}000$ 时，单个完整 attention map 约有 $5.3\times10^9$ 个元素，不能在单卡上朴素存储。
+
+因此训练需要多种并行：data parallel 复制模型分批处理样本；tensor parallel 切分矩阵乘法；sequence/context parallel 按 token 维度分片。这里的 sharding（分片）指把参数、激活或序列切到多张 GPU，使每卡只保存局部而不再完整复制。collectives（集合通信）包括 all-reduce、all-gather、reduce-scatter 等多 GPU 通信原语，用于汇总或交换分片结果。
+
+\begin{warningbox}{参数量不是唯一系统尺度}
+30B 参数描述权重容量，73K context 描述单样本激活与 attention，采样步数描述重复前向次数。部署成本必须同时核算权重显存、激活、临时 buffer、集合通信和 ODE steps；只报参数量会严重低估视频生成。
+\end{warningbox}
+
+\teachervoice{00:33:59--00:35:12，老师把两年进步归因于架构、数据、模型规模、compute 与硬件共同变化。完整架构的价值不是某个新 block，而是这些部分终于能沿统一系统一起扩展。}
+
+\subsection{本章小结}
+
+Movie Gen 使用随机初始化的 Llama-style backbone，而非语言权重迁移。三项关键改造是文本 cross-attention、timestep AdaLN 和双向 MHA。完整系统的真正瓶颈来自 73K-token 序列、二次 attention、多卡分片通信和多步 ODE 推理，而不只是 30B 参数。
+

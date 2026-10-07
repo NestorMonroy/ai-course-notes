@@ -1,0 +1,64 @@
+\section{从 Prompting 到 SFT：怎样让好轨迹自然排到前面}
+
+CoT decoding 承认正确轨迹可能藏在分布深处，再用额外候选把它找出来。更直接的目标是改变分布本身：让有步骤、能导向正确答案的响应在第一次生成时就拥有更高概率。Prompting 和 supervised finetuning（SFT）都在做分布重排，但前者通过上下文临时改变条件分布，后者通过参数更新形成长期偏好。
+
+\lecturefigure{slide-12.jpg}{下一步问题：能否让 thoughtful response 自然成为 top-1}{12}
+
+\subsection{Few-shot CoT 与 zero-shot trigger 改变了什么}
+
+Few-shot CoT 在 prompt 中放入相似问题及分步解法，模型据此模仿输出格式与求解策略；“Let's think step by step” 则用通用触发语诱导更长的中间过程。两者都不修改参数，优点是部署快、可针对任务调试，缺点是上下文占用、示例选择敏感，以及性能常被措辞和顺序影响。
+
+\lecturefigure{slide-13.jpg}{Few-shot Chain-of-Thought 与 zero-shot “Let's think step by step”}{13}
+
+\lecturefigure{slide-14.jpg}{Prompting 的优点与局限：简单有效，但依赖示例}{14}
+
+\lecturefigure{slide-15.jpg}{课堂批评：要求先看范例或重复“逐步思考”是一种不自然接口}{15}
+
+读这三页时应区分\textbf{任务信息}与\textbf{推理控制信号}。示例既告诉模型输出格式，也可能泄漏领域词汇、难度与答案分布；通用触发语减少任务工程，却通常弱于高质量 few-shot。若只报告“prompt A 比 prompt B 好”，而不报告示例、顺序、token 预算和解码设置，就无法判断改进来自真正的策略迁移，还是更有利的上下文条件。
+
+\teachervoice{00:12:40--00:16:20，老师说 few-shot CoT 很有效，但如果提问者已经拥有相似问题和完整解法，为什么还要问模型；而每次都补一句“逐步思考”也不像自然能力。老师强调：成功的 prompt 是有用接口，不等于训练问题已经解决。}
+
+\begin{knowledgebox}{术语消化：Prompting、In-Context Learning 与 Finetuning}
+\textbf{Prompting} 是在输入中加入指令、示例或结构；\textbf{in-context learning} 是模型在不更新参数时从上下文适配任务；\textbf{finetuning} 则用梯度更新参数。前两者的状态通常随请求结束而消失，后者改变模型在未来请求中的基础分布。
+\end{knowledgebox}
+
+\subsection{SFT：把人类轨迹变成最大似然目标}
+
+SFT 收集问题 $x$ 与人工分步解答 $y^*=(r^*,a^*)$，再最大化参考序列的似然。对数据集 $\mathcal D$，损失为
+\[
+\mathcal L_{\text{SFT}}(\theta)
+=-\mathbb E_{(x,y^*)\sim\mathcal D}
+\left[\sum_{t=1}^{|y^*|}\log p_\theta(y_t^*\mid x,y_{<t}^*)\right].
+\]
+其中 $\theta$ 是待更新参数，$|y^*|$ 是参考响应长度。Teacher forcing 训练时总把正确前缀 $y_{<t}^*$ 喂给模型；部署时模型必须消费自己生成的前缀，因此一步偏差可能把后续状态带到训练分布之外。
+
+\lecturefigure{slide-16.jpg}{Supervised Finetuning：收集人工步骤并最大化其似然}{16}
+
+\lecturefigure{slide-17.jpg}{SFT 的训练—测试落差：从已标注任务迁移到新问题}{17}
+
+图 17 用末字母、苹果题训练，再测试 “strawberry 有几个 r”。即使任务都能写成自然语言步骤，表面格式一致也不保证算法迁移。模型可能学到“复述训练示例的词形和句式”，却没有学到对任意字符串执行逐字符计数；这就是为什么需要按组合长度、词形、领域与难度做 out-of-distribution 切分，而不是随机拆分近似样本。
+
+\begin{warningbox}{Teacher forcing 的隐藏假设}
+SFT 假设参考轨迹既正确又是模型容易生成的路径，并假设局部 next-token imitation 能产生全局正确行为。若参考步骤风格与模型分布差异太大，模型可能在训练损失下降时仍无法稳定进入那条轨迹。
+\end{warningbox}
+
+\subsection{为什么“多收数据再放大”未必解决泛化}
+
+SFT 的优点是通用：一旦构建统一的输入—响应格式，同一个训练管线可以覆盖数学、代码和解释任务。缺点是对新组合与新难度的泛化不稳定，而且扩大同类人工轨迹常带来递减收益。页面上的 “Don't scale blindly” 不是反对 scale，而是要求先确认学习目标与数据生成过程是否对准部署目标。
+
+\lecturefigure{slide-18.jpg}{SFT：通用但泛化有限，盲目扩大同一范式不一定有效}{18}
+
+\teachervoice{00:16:20--00:19:55，老师回顾 2021 年团队发现 SFT 在推理上泛化不佳，并给出本讲最强的实践警告之一：如果 paradigm 本身错了，继续扩大同类数据和训练规模也不会自动修复。}
+
+可用三类测试区分“没学够”与“目标错位”：
+\begin{enumerate}
+  \item \textbf{同分布扩量}：增加近似训练样本是否继续稳定提升；
+  \item \textbf{组合外推}：长度、数字范围或操作组合变大时是否崩溃；
+  \item \textbf{轨迹替换}：不同但同样正确的解法是否被错误惩罚。
+\end{enumerate}
+若模型只在第一类提升，说明它更像在插值；若第三类中把有效替代轨迹视为错误，最大似然目标本身就在压缩解空间。
+
+\subsection{本章小结}
+
+Prompting 用上下文临时诱导轨迹，SFT 用人工参考永久重排分布。两者都能让 reasoning 更常出现，但都依赖人类指定“应该长什么样”。当部署问题拥有多个有效路径、难度超出标注分布或正确轨迹难以人工书写时，下一步应直接优化结果质量，而不是继续模仿单一路径。
+

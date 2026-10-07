@@ -1,0 +1,97 @@
+\section{Evaluation Infrastructure：没有反馈，就没有开放对齐迭代}
+
+上一章出现大量模型，却缺少共同坐标。2023 年 5--7 月，ChatBotArena、AlpacaEval、MT-Bench 和 Open LLM Leaderboard 在数周内出现，原因不是评测理论突然成熟，而是开放团队无法像大公司那样持续雇人比较回答。评测因此成为训练 loop 的代理反馈。
+
+\subsection{四套评测为什么同时出现}
+
+本节先看时间线和角色分工。Arena 收集真实人类 pairwise preference，反馈慢但外部效度高；AlpacaEval 和 MT-Bench 用强 LLM judge 加速迭代；Leaderboard 自动跑静态任务，最容易集成工程流水线。四者优化不同目标，不能由一个分数取代。
+
+\lecturefigure{slide-049.jpg}{2023 年四套主流开放 aligned-model evaluations 几乎同时出现}{official deck, p.~49}
+
+\teachervoice{00:32:14--00:32:48，Nathan 说这些工具在短时间内出现，是因为开放 builder desperately needed signal，却没有能力像闭源公司一样持续支付人类比较成本。}
+
+\subsection{ChatBotArena：慢，但接近真实用户偏好}
+
+上一节把四套评测放在同一张地图上，本节先看其中最接近真实产品反馈的一种。Arena 把两个匿名模型并排展示给用户，收集胜、负或平局，再通过 pairwise ranking 估计相对强弱。阅读流程图时先追踪 prompt 从哪里来、比较结果怎样进入 ranking、一个新模型需要多少对战才能稳定；它的优势是 prompt 来自真实用户、judge 是人，弱点则是采样和收敛都慢，开发反馈可能需要数天。
+
+\lecturefigure{slide-050.jpg}{ChatBotArena：匿名双模型比较与真实用户偏好收集}{official deck, p.~50}
+
+Elo 的期望胜率可写成
+\[
+P(A\succ B)=\frac{1}{1+10^{(R_B-R_A)/400}},
+\]
+其中 $R_A,R_B$ 是模型评分，$P(A\succ B)$ 是 A 战胜 B 的概率。评分是相对量，依赖对手图、用户分布和时间窗口；不同 Arena 版本的绝对 Elo 不宜直接横比。
+
+\teachervoice{00:33:14--00:33:56，讲者认为 Arena 对发布和公司策略非常重要，但对训练工程太慢：团队需要在决定发布前就知道模型是否改进，因此必须搭配更快的自动评测。}
+
+\subsection{AlpacaEval：快速 preference proxy 与 judge bias}
+
+AlpacaEval 用固定 prompts，让 candidate response 与 baseline response 比较，再请强 LLM 判断胜者。更多样本带来较小误差条，运行快且易集成；但 baseline、judge、response length 和 style 都会改变胜率。
+
+\lecturefigure{slide-051.jpg}{AlpacaEval：candidate 与 baseline response 的 LLM preference judging}{official deck, p.~51}
+
+\lecturefigure{slide-052.jpg}{AlpacaEval 的优势与局限：样本多、误差小，但 judge 有偏置}{official deck, p.~52}
+
+若 $n$ 个独立比较中 candidate 获胜比例为 $\hat p$，近似标准误为
+\[
+\operatorname{SE}(\hat p)=\sqrt{\frac{\hat p(1-\hat p)}{n}}.
+\]
+其中 $n$ 是比较数，$\hat p$ 是观测 win rate。增加样本降低随机误差，却不会消除系统偏差，例如 judge 偏好更长、更礼貌或与自身风格相似的回答。
+
+\lecturefigure{slide-053.jpg}{AlpacaEval 2：更换 GPT-4 baseline 并引入 length control}{official deck, p.~53}
+
+\begin{warningbox}{LLM-as-a-judge 的四个偏差源}
+\begin{enumerate}
+  \item \textbf{Position bias}：先出现或后出现的答案更易获胜；
+  \item \textbf{Length/style bias}：冗长、格式漂亮的答案获得额外偏好；
+  \item \textbf{Self preference}：judge 偏好与自身分布相似的输出；
+  \item \textbf{Contamination}：judge 可能见过 benchmark、candidate 或 reference。
+\end{enumerate}
+随机换位、长度控制、多 judge 与人工抽检只能缓解，不能完全消除。
+\end{warningbox}
+
+\teachervoice{00:33:56--00:36:16，Nathan 把 AlpacaEval 视为快速工程信号，但对 AlpacaEval 2 分数的具体含义保持谨慎。评测越容易优化，就越需要检查是否只学会迎合 judge。}
+
+\subsection{MT-Bench：多轮覆盖与小样本脆弱性}
+
+AlpacaEval 使用 pairwise preference 回避绝对评分校准，MT-Bench 则故意换成多轮、分类型的标量打分，以观察模型能否在追问后继续保持质量。本节因此要比较两种误差来源：pairwise judge 的相对偏好，与 1--10 分尺度的漂移。MT-Bench 让 LLM judge 对两轮回答打分，题目覆盖写作、推理、数学、编码等类别；读图时先看第二轮是否真正依赖第一轮，再看类别平均是否掩盖个别失败。多轮结构比单轮 preference 更接近 chat，但题目数量小、judge 评分尺度不稳定，团队也容易针对公开题调参。
+
+\lecturefigure{slide-054.jpg}{MT-Bench：强模型对多轮回答做标量评分}{official deck, p.~54}
+
+\lecturefigure{slide-055.jpg}{MT-Bench 的优点、缺点与可被优化风险}{official deck, p.~55}
+
+\begin{knowledgebox}{读图：标量分数比 pairwise 更难校准}
+给一个回答打 7 分需要稳定的绝对标准，而判断 A 是否优于 B 只需局部比较。不同 judge 或 prompt wording 会改变 1--10 尺度。报告 MT-Bench 时应保留逐题结果、judge 版本和类别分布，不只给平均分。
+\end{knowledgebox}
+
+\teachervoice{00:36:16--00:37:44，课程指出 MT-Bench 的两轮题很有用，但题量少、judge 有偏差，而且公开后可以被直接优化。一个高分模型可能只是更贴合这 80 道问题。}
+
+\subsection{Open LLM Leaderboard：工程工具如何被 Goodhart 化}
+
+Leaderboard 自动运行多个静态 benchmark，最初是方便比较 base/fine-tuned model 的工程工具。随着排名影响下载量和声誉，训练数据开始混入 benchmark 风格甚至测试题，静态分数逐渐失去区分真实 chat quality 的能力。
+
+\lecturefigure{slide-056.jpg}{Open LLM Leaderboard：自动 benchmark pipeline 与公开排名}{official deck, p.~56}
+
+\lecturefigure{slide-057.jpg}{评测组合：Arena 慢而真实，自动 eval 快而可被投机}{official deck, p.~57}
+
+\begin{importantbox}{Goodhart's law 在模型评测中的形式}
+当 metric 从“测量目标”变成“训练目标”，模型会学习 metric 的可利用部分。解决方案不是寻找永远不会被投机的单一 benchmark，而是建立评测组合：隐藏/动态 prompts、真实用户偏好、能力与安全分层、人工审计，以及定期更换已被饱和的任务。
+\end{importantbox}
+
+\teachervoice{00:37:44--00:39:45，Nathan 说 Leaderboard 最初是工程工具，但污染和 gaming 降低了价值；他的组合建议是把 Arena 当长期公开信号，把 AlpacaEval/MT-Bench 当快速开发信号，而不是寻找一个万能分数。}
+
+\begin{lstlisting}[caption={评测 portfolio 的最小记录结构}]
+evaluation = {
+    "prompt_distribution": "real_users | fixed_set | hidden_set",
+    "judge": "human | model_name_and_version",
+    "baseline": "model_or_none",
+    "aggregation": "elo | win_rate | scalar_mean",
+    "latency": "minutes | days",
+    "known_biases": ["length", "position", "contamination"]
+}
+\end{lstlisting}
+
+\subsection{本章小结}
+
+四套评测分别服务不同时间尺度：Arena 支持发布和公共比较，AlpacaEval/MT-Bench 支持快速迭代，Leaderboard 支持自动能力回归。每套工具都有 prompt、judge、baseline 和 aggregation 假设；开放对齐的成熟不是找到完美分数，而是知道每个分数能回答什么、不能回答什么。
+

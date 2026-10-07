@@ -1,0 +1,91 @@
+\section{从 Waveform 到 Spectrogram：先决定模型看见什么}
+
+声音首先是随时间变化的幅值，而不是天然的二维图片或离散词表。把它交给模型之前，可以保留 raw waveform，也可以投影到 sinusoidal bases、perceptual filterbanks 或 learned features。每次变换都在回答两个问题：哪些变化应被视为相近，以及哪些细节可以被压缩。理解这些选择，是读懂后续三篇工作最重要的前置知识。
+
+\subsection{采样率与序列长度}
+
+设连续信号为 $x(t)$，采样率为 $f_s$，观察时长为 $T$ 秒，则离散序列长度为
+\[
+n=f_sT.
+\]
+其中 $n$ 是 samples 数。以 $f_s=16\,000\ \mathrm{Hz}$ 为例，一秒有 $16\,000$ 个位置，十秒有 $160\,000$ 个位置。若每个位置都与所有历史位置计算 attention，单层 score 数量近似为
+\[
+N_{\mathrm{pair}}\approx \frac{n(n+1)}{2}=O(n^2).
+\]
+十秒信号会产生约 $1.28\times10^{10}$ 个 causal pairs；这还没计入 heads、layers、batch 与 activation memory。
+
+\begin{importantbox}{第一性约束}
+Audio 的“长序列”不是抽象形容词，而是由采样率直接决定。任何可运行方案都必须在局部窗口、下采样、patch、稀疏 attention、latent code 或替代序列模型之间做选择。
+\end{importantbox}
+
+\subsection{Fourier basis 与短时分析}
+
+离散 Fourier transform 把长度 $N$ 的窗口表示为不同频率的复数系数：
+\[
+X[k]=\sum_{n=0}^{N-1}x[n]e^{-j2\pi kn/N},
+\qquad k=0,\ldots,N-1.
+\]
+这里 $x[n]$ 是第 $n$ 个 sample，$k$ 是频率 bin，复数 $X[k]$ 同时包含 magnitude 与 phase。真实声音通常非平稳，因此不能只对整段做一次 transform；短时 Fourier transform（STFT）使用窗口 $w[n]$ 在不同时间帧 $m$ 上重复分析：
+\[
+X[m,k]=\sum_n x[n]w[n-mH]e^{-j2\pi kn/N},
+\]
+其中 $H$ 是 hop size。Spectrogram 常画作
+\[
+S[m,k]=|X[m,k]|^2
+\quad\text{或}\quad \log(|X[m,k]|+\epsilon).
+\]
+时间轴对应 $m$，频率轴对应 $k$，颜色对应能量。窗口越长，频率分辨率更细但瞬时定位更差；窗口越短则相反。
+
+\lecturefigure{slide-08-spectrogram-overview.jpg}{Spectrogram：窗口化 waveform 后，将短时频谱沿时间堆叠。}{Stanford Online 官方视频 00:06:20--00:10:58。}
+
+\begin{knowledgebox}{读图：从 waveform 到二维图的四步}
+先在横轴上切出重叠窗口；再对每个窗口做 Fourier transform；随后取 magnitude 或 power；最后把相邻窗口按时间排列。图像纹理能支持 vision-like 模型，但 phase、窗口函数与 hop size 若不记录，二维图并不能无损还原原 waveform。
+\end{knowledgebox}
+
+\teachervoice{讲者故意用 “batches” 再改口为 “windowing”：机器学习读者常把 STFT 当预处理黑箱，而信号处理视角要求明确窗口长度、重叠和 basis。}
+
+\subsection{固定表示、感知表示与 learned front end}
+
+Fourier bins 等距排列，但人耳对频率的感知并非线性；mel 与 constant-Q filterbanks 会重新分配频带，使低频更细或让音乐中的 harmonic spacing 更稳定。Raw waveform 保留全部采样信息，却把模型暴露给最长序列。Learned front end 则让任务损失决定滤波器，可能得到介于经典 DSP 与黑箱特征之间的表示。
+
+\lecturefigure{slide-09-audio-representations.jpg}{Audio representations：spectrogram、filterbank、raw waveform 与 learned features。}{Stanford Online 官方视频 00:10:58--00:12:50。}
+
+\begin{table}[H]
+\centering
+\small
+\caption{常见音频表示的主要取舍。}
+\begin{tabularx}{\textwidth}{L{0.19\textwidth}L{0.22\textwidth}L{0.22\textwidth}X}
+\toprule
+表示 & 优势 & 主要损失/偏置 & 对 Transformer 的影响 \\
+\midrule
+Raw waveform & 保留采样级细节与 phase & 序列极长、局部振荡复杂 & 需要局部 context、压缩或高效 attention。 \\
+STFT magnitude & 直观时频结构、成熟工具链 & 时间/频率分辨率折衷；phase 常被省略 & 可按 frame/patch token 化，长度显著下降。 \\
+Mel / constant-Q & 更接近感知或音乐结构 & 频带定义预先固定，可能丢失任务相关细节 & 给模型更强 inductive bias、更少自由度。 \\
+Learned filterbank & 可按任务自适应 & 需要数据与正则；可解释性不自动成立 & 前端与 Transformer 可端到端共同优化。 \\
+Discrete codebook & 直接得到有限词表 & 量化/重构误差、码本塌缩 & 可使用语言建模目标和长程 token dependencies。 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{一段声音同时存在多个时间尺度}
+
+讲座用快速动画把同一 waveform 从一秒缩放到百毫秒、十毫秒和一毫秒。这个顺序不是视觉效果：一秒可承载节奏或事件，百毫秒接近音素/瞬态，十毫秒能看到周期性，一毫秒只覆盖少量高频振荡。单一窗口或单一 receptive field 很难同时为这些结构提供最佳分辨率。
+
+\lecturefigure{slide-10-waveform-100ms.jpg}{约 100 ms：局部包络、瞬态与短音素级结构开始显现。}{Stanford Online 官方视频 00:11:50--00:11:53。}
+
+\lecturefigure{slide-11-waveform-1ms.jpg}{约 1 ms：只覆盖少量快速振荡，适合观察高频局部结构。}{Stanford Online 官方视频 00:11:54--00:11:55。}
+
+\lecturefigure{slide-12-waveform-10ms.jpg}{约 10 ms：周期性与局部基频结构更容易辨认。}{Stanford Online 官方视频 00:11:56--00:11:57。}
+
+\lecturefigure{slide-13-waveform-1s.jpg}{约 1 s：事件包络与较慢的语音/音乐结构占主导。}{Stanford Online 官方视频 00:11:58--00:12:53。}
+
+\begin{knowledgebox}{读图：多尺度不是“多放几张图”}
+四张图支持一个建模结论：高频细节需要短窗口，语义与节奏需要长 context。WaveNet 用 dilation 构造多尺度 receptive field；conditioned Transformer 压缩远处 context；wavelet/pooling 在中间层降低时间分辨率；hierarchical VQ 则在 token space 建多级时间尺度。
+\end{knowledgebox}
+
+\teachervoice{讲者让 waveform 在几个尺度间反复切换，是为了让读者“看见”表示问题：模型既要听清局部振荡，又要理解数秒以前发生的结构。后文三篇工作都在不同位置处理这个冲突。}
+
+\subsection{本章小结}
+
+Waveform、spectrogram、filterbank 与 discrete code 并非等价输入格式。它们改变序列长度、可逆性、时间频率分辨率与归纳偏置。Audio Transformer 的第一项架构决定，往往发生在 attention 之前。
+

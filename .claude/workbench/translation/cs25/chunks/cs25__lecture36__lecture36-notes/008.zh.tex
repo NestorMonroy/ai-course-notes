@@ -1,0 +1,104 @@
+\section{Deployment Contract：Reliability、Loop、Observability 与 Human Override}
+
+最后一张教学 slide 把前文全部收束为四类部署问题：可靠性、循环与计划漂移、测试与 benchmark、真实部署与可观测性。它不是附录，而是对“Everyday AGI”愿景的验收条件。系统越接近用户邮箱、日历、支付和公开账号，越不能用平均 demo 成功率代替操作保障。
+
+\lecturefigure{slide-58-key-issues-autonomous-agents.jpg}{自主 Agent 的关键问题：可靠性、循环、测试与可观测性}{00:46:09}
+
+这张总结页与开场的 Everyday AGI 形成首尾对应：前者问“如果智能进入日常生活会怎样”，后者回答“在进入之前必须满足什么”。可靠性决定能否授权，loop control 决定成本和失控边界，testing 决定改动是否可验证，observability 决定事故是否能被解释。四项不是上线后的运维补丁，而应在 agent architecture、数据收集和训练环境阶段就被设计进去。
+
+\subsection{Reliability：99.9\% 也要问任务频率与事故成本}
+
+若单次高风险动作失败概率为 $q$，一年执行 $N$ 次，至少一次失败的概率为
+\[
+P(\ge 1\text{ failure})=1-(1-q)^N.
+\]
+当 $q=0.001$、$N=1000$ 时，该概率约为 $63.2\%$。因此“99.9\% reliable”并不是天然安全；还要减少高风险自动动作、增加确认、限制权限并保证可恢复。
+
+\teachervoice{00:46:09--00:50:00，讲者说支付、银行、邮箱和社交账号要求接近生产级可靠性；系统不能发错内容、做错交易或陷入循环。老师强调 audit trail、在线监控、human fallback 与用户接管。}
+
+\begin{warningbox}{平均成功率会掩盖灾难性尾部}
+可靠性报告应同时给出严重错误率、不可逆错误率、未经确认的权限使用、最长循环、最高单任务成本和人工接管率。只报平均任务成功，无法证明系统不会制造低频高损事故。
+\end{warningbox}
+
+\subsection{Loop 与 plan divergence：给系统预算和可检测状态}
+
+循环可能是重复同一动作，也可能是计划不断扩张却没有推进。检测可以结合状态 hash、动作 n-gram、目标距离和预算：
+\[
+\text{loopRisk}_t=
+\alpha\,\mathbf{1}[h(s_t)=h(s_{t-k})]
++\beta\,\text{actionRepeat}_t
++\gamma\,\text{noProgress}_t.
+\]
+当风险超过阈值，系统应停止、降级或请求人工，而不是自动增加 token budget。
+
+\begin{lstlisting}[caption={带预算、重复检测与人工接管的执行循环}]
+while not done:
+    if spent_cost > cost_limit or elapsed > time_limit:
+        return escalate("budget exceeded")
+    if state_hash in recent_states:
+        return escalate("loop detected")
+    action = agent.next_action()
+    if action.risk >= confirmation_threshold:
+        action = wait_for_user_confirmation(action)
+    execute(action)
+    append_audit_log(action)
+\end{lstlisting}
+
+\subsection{Q\&A：从 zero-shot 到 task-specific training}
+
+面对“如何从 40\% 到接近 99\%”的问题，讲者指出很多 frontier models 对 agent interfaces 是 zero-shot：预训练分布并不包含特定网页和操作流程。通过任务特定 RL、自我修正和反复收集轨迹，某一窄域可以被推高；但这不等于开放世界所有任务都能同步饱和。
+
+\teachervoice{00:50:00--00:54:20，讲者用 AgentQ 说明 task-specific RL 可以显著提高预约任务准确率，同时承认新网站、新任务和新约束仍会形成分布偏移。讲义提醒：局部饱和与通用可靠性必须分开报告。}
+
+可把部署飞轮写为
+\[
+\begin{aligned}
+\text{production traces}&\rightarrow\text{failure taxonomy}
+\rightarrow\text{offline simulation}\\
+&\rightarrow\text{training}\rightarrow\text{shadow eval}
+\rightarrow\text{controlled rollout}.
+\end{aligned}
+\]
+每一步都要保留版本和数据 provenance，才能判断提升来自模型、prompt、工具还是环境变化。
+
+\subsection{Hallucination 与 domain-specific regression suites}
+
+讲者的工程答案包含两层：更强基础模型会降低一些错误；具体产品仍需自己的测试与评测。对一个垂直 agent，应维护真实任务、极端输入、权限边界、工具失败和历史事故组成的 regression suite，并在模型、prompt、工具 schema 或 policy 改动后每日重放。
+
+\teachervoice{00:54:20--00:57:55，讲者强调建立约一千个关心的 domain scenarios、持续检查 prompt 变化和回归、比较不同模型，并用 fine-tuning 或 reinforcement learning 进一步优化。实践经验：不要把供应商模型升级当作自己的验收。}
+
+\begin{importantbox}{一个可交付的 Agent 发布门槛}
+\begin{enumerate}
+  \item strict offline suite 无严重回归；
+  \item shadow traffic 不执行真实副作用；
+  \item canary 用户和低权限工具先开放；
+  \item 高风险动作必须确认并可撤销；
+  \item 监控覆盖成功、成本、循环、错误与人工接管；
+  \item 事故能够定位到模型、prompt、memory、tool 或 policy 版本。
+\end{enumerate}
+\end{importantbox}
+
+\subsection{小模型、Manager--Worker 与真实世界检验}
+
+Q\&A 讨论 smaller versus larger models。讲者认为经过 reasoning traces 与 RL 训练的小模型可能在窄任务上更有效，并提出大模型 manager、较小模型 workers 的可能架构。这里应保持证据边界：模型大小只是路由变量之一，还要看质量、时延、成本、隐私、工具使用和上下文需求。
+
+\teachervoice{00:57:55--00:59:47，讲者认为“需要更聪明而非只更大”的模型，并提出 large manager + small workers 的可能组合；他同时把 real-world task success 作为 litmus test，而不是按参数量决定。}
+
+设任务 $x$ 可路由到模型 $m$，一个简单目标是
+\[
+m^*(x)=\arg\max_m\left[
+Q(m,x)-\lambda_L L(m,x)-\lambda_C C(m,x)-\lambda_R R(m,x)
+\right],
+\]
+$Q$ 是质量，$L$ 是时延，$C$ 是成本，$R$ 是风险。路由器应按任务动态选择，而不是永久绑定“manager 必须最大、worker 必须最小”。
+
+\subsection{Memory 问题没有单一硬件答案}
+
+最后一个问题把 agent memory 类比 RAM、ROM 与 hard drive。讲者没有给出统一架构，而是强调应用不同、组件组合不同。这个保留非常重要：有些任务只需短期 scratchpad，有些需要可编辑用户档案，有些需要事件日志和知识库；把它们都叫“memory”会导致错误共享和过度持久化。
+
+\teachervoice{00:59:47--01:00:57，面对 RAM/ROM/disk 类比，讲者明确说没有 straight answer；应根据 coding、chat、actions 等应用寻找合适模型和组件。课堂提示：memory architecture 是产品与风险决定，不是越多越好。}
+
+\subsection{本章小结}
+
+部署合同把 Agent 的研究指标转成现实责任：可靠性要结合任务频率，循环要有检测与预算，测试要覆盖领域分布，线上要有 trace、监控、审计和人工接管。局部 RL 可以提高窄域任务，但不能抹去分布偏移；模型大小和 memory 结构都应按任务路由。
+

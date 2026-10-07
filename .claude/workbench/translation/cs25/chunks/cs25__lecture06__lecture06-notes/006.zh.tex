@@ -1,0 +1,66 @@
+\section{从 Bytes 理解语言：移除 Tokenizer 的代价与收益}
+
+前一节说明 output queries 可以产生序列，本节把统一接口应用到语言。常见 Transformer 先用 tokenizer 将字符串切成 subwords；这显著缩短序列，却写入词表、脚本和语言特定规则。Perceiver IO 借助 latent bottleneck，可以处理更长的 raw byte sequence，并尝试弱化 tokenizer 假设。
+
+\lecturefigure{slide-22-language-tokenization.jpg}{语言、Transformer 与 tokenization：同一句话可被切成字符、bytes 或 subwords。}{Stanford Online 当前官方视频 00:43:44--00:45:13。}
+
+\begin{knowledgebox}{什么是 byte-level input}
+文本先编码为 UTF-8 bytes，每个 byte 值位于 0--255。它对语言和脚本共享固定字母表，避免未知词；代价是一个字符可能占多个 bytes，序列比 subword tokenization 长得多。
+\end{knowledgebox}
+
+\subsection{为什么移除 tokenizer}
+
+本节把 tokenizer 当作一种可选择的语言偏置来审计。Tokenizer 的词表在高资源语言上有效，却可能把罕见语言、拼写、代码、emoji 或新词切得很碎。不同语言可能需要不同 vocabulary，跨语言系统还要处理归一化和预分词差异。Bytes 提供最低层统一符号，使模型自己学习边界。
+
+\lecturefigure{slide-23-why-remove-tokenizers.jpg}{Tokenizer 的语言依赖与 UTF-8 byte 表示。}{Stanford Online 当前官方视频 00:45:14--00:45:37。}
+
+\teachervoice{老师并没有说 tokenizer “错误”，而是强调它是人工加入的 inductive bias。Bytes 更通用，但将结构学习和长序列成本转移给模型；是否值得取决于数据规模、语言覆盖与计算预算。}
+
+\begin{warningbox}{Token-free 不等于预处理为零}
+Unicode normalization、UTF-8 编码、padding、masking 和 byte position 仍是预处理选择。Byte vocabulary 固定只消除了 subword segmentation，不消除文本规范化和数据清洗。
+\end{warningbox}
+
+\subsection{Masked Language Modeling 与 GLUE fine-tuning}
+
+训练遵循 BERT 风格 masked language modeling：遮蔽一部分输入 bytes，decoder queries 在对应位置预测目标；之后在 GLUE 任务上增加 sentence/task queries 进行 fine-tuning。对被遮蔽集合 $\mathcal{M}$，目标可写为：
+
+\[
+\mathcal{L}_{\text{MLM}}=-\sum_{t\in\mathcal{M}}\log p_\theta(b_t\mid b_{\setminus\mathcal{M}}).
+\]
+
+其中，$b_t$ 是位置 $t$ 的真实 byte；$b_{\setminus\mathcal{M}}$ 是未遮蔽上下文；$p_\theta$ 是模型输出分布；$\mathcal{M}$ 是 masked positions。
+
+\lecturefigure{slide-24-masked-language-modeling.jpg}{Perceiver IO 的 byte-level masked language modeling。}{Stanford Online 当前官方视频 00:45:38--00:45:53。}
+
+Fine-tuning 时，任务可通过额外 queries 解码 sentence、entailment、grammar 或 paraphrase logits。共享 encoder/latent processor 接受 bytes，输出 interface 随任务变化。
+
+\lecturefigure{slide-25-glue-finetuning.jpg}{从 byte-level MLM 到 GLUE：不同 output queries 解码任务 logits。}{Stanford Online 当前官方视频 00:45:54--00:47:17。}
+
+\begin{importantbox}{Latent bottleneck 为 bytes 提供什么}
+Byte sequence 很长，但 deep self-attention 只在固定 latents 上进行；输入 cross-attention 对 byte 数线性。模型用计算瓶颈换取统一 vocabulary，并把分词边界学习内化。
+\end{importantbox}
+
+\subsection{FLOP-matched 结果与 attention diagnostics}
+
+表格比较 BERT、CANINE 与不同深度/参数的 Perceiver IO。在相近 FLOPs 下，byte-level Perceiver IO 可达到有竞争力的 GLUE 分数；增加模型规模继续提升。正确解读应同时看 tokenizer、深度、参数、FLOPs 和训练数据，而非只挑一个分数。
+
+\lecturefigure{slide-26-language-from-bytes-results.jpg}{直接从 bytes 理解语言：tokenized 与 token-free 模型的参数、FLOPs 和 GLUE 对比。}{Stanford Online 当前官方视频 00:47:18--00:47:59。}
+
+\begin{knowledgebox}{读表：FLOPs 匹配仍不等于延迟匹配}
+长 byte sequence 会改变 memory access、cross-attention kernel 和 batch size。相同理论 FLOPs 在不同硬件上可能有不同 wall-clock；还应比较序列长度、吞吐、峰值内存和语言覆盖。
+\end{knowledgebox}
+
+Attention 可视化显示模型对标点、大小写、词片段和重复 byte pattern 的关注。它说明模型能从低层符号发现结构，但 attention weight 不是因果解释，也不能证明某个 head “理解语法”。
+
+\lecturefigure{slide-27-language-attention-patterns.jpg}{Byte-level Perceiver IO 的语言 attention pattern 诊断。}{Stanford Online 当前官方视频 00:48:00--00:48:43。}
+
+\teachervoice{讲者把这些图作为“模型确实会关注可识别结构”的检查，而非完整 interpretability 结论。对 attention map 应同时做 ablation、counterfactual 和输出敏感性测试。}
+
+\begin{warningbox}{Attention visualization 容易被过度叙事}
+颜色模式可以启发假设，却不能单独说明信息如何影响最终预测。多个 heads、residual 和 MLP 会共同作用；漂亮 pattern 可能与任务贡献很弱。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Byte-level Perceiver IO 用长序列与更多结构学习换取跨语言统一 vocabulary。MLM/GLUE 结果证明方案可行，但 tokenizer 的数据效率与部署优势并未被普遍否定，attention map 也只是诊断证据。
+

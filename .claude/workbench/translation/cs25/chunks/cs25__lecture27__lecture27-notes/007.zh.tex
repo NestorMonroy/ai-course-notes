@@ -1,0 +1,88 @@
+\section{四步变换：把 Encoder-decoder 连续改写成 Decoder-only}
+
+上一章给出静态架构图，本章执行 Hyung Won 的核心推导。起点是标准 encoder-decoder，终点是 decoder-only；每一步只消除一个差异，并更新比较表。推导的教学价值不在于推荐某个具体实现，而在于把“架构不同”改写成四个可单独实验的假设。
+
+\subsection{起点：四类差异}
+
+本节先固定比较维度：额外 cross-attention、encoder/decoder 参数是否分离、target-to-input 在哪一层连接，以及输入 self-attention 是否双向。后续每一步都只改变其中一项，避免把多个变化混在一次 ablation 中。
+
+\lecturefigure{hyung-slide-040.jpg}{变换起点：标准 encoder-decoder 与 decoder-only 并排比较}{Hyung Won Chung official deck, p.~40}
+
+\begin{importantbox}{四个可检验假设}
+\begin{enumerate}
+  \item 输入与目标是否需要独立 attention role？
+  \item 输入与目标是否需要独立参数？
+  \item decoder 每层是否只能读取 encoder 最终层？
+  \item 输入是否必须使用 bidirectional attention？
+\end{enumerate}
+把它们分开，才能知道性能差异来自哪一项结构。
+\end{importantbox}
+
+\subsection{步骤一：共享 cross-attention 与 self-attention 参数}
+
+Cross-attention 和 self-attention 都使用 query、key、value 与 output projection；差别主要是输入张量来自哪里。因此第一步不删除连接，而是让两种 role 共享投影参数，使一个 attention module 同时承担序列内与跨序列交互。
+
+\lecturefigure{hyung-slide-041.jpg}{步骤一：共享 cross-attention 与 self-attention 参数}{Hyung Won Chung official deck, p.~41}
+
+若原先有 $W_Q^{\mathrm{self}},W_K^{\mathrm{self}},W_V^{\mathrm{self}}$ 与 $W_Q^{\mathrm{cross}},W_K^{\mathrm{cross}},W_V^{\mathrm{cross}}$，参数共享就是施加约束
+\[
+W_{\bullet}^{\mathrm{self}}=W_{\bullet}^{\mathrm{cross}},
+\quad \bullet\in\{Q,K,V,O\}.
+\]
+其中 $Q,K,V,O$ 分别表示 query、key、value 与 output projection。连接来源仍可不同，但模型不能为两种 role 保留完全独立的线性映射。
+
+\lecturefigure{hyung-slide-042.jpg}{步骤一后的比较：独立 cross-attention 变成 self-attention 兼任两种 role}{Hyung Won Chung official deck, p.~42}
+
+\begin{knowledgebox}{读图：共享参数不等于共享输入}
+表格改变的是 module identity，而不是可见性。Decoder 仍可以对自己的历史和 encoder 表示使用不同 mask；只是投影矩阵相同。实验时若同时改变 mask 和参数，很难判断收益来自表示共享还是连接模式。
+\end{knowledgebox}
+
+\subsection{步骤二：共享 encoder 与 decoder 参数}
+
+第一步统一 attention role，第二步统一两套 stack。若输入与目标都只是 token sequence，使用完全独立参数相当于假设两类序列需要不同表示空间。共享参数则要求同一组 layer 处理两者，把差异交给上下文和 mask 表达。本节因此不仅比较参数数量，还比较“角色差异应写进权重，还是应由序列条件动态表达”这两种建模选择。
+
+\lecturefigure{hyung-slide-044.jpg}{步骤二：共享 encoder 与 decoder 的 layer 参数}{Hyung Won Chung official deck, p.~44}
+
+\lecturefigure{hyung-slide-045.jpg}{步骤二后的比较：separate parameters 变成 shared parameters}{Hyung Won Chung official deck, p.~45}
+
+\begin{warningbox}{参数共享是一种更弱任务先验，也可能造成干扰}
+共享能减少参数并促进跨语言、跨角色知识复用，但当输入与目标分布差异很大时，也可能产生容量竞争。正确问题不是“共享必然更先进”，而是当前任务是否仍需要专门化，以及增加总容量后这种专门化收益是否保留。
+\end{warningbox}
+
+\teachervoice{00:55:17--00:55:41 的讲解非常直接：decoder-only 只有一个 stack，所以自然共享参数。Hyung Won 借这个对比追问 encoder-decoder 的分离是否仍有必要，而不是声称共享本身没有代价。}
+
+\subsection{步骤三：让 decoder 与 encoder 的同层表示对齐}
+
+标准 cross-attention 通常让每个 decoder layer 读取 encoder 最终层。Decoder-only 的同层 self-attention 则让第 $\ell$ 层读取前缀 token 在同一层的表示。第三步把连接改成 layer-aligned，使表示粒度更接近单 stack。
+
+\lecturefigure{hyung-slide-047.jpg}{步骤三：decoder layer $\ell$ attends to encoder layer $\ell$}{Hyung Won Chung official deck, p.~47}
+
+\lecturefigure{hyung-slide-048.jpg}{步骤三后的比较：final-layer cross-attention 变成同层连接}{Hyung Won Chung official deck, p.~48}
+
+\begin{knowledgebox}{读图：为什么 layer index 可能代表 granularity}
+深层网络常呈层级表示：底层偏局部形式，高层偏抽象语义。若 decoder 第一层只能读取 encoder 最终层，它必须从高度抽象表示中恢复低层信息；同层连接允许每个阶段读取相近粒度的输入。这个解释是设计直觉，是否真的形成瓶颈仍需随深度做 ablation。
+\end{knowledgebox}
+
+\subsection{步骤四：把 encoder self-attention 改成 causal}
+
+前三步已统一 module、参数和层间连接，剩下的主要差异是输入序列内部是否双向可见。将 encoder mask 改为 causal 后，前面 token 不再读取后面 token；把输入与目标串接起来，两个 stack 的计算图便接近单个 decoder-only stack。
+
+\lecturefigure{hyung-slide-050.jpg}{步骤四：将 encoder 的 bidirectional self-attention 改成 causal}{Hyung Won Chung official deck, p.~50}
+
+\lecturefigure{hyung-slide-051.jpg}{四步完成后的差异表：两类架构只剩很小实现差别}{Hyung Won Chung official deck, p.~51}
+
+\begin{lstlisting}[caption={四步 architecture transformation 的概念伪代码}]
+model = encoder_decoder()
+share(model.cross_attention, model.self_attention)
+share(model.encoder_layers, model.decoder_layers)
+connect_decoder_layer_to_matching_encoder_layer(model)
+set_encoder_mask(model, mode="causal")
+concatenate_input_and_target(model)
+\end{lstlisting}
+
+\teachervoice{00:56:45--00:57:09，Hyung Won 认为完成四步后，两种架构在同任务同数据下的差异可能小于重复训练噪声。这是经验判断，不是课程给出的正式定理；真正验证仍需要控制参数量、初始化、训练预算和数据顺序。}
+
+\subsection{本章小结}
+
+四步变换把架构标签还原成四个局部假设：attention role、参数分离、层间连接和输入方向性。它们都能单独实验，也都可能随规模改变价值。下一章将逐项解释这些结构为什么在机器翻译和早期任务中合理，以及为什么在通用语言模型、多轮对话和更深网络中需要重新审视。
+

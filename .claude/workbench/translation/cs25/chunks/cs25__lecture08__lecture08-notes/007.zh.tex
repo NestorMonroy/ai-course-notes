@@ -1,0 +1,113 @@
+\section{两层 Composition：从 Additive Heads 到 Virtual Heads}
+
+一层模型缺少 phase change，而两层模型拥有。区别不只在“多了一倍 heads”，更在于第二层 attention pattern 可以读取第一层写入的 features，并且两层 value paths 会组合成新的 effective operator。下面用 path expansion 把这种组合显式展开。
+
+\lecturefigure{slide-34-one-layer-formula-recall.jpg}{回顾一层模型的 direct path 与 single-head paths。}{Stanford Online 官方视频 00:38:36--00:39:05。}
+
+\subsection{定义可复用的 OV 与 QK 矩阵}
+
+为了减少符号，文章与讲座把总是一起出现的 matrices 合并：
+\[
+W_{OV}^{\ell,h}=W_V^{\ell,h}W_O^{\ell,h},
+\qquad
+W_{QK}^{\ell,h}=W_Q^{\ell,h}(W_K^{\ell,h})^{\top}.
+\]
+其中 $\ell$ 是 layer index，$h$ 是 head index。前者描述 content write，后者描述 compatibility metric。
+
+\lecturefigure{slide-35-define-wov-wqk.jpg}{定义 $W_{OV}$ 与 $W_{QK}$，暴露 attention 的两类核心 circuit。}{Stanford Online 官方视频 00:39:06--00:39:33。}
+
+\subsection{两层模型的算子乘积}
+
+定义好单层的 $W_{QK}$ 与 $W_{OV}$ 后，接下来的问题不是简单地再写一遍第二层，而是解释第二层怎样使用第一层已经写入 residual stream 的信息。本节把两层视为两个 residual-plus-head operators 的乘积；这样既能保留每层的独立 heads，也能显式看见只有跨层组合才存在的 effective paths。这个展开是从“模型有两层”走向“模型获得新算法能力”的关键桥梁。
+
+忽略 LayerNorm/MLP/bias，令每层 operator 为
+\[
+\mathcal{L}_{\ell}
+=I+\sum_{h\in H_{\ell}}A^{\ell,h}\otimes W_{OV}^{\ell,h}.
+\]
+两层 residual transform 为
+\[
+X_2=\mathcal{L}_2\mathcal{L}_1X_0.
+\]
+
+\lecturefigure{slide-36-two-layer-formula.jpg}{两层 attention-only Transformer：两个 residual-plus-head operators 相乘。}{Stanford Online 官方视频 00:39:34--00:39:59。}
+
+Kronecker product 满足 mixed-product identity：
+\[
+(A_2\otimes W_2)(A_1\otimes W_1)
+=(A_2A_1)\otimes(W_2W_1).
+\]
+
+\begin{itemize}
+  \item $A_2A_1$：position routing 的两步 composition；
+  \item $W_2W_1$：content transformation 的两步 composition；
+  \item identity 选择会产生绕过某层的 paths；
+  \item 注意矩阵实际依赖 residual，因此符号展开不消除 routing nonlinearity。
+\end{itemize}
+
+\lecturefigure{slide-37-mixed-product-identity.jpg}{Mixed-product identity 将 position composition 与 content composition 分开。}{Stanford Online 官方视频 00:40:00--00:40:33。}
+
+\subsection{展开后的三类路径}
+
+算子乘积本身还没有告诉我们哪些计算路径真正出现。本节进一步展开 $\mathcal{L}_2\mathcal{L}_1$，并按是否绕过某层、只经过单个 head、或连续经过两层 heads 来分类。读下面的式子时，应把每一项看成一条可单独检查和干预的信息流，而不是把所有 summands 又压回一个黑箱矩阵；induction circuit 正是最后一类 composed path 的具体实例。
+
+展开得到：
+\[
+I
++\sum_{h\in H_1}A^{1,h}\otimes W_{OV}^{1,h}
++\sum_{k\in H_2}A^{2,k}\otimes W_{OV}^{2,k}
++\sum_{k,h}(A^{2,k}A^{1,h})\otimes
+(W_{OV}^{2,k}W_{OV}^{1,h}).
+\]
+
+\begin{itemize}
+  \item direct path：两层都走 residual；
+  \item single-head paths：只经过某一层的一个 head；
+  \item virtual/composed paths：第一层 head 的输出被第二层 head 读取；
+  \item virtual head 不是新增参数，而是已有 heads composition 的 effective circuit。
+\end{itemize}
+
+\lecturefigure{slide-38-expanded-two-layer-terms.jpg}{两层展开：direct、individual head 与 virtual-head composition terms。}{Stanford Online 官方视频 00:40:34--00:41:39。}
+
+\lecturefigure{slide-39-principled-head-analysis.jpg}{Path expansion 提供原则化的 attention-head 分析框架。}{Stanford Online 官方视频 00:41:40--00:42:43。}
+
+\begin{importantbox}{Circuit 不等于“单个 head”}
+一个算法可以跨多个 heads 与 layers：上游 head 写入 feature，下游 head 用 QK 读取它，再由 OV 写入 logits。只按单-head attention map 命名容易漏掉 composition；path 是更接近程序执行的单位。
+\end{importantbox}
+
+\subsection{用 marginal loss accounting 排序 paths}
+
+Toy model 中可以 ablate 或移除 path term，测量对 loss 的边际影响。讲座给出 direct path、individual layer-one/two heads 与 virtual paths 的量级；许多虚拟项单独很小，但不应因此永久丢弃，因为它们可能在更深模型或特定 input 上成为关键。
+
+\lecturefigure{slide-40-path-loss-contributions.jpg}{不同 path types 对 loss 的 marginal contribution。}{Stanford Online 官方视频 00:42:44--00:42:49。}
+
+\lecturefigure{slide-41-virtual-heads-later.jpg}{当前模型中 virtual-head terms 较小，但在更深模型中可能重要。}{Stanford Online 官方视频 00:42:50--00:43:05。}
+
+\lecturefigure{slide-42-understand-model-with-twelve-heads.jpg}{Near-complete toy-model accounting：主要行为可由约十二个 heads 理解。}{Stanford Online 官方视频 00:43:06--00:43:09。}
+
+\lecturefigure{slide-43-head-terms-by-layer.jpg}{按 layer/type 组织 attention-head terms 与 loss reduction。}{Stanford Online 官方视频 00:43:10--00:43:21。}
+
+\begin{knowledgebox}{读图：marginal effect 不是唯一重要性指标}
+Head ablation 可能被冗余路径补偿；一个上游 head 的 OV direct logit effect 很小，却可能强烈改变下游 QK routing。应同时看 direct logit effect、path composition、attention-pattern dependence 与 behavior-specific ablation。
+\end{knowledgebox}
+
+\subsection{第二层 pattern 依赖第一层写入}
+
+即使 OV path 可以形式化为加法，第二层的 $Q$ 与 $K$ 来自包含第一层 outputs 的 residual stream。因此第二层 attention pattern 本身包含 cross terms：previous heads 改变“去哪里看”，而不只改变“看完后写什么”。
+
+\lecturefigure{slide-44-patterns-read-previous-heads.jpg}{第二层 attention patterns 使用第一层信息，即使简单 OV path 暂时忽略 composition。}{Stanford Online 官方视频 00:43:22--00:43:39。}
+
+\lecturefigure{slide-45-layer-two-qk-context.jpg}{显式展开第二层 QK：queries/keys 都可包含第一层 heads 的贡献。}{Stanford Online 官方视频 00:43:40--00:43:49。}
+
+\lecturefigure{slide-46-positive-eigenvalues-copy.jpg}{复制型 OV signature：positive eigenvalues 使 attended token 更可能被输出。}{Stanford Online 官方视频 00:43:50--00:43:59。}
+
+\lecturefigure{slide-47-second-layer-copying-circuits.jpg}{第二层多个 heads 具有 copying OV circuit，为 conditional copy 奠定基础。}{Stanford Online 官方视频 00:44:00--00:44:11。}
+
+\lecturefigure{slide-48-inspect-patterns-empirically.jpg}{QK circuit 变复杂时，从 empirical attention patterns 反推候选机制。}{Stanford Online 官方视频 00:44:12--00:46:07。}
+
+\teachervoice{Olah 既使用 algebra，也承认复杂 QK circuit 最容易从实际 attention pattern 开始看。Mechanistic interpretability 不是只准一种工具，而是让公式、visualization、ablation 与 examples 互相约束。}
+
+\subsection{本章小结}
+
+两层模型通过 operator multiplication 产生 direct、single-head 与 composed virtual paths。更重要的是，第一层写入会改变第二层 routing，使模型能先移动“前一个 token”等状态，再用下一层匹配并复制，从而获得一层模型不具备的 conditional algorithm。
+

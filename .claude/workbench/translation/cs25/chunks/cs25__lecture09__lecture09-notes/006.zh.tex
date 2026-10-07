@@ -1,0 +1,71 @@
+\section{连续声音怎样变成“语言”：VQ、Codebook 与 Hierarchy}
+
+第二篇工作从生成转向 representation learning。核心障碍是：语言模型预测有限词表，而音频 waveform/embedding 连续且高频。若希望使用 next-token objective，就必须先定义“audio token”。Vector quantization 通过 codebook 把连续 encoder output 映射为离散 index，使 sequence modeling 成为可能，同时引入 reconstruction error、code utilization 与 collapse 等新问题。
+
+\lecturefigure{slide-25-contrastive-audio-representations-title.jpg}{第二篇工作：generative 与 contrastive audio representation learning。}{Stanford Online 官方视频 00:22:36--00:22:44；Verma 与 Smith, arXiv:2010.11459。}
+
+\subsection{为什么要学习 Audio Representation}
+
+Acoustic scene understanding 希望从声音判断环境或事件，而不必生成每个 sample。讲者举出 emergency vehicle、music recommendation 与 health monitoring 等例子：一个好的 representation 应压缩与决策有关的结构，并对无关录音细节保持适当不变性。但这些应用也有不同误报成本，不能只用统一 accuracy 代替实际决策质量。
+
+\lecturefigure{slide-26-applications-overview.jpg}{Acoustic scene understanding 的应用：交通、推荐、医疗与环境感知。}{Stanford Online 官方视频 00:22:45--00:24:32。}
+
+\teachervoice{Waymo 麦克风例子强调声音能在视线外提前暴露警报；医疗中的咳嗽/喷嚏例子则提醒我们，representation 会进入高风险决策。下游意义决定什么信息值得保留。}
+
+\subsection{从连续空间到有限词表}
+
+设 encoder 将片段 $x$ 映射为 $z_e(x)\in\mathbb{R}^d$，codebook 为 $\{e_1,\ldots,e_K\}$。Vector quantization 选择最近 code：
+\[
+k^*(x)=\operatorname*{argmin}_{k\in\{1,\ldots,K\}}
+\|z_e(x)-e_k\|_2^2,
+\qquad z_q(x)=e_{k^*(x)}.
+\]
+离散 token 是 index $k^*$，decoder 再从 $z_q$ 重构 waveform 或 spectrum。Transformer 看到的是 index sequence，不是原始声音；codebook 的时间步长与容量决定 token rate 和重构上限。
+
+\lecturefigure{slide-27-discrete-audio-language-modeling.jpg}{Audio language modeling 的前提：先把连续声音转换为离散 code sequence。}{Stanford Online 官方视频 00:24:33--00:25:57。}
+
+\lecturefigure{slide-28-vector-quantization-recipe.jpg}{VQ/VQ-VAE、k-means 与 wav2vec-like 方法提供不同离散化路径。}{Stanford Online 官方视频 00:25:58--00:26:53。}
+
+\begin{knowledgebox}{术语消化：Codebook 系统里的四个对象}
+Encoder 决定连续 feature；quantizer 选择最近 code；codebook 存储有限 prototypes；decoder 决定 code 中保留的信息能否重建。Code index 可被语言模型预测，但它的“语义”取决于训练目标，不必对应音素、音符或人类命名事件。
+\end{knowledgebox}
+
+\subsection{Voronoi cell、重构与 Codebook Collapse}
+
+几何上，每个 code vector 拥有一个 Voronoi region，落在该区域的 encoder outputs 共用同一 index。$K$ 太小会造成高 quantization error；$K$ 太大或优化失衡会让大量 codes 从不被选择，形成 codebook collapse。训练还要平衡 reconstruction、codebook update 与 commitment，使 encoder 不在 code 边界间任意漂移。
+
+\lecturefigure{slide-29-vq-voronoi.jpg}{Vector quantization 的 Voronoi 视角：连续空间被最近 code 划分。}{Stanford Online 官方视频 00:26:54--00:27:55。}
+
+\lecturefigure{slide-30-vq-autoencoder-transformer.jpg}{Encode--quantize--predict--decode：VQ autoencoder 与 Transformer 的组合。}{Stanford Online 官方视频 00:27:56--00:29:55。}
+
+\begin{lstlisting}[caption={离散 audio-token 建模的概念流程。}]
+def audio_token_pipeline(waveform, encoder, codebook,
+                         transformer, decoder):
+    continuous = encoder(waveform)
+    token_ids = nearest_code_indices(continuous, codebook)
+    predicted_ids = transformer.autoregressive(token_ids)
+    quantized = codebook[predicted_ids]
+    reconstructed = decoder(quantized)
+    return token_ids, reconstructed
+\end{lstlisting}
+
+\begin{warningbox}{离散 token 不是免费压缩}
+更低 token rate 减轻 Transformer 长度，但会丢失 timing、phase、timbre 或微小瞬态；更高 token rate 改善重构，却重新引入长序列。评价 codec/tokenizer 时必须同时报告重构质量、code utilization、bitrate 与下游表现。
+\end{warningbox}
+
+\subsection{Hierarchical Codes：不同层负责不同时间尺度}
+
+Jukebox 类系统使用多级 VQ：高层低频 token 捕捉较慢音乐结构，低层高频 token 补充局部声学细节，再由 decoder 合成 waveform。Hierarchy 将前面看到的多尺度矛盾转化为多条 token streams；代价是训练、sampling 与跨层一致性都更复杂。
+
+\lecturefigure{slide-31-jukebox-hierarchical-tokens.jpg}{Jukebox-style hierarchy：多级 codes 在时间压缩与重构细节之间分工。}{Stanford Online 官方视频 00:29:56--00:30:24。}
+
+\begin{knowledgebox}{读图：Hierarchy 为什么减少 long-range burden}
+如果最高层每个 token 覆盖更长时间，Transformer 可以用较短 sequence 建模歌曲级结构；下层只需在高层 condition 下补细节。它没有消除计算，而是把全局规划与局部重建分配给不同分辨率。
+\end{knowledgebox}
+
+\teachervoice{讲者把 VQ 称为“powerful and under-utilized”。课堂真正值得保留的不是评价词，而是组合方式：把 continuous audio 变成 code，再让 Transformer 学 code 的 long dependency。}
+
+\subsection{本章小结}
+
+Audio language modeling 依赖 tokenizer。VQ 使连续声音进入有限词表，但 token rate、codebook size 与 decoder 共同决定可学的长程结构和可恢复的声学细节。Hierarchy 是一种显式多尺度带宽分配。
+

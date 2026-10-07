@@ -1,0 +1,65 @@
+\section{贡献三与四：Self-Play RL 和 Value-Based Filtering}
+
+前一章描述单次 planning，Cicero 还需要在训练阶段改进策略模型，并在发送消息前做最后一道行为级检查。self-play RL 让 policy 超越 imitation 的平均水平；value-based filtering 则把“这句话会让别人怎么行动”纳入候选选择。
+
+\subsection{Self-play RL：超过模仿但不脱离人类}
+
+slide 36 高亮第三项贡献。团队不是直接用 unconstrained self-play 替换 human model，而是继续使用 piKL，让 RL 在价值上进步的同时保持对人类政策分布的解释力。课堂报告的结论是，这种方式对人类行为的建模也优于单纯 imitation。
+
+\lecturefigure{slide-36-main-contribution-selfplay.jpg}{Main contribution：用 piKL-regularized self-play RL 改进策略}{官方录像恢复幻灯片 V036；Stanford CS25 Lecture 14}
+
+\begin{knowledgebox}{训练时 RL 与推理时 search 的区别}
+Self-play RL 更新参数，使未来许多局面上的 base policy 改善；inference-time search 不一定改权重，而是在当前局面临时投入额外计算。Cicero 同时需要两者：训练得到可用先验，推理时根据具体对话和局面细化。
+\end{knowledgebox}
+
+\subsection{为什么语言过滤必须看 strategic value}
+
+第四项贡献从生成后的候选开始。普通 toxicity、重复和规则过滤只能发现表面问题；Cicero 还会遇到语法完美却自毁策略的消息。例如讲者展示的荒谬候选，一边威胁“把你从棋盘上清除”，一边请求对方提供“croissant”。更隐蔽的失败则是无意中暴露攻击计划或诱导对方采取对自己不利的行动。
+
+\lecturefigure{slide-37-main-contribution-filtering.jpg}{Main contribution：对候选消息执行战略与一致性过滤}{官方录像恢复幻灯片 V037；Stanford CS25 Lecture 14}
+
+\subsection{Value-based filtering 的因果测试}
+
+设候选消息为 $m$，接收者未来行动为 $a_{-i}$，Cicero 的计划行动为 $a_i$。系统可用行为模型预测消息发送前后的对方政策，并比较计划价值：
+\begin{equation}
+V(m)
+=\mathbb{E}_{a_{-i}\sim p(\cdot\mid s,h,d,m)}
+\left[Q_i(s,a_i,a_{-i})\right].
+\end{equation}
+若 $V(m)$ 明显低于不发送或发送基准消息的价值，候选就应被拒绝。这里评价的不是句子情感，而是它通过改变别人行为对未来收益产生的因果影响。
+
+\lecturefigure{slide-38-value-filtering.jpg}{Value-based filtering：预测消息对他人行动和计划收益的影响}{官方录像恢复幻灯片 V038；Stanford CS25 Lecture 14}
+
+\begin{knowledgebox}{读图：过滤器的输入输出}
+左侧是候选生成，中央 action predictor 模拟接收者读到候选后的 policy，右侧 evaluator 估计 Cicero 原计划在该响应下的价值。一个候选可以通过语法和安全检查，却在这一层因降低 expected value 被丢弃。过滤因此是轻量 counterfactual evaluation，而不是关键词黑名单。
+\end{knowledgebox}
+
+\begin{warningbox}{Evaluator 错误会成为系统性盲区}
+如果 action predictor 低估人类的愤怒、报复或长期记忆，$V(m)$ 会错误地偏高。过滤器只和内部世界模型一样好；它不能凭空弥补模型没有表示的社会后果。这正是后面 truthfulness 限制的根源。
+\end{warningbox}
+
+\begin{lstlisting}[caption={Cicero-style strategic dialogue closed loop},label={lst:cicero-loop}]
+while game_is_active(state):
+    human_anchor = predict_human_policies(state, history, dialogue)
+    policy = pikl_search(state, human_anchor, value_model)
+    own_plan, expected_others = choose_joint_intents(policy)
+
+    candidates = dialogue_model.generate(
+        state=state,
+        history=history,
+        dialogue=dialogue,
+        own_intent=own_plan,
+        recipient_intent=expected_others,
+    )
+    candidates = filter_nonsense_and_inconsistency(candidates)
+    message = max(candidates, key=predicted_strategic_value)
+    send(message)
+    state, history, dialogue = observe_next_event()
+\end{lstlisting}
+
+这段伪代码最重要的是最后一行：系统观察新消息或新状态后再次预测和规划。若把输出消息当作 pipeline 终点，就会丢失 agent 的定义；真正的智能体必须让沟通结果回流到 belief 和 policy。
+
+\subsection{本章小结}
+
+Self-play RL 改善长期 base policy，piKL 保留人类可协调性，value-based filtering 则在每次发送前检查语言的战略后果。三者共同说明：自然语言候选必须经过行为模型和价值函数，而不是直接从 decoder 走向环境。
+

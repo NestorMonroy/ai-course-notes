@@ -1,0 +1,63 @@
+\section{Decision Transformer：轨迹如何变成 token sequence}
+
+有了 offline dataset，完整轨迹在训练时已经记录了未来 reward，因此可以回算每个时刻的 return-to-go，并把它与 state、action 交错排列。关键是理解：训练时 return-to-go 来自已完成轨迹；部署时则由用户或系统设定一个目标，再随着实际 reward 逐步扣减。
+
+\subsection{Return-to-go 是目标条件，不是“偷看未来”}
+
+对有限时域任务，未折扣 return-to-go 定义为
+\[
+\widehat{R}_t=\sum_{t'=t}^{T}r_{t'}.
+\]
+若需要折扣，可使用
+\[
+\widehat{R}^{(\gamma)}_t=\sum_{t'=t}^{T}\gamma^{t'-t}r_{t'}.
+\]
+符号 $t$ 表示当前 timestep，$T$ 表示 episode 终点，$r_{t'}$ 是未来第 $t'$ 步真实 reward，$\gamma$ 是 discount factor。训练阶段可以从日志中计算该量；推理阶段只能指定 desired return，并根据已经获得的 reward 更新剩余目标。
+
+\begin{importantbox}{Return-to-go 与即时 reward 的区别}
+即时 reward $r_t$ 回答“刚才发生了什么”；return-to-go $\widehat{R}_t$ 回答“从现在到结束，这条轨迹总共还会得到多少回报”。Decision Transformer 用后者作为条件，使同一个模型可以在不同目标回报下生成不同动作分布。
+\end{importantbox}
+
+\subsection{三类 token 与 causal Transformer}
+
+一条长度为 $T$ 的轨迹被排列为
+\[
+\tau=(\widehat{R}_1,s_1,a_1,\widehat{R}_2,s_2,a_2,\ldots,\widehat{R}_T,s_T,a_T).
+\]
+每个 timestep 贡献三个 token：return、state 与 action。它们先经过各自的 embedding，再与共同的 timestep embedding 相加，送入 causal Transformer。模型在 action 位置输出 $\widehat{a}_t$；causal mask 保证预测只能使用当前及之前的信息。
+
+\lecturefigure{slide-08-decision-transformer-architecture.jpg}{Decision Transformer 架构：return、state、action 交错输入，causal Transformer 在 action 位置解码动作。}{Stanford Online 官方视频 12:56；对应 Chen et al. 2021。}
+
+\begin{knowledgebox}{读图：沿着一次 action prediction 追踪信息}
+先从底部的 $\widehat{R}_t,s_t,a_t$ 看起。蓝、绿、橙色块表示不同 token type 的 embedding；位置上方的 causal Transformer 聚合长度为 $K$ 的历史；最上方 linear decoder 只在需要的 hidden state 上预测动作。图中 $a_t$ 已作为历史 token 出现在后续位置，但预测当前 $a_t$ 时不能看见它本身，这由输入错位与 causal mask 保证。
+\end{knowledgebox}
+
+\begin{warningbox}{不要把 target return 当作保证}
+输入 $\widehat{R}_1=100$ 只表达“希望生成与高回报轨迹一致的动作”，并不意味着环境最终一定返回 100。模型可能缺乏相应数据、遇到随机 transition，或在闭环中累积误差。requested return 和 realized return 必须分开记录。
+\end{warningbox}
+
+\subsection{Conditional sequence modeling 的概率视角}
+
+从函数逼近角度，模型学习的是
+\[
+p_{\theta}(a_t\mid \widehat{R}_{\le t},s_{\le t},a_{<t}).
+\]
+参数 $\theta$ 表示 Transformer 与 embedding/decoder 的全部可训练参数。与只看当前 state 的 Markov policy 相比，这个条件分布显式保留历史；与普通 behavior cloning 相比，它还把 desired return 作为条件，用于区分同一状态附近的不同质量行为。
+
+\begin{knowledgebox}{术语消化：本节四个关键概念}
+\begin{tabularx}{\textwidth}{L{3.0cm} X X}
+\toprule
+术语 & 机制 & 容易误解之处 \\
+\midrule
+causal mask & 阻止位置访问未来 token & 不等于模型只看当前 state \\
+timestep embedding & 标记轨迹中的时间位置 & 与 token-type embedding 解决不同问题 \\
+context length $K$ & 每次预测保留的历史窗口 & 更长不必然更好，会增加计算和数据需求 \\
+conditional generation & 用目标回报选择行为分布 & 不是可达性证明，也不是万能 task identifier \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+Decision Transformer 把 return、state、action 交错成 causal sequence，并学习在历史与目标回报条件下预测 action。Return-to-go 在训练中由日志回算，在部署中是可更新的目标条件；它提供控制接口，但不保证目标可达。
+

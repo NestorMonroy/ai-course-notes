@@ -1,0 +1,81 @@
+\section{GPT-4 as Evaluator：Judge 也需要被测试}
+
+前两章已经看到 metric conflict，本章把 GPT-4 从“评价工具”变成“被评价对象”。\term{LLM-as-a-judge} 指让语言模型按 rubric 对回答打分或排序；它降低人评成本，却可能有 position、style、self-preference 与 task-dependent errors。
+
+\subsection{Position Bias 与 Prompted Overcorrection}
+
+前面已经看到 evaluator 会重排模型，本节从最基本的不变量开始审计 judge：若回答内容不变，只交换左右位置，判决原则上不应改变。读两张 distribution 图时先比较 human 与 GPT-4 的位置分布，再检查 prompt-level debiasing 是否真正恢复平衡。课堂数据却显示 GPT-4 倾向选择左侧/第一项；更有警示性的是，直接告诉模型“你有左偏”会让它反向偏到另一侧。
+
+\lecturefigure{slide-60.jpg}{GPT-4 pairwise judge 的 positional bias}{官方幻灯片 p.60}
+
+\begin{knowledgebox}{读图：比较 GPT-4 与 human rating distribution}
+GPT-4 的 rating 质量集中在偏向第一项的区间，而 human distribution 更均衡。先看 distribution skew，再看不同 model pair 是否都出现；该图证明 protocol bias，不证明模型“有意识偏爱左边”。
+\end{knowledgebox}
+
+\lecturefigure{slide-61.jpg}{显式要求 debias 后，偏差翻向另一侧}{官方幻灯片 p.61}
+
+\begin{warningbox}{Self-critique prompt 不等于 calibration}
+模型能复述“我可能有偏差”，却可能把修正理解为选择另一边。真正的 mitigation 应基于 counterbalanced pairs、swap consistency、human calibration 与置信区间，而不是只在 prompt 中加入一句提醒。
+\end{warningbox}
+
+\teachervoice{讲者形容这一现象为 bias ``flips in the opposite direction''。这说明 prompt-level debiasing 可能只是改变输出启发式，并未学习正确的无偏 decision rule。}
+
+\subsection{Scoring 比 Ranking 稍好，但没有根治}
+
+独立给每个 response 打分，能减少两个答案在同一 prompt 中的直接位置竞争；然而 score 仍受 rubric anchoring、长度和 judge calibration 影响，因此只部分缓解问题。
+
+\lecturefigure{slide-62.jpg}{Independent scoring 对 position bias 的部分缓解}{官方幻灯片 p.62}
+
+\begin{knowledgebox}{读图：interface change 改变 error mode}
+Ranking 直接比较 A/B，容易出现位置偏差；scoring 分别评价，可能出现分数压缩、anchor drift 或不同 prompt 间不可比。没有一种 interface 自动成为真值，必须用 swap test 与 human agreement 验证。
+\end{knowledgebox}
+
+\subsection{Training--Evaluation Doping 与 Style Preference}
+
+如果 candidate model 用 GPT-4 data 训练，再由 GPT-4 judge 评价，judge 可能偏好熟悉的表达分布。课程称其为 evidence of doping：它类似 train/test contamination，但污染发生在 style/preference space，而不一定是 exact answer memorization。
+
+\lecturefigure{slide-63.jpg}{GPT-4 偏好在 GPT-4 data 上训练的 models}{官方幻灯片 p.63}
+
+\begin{warningbox}{Evaluator 与训练数据同源会破坏独立性}
+当 teacher、preference generator 与 judge 属于同一 model family，candidate 可能学会 judge 的 verbosity、结构和免责声明。高分可能表示 distribution match，而不是更符合人类真实偏好。应加入 human holdout 和异构 judges。
+\end{warningbox}
+
+\lecturefigure{slide-64.jpg}{GPT-4 对 response diversity 与 length 的偏好}{官方幻灯片 p.64}
+
+\begin{knowledgebox}{读图：长度是可见 style feature}
+散点/趋势展示 GPT-4 score 与 unique tokens、response length 的关系。先看总体相关，再看相同任务中的残差；长且多样可能真的更完整，也可能只是更容易获得 style credit。相关性不能替代 factuality check。
+\end{knowledgebox}
+
+\teachervoice{讲者观察到 GPT-4 偏好 GPT-4-like data、长回答和 list-like style，而人类写作可能更简洁、事实更直接。这个结果把 Zephyr 的强 judge score 与训练数据 provenance 重新连接起来。}
+
+\subsection{Task Entropy 决定 Human Correlation}
+
+最后一页把 judge--human correlation 按 task 分解。GPT-4 在 creative/high-entropy tasks 上与人更一致，却在 math、coding、reasoning 等 low-entropy tasks 上较差；这很反直觉，因为后者看似更容易判定，但需要执行或严格验证。
+
+\lecturefigure{slide-65.jpg}{GPT-4 与人类一致性随 task category 变化}{官方幻灯片 p.65}
+
+\begin{knowledgebox}{读图：先分 task，再看 overall correlation}
+总体相关系数会掩盖类别差异。Brainstorm/generation 可凭语义与风格判断，coding/math 可能需要运行测试或逐步验证；语言 judge 容易被看似合理的解释欺骗。该图支持 task-conditional evaluation policy。
+\end{knowledgebox}
+
+\teachervoice{讲者认为这种结果 counterintuitive，并明确说团队没有完全研究哪些 prompts 导致偏差。课堂只确认现象与一些可行 mitigation，不能把“left-to-right training 导致左偏”写成已证实因果。}
+
+\begin{lstlisting}[caption={Counterbalanced pairwise LLM-judge evaluation 的概念实现}]
+def balanced_judge_pairs(response_a, response_b, judge):
+    first = judge(left=response_a, right=response_b)
+    second = judge(left=response_b, right=response_a)
+    return {
+        "a_left": first,
+        "a_right": invert_pairwise_label(second),
+        "swap_consistent": first == invert_pairwise_label(second),
+    }
+\end{lstlisting}
+
+\begin{importantbox}{LLM Judge Audit Checklist}
+至少报告：pair order randomization、swap consistency、response length、judge model/version、prompt/rubric、temperature、human agreement、task-stratified results，以及 candidate training data 是否来自同一 judge family。
+\end{importantbox}
+
+\subsection{本章小结}
+
+LLM judge 是高吞吐 measurement instrument，不是无偏裁判。Position、prompted overcorrection、training--evaluation coupling、verbosity 与 task-specific verification 都会改变结论；使用 judge 前必须先校准 judge。
+

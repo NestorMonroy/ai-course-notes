@@ -1,0 +1,135 @@
+\section{Training Graph 与 Evaluation Graph 必须分开画}
+
+有了两条 recipe，课程没有直接宣布赢家，而是先枚举训练阶段与评估阶段。这里最重要的结构是：pretraining、in-context、SFT、RLHF 组成 training graph；instruction following、human Elo、LLM judge、reward-model test 与 red teaming 组成另一张 evaluation graph。
+
+\subsection{四种 Adaptation Stage}
+
+前面已经有 human 与 synthetic 两条 recipe，本节先把它们都放回更大的 model adaptation 图中，避免把某个训练阶段误当成完整系统。读下面三页时，要区分“参数是否更新”“监督信号来自哪里”“目标是能力还是价值偏好”，并观察 chatbot branch 从哪一步开始出现。相同 base model 可以通过 prompt、SFT 或 preference optimization 获得不同行为。
+
+\lecturefigure{slide-33.jpg}{Pretraining、in-context learning、SFT 与 RLHF}{官方幻灯片 p.33}
+
+\begin{knowledgebox}{读图：四行不是线性必经流程}
+Pretraining 学通用 next-token distribution；in-context learning 只改输入；SFT 改参数以遵循 instruction；RLHF/DPO 再根据 preference 调整行为。项目可跳过或重复某些阶段，但必须说明当前 model checkpoint 属于哪一层。
+\end{knowledgebox}
+
+\lecturefigure{slide-34.jpg}{把 training stage 映射到 chatbot evaluation target}{官方幻灯片 p.34}
+
+\begin{knowledgebox}{读图：训练目标与评价问题不是一一同名}
+SFT loss 低不保证回答有用，reward loss 低不保证 policy 安全。Evaluation 需要从 held-out tasks、pairwise preference、human study 和 adversarial prompts 多角度观察，否则只是在验证模型会优化训练 surrogate。
+\end{knowledgebox}
+
+\lecturefigure{slide-35.jpg}{Chatbot training branch 在 adaptation stack 中的位置}{官方幻灯片 p.35}
+
+\begin{importantbox}{Training loss 是过程指标，不是产品质量}
+Cross-entropy、preference loss 与 policy reward 只能说明模型更贴近各自 objective。它们不能直接回答 factuality、harmlessness、calibration 或真实用户满意度；必须引入外部 measurement。
+\end{importantbox}
+
+\subsection{Helpfulness、Harmlessness 与三层 Evaluation}
+
+上一小节画的是 training graph，本节转向与之不同的 evaluation graph，并回答“模型会做任务”与“模型在危险输入下是否可靠”为什么不能共用一个分数。读接下来的递进页时，先看每增加一层 evaluation，暴露的是哪一种新失败。Evaluation 至少包含 instruction following、reward-model ranking 和 red teaming；前两层常优化平均表现，第三层主动寻找尾部漏洞，三者不可用单一 leaderboard 替代。
+
+\lecturefigure{slide-36.jpg}{Helpfulness 与 Harmlessness 是不同评价维度}{官方幻灯片 p.36}
+
+\begin{knowledgebox}{读图：能力与安全可能同时变化，也可能冲突}
+模型更愿意回答可能提升 helpfulness，却增加危险请求风险；更强拒答又可能损害正常用户。图中左右不是互斥类别，而是需要分别测量、再讨论 tradeoff 的维度。
+\end{knowledgebox}
+
+\lecturefigure{slide-37.jpg}{Instruction following、RM evaluation 与 red teaming}{官方幻灯片 p.37}
+
+\begin{knowledgebox}{读图：三个层级对应三种失败}
+Step 1 查“会不会做”；Step 2 查“会不会选”；Step 3 查“在哪些输入上会失控”。一个能在标准 prompt 生成好答案的模型，可能在对抗 prompt 下暴露漏洞；一个能排序 pair 的 RM，也可能被分布外回答欺骗。
+\end{knowledgebox}
+
+\lecturefigure{slide-38.jpg}{Instruction following/helpfulness 的开放式问题示例}{官方幻灯片 p.38}
+
+\begin{warningbox}{Open-ended prompt 没有唯一 reference}
+Brainstorm New Year resolutions 可以有许多合理答案，exact match 不适用。此时 human/LLM preference 便利，却更容易受长度、格式和语气影响；评价器必须说明 rubric，不能只报 win rate。
+\end{warningbox}
+
+\teachervoice{讲者把不同 benchmark 放在一起，不是为了找最终总榜，而是说明每个工具回答不同问题。她后面发现 metric reversal，正是因为这些 evaluator 的偏好函数不相同。}
+
+\subsection{Elo、AlpacaEval、Arena 与 MT-Bench}
+
+下面五页展示 2023 年常见 chatbot leaderboards。\term{Elo rating}把 pairwise outcome 聚合成相对能力分数；若模型 $i,j$ 的分数为 $R_i,R_j$，常用胜率模型：
+\[
+P(i\succ j)=\frac{1}{1+10^{(R_j-R_i)/400}},\qquad
+R_i' = R_i + K(S_i-P(i\succ j)).
+\]
+其中 $S_i\in\{0,0.5,1\}$ 是实际 outcome，$K$ 是更新步长。Elo 依赖配对图、prompt 分布和投票者，不是绝对质量单位。
+
+\lecturefigure{slide-39.jpg}{Hugging Face H4 human-evaluation Elo leaderboard}{官方幻灯片 p.39}
+
+\begin{knowledgebox}{读图：先问谁投票、对哪些 prompts 投票}
+榜单将 pairwise human votes 聚合为 Elo。样本量、模型配对覆盖和 prompt mixture 会影响不确定性；相近分数不一定有显著差异。它比单一自动 metric 更接近用户偏好，但成本高且仍有群体偏差。
+\end{knowledgebox}
+
+\lecturefigure{slide-40.jpg}{AlpacaEval：以强 LLM judge 做 pairwise evaluation}{官方幻灯片 p.40}
+
+\begin{knowledgebox}{读图：自动化换来 judge dependence}
+AlpacaEval 让 candidate 与 reference answer 比较并报告 win rate，速度快、可复现。问题是 judge 可能偏好长回答、特定格式或自身生成风格；若训练数据也来自同一 judge family，会产生 data--evaluator coupling。
+\end{knowledgebox}
+
+\lecturefigure{slide-41.jpg}{LMSYS Chatbot Arena 的 crowdsourced Elo}{官方幻灯片 p.41}
+
+\begin{knowledgebox}{读图：真实用户 prompt 提高生态有效性，也增加混杂}
+Arena 随机匿名展示两个模型并收集用户选择，能覆盖自然使用分布；但用户群体、展示顺序、模型延迟和安全拒答都可能影响 vote。Elo 是系统行为的合成结果，不只测语言能力。
+\end{knowledgebox}
+
+\lecturefigure{slide-42.jpg}{MT-Bench：多轮问题与 LLM scoring}{官方幻灯片 p.42}
+
+\begin{knowledgebox}{读图：score 与 ranking 是两种 judge interface}
+MT-Bench 让 judge 独立给回答打分，并覆盖多轮 follow-up；它减少直接 pairwise position bias，却仍依赖 rubric、judge calibration 与 prompt set。课堂后面显示 scoring 只能缓解、不能消除偏差。
+\end{knowledgebox}
+
+\lecturefigure{slide-43.jpg}{LMSYS leaderboard 的课堂时间快照}{官方幻灯片 p.43}
+
+\begin{warningbox}{Leaderboard snapshot 不应跨时间直接比较}
+该页只能说明 2023-10-31 前后的公开生态。模型版本、sampling、系统 prompt 和投票规模会更新；引用时应关注 evaluation design，而不是把具体名次写成 2026 事实。
+\end{warningbox}
+
+\subsection{Reward Model 与 Red Teaming 的 Benchmark Gap}
+
+Instruction-following benchmark 较多，RM 与 vulnerability evaluation 当时仍缺公开、统一标准。下面四页把这一缺口逐层显露出来：先加入 RM ranking，再加入 red teaming，最后展示 H4 的公开实践。
+
+\lecturefigure{slide-44.jpg}{Evaluation stack 加入 reward-model ranking}{官方幻灯片 p.44}
+
+\begin{knowledgebox}{读图：RM evaluation 不能只复用训练 pair}
+RM 应在 held-out prompts、不同 response generators 和难分 pair 上测试。若 test pair 与训练数据同源，模型可能只识别长度、拒答模板或 teacher 风格，而不是理解 helpfulness/truthfulness。
+\end{knowledgebox}
+
+\lecturefigure{slide-45.jpg}{Benchmarking reward models 的模型与数据表}{官方幻灯片 p.45}
+
+\begin{knowledgebox}{读图：表格的空白本身就是结论}
+比较列关注 model、training data 与 evaluation source；当公开 RM benchmark 少、数据来源不透明时，跨模型分数缺少共同尺度。该页支持“benchmarking gap”，不支持某个 RM 已经可靠代表人类价值。
+\end{knowledgebox}
+
+\lecturefigure{slide-46.jpg}{Evaluation stack 加入 red-teaming}{官方幻灯片 p.46}
+
+\begin{knowledgebox}{读图：平均 helpfulness 与尾部安全是两类统计量}
+Red teaming 主动构造诱发危险、越权或新能力的 prompts，关注 rare failure，不应被平均 benchmark 覆盖。高平均分模型仍可能在小类 adversarial inputs 上失败。
+\end{knowledgebox}
+
+\lecturefigure{slide-47.jpg}{H4 的 Red Teaming Large Language Models 实践}{官方幻灯片 p.47}
+
+\begin{warningbox}{Red-team set 也会过拟合}
+已知 attack patterns 可被模板化拒答解决，却留下新攻击面。高质量 red teaming 需要 threat model、攻击者多样性、复测和 incident taxonomy；一次性 prompt list 不是完整安全认证。
+\end{warningbox}
+
+\begin{knowledgebox}{术语消化：五类 evaluator}
+\begin{tabularx}{\textwidth}{@{}L{0.17\textwidth}L{0.24\textwidth}X@{}}
+\toprule
+方法 & 主要测量 & 关键风险 \\
+\midrule
+Task metrics & 正确率、TruthfulQA 等 & 覆盖窄、reference 依赖 \\
+Human pairwise/Elo & 用户相对偏好 & 成本、群体与顺序偏差 \\
+AlpacaEval 与 LLM judge & 自动 preference/scoring & judge style、数据耦合 \\
+RM benchmark & chosen/rejected ranking & generator shift、shortcut \\
+Red teaming & 尾部漏洞与新能力 & attack coverage、快速过拟合 \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+Training graph 决定模型如何更新，evaluation graph 决定我们能看到什么。Leaderboards、RM tests 与 red teaming 是互补视角；任何一个单独变绿都不能证明 chatbot 已经 helpful、truthful 且 safe。
+

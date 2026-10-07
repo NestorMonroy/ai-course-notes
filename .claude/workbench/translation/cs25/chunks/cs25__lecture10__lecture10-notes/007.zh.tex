@@ -1,0 +1,98 @@
+\section{训练：Masked Reconstruction、Settling 与 Consensus Distillation}
+
+表示机制只有在 objective 能把正确 islands 学出来时才成立。课堂给出两类互补 signal：像 BERT 一样遮掉输入 patch、让系统经过若干 settling iterations 重建；再把 bottom-up/top-down predictions 拉向融合了邻域与时间信息的 consensus embedding，以鼓励局部一致区域形成。
+
+\subsection{Masked reconstruction 与 BPTT}
+
+给定图像 $I$ 和 mask $M$，输入中删除部分 patch。系统运行约 $T\approx10$ 个 recurrent steps，再从最低层预测缺失内容。重建 loss 通过 time 与 hierarchy 反向传播，因此高层 hypothesis、低层 evidence 与 lateral agreement 都可能接收 gradient。
+
+\lecturefigure{slide-27-deep-end-to-end-training.jpg}{Deep end-to-end training：mask 输入、settle、重建并通过时间反向传播。}{Stanford Online 官方视频 00:44:46--00:45:43。}
+
+\[
+\mathcal L_{\mathrm{rec}}=
+\sum_{x\in M}
+\ell\!\left(D\!\left(\mathbf e_{x,0}^{(T)}\right),I_x\right).
+\]
+
+其中，$M$ 是 masked locations，$I_x$ 是真实 patch，$D$ 是从最低层 embedding 重建输入的 decoder，$T$ 是 settling steps，$\ell$ 可是 pixel、feature 或 distribution loss。课堂没有固定唯一形式；重要的是 error 必须穿过 recurrent inference path。
+
+\begin{warningbox}{“Train like BERT”并不意味着 optimization 一样简单}
+BERT 的 mask prediction 主要穿过固定深度 forward graph；GLOM 还要跨 settling time、上下 levels、attention neighborhoods 与 shared prediction nets 做 BPTT。梯度稳定、memory、truncation、fixed point 与 early-exit criteria 都是额外工程问题。
+\end{warningbox}
+
+\subsection{Consensus embedding 作为 teacher}
+
+四路输入混合后的 target 被称为 \term{consensus embedding}。如果 bottom-up 与 top-down predictors 各自只看一种 source，它们可以被训练去逼近已融合相似邻域、前一时刻和另一层信息的 consensus。由于 lateral attention 已偏向 nearby similar states，逼近 consensus 会间接推动 island formation。
+
+\lecturefigure{slide-28-consensus-and-distillation.jpg}{预测网络向 consensus 靠拢：一种 online co-distillation 视角。}{Stanford Online 官方视频 00:45:44--00:47:11。}
+
+\begin{knowledgebox}{读图：teacher 不是标签，而是融合状态}
+bottom-up 与 top-down nets 各自给出 prediction；同层历史、邻域 attention 与其他方向的信息共同形成 consensus。训练把单源 prediction 拉向这个融合 target，因此不同 columns 可以交换知识。读图时必须保留两条限制：consensus 依赖当前模型自身，可能漂移；如果所有 peers 共享同一偏差，co-distillation 会强化而不是纠正错误。
+\end{knowledgebox}
+
+设 $\mathbf c_{x,\ell}^{(t)}$ 为 stop-gradient teacher，可写成：
+
+\[
+\mathcal L_{\mathrm{cons}}=
+\sum_{x,\ell,t}
+\left\|
+f_{\mathrm{bu}}^{\ell}\!\left(\mathbf e_{x,\ell-1}^{(t)}\right)
+-\operatorname{sg}\!\left(\mathbf c_{x,\ell}^{(t)}\right)
+\right\|_2^2
++
+\left\|
+f_{\mathrm{td}}^{\ell}\!\left(\mathbf e_{x,\ell+1}^{(t)},x\right)
+-\operatorname{sg}\!\left(\mathbf c_{x,\ell}^{(t)}\right)
+\right\|_2^2.
+\]
+
+其中，$\operatorname{sg}$ 表示 stop-gradient，避免 teacher 与 student 同时沿同一路径任意漂移；两项分别训练 bottom-up 与 top-down predictor。论文也讨论不完全 weight sharing 的 biological variant；课堂图则更偏工程化共享模型。
+
+\subsection{Weight sharing 与 brain plausibility}
+
+工程系统可以在所有位置复制同一 bottom-up/top-down weights；大脑未必精确共享权重。GLOM 论文提出 co-distillation：不同位置的 local models 即使参数略有差异，也可通过共同 consensus 交换知识。这个想法解释“功能近似共享”如何不依赖 exact parameter tying，但会引入 teacher quality 与 coordination 问题。
+
+\lecturefigure{slide-29-shared-weights.jpg}{工程上可共享 column 间权重；脑中可用 consensus/co-distillation 共享知识。}{Stanford Online 官方视频 00:47:22--00:48:51。}
+
+\begin{knowledgebox}{Distillation 术语消化}
+\begin{tabularx}{\textwidth}{L{0.22\textwidth}L{0.30\textwidth}X}
+\toprule
+术语 & Teacher 从哪里来 & 在本讲中的作用 \\
+\midrule
+knowledge distillation & 预训练大模型或 ensemble 输出 & 把 soft target 传给 student \\
+online distillation & 训练中的 peers/ensemble 即时产生 target & 同步多个模型或分片的知识 \\
+co-distillation & peers 互为 teacher，或 ensemble consensus 教所有 peers & 让不同 columns 的 predictors 向共同 island-compatible target 靠近 \\
+consensus & temporal、bottom-up、top-down、lateral 信息的融合状态 & 不是 ground truth；可能放大共同错误 \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Masked reconstruction 与 consensus training 的教学伪代码}]
+def train_step(image, mask, steps=10):
+    visible = apply_mask(image, mask)
+    state = initialize_columns(visible)
+
+    consensus_targets = []
+    for _ in range(steps):
+        state, consensus = glom_step_all_levels(state)
+        consensus_targets.append(stop_gradient(consensus))
+
+    reconstruction = decode_lowest_level(state)
+    reconstruction_loss = loss_on_masked_patches(reconstruction, image, mask)
+
+    consensus_loss = 0.0
+    for target in consensus_targets:
+        consensus_loss += prediction_to_consensus_loss(state, target)
+
+    total_loss = reconstruction_loss + CONSENSUS_WEIGHT * consensus_loss
+    total_loss.backward()  # backpropagation through settling time
+\end{lstlisting}
+
+\begin{warningbox}{Consensus 也可能共同犯错}
+若初始 evidence 有偏、attention 过尖、邻域跨过真实边界，所有 predictors 可能朝错误 consensus 收敛。可靠系统需要 source weighting、uncertainty、boundary diagnostics、curriculum 或 alternative hypotheses，而不能把“大家同意”当成“大家正确”。
+\end{warningbox}
+
+\subsection{本章小结}
+
+训练提案把 masked reconstruction 提供的外部 error 与 consensus distillation 提供的内部结构信号结合起来。它说明 islands 可以如何被优化，但也暴露 GLOM 最难的工程部分：recurrent BPTT、teacher drift、collapse、边界泄漏与 settling stability。
+

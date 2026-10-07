@@ -1,0 +1,99 @@
+\section{SFT Dataset Design：数量之外还有分布}
+
+上一章选定 human-written baseline，本章进入真正困难的采购问题：需要多少条、哪些任务、什么长度、由怎样的人群完成。课堂的核心贡献是把“收集 10K 条数据”改写成一个多维 design vector。
+
+\subsection{Diminishing Returns 不是“数据不重要”}
+
+上一章解释了为什么 H4 需要一个 human-written baseline；本节进一步问，既然人工数据昂贵，增加样本到什么阶段会开始失去边际价值。读曲线时先区分“收益斜率变小”与“数据不再重要”。早期工作提示高质量 instruction 在几千条后收益趋缓，但这个结论依赖基座模型、任务混合与 evaluator。正确含义是边际收益下降，需要做 controlled ablation；错误理解是任意 1K 条数据都足够。
+
+\lecturefigure{slide-14.jpg}{过去 SFT 研究中的数据规模与 diminishing returns}{官方幻灯片 p.14}
+
+\begin{knowledgebox}{读图：曲线支持边际收益下降，不支持统一最优规模}
+横轴是加入的 instruction 数量，纵轴是特定评估表现。先看斜率何时变小，再检查曲线使用的 task mix 和 model。饱和说明继续复制相似样本价值下降，却不排除新增任务、提高难度或修复错误仍然有效。
+\end{knowledgebox}
+
+\teachervoice{团队进入采购时掌握两条看似矛盾的先验：数据规模应在 tens of thousands，但少数高质量 instructions 后又会迅速饱和。讲者用这个矛盾引出后续 task/length ablation，而不是给出一个神奇样本数。}
+
+\lecturefigure{slide-15.jpg}{SFT data desiderata：task、length、quantity、human 与 synthetic}{官方幻灯片 p.15}
+
+\begin{importantbox}{Dataset size 不是充分统计量}
+两个同为 10K 的数据集可以在 task entropy、prompt length、completion length、multi-turn ratio、写作者背景和错误相关性上完全不同。若模型表现不同，不能只把因果归到 ``more data'' 或 ``better quality''。
+\end{importantbox}
+
+\subsection{Task Distribution：模型最终练习了什么}
+
+Task mix 决定 token budget 被分配到 generation、QA、coding、classification 等能力。课程先展示 InstructGPT 分布，再展示 H4 为 Surge collection 选择的分布，强调 distribution 是产品需求与可评估性的共同函数。
+
+\lecturefigure{slide-16.jpg}{InstructGPT 的 instruction task distribution}{官方幻灯片 p.16}
+
+\begin{knowledgebox}{读图：百分比是训练预算分配}
+表中每一行不仅代表一种任务名，也代表不同答案空间：classification 较低熵，brainstorm/generation 较高熵，coding/math 更容易存在可执行或唯一正确性。分布变化会同时改变学习难度和 evaluator reliability。
+\end{knowledgebox}
+
+\lecturefigure{slide-17.jpg}{H4/Surge 选择的 task mix}{官方幻灯片 p.17}
+
+\begin{knowledgebox}{读图：比较差值，而不是寻找唯一正确配方}
+先比较 generation、rewrite、coding、QA 等比例相对基线怎样移动，再问这种移动服务什么目标。H4 分布是一次有预算、有人群和 2023 应用假设的设计；它不是所有 chatbot 的 universal mixture。
+\end{knowledgebox}
+
+\teachervoice{讲者把采购问题概括为“how many thousands of what task?”。这句话比“数据质量更重要”更精确：质量必须落到任务覆盖、答案可判定性与下游目标上。}
+
+\begin{lstlisting}[caption={按目标比例分配有限 demonstration budget 的概念代码}]
+target_mix = {
+    "generation": 0.15, "open_qa": 0.05, "brainstorm": 0.10,
+    "rewrite": 0.15, "summarize": 0.10, "math": 0.05,
+    "coding": 0.15, "classify": 0.10, "closed_qa": 0.05,
+    "extract": 0.10,
+}
+
+def allocate_examples(total_examples, target_mix):
+    counts = {task: round(total_examples * ratio)
+              for task, ratio in target_mix.items()}
+    counts[max(counts, key=counts.get)] += total_examples - sum(counts.values())
+    return counts
+\end{lstlisting}
+
+\subsection{Length Distribution：不是越长越有用}
+
+Prompt/response length 会改变 task difficulty、训练 token 数、generation style 和 judge 偏好。课程把 prior datasets 的 length table 与选定约束并列，为后面的 metric reversal 埋下伏笔。
+
+\lecturefigure{slide-18.jpg}{已有数据集的 prompt 与 completion length 分布}{官方幻灯片 p.18}
+
+\begin{knowledgebox}{读图：样本数与 token 数是两种预算}
+同样 10K examples，平均 completion 长度翻倍就近似消耗双倍 target tokens。长回答也更容易包含列表、解释和冗余，LLM judge 可能把这些 style signal 当成 helpfulness，因此 length 既是训练变量也是 evaluation confounder。
+\end{knowledgebox}
+
+\lecturefigure{slide-19.jpg}{H4 选择的 length constraint 与重点区间}{官方幻灯片 p.19}
+
+\begin{warningbox}{Length effect 不能只看相关曲线}
+若长 prompt 同时集中在某些任务，或长 completion 来自特定写作者，performance--length correlation 可能是 task/source confounding。后续 ablation 的价值在于控制一部分变量，但仍不能自动得到普适因果律。
+\end{warningbox}
+
+\subsection{Surge-Instruct 的任务、例子与人群}
+
+前两小节已经确定 task 与 length 两个设计变量，本节把它们落到最终采购的数据集，并补上常被忽略的 workforce provenance。读下面三页时依次回答“收了什么”“样本长什么样”“谁在写”，再判断这些信息如何限制结果外推。Surge-Instruct 最终收集约 10K instruction--demonstration pairs；只有三类证据一起，数据集描述才完整。
+
+\lecturefigure{slide-20.jpg}{Surge-Instruct 的 10K 数据任务构成}{官方幻灯片 p.20}
+
+\begin{knowledgebox}{读图：饼图与计数表需要同时看}
+Generation 占最大块，但 open QA、brainstorm、chat、rewrite、summarize、coding 等共同构成 mixture。先看绝对计数避免小类别被饼图隐藏，再看任务是否覆盖预期产品；该图描述 distribution，不直接证明哪一类带来提升。
+\end{knowledgebox}
+
+\lecturefigure{slide-21.jpg}{Surge-Instruct 的 generation、classification、brainstorm 与 QA 示例}{官方幻灯片 p.21}
+
+\begin{knowledgebox}{读图：不同 task 的“好答案”判据不同}
+Knock-knock joke 需要风格与结构，classification 需要离散标签，brainstorm 强调覆盖和简洁，open QA 强调事实。把它们放在同一 loss 中训练很容易，但评价时必须保留 task-specific criteria。
+\end{knowledgebox}
+
+\lecturefigure{slide-22.jpg}{Surge annotator workforce 的人口统计背景}{官方幻灯片 p.22}
+
+\begin{warningbox}{Demographics 是来源说明，不是代表性证明}
+US-based workforce、性别/年龄/种族/教育分布有助于理解数据由谁生产，却不能证明它代表全球用户。讲义保留这些信息，是为了追踪 viewpoint coverage 和潜在偏差，而不是把 demographic diversity 当作质量认证。
+\end{warningbox}
+
+\teachervoice{讲者列出 annotator background，是在承认 human-written data 也有生产分布。人工数据不会自动无偏；它只是把偏差来源从 teacher model 转移到写作者、指南、供应商与审核流程。}
+
+\subsection{本章小结}
+
+SFT collection 是 task、length、quantity 与 workforce 的联合设计。只有记录这些变量，后面的 leaderboard 差异才可解释；仅报告“10K 高质量数据”会丢掉最重要的实验信息。
+

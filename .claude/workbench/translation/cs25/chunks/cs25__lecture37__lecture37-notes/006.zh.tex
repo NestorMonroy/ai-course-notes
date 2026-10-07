@@ -1,0 +1,126 @@
+\section{从路径概率到答案概率：Self-Consistency 与自由文本聚合}
+
+语言模型原生优化的是每一步 next-token probability。用户真正关心的却常是最终答案 $a$ 的概率，而同一个答案可能由许多不同的 reasoning path $r$ 导出。若只选联合概率最高的一条完整响应，就把“最可能路径”误当成“最可能答案”。Self-consistency 的理论入口就是对潜在路径做 marginalization。
+
+\subsection{最可能路径不等于最可能答案}
+
+本节先把 slide 33--34 的图形直觉翻译成概率式。读图时要区分一条完整响应的联合概率与多个路径汇聚到同一答案后的总概率；前者对应“哪条路径最常见”，后者才对应“哪个答案拥有最多概率质量”。
+
+对输入 $x$，答案概率应为
+\[
+p_\theta(a\mid x)=\sum_{r}p_\theta(r,a\mid x)
+=\sum_r p_\theta(r\mid x)p_\theta(a\mid x,r).
+\]
+其中 $r$ 是潜在 reasoning path。Greedy 或 beam search 更接近寻找
+\[
+(r^*,a^*)=\arg\max_{r,a}p_\theta(r,a\mid x),
+\]
+而用户要的是
+\[
+a^*=\arg\max_a\sum_r p_\theta(r,a\mid x).
+\]
+如果答案 A 有十条中等概率路径，答案 B 只有一条最高概率路径，单路径解码可能选 B，但总概率质量可能集中在 A。
+
+\lecturefigure{slide-33.jpg}{解码错位：最大联合路径与最大答案边缘概率并不一致}{33}
+
+\lecturefigure{slide-34.jpg}{修复思路：对潜在 reasoning path 做 marginalization}{34}
+
+\begin{importantbox}{Self-consistency 的概率含义}
+它不是简单的“多数人投票”，而是用随机样本近似答案边缘概率。每条 reasoning path 是潜变量，最终只按规范化答案聚合；不同路径得到同一答案时，它们的概率质量应累加。
+\end{importantbox}
+
+\teachervoice{00:40:17--00:43:00，老师把这件事称为“高中条件概率也能看懂”的错位：模型按整条序列概率生成，而任务希望选最终答案概率最大的结果。课堂提示：很多推理改进来自把优化对象写对，而不是引入复杂架构。}
+
+\subsection{Self-Consistency：用 Monte Carlo 估计答案质量}
+
+采样 $K$ 条轨迹 $(r^{(k)},a^{(k)})$ 后，exact-answer 场景的估计器为
+\[
+\widehat p_K(a\mid x)=\frac{1}{K}\sum_{k=1}^{K}\mathbf 1[a^{(k)}=a],
+\qquad
+\hat a=\arg\max_a\widehat p_K(a\mid x).
+\]
+其中 $K$ 是采样数，$\mathbf 1[\cdot]$ 是指示函数，$\widehat p_K$ 是答案出现频率。随着 $K$ 增大，Monte Carlo 方差下降，但成本线性增长；如果样本高度相关或共享同一错误，增加 $K$ 也不会产生独立证据。
+
+\lecturefigure{slide-35.jpg}{Self-Consistency：随机生成多条响应，选择最常见答案}{35}
+
+\lecturefigure{slide-36.jpg}{鸭蛋题：聚合最终答案，而不是寻找最常见的文字轨迹}{36}
+
+鸭蛋题三条响应中，两条得到 18，一条得到 26；正确聚合单位是规范化后的答案 18。两条正确轨迹文字不同，但表达同一计算。若按整段字符串投票，它们不会合并；若过度规范化，又可能把 $18$、$18\%$ 和 $18$ 美元错误合并。因此答案 parser 是 self-consistency 的一部分，不是无关的后处理。
+
+\begin{lstlisting}[language=Python,caption={Exact-answer self-consistency 聚合}]
+from collections import Counter
+
+def self_consistency(model, prompt, parse_answer, n=32):
+    counts = Counter()
+    traces = []
+    for sample in model.sample(prompt, n=n, temperature=0.8):
+        answer = parse_answer(sample.text)
+        if answer is not None:
+            counts[answer] += 1
+            traces.append((answer, sample.text))
+    if not counts:
+        raise ValueError("all samples failed answer parsing")
+    answer, votes = counts.most_common(1)[0]
+    return answer, votes / sum(counts.values()), traces
+\end{lstlisting}
+
+\subsection{怎样读 GSM8K 与后续模型结果}
+
+slide 37 汇总早期 GSM8K 结果，视觉重点不是记住每个小数，而是看同一模型加 CoT 后提升、再加 self-consistency 后进一步跃升。slide 38 引用后续 reasoning model 的 aggregation 结果，说明“多样本形成 consensus”并未因单模型变强而失效。两页跨模型、跨年份、跨设置，不能直接当统一 leaderboard；它们支持的是机制层结论：答案级聚合仍能利用候选多样性。
+
+\lecturefigure{slide-37.jpg}{GSM8K：CoT 与 self-consistency 带来的分阶段提升}{37}
+
+\lecturefigure{slide-38.jpg}{后续 reasoning model 中 aggregation 仍提供收益}{38}
+
+\begin{warningbox}{Inference-time scaling 必须说明“扩展了什么”}
+多采样扩大宽度，长 CoT 扩大深度，tree search 扩大结构，tool use 扩大外部能力。它们的延迟、并行性、内存和错误模式完全不同；只写“增加 test-time compute”无法复现实验，也无法做成本比较。
+\end{warningbox}
+
+\teachervoice{00:44:10--00:47:20，老师强调 self-consistency 的提升很大，但也立即接受学生关于成本的追问：更多样本意味着更多 token。实践经验：报告提升时必须同时给出采样数、总 token、墙钟延迟与并发条件。}
+
+\subsection{一致性可以做置信度，但不能自动变成保证}
+
+slide 39 显示在该 GSM8K 设置中，一致性越高，准确率整体越高。可定义 consistency
+\[
+c(x)=\max_a\widehat p_K(a\mid x).
+\]
+$c(x)$ 接近 1 表示大多数样本汇聚到同一答案；但它只测\textbf{内部共识}。若模型对同一错误拥有稳定偏见，$c(x)$ 仍会很高。部署前应在验证集上画 reliability diagram，比较预测置信度区间与真实正确率，而不是把课堂相关图直接当校准证明。
+
+\lecturefigure{slide-39.jpg}{在 GSM8K 设置中，更高一致性与更高准确率相关}{39}
+
+\lecturefigure{slide-40.jpg}{两个边界问题：直接答案是否要采样，以及单次生成多个答案是否等价}{40}
+
+第一个问题区分“没有中间 reasoning”与“仍然存在多 token 答案”：若答案是单个离散标签，可直接读取 logits 得到全分布，不必用采样近似；若答案是长字符串，序列概率仍需要搜索或采样。第二个问题区分\textbf{独立采样}与“让同一次响应列出多个答案”：后者的候选共享上下文并相互影响，不再是同一分布的独立 Monte Carlo 样本，虽然工程上也可能形成 ensemble。
+
+\begin{knowledgebox}{一致性、校准与正确性}
+\textbf{Consistency} 是样本间共识；\textbf{calibration} 是声称 80\% 置信度的样本约有 80\% 正确；\textbf{accuracy} 是最终命中率。三者相关但不等价。高共识错误、低共识正确和分布漂移都会打破简单映射。
+\end{knowledgebox}
+
+\subsection{自由文本如何聚合：Universal Self-Consistency}
+
+开放问题没有可直接计数的标准化答案。Universal Self-Consistency（USC）把“相同字符串投票”换成“让 judge 模型比较多条候选，选出最一致、最能代表共同内容的响应”。slide 42 的咖啡消费例子中，各响应列出的国家集合不同，不能 exact match；judge 需要识别重叠事实、冲突与覆盖范围。
+
+\lecturefigure{slide-41.jpg}{Universal Self-Consistency：让 LLM 选择最一致的自由文本答案}{41}
+
+\lecturefigure{slide-42.jpg}{自由文本示例：从语义重叠中选择代表性响应}{42}
+
+\begin{lstlisting}[language=Python,caption={自由文本 Universal Self-Consistency 的结构化实现}]
+def universal_self_consistency(generator, judge, prompt, n=12):
+    candidates = generator.sample(prompt, n=n)
+    packet = {
+        "question": prompt,
+        "candidates": [c.text for c in candidates],
+        "criteria": ["factual overlap", "contradictions", "coverage"],
+    }
+    decision = judge.generate_json(packet)
+    return candidates[decision["selected_index"]], decision
+\end{lstlisting}
+
+USC 引入新的失败面：judge 可能偏好更长、更自信或与自身风格相似的文本；候选若共同复制同一错误，语义共识同样无效。更稳健的实现应保存 judge 理由、做候选顺序随机化、使用独立 verifier 检查事实，并对 judge 模型与 generator 的同源偏差做消融。
+
+\teachervoice{00:47:20--00:51:29，老师把 consistency 视作自然的 confidence signal，但在后续 Q\&A 又承认 self-consistency 并不完美。讲义提醒：它是估计器和工程工具，不是“多数一定正确”的定理。}
+
+\subsection{本章小结}
+
+Self-consistency 修复了最可能路径与最可能答案之间的错位：对多个 reasoning path 采样，并在答案层聚合概率质量。它能显著提高准确率并提供共识信号，但收益依赖样本多样性、答案解析、成本预算和校准；自由文本版本还额外依赖 judge 的可靠性。
+

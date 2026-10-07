@@ -1,0 +1,74 @@
+\section{Eureka：让 LLM 设计 Reward，让 RL 学会低层控制}
+
+Voyager 适合 symbolic action interface，但 dexterous control 需要连续高频动作，直接让 LLM 写每个 motor command 并不现实。Eureka 改变接口层级：LLM 阅读 simulator environment code，生成 reward program；内层 RL 再用梯度学习 policy。\term{reward reflection（奖励反思）}指模型根据训练曲线、分项 reward 和失败行为修订 reward code，而不是对自然语言答案做泛泛自评。
+
+\subsection{Hybrid-gradient Architecture}
+
+Eureka 把系统分成外层黑盒 code search 与内层白盒 policy optimization。外层 LLM 不需要反向传播，负责提出可执行 reward；内层 RL 使用 simulator 并行采样和 gradient update，把该 objective 转成动作。两层通过训练统计连接，因此语言模型可以“指导”低层神经控制而不直接产生高频 action。
+
+\lecturefigure{slide-39-eureka-architecture.jpg}{Eureka：环境代码、reward program 与 RL policy 的双层架构}{官方录像恢复幻灯片 V039；00:33:36}
+
+\begin{knowledgebox}{读图：先分清谁在优化什么}
+LLM 外层搜索 reward code，RL 内层在固定 reward 下优化 policy。环境代码向 LLM 暴露 observation、state 与可计算量，训练结果再返回 performance summary。Eureka 的贡献不是让 GPT-4 自己学会 motor control，而是让它改写可微学习系统的 objective interface。
+\end{knowledgebox}
+
+双层过程可以写成：
+\[
+\phi_{k+1}\sim p_{\mathrm{LLM}}(\phi\mid \text{env code},\,\mathcal{H}_k),
+\qquad
+\theta_k^*=\arg\max_\theta J(\theta; r_{\phi_k}),
+\qquad
+\mathcal{H}_{k+1}=\mathcal{H}_k\cup\{\phi_k,\operatorname{metrics}(\theta_k^*)\}.
+\]
+其中 $\phi_k$ 是第 $k$ 轮 reward program，$r_{\phi_k}$ 是其计算出的 reward，$\theta_k^*$ 是内层 RL 学到的 policy 参数，$J$ 是 expected return，$\mathcal{H}_k$ 是 reward 与训练反馈历史。外层改代码、内层改权重，二者的学习机制不同。
+
+\teachervoice{讲者把 Voyager 称为 no-gradient architecture，把 Eureka 称为 hybrid-gradient architecture：GPT-4 外环负责选择 reward function，神经网络内环通过 RL gradient 学 control。这个区分避免把“LLM 参与系统”误写成“所有组件都由 LLM 端到端训练”。}
+
+\subsection{Reward Reflection 与 In-context Evolution}
+
+一段 reward code 能运行，不代表它会诱导正确行为。Eureka 因此把各 reward term、训练成功率和 policy behavior 压缩为反馈，让 LLM 判断哪些项过强、过弱或方向错误，再生成新代码与 hyperparameter。反思的对象是可执行 specification 及其后果。
+
+\lecturefigure{slide-40-eureka-reward-reflection.jpg}{Eureka 根据训练反馈反思 reward 设计}{官方录像恢复幻灯片 V040；00:35:24}
+
+\begin{knowledgebox}{读图：反馈必须能定位 reward term}
+页面包含 reward code、训练统计与反思文本。先检查每个 term 的尺度和符号，再看 policy 是否通过异常姿态获得高分；最后判断新建议是否针对 observable failure。只有总回报而没有 term-wise metrics，LLM 很难区分“目标没达到”和“某个 shaping 项主导了优化”。
+\end{knowledgebox}
+
+\lecturefigure{slide-41-eureka-reward-code-diff.jpg}{Reward code 与权重在多轮反馈中演化}{官方录像恢复幻灯片 V041；00:35:36}
+
+代码 diff 展示 specification 被逐步修改。先比较新增/删除的 reward term，再比较 coefficient 与 normalization；关键不是代码变长，而是训练行为更接近任务意图。图中改进支持 in-context reward evolution 有效，却不能保证对新 simulator、真实 robot 或 adversarial state 同样稳健。
+
+\begin{lstlisting}[caption={Eureka 外层 reward generation 与内层 RL 训练循环的概念伪代码}]
+history = []
+for generation in range(max_generations):
+    candidates = llm.generate_reward_programs(env_code, history)
+    evaluated = []
+    for reward_program in candidates:
+        policy, metrics = train_rl(env, reward_program)
+        rollout_summary = evaluate_policy(policy, env)
+        evaluated.append((reward_program, metrics, rollout_summary))
+    best = select_valid_candidate(evaluated)
+    reflection = llm.reflect(best, term_wise_metrics=True)
+    history.append((best, reflection))
+\end{lstlisting}
+
+\begin{warningbox}{LLM-generated reward code 必须经过隔离与验证}
+执行前应做 syntax/type check、API allowlist、数值范围检查和 timeout；训练后应检查 NaN、reward saturation、unsafe contact、constraint violation 与 held-out scenario。Reward optimization 会主动寻找 loophole，因此“代码可运行”只是最低门槛。
+\end{warningbox}
+
+\subsection{Dexterity 与 Simulator Scaling}
+
+Eureka 的结果重点在 dexterous manipulation：任务包含精细姿态、接触与连续控制，难以由 LLM 直接逐步生成。大规模 Isaac simulator 并行训练使每个 reward candidate 能获得相对快速、可比较的 feedback；因此算法收益依赖于可靠 environment code 与足够计算资源。
+
+\lecturefigure{slide-42-dexterity-scaling.jpg}{Dexterous tasks 与 Isaac simulator scale 支撑 reward search}{官方录像恢复幻灯片 V042；00:35:54}
+
+\begin{knowledgebox}{读图：结果与基础设施不能拆开解释}
+左侧曲线比较 learned/evolved reward 与 human baseline 的任务表现，右侧显示 simulator scaling。先确认横轴任务或资源规模、纵轴 success/score，再比较是否跨任务稳定领先。结论是 LLM reward search 可在给定 simulator 中产生强 objective；它不证明 simulation-to-real gap、传感器噪声或硬件安全已解决。
+\end{knowledgebox}
+
+\teachervoice{讲者强调 Eureka 在若干 dexterous tasks 上超过 human-designed reward，同时指出 simulator scale 让外层搜索可行。换句话说，方法能力来自 LLM prior、environment source code、RL optimizer 与并行基础设施的共同作用，不能只归功于 prompt。}
+
+\subsection{本章小结}
+
+Eureka 把 LLM 放在 objective-design 层，把 gradient-based RL 留在连续控制层。Reward reflection 根据真实训练反馈修改可执行 specification，形成外层 code search 与内层 policy learning 的 hybrid architecture。它为高层 reasoning 与低层 motor control 建立接口，也要求严格 sandbox、term-wise metrics、constraint audit 和 simulator boundary。
+

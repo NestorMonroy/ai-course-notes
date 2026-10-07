@@ -1,0 +1,97 @@
+\section{三类 Transformer：从 sequence model 的共同底座出发}
+
+上一章讨论为什么要研究结构，本章先把结构讲清楚。Encoder-decoder、encoder-only 与 decoder-only 不是三个完全无关的发明；它们都把离散输入变成向量序列，再用 attention 建模元素间交互。差异主要来自参数是否共享、attention mask 如何限制可见范围，以及输出如何被训练和使用。
+
+\subsection{三类架构的任务接口}
+
+本节先看全景，再逐步进入图。Encoder-decoder 为输入与输出设置两套 stack；encoder-only 把输入压成表征，通常需要 task-specific head；decoder-only 把输入与目标串接，在一个 causal stack 中逐 token 生成。不同接口隐含了不同任务假设。
+
+\lecturefigure{hyung-slide-017.jpg}{Transformer 的三类架构：encoder-decoder、encoder-only、decoder-only}{Hyung Won Chung official deck, p.~17}
+
+\begin{knowledgebox}{术语表：三类架构解决什么问题}
+\begin{tabularx}{\textwidth}{L{0.22\textwidth} X}
+\toprule
+架构 & 核心机制与课程关系 \\
+\midrule
+Encoder-decoder & 输入由 encoder 双向编码，decoder 通过 causal self-attention 与 cross-attention 生成目标；适合显式 sequence-to-sequence。 \\
+Encoder-only & 全序列双向交互，输出通常用于分类、检索或 token labeling；若要生成序列，需要额外生成机制。 \\
+Decoder-only & 输入与历史输出位于同一 causal 序列，参数共享、接口统一，天然适合 autoregressive generation 与多轮续写。 \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{从字符到向量序列，再到 interaction}
+
+架构分类之前需要理解共同 pipeline。文本先被 tokenizer 映射成 token ID；embedding table 再把每个 ID 映射到 $d_{\text{model}}$ 维向量；sequence model 根据 attention pattern 让不同位置交换信息。模型处理的是向量序列，而不是直接处理“词义”。
+
+\lecturefigure{hyung-slide-018.jpg}{原始字符序列是 Transformer pipeline 的起点}{Hyung Won Chung official deck, p.~18}
+
+\lecturefigure{hyung-slide-021.jpg}{完整 pipeline：tokenization、embedding 与 sequence model}{Hyung Won Chung official deck, p.~21}
+
+若 token ID 为 $i_t$，embedding matrix 为 $E\in\mathbb{R}^{V\times d}$，则
+\[
+h_t^{(0)}=E[i_t]+p_t.
+\]
+其中 $V$ 是词表大小，$d$ 是 hidden dimension，$E[i_t]$ 是第 $i_t$ 个 token 的向量，$p_t$ 是位置表示，$h_t^{(0)}$ 是送入第一层的状态。Tokenization 决定序列长度和切分边界，embedding 决定初始连续表示，两者都会影响后续计算成本。
+
+\teachervoice{Hyung Won 在 00:16:11--00:17:26 把 Transformer 先定义成 sequence model：输入元素可以是词、图像或其他对象，核心是对元素之间的 interaction 建模。这个顺序避免把 attention 公式脱离数据接口。}
+
+\subsection{Encoder-decoder：三种 attention role}
+
+现在进入原始 Transformer。读图时先把三条信息流分开：encoder 内的双向 self-attention、decoder 内的因果 self-attention，以及 decoder 查询 encoder 表示的 cross-attention。每一条边都对应“哪个位置可以读取哪个位置”的权限。
+
+\lecturefigure{hyung-slide-022.jpg}{完整 encoder-decoder 架构与三种 attention role}{Hyung Won Chung official deck, p.~22}
+
+\begin{importantbox}{Self-attention 与 cross-attention}
+给定 query $Q$、key $K$、value $V$，scaled dot-product attention 为
+\[
+\operatorname{Attn}(Q,K,V)=\operatorname{softmax}\!\left(\frac{QK^{\top}}{\sqrt{d_k}}+M\right)V.
+\]
+其中 $d_k$ 是 key 维度，$M$ 是可见性 mask。Self-attention 的 $Q,K,V$ 来自同一序列；cross-attention 的 $Q$ 来自 decoder，$K,V$ 来自 encoder 输出。
+\end{importantbox}
+
+\lecturefigure{hyung-slide-023.jpg}{Encoder 使用 bidirectional self-attention 建模完整输入}{Hyung Won Chung official deck, p.~23}
+
+Bidirectional attention（双向注意力）允许输入中任一位置读取任一其他位置。若序列长度为 $n$，可见性 mask 可写为 $M_{ij}=0$；没有未来屏蔽。它适合一次性给定的输入，因为所有 token 在编码时都已知，但也意味着输入末尾变化会影响前面所有位置的表示。
+
+\lecturefigure{hyung-slide-025.jpg}{Decoder 使用 causal self-attention，只读取当前位置及其左侧历史}{Hyung Won Chung official deck, p.~25}
+
+Causal attention（因果注意力）用上三角 mask 阻止读取未来：
+\[
+M_{ij}=\begin{cases}
+0,&j\le i,\\
+-\infty,&j>i.
+\end{cases}
+\]
+其中 $i$ 是当前 query 位置，$j$ 是被读取的 key 位置。Softmax 后，未来位置权重变为零，因此训练时可以并行计算所有位置，推理时又保持 autoregressive 条件。
+
+\lecturefigure{hyung-slide-027.jpg}{Cross-attention 把 decoder 目标位置连接到 encoder 输入表示}{Hyung Won Chung official deck, p.~27}
+
+\lecturefigure{hyung-slide-028.jpg}{Encoder-decoder 的最终构造：输入双向编码，目标因果生成}{Hyung Won Chung official deck, p.~28}
+
+\begin{knowledgebox}{读图：一条机器翻译路径怎样流动}
+输入 ``That is good'' 先在 encoder 内双向交互，形成每个源 token 的上下文化表示；decoder 在生成 ``Das ist gut'' 时，只能读取已生成的目标前缀，同时通过 cross-attention 访问 encoder 最终层。图支持的是信息权限结构，不表示 attention 权重天然等同于对齐解释。
+\end{knowledgebox}
+
+\subsection{Encoder-only 与 decoder-only 的关键差异}
+
+前一节使用两个 stack；本节看两个极端。Encoder-only 产生全局双向表征，分类时常读取特殊 token 并加 task-specific layer；decoder-only 则把输入和输出统一成一个序列，用同一套参数和 causal self-attention 承担上下文理解与生成。
+
+\lecturefigure{hyung-slide-032.jpg}{Encoder-only 的完整形态：双向表征、特殊 token 与任务头}{Hyung Won Chung official deck, p.~32}
+
+\begin{warningbox}{Encoder-only 不是“不能输出任何序列”}
+这页说的是默认接口：单个 encoder stack 不自带 autoregressive generation path。可以在其上增加 decoder、span head、迭代填空或其他生成机制；代价是系统不再是图中这个最简 encoder-only 结构。课程比较的是内建假设，而不是逻辑上的绝对能力。
+\end{warningbox}
+
+\lecturefigure{hyung-slide-037.jpg}{Decoder-only 的完整形态：串接输入目标、共享参数与 causal attention}{Hyung Won Chung official deck, p.~37}
+
+Decoder-only 的统一接口可写成
+\[
+p(y\mid x)=\prod_{t=1}^{|y|}p(y_t\mid x,y_{<t}).
+\]
+其中 $x$ 是输入 token 序列，$y$ 是目标序列，$y_{<t}$ 是已生成目标前缀。输入和目标使用同一个 stack，但 loss 通常可以只在目标位置计算；“参数共享”不等于模型无法区分角色，因为位置、分隔 token 和上下文本身仍提供条件。
+
+\subsection{本章小结}
+
+三类 Transformer 共享 tokenization、embedding、attention 和 MLP 底座；主要差异是信息可见性、参数分组和任务接口。理解这些差异后，下一章不再把 encoder-decoder 与 decoder-only 当成不可通约的类别，而是通过四步操作把前者连续变换为后者，从而暴露真正的归纳偏置。
+

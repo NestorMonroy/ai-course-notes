@@ -1,0 +1,79 @@
+\section{MineCLIP：把 Internet Video 变成 Language-conditioned Reward}
+
+上一章最难的缺口是 creative goal 没有容易手写的 reward。MineCLIP 的策略是学习视频片段与文本描述的共同表示：若视频内容更符合目标文本，相似度就更高，并可作为 policy 学习的 dense feedback。\term{reward model（奖励模型）}是把 trajectory、observation 或 outcome 映射为标量反馈的模型；它近似人类目标，却不是目标本身。
+
+\subsection{Contrastive Learning 与 InfoNCE}
+
+\term{contrastive learning（对比学习）}通过拉近匹配样本、推远不匹配样本来学习表示。MineCLIP 把 Minecraft 视频片段编码为 $v_i$，把对应文本编码为 $t_i$；训练时同一对是 positive，batch 中其他文本或视频充当 negative，使语义一致的 video--text pair 在 embedding space 中更接近。
+
+\lecturefigure{slide-22-mineclip-contrastive-reward.jpg}{MineCLIP 学习视频--语言对齐并输出语义相似度}{官方录像恢复幻灯片 V022；00:16:51}
+
+\begin{knowledgebox}{读图：先区分训练信号与部署 reward}
+训练阶段使用成对 video clip 与 transcript，让匹配对得分高；部署阶段把 agent 最近一段 observation 与目标文本送入模型，得到 similarity reward。图中高分表示语义更接近，不等于任务一定完成；模型可能偏好视觉捷径、背景或常见共现，因此需要 outcome check 与人工审计。
+\end{knowledgebox}
+
+一个简化的 video-to-text InfoNCE loss 为：
+\[
+\mathcal{L}_{\mathrm{NCE}}
+=-\frac{1}{B}\sum_{i=1}^{B}
+\log\frac{\exp(\operatorname{sim}(v_i,t_i)/\tau)}
+{\sum_{j=1}^{B}\exp(\operatorname{sim}(v_i,t_j)/\tau)}.
+\]
+其中 $B$ 是 batch size，$v_i$ 是第 $i$ 个视频 embedding，$t_i$ 是匹配文本 embedding，$\operatorname{sim}$ 通常为归一化向量的 cosine similarity，$\tau$ 是 temperature。Loss 只要求匹配对相对更近，并不保证 similarity 已校准为真实成功概率。
+
+对目标文本 $g$，policy 使用的语义 reward 可写成：
+\[
+r_t^{\text{MineCLIP}}=\operatorname{sim}\!\left(E_v(o_{t-k:t}),E_t(g)\right),
+\qquad
+J(\theta)=\mathbb{E}_{\pi_\theta}\left[\sum_t\gamma^t r_t^{\text{MineCLIP}}\right].
+\]
+其中 $E_v$ 与 $E_t$ 分别是视频和文本 encoder，$o_{t-k:t}$ 是最近 $k$ 步 observation window，$g$ 是语言目标，$r_t^{\text{MineCLIP}}$ 是 learned reward，$J(\theta)$ 是 policy objective。Reward 越 dense，探索越容易；但 reward bias 也会被 policy 主动放大。
+
+\subsection{用 Learned Reward 训练 Language-conditioned Policy}
+
+MineCLIP 自身不是完整控制器。系统仍需要 RL policy 根据当前 observation 选择 action，并用 learned reward 更新参数。语言目标因此进入两处：一处定义 reward 的语义方向，另一处可作为 policy condition，使同一个网络根据不同 instruction 执行不同任务。
+
+\lecturefigure{slide-23-rl-with-mineclip.jpg}{MineCLIP reward 驱动 language-conditioned reinforcement learning}{官方录像恢复幻灯片 V023；00:17:03}
+
+\begin{lstlisting}[caption={MineCLIP-conditioned RL 训练循环的概念伪代码}]
+for goal in sampled_language_goals:
+    obs = env.reset(goal)
+    recent_frames = []
+    while not env.done():
+        action = policy.sample(obs, goal)
+        next_obs = env.step(action)
+        recent_frames.append(next_obs.frame)
+        reward = mineclip.similarity(recent_frames[-k:], goal)
+        replay.add(obs, action, reward, next_obs, goal)
+        policy.update(replay)
+        obs = next_obs
+\end{lstlisting}
+
+\begin{warningbox}{Reward hacking 会随 policy 变强而更严重}
+若 MineCLIP 把某种背景、镜头运动或局部物体误当成成功，RL 会系统性寻找该 shortcut。必须同时记录 programmatic state、人工视频审查、不同 seed、对抗目标和 reward trajectory；“reward 上升”只是训练信号改善，不自动等于人类意图完成。
+\end{warningbox}
+
+\teachervoice{讲者把 MineCLIP 描述为从 passive internet video 到 active reinforcement learning 的桥：视频提供语义相似度，agent 再通过环境互动学习控制。这个桥很重要，但课堂也没有声称 learned reward 完美；它仍受数据偏差、目标歧义和视觉 shortcut 限制。}
+
+\subsection{结果：任务成功与视觉鲁棒性}
+
+结果页要回答两个不同问题：MineCLIP reward 是否足以训练出完成若干语言目标的 policy，以及 policy 是否只记住训练场景。第一类证据看任务 success 或相对 baseline，第二类证据看 zero-shot visual condition。两者都应限定在测试任务、seed 和 Minecraft distribution 内。
+
+\lecturefigure{slide-24-mineclip-results.jpg}{MineCLIP-conditioned RL 在多类任务上的结果}{官方录像恢复幻灯片 V024；00:19:00}
+
+\begin{knowledgebox}{读图：先看列定义，再看相对提升}
+表格比较不同任务和方法的 success 指标。先确认每列任务是否使用相同 evaluation protocol，再比较 MineCLIP reward 与其他 reward/baseline；关键结论是视频--语言表示可提供可用训练信号，而不是所有任务都已被解决。平均数会隐藏失败任务与 seed variance，不能据此推断开放世界 generality。
+\end{knowledgebox}
+
+\lecturefigure{slide-25-policy-robustness.jpg}{学习到的 policy 在未见视觉条件下保持一定鲁棒性}{官方录像恢复幻灯片 V025；00:19:57}
+
+\begin{knowledgebox}{读图：鲁棒性来自任务不变性，不是任意 OOD 能力}
+图中展示不同天气、光照、生物群系或视觉条件。应先比较目标行为是否保持，再检查这些变化是否仍属于训练世界规则。结果支持 policy 没有完全绑定单一画面，但不能证明它能迁移到新游戏、新动作空间或真实机器人；visual robustness 与 embodiment transfer 是不同层次。
+\end{knowledgebox}
+
+\teachervoice{课堂对结果的态度是“reward representation 有用”，而不是“Minecraft 已完成”。讲者强调 unseen visual condition 下的鲁棒性，因为这更接近 foundation-model transfer；但他也把 MineDojo、Voyager 和 Eureka 称为仅仅 scratching the surface。}
+
+\subsection{本章小结}
+
+MineCLIP 用 contrastive video--language learning 把自然语言目标转换为 dense reward，再由 RL policy 在环境中学习控制。它证明 internet video 可以成为 active learning 的监督来源，同时也暴露 learned reward 的核心风险：相似度不等于成功，policy 会放大 reward model 的偏差，结果必须与程序化状态和人工审计共同解释。
+

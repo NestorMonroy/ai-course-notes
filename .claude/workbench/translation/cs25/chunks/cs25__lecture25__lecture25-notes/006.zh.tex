@@ -1,0 +1,140 @@
+\section{Contextualizing the Whole System：从松耦合到共同优化}
+
+前一章仍把 generator 冻结，只训练 retrieval side。课堂接着把红框扩展到 retriever、context 与 generator，追问为什么要让彼此独立训练的组件勉强拼接。RAG、FiD、kNN-LM、RETRO 等方法的差异可以沿两条轴阅读：证据在何时检索，以及生成器在何处融合证据。
+
+\subsection{Contextualization of Both}
+
+架构页把 query encoder、retriever、context 与 generator 同时放入红框，表示最终任务 loss 可以影响更多组件。Joint training 的理想是让 retriever 找到 generator 真正会用的文档，让 generator 学会在证据不足或冲突时采取可预测行为。
+
+\lecturefigure{slide-22-contextualization-both.jpg}{Retriever 与 generator 共同 contextualize 的架构}{Stanford 课堂视频 00:30:06}
+
+\begin{knowledgebox}{读图：Joint 不一定意味着每步同步更新全部参数}
+大规模 document encoder 无法在每个 batch 后立刻重编码整个 corpus，因此实际系统常冻结部分参数、异步刷新 index、只更新 query side，或交替训练 retriever 与 generator。Joint objective 描述信号耦合，implementation 可以是近似的。
+\end{knowledgebox}
+
+\teachervoice{讲者的核心批评是：如果 retriever、document encoder 与 generator 都在不同目标上独立训练，它们只是被迫合作。更好的方向是让 gradients 或 task signal 尽可能贯穿整套系统。}
+
+\subsection{Original RAG：对 latent document 做 marginalization}
+
+RAG architecture slide 展示 query encoder 从 Wikipedia index 取 top documents，generator 对每个 document 计算输出概率，再把 document 作为 latent variable 边缘化。它比直接拼接所有文档更明确地区分 retrieval probability 与 generation probability。
+
+\lecturefigure{slide-23-rag-architecture.jpg}{Lewis et al. RAG 的 retriever--generator 架构}{Stanford 课堂视频 00:30:51}
+
+\begin{knowledgebox}{读图：Document 是 latent variable}
+系统没有把一份 retrieved document 当作确定真相，而是对多个 $z$ 加权。Retriever 提供 $p_\eta(z\mid x)$，generator 提供 $p_\theta(y\mid x,z)$；两者共同决定答案，retriever 的概率也能收到最终 task loss。
+\end{knowledgebox}
+
+\subsection{RAG-Sequence 与 RAG-Token}
+
+Equation slide 区分两种 marginalization。RAG-Sequence 为整段输出选择同一 latent document；RAG-Token 允许每个 output token 从不同 document mixture 获得支持。后者更灵活，也需要更多检索/融合计算并更难解释整段来源。
+
+\lecturefigure{slide-24-rag-equations.jpg}{RAG-Sequence 与 RAG-Token 的概率分解}{Stanford 课堂视频 00:31:27}
+
+\begin{importantbox}{两种 RAG likelihood}
+RAG-Sequence 近似为
+\[
+p(y\mid x)=\sum_{z\in\operatorname{top}k}p_\eta(z\mid x)
+\prod_{t=1}^{T}p_\theta(y_t\mid x,z,y_{<t}),
+\]
+而 RAG-Token 把求和放进每个 token：
+\[
+p(y\mid x)=\prod_{t=1}^{T}\sum_{z\in\operatorname{top}k}
+p_\eta(z\mid x)p_\theta(y_t\mid x,z,y_{<t}).
+\]
+$\eta$ 是 retriever 参数，$\theta$ 是 generator 参数。两者的来源解释粒度不同。
+\end{importantbox}
+
+\subsection{Freezing Suboptimal：表格与 Frankenstein 隐喻}
+
+Ablation table 比较 BM25、DPR、RAG 与 generator/retriever 是否冻结。课堂结论不是“某一列数字永远最佳”，而是 independent freezing 通常损失任务性能；组件越能接收共同目标信号，越可能形成有效协作。本节把 benchmark table 与随后出现的 Frankenstein 隐喻放在一起，先读控制实验，再解释错配机制。
+
+\lecturefigure{slide-25-freezing-suboptimal-results.jpg}{RAG ablation：冻结 retriever 或 generator 的影响}{Stanford 课堂视频 00:31:51}
+
+\begin{knowledgebox}{读表：先看控制变量，再看绝对分数}
+比较行时要确认 generator size、retrieval corpus、training data 与 evaluation metric 一致。表格支持“冻结会限制适配”这一方向性结论，却不证明所有 jointly trained RAG 都优于所有 frozen RAG；数据规模与模型强度仍会改变结果。
+\end{knowledgebox}
+
+\lecturefigure{slide-26-frankenstein-rag.jpg}{课堂用 Frankenstein 形容独立训练组件的拼接}{Stanford 课堂视频 00:32:15}
+
+\begin{warningbox}{Frankenstein 问题的三种错配}
+\begin{enumerate}
+  \item \textbf{Score mismatch}：retriever relevance 不等于 generator utility；
+  \item \textbf{Representation mismatch}：chunk 粒度与 generator attention/fusion 不匹配；
+  \item \textbf{Objective mismatch}：retrieval benchmark、language modeling 与 downstream task 分别优化。
+\end{enumerate}
+Joint training 的价值是减少错配，不是消除数据错误或推理错误。
+\end{warningbox}
+
+\teachervoice{讲者在 ablation table 上叠加 Frankenstein 头像，明确说“whole point of RAG: freezing is suboptimal”。这个玩笑揭示真正观点：各组件能运行，不代表它们是一套经过共同优化的系统。}
+
+\subsection{FiD：在 Decoder 中融合多 passage 表示}
+
+Fusion-in-Decoder 独立编码每个 retrieved passage 与 question，再让 decoder cross-attend 所有 passage representations。它避免把长文档在 encoder 输入端直接拼接，允许每个 passage 先形成自己的表示。
+
+\lecturefigure{slide-27-fid.jpg}{Fusion-in-Decoder 的多 passage encoding 与 decoder fusion}{Stanford 课堂视频 00:33:21}
+
+\begin{knowledgebox}{读图：Fusion location 决定计算形状}
+Early fusion 在 encoder 前拼接文本，简单但长度快速增长；FiD 让 encoder 对 passage 并行，decoder 才融合，open-domain QA 表现强。它主要改进 evidence fusion，并不自动训练 retriever。
+\end{knowledgebox}
+
+\subsection{kNN-LM：推理时在 datastore 中寻找相似 hidden state}
+
+kNN-LM 把训练语料 token 的 hidden representation 与 next token 存入 datastore。推理时用当前 context representation 检索近邻，得到 non-parametric token distribution，再与 parametric LM distribution 插值。
+
+\lecturefigure{slide-28-knn-lm.jpg}{kNN-LM 的 hidden-state datastore 与最近邻预测}{Stanford 课堂视频 00:33:42}
+
+\begin{importantbox}{Parametric 与 kNN distribution 插值}
+若 $p_{LM}(w\mid x)$ 是模型分布，$p_{kNN}(w\mid x)$ 是近邻投票分布，则
+\[
+p(w\mid x)=\lambda p_{kNN}(w\mid x)+(1-\lambda)p_{LM}(w\mid x).
+\]
+$\lambda$ 控制外部 memory 影响。Datastore 可以更新或换域，但查询每个 token 会增加 latency 与存储带宽。
+\end{importantbox}
+
+\subsection{RETRO：从预训练开始让模型依赖外部 memory}
+
+RETRO 把训练序列切成 chunks，为每个 chunk 检索邻近文本，并通过 chunked cross-attention 注入 decoder。它不只是 inference-time prompt augmentation，而是在 pretraining 中让模型学会利用大规模 external memory。
+
+\lecturefigure{slide-29-retro-architecture.jpg}{RETRO 的 chunk retrieval 与 cross-attention 架构}{Stanford 课堂视频 00:35:27}
+
+\begin{knowledgebox}{读图：Causality 与 chunk boundary}
+当前 chunk 的生成只能使用允许的历史与 retrieved neighbors，不能泄漏未来 token。Chunk size、neighbor count 和 retrieval latency 共同决定 memory coverage 与训练成本；文档切分因此成为模型架构的一部分。
+\end{knowledgebox}
+
+\begin{importantbox}{参数与 datastore 的容量分工}
+若 parametric model 规模为 $P$、external datastore token 数为 $M$，系统容量不再只由 $P$ 衡量。RETRO 的观点是用较小 $P$ 配合大 $M$ 获得更强 factual recall；但每次访问 $M$ 产生额外 search 与 cross-attention 成本。
+\end{importantbox}
+
+\subsection{RETRO++ 与混合架构}
+
+RETRO++ slide 展示在 RETRO 基础上结合 in-context RAG 风格的混合系统，并用结果表讨论参数规模和任务性能。它说明 architecture space 不是 frozen versus joint 的二元分类，retrieval 可以同时出现在 pretraining 与 inference context。
+
+\lecturefigure{slide-30-retro-plus-plus.jpg}{RETRO++：pretraining retrieval 与 in-context retrieval 的组合}{Stanford 课堂视频 00:37:24}
+
+\begin{knowledgebox}{读表：Hybrid architecture 需要报告两类 retrieval}
+应分别说明预训练 datastore、测试时 index、是否同一 corpus、是否更新 retriever、以及 generator 是否见过相同 retrieval format。否则“用了 RETRO++”不足以复现实验或比较成本。
+\end{knowledgebox}
+
+\subsection{Contextualization All the Way}
+
+最后一张 architecture slide 把 retrieval side 与 generator 全部圈入红框，作为进入 REALM/Atlas 的转场。它代表目标：不仅把文档放进 context，还要联合考虑 representation、retrieval objective、fusion 与 language-model training。
+
+\lecturefigure{slide-31-contextualization-all-the-way.jpg}{从局部适配走向端到端 contextualization}{Stanford 课堂视频 00:38:00}
+
+\begin{importantbox}{架构比较的四问}
+看到任何 RAG 模型，先问：
+\begin{enumerate}
+  \item retrieval 发生在 pretraining、fine-tuning 还是 inference？
+  \item retriever/document encoder/generator 哪些参数更新？
+  \item evidence 在 prompt、encoder、decoder 还是 token distribution 中融合？
+  \item index 何时重建，训练与部署 corpus 是否一致？
+\end{enumerate}
+这四问比只记模型名称更能迁移到新系统。
+\end{importantbox}
+
+\teachervoice{课堂从 RAG、FiD、kNN-LM 到 RETRO 的顺序，是在逐步展示 retrieval 能进入不同层级：输入 context、decoder attention、token distribution 或 pretraining architecture。}
+
+\subsection{本章小结}
+
+Joint RAG 把 documents 视为 latent variables，让最终任务信号影响 retrieval 与 generation。FiD 改变 fusion location，kNN-LM 在 token distribution 层融合 memory，RETRO 从预训练开始使用 external datastore。系统设计需要同时描述 retrieval timing、fusion point、updated parameters 与 index lifecycle。
+

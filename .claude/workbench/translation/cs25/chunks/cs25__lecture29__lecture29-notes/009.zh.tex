@@ -1,0 +1,99 @@
+\section{总结与延伸}
+
+这堂课最值得迁移到其他模型的，不是一组 Mixtral 数字，而是一套审计方法：先确认 dense baseline，再写清 routing algorithm；同时报告 total/active/resident；把 communication 与 load balance 纳入成本；最后用 routing statistics 与 intervention 检查“experts”是否真的有可解释分工。
+
+\subsection{十五条核心结论}
+
+以下结论按结构、系统和解释三层组织，避免把模型名当作答案。
+
+\begin{enumerate}
+  \item Mixtral 保留 Mistral 7B attention，只把每层 MLP 换成 top-two-of-eight experts。
+  \item GQA 减少 KV heads 与 KV cache；SWA 限制单层 attention neighborhood。
+  \item Router 为每个 token 独立打分、选 top-$k$、归一化并加权组合 expert outputs。
+  \item 每层都有八个 experts；expert 编号在层内可置换，跨层没有天然身份。
+  \item Total parameters、active parameters 与 resident memory 是三种不同量。
+  \item Active parameters 主要近似 per-token compute，不代表完整 latency 或 dollar cost。
+  \item Expert parallelism 需要 token all-to-all，跨 node topology 可能成为瓶颈。
+  \item Load imbalance 让最忙 expert 决定并行 step 的 tail。
+  \item 高 batch/高流量更容易把 expert GEMM 做大并摊薄 dispatch overhead。
+  \item MLP-knowledge hypothesis 有实验启发性，但不是功能定位定理。
+  \item 2024 benchmark 显示 knowledge-heavy gains 最大，却不能证明新 reasoning algorithm。
+  \item Discrete routing 提供可统计信号，但 routing frequency 不是语义或因果解释。
+  \item Clean domain experts 可能导致其他 experts 空闲，降低利用率。
+  \item Expert ablation 是重要 intervention，但必须记录 layer、gate normalization 与 overflow 处理。
+  \item MoE、domain tuning 与 RAG 是可组合的不同轴，expert swapping 还需要 router adaptation。
+\end{enumerate}
+
+\subsection{一张表串起结构、训练与 serving}
+
+为了把概念变成工程检查，下表给出每个阶段最应该观察的变量和常见误判。
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{\textwidth}{L{0.16\textwidth} L{0.27\textwidth} X}
+\toprule
+阶段 & 关键观测量 & 常见误判 \\
+\midrule
+Architecture & $E,k$、shared/expert params、GQA/SWA & 用模型名估参数量 \\
+Training & tokens/expert、aux loss、gradient、optimizer state & 只按 active params 算内存 \\
+Placement & expert sharding、node topology、HBM & 假设未激活 expert 不需驻留 \\
+Serving & batch、all-to-all、imbalance、tail latency & 用 FLOPs 代替真实 cost \\
+Interpretation & routing stats、ablation、counterfactual & 给 expert 直接贴 domain 标签 \\
+Evaluation & task setup、active/total axes、history date & 把 2024 plot 当当前排名 \\
+\bottomrule
+\end{tabularx}
+\caption{MoE 从架构到解释的最小审计框架。}
+\end{table}
+
+\subsection{实践用 MoE release checklist}
+
+下面的 checklist 用于审阅论文、模型卡或内部 release，重点是避免只展示 parameter headline。
+
+\begin{lstlisting}[caption={Sparse MoE release checklist}]
+report_total_and_active_parameters()
+report_expert_count_topk_and_shared_modules()
+report_weight_precision_and_resident_memory()
+report_tokens_per_expert_and_load_imbalance()
+report_expert_parallel_topology_and_all_to_all_cost()
+compare_against_dense_models_at_compute_and_memory_budgets()
+publish_routing_analysis_with_causal_controls()
+document_quantization_offload_and_failure_cases()
+\end{lstlisting}
+
+\begin{warningbox}{看到 “13B active” 时立即追问}
+Checkpoint 总参数是多少？所有 experts 放在哪里？是单卡、单 node 还是跨 node？Batch size 多大？P99 latency 如何？是否发生 token drop/reroute？没有这些信息，active parameter headline 只描述局部计算路径。
+\end{warningbox}
+
+\subsection{自测问题}
+
+这些问题用于检查是否真正掌握三本账和 routing evidence。
+
+\begin{enumerate}
+  \item 为什么 Mixtral 不是八个独立 7B 模型的 ensemble？
+  \item GQA 与 SWA 分别降低什么资源？
+  \item 写出 top-two routing 从 logits 到 weighted sum 的过程。
+  \item 为什么 $8\times 7\mathrm{B}$ 不是 total 或 active parameter 的精确值？
+  \item Active parameters 为什么不能直接预测 serving latency？
+  \item Expert parallel all-to-all 在 dispatch 与 combine 两阶段分别做什么？
+  \item 为什么最慢 expert 会控制一个 batch 的完成时间？
+  \item Quantization、offload 与 sparsification 有什么区别？
+  \item Domain routing histogram 能证明什么，又不能证明什么？
+  \item 为什么纯代码 experts 可能降低整体利用率？
+  \item Expert ablation 需要记录哪些控制变量？
+  \item 为什么 RAG 与 MoE 不是替代关系？
+  \item 替换一个 expert 后为什么还要训练 router？
+  \item 更多 experts 在什么条件下可能反而降低 throughput？
+\end{enumerate}
+
+\subsection{拓展阅读}
+
+\begin{itemize}
+  \item Jiang et al., \href{https://arxiv.org/abs/2401.04088}{\emph{Mixtral of Experts}}：模型结构、性能与 routing analysis 的主论文。
+  \item Jiang et al., \href{https://arxiv.org/abs/2310.06825}{\emph{Mistral 7B}}：GQA、SWA 与 dense baseline。
+  \item Shazeer et al., \href{https://arxiv.org/abs/1701.06538}{\emph{Outrageously Large Neural Networks}}：sparsely-gated MoE layer。
+  \item Fedus et al., \href{https://arxiv.org/abs/2101.03961}{\emph{Switch Transformers}}：大规模稀疏训练与 parallelism。
+  \item 阅读这些论文时，同时记录 total/active parameters、precision、hardware、batch 与 communication；不要只摘 benchmark headline。
+\end{itemize}
+
+\end{document}

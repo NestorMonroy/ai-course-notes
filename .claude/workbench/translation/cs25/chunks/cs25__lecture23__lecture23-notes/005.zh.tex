@@ -1,0 +1,145 @@
+\section{从 Seed 到可挖掘的多语语料}
+
+评测集回答“做得怎么样”，训练数据还要回答“从哪里学”。对低资源语言，最大困难不是没有足够大的模型，而是连 language identification、句向量、语料清洗和 backtranslation 所需的可靠起点都缺失。NLLB-Seed 与随后的 mining pipeline 正是用少量高质量证据启动更大规模的弱监督生产线。
+
+\subsection{为什么不能从零开始}
+
+本节从评测基础设施转向训练数据的启动问题。数据挖掘常被描述为“从互联网找平行句”，但要判断网页属于哪种语言、两句是否语义相同、过滤器是否误杀，都需要已有的标注或可信表示。Seed data 的作用不是提供最终规模，而是校准这些基础组件。
+
+\lecturefigure{slide-14-seed-data-why.jpg}{语言识别、句向量与翻译模型都需要可靠种子数据}{Stanford 课堂视频 00:13:51}
+
+\begin{knowledgebox}{读图：一份 seed data 同时服务四个启动器}
+可靠目标语文本可以训练 language identification；对齐句对可以训练 sentence encoder；单语侧能辅助 language modeling；双语侧能启动 translation model。若最初数据被错误语言、机器翻译或脚本混用污染，错误会沿四条路径同时扩散。
+\end{knowledgebox}
+
+\begin{importantbox}{Seed data 的杠杆作用}
+少量人工数据的价值不只由样本数决定，而由它能校准多少下游组件决定：
+\[
+\text{Seed}\rightarrow\{\text{LID},\text{Encoder},\text{Filter},\text{MT}\}
+\rightarrow\text{Mined/BT Data}\rightarrow\text{Better MT}.
+\]
+这是一条 bootstrapping loop。早期质量决定后续伪标签与挖掘语料的误差上限，因此 seed 的边际价值可能高于同量随机网页文本。
+\end{importantbox}
+
+\subsection{NLLB-Seed：小而可信的启动资源}
+
+课堂 slide 报告 NLLB-Seed 覆盖 43 种语言、约 6,193 句，并说明内容来自 Wikimedia 的通识主题列表。NLLB 论文最终发布口径会因版本和语言选择略有不同；本讲保留课堂 slide 数字，同时把它理解为“几千句、数十种语言”的高质量种子资源，而不是大规模训练主体。
+
+\lecturefigure{slide-15-nllb-seed.jpg}{NLLB-Seed 的语言数、句子数与通识主题来源}{Stanford 课堂视频 00:14:18}
+
+\begin{knowledgebox}{读图：为什么选通识主题而不是随机网页}
+通识主题能覆盖人物、历史、地理、科学等多类内容，并减少单一网站模板噪声；连续句还给译者上下文。代价是源内容仍偏英语 Wikipedia 的知识结构，目标文本也可能带 translationese。Seed 的目标是可靠启动，不是代表所有本地文化与口语场景。
+\end{knowledgebox}
+
+\teachervoice{Fan 用“can't start from nothing”概括低资源生成任务：没有少量可靠句子，既难知道文本是什么语言，也难建立最初翻译。Seed data 的教学重点是起点质量，而不是样本数竞赛。}
+
+\subsection{WikiMatrix：大规模挖掘的前身}
+
+WikiMatrix 展示了一个关键可能性：用多语句向量在 Wikipedia 中寻找语义对应句，可以跨大量语言对产生平行数据。它为 NLLB 说明了 embedding-based mining 能扩大覆盖，但 Wikipedia 规模与主题有限，真正扩到两百语言还要面向更杂乱的开放网页。
+
+\lecturefigure{slide-16-wikimatrix.jpg}{WikiMatrix 用多语句向量挖掘大规模平行句}{Stanford 课堂视频 00:15:00}
+
+\begin{knowledgebox}{读图：标题里的 135M 与 1620 是规模，不是质量保证}
+挖掘候选数越多，假阳性也可能越多。WikiMatrix 的贡献在于把句向量检索变成可扩展 pipeline；NLLB 仍需更好的 encoder、语言识别、margin score、过滤与人工验证，才能把网页相似句转成可训练 bitext。
+\end{knowledgebox}
+
+\subsection{Sentence Alignment：从网页到句对}
+
+课堂把句对挖掘分成三个层次：从 Common Crawl 找可能相关的网页内容，抽取和清洗文本，再用句向量寻找匹配。任何一层失败都会造成错配：网页模板可能相似而正文不同，分句器可能不适配脚本，向量也可能把同主题但不同事实的句子拉近。
+
+\lecturefigure{slide-17-sentence-alignment.jpg}{从 Common Crawl 内容匹配到句子级 alignment}{Stanford 课堂视频 00:15:39}
+
+\begin{knowledgebox}{读图：alignment 不是字符串匹配}
+系统先缩小候选文档，再把句子编码为共享向量，最后比较语义接近度。读图时应区分 content retrieval 与 sentence retrieval：前者降低搜索空间，后者决定是否形成正样本。若直接全局最近邻，常见模板与短句会淹没真正翻译。
+\end{knowledgebox}
+
+设源句 $x$ 和目标句 $y$ 的向量分别为 $f(x)$ 与 $g(y)$，最基本的相似度是
+\[
+\operatorname{cos}(x,y)=\frac{f(x)^\top g(y)}{\lVert f(x)\rVert_2\lVert g(y)\rVert_2}.
+\]
+其中 $f,g$ 表示多语 sentence encoder，分子是内积，分母把向量归一化。实际 mining 常用 margin-based score，把候选相似度与局部邻域平均相似度比较，以降低 hubness 与通用句子的干扰。
+
+\begin{lstlisting}[caption={句向量平行语料挖掘的概念流程}]
+for source_document in crawl:
+    target_candidates = retrieve_related_documents(source_document)
+    source_sentences = clean_and_segment(source_document)
+    target_sentences = clean_and_segment(target_candidates)
+    pairs = nearest_neighbors(source_sentences, target_sentences)
+    keep = margin_filter(pairs, language_id=True, quality=True)
+    send_selected_samples_to_bilingual_validation(keep)
+\end{lstlisting}
+
+\subsection{Encoder quality：低资源语言的第一道瓶颈}
+
+若 sentence encoder 只在高资源语言上形成良好共享空间，低资源句子会聚成错误邻居，后续 mining 再大也只是批量生成噪声。课堂比较 masked language modeling 与 multilingual distillation：前者利用单语上下文，后者让多语 student 模仿更强 teacher 的语义空间。
+
+\lecturefigure{slide-18-encoder-training.jpg}{用 masked language modeling 与 multilingual distillation 改善 encoder}{Stanford 课堂视频 00:16:33}
+
+\begin{knowledgebox}{读图：两个目标分别补语言建模与跨语对齐}
+Masked language modeling 让 encoder 学习目标语言内部结构；multilingual distillation 用语义等价句把不同语言拉到共享空间。前者不能单独保证跨语对齐，后者又依赖可靠 teacher 和配对数据；NLLB 把二者结合，以提高极低资源语言的 mining recall 与 precision。
+\end{knowledgebox}
+
+\begin{warningbox}{Encoder 分数会变成数据选择偏差}
+Mining pipeline 只看得见 encoder 能表示的相似性。如果某种脚本、领域或变体在 encoder 中质量差，它的句子会更少进入训练集，模型随后又更难改进该语言，形成 data flywheel 的负反馈。
+\end{warningbox}
+
+\subsection{LASER3：先让表示更公平，再谈规模}
+
+前面已经说明 encoder 决定 mining 能看见什么；本节用 LASER3 结果验证这道瓶颈。结果图按语言比较句向量质量。课堂希望读者看到的不是“所有柱都变高”，而是新 encoder 对许多原本很弱的语言显著改善，使它们更可能在网页挖掘中找到正确候选。
+
+\lecturefigure{slide-19-laser3-encoder-quality.jpg}{LASER3 相对早期 LASER 的跨语言 encoder 质量}{Stanford 课堂视频 00:18:48}
+
+\begin{knowledgebox}{读图：先找低基线语言，再看改善是否普遍}
+横轴是语言，纵轴是 encoder 相关质量指标；浅色/深色柱对应不同版本。最重要的不是平均提高，而是尾部语言是否从几乎不可用提升到能支撑 mining。图也没有证明最终翻译质量必然同比提高，因为后面还有网页可见性、过滤和模型训练瓶颈。
+\end{knowledgebox}
+
+\teachervoice{老师把 encoder quality 称为 low-resource challenge：在高资源语言上可行的 mining 方法，若共享表示对某些语言失败，就会在进入模型前把它们排除。}
+
+\subsection{迭代式数据工厂，而不是一次 ETL}
+
+完整 slide 把 language identification、monolingual cleaning、sentence mining、filtering、模型训练和 bilingual validation 连成循环。每次模型与 encoder 改进，都可能重新发现更好的数据；每次人工验证发现系统性错误，也要回到 LID、清洗或阈值设置。
+
+\lecturefigure{slide-20-data-pipeline.jpg}{NLLB 的低资源数据管线与人工验证回路}{Stanford 课堂视频 00:21:15}
+
+\begin{knowledgebox}{读图：沿箭头找反馈，而不是只读方框}
+LID training data 支撑网页语言分类；清洗后的 monolingual data 进入 mining；候选 bitext 经 filtering 后训练 MT；模型输出和样本再由双语人员验证。图中多条回路意味着数据、模型和评测共同迭代，任何固定阈值都需要按语言重新校准。
+\end{knowledgebox}
+
+\begin{importantbox}{Pipeline 的误差传播}
+若第 $i$ 阶段的有效 precision 为 $p_i$，把各阶段近似看成串联过滤，则最终候选的粗略可信度受
+\[
+P_{\text{effective}}\approx\prod_i p_i
+\]
+约束。$p_i$ 表示 LID、清洗、文档匹配、句对打分等阶段的正确率。该式不是精确概率模型，但说明多个“还不错”的组件串联后仍可能显著损失质量，因此需要抽样人工验证和回路修正。
+\end{importantbox}
+
+\subsection{Stopes：把研究管线开放为基础设施}
+
+本节从算法流程进一步转向可复现工程。课堂随后给出 Stopes 的开源入口。开放的不只是最终模型，还包括处理单语网页、挖掘 bitext 和复现数据生产的工具。这种 release 让外部研究者能够检查过滤逻辑、替换语言组件并补充本地数据，而不是只能下载一个不可解释的 checkpoint。
+
+\lecturefigure{slide-21-stopes-open-source.jpg}{Stopes：NLLB 开放的多语数据挖掘工具}{Stanford 课堂视频 00:21:45}
+
+\begin{knowledgebox}{读图：开源层级决定可复现深度}
+只开放模型只能复现 inference；开放 benchmark 可以复现 evaluation；开放 LID、encoder、mining 和 filtering 工具，才允许重建 training data。Stopes 位于第三层，它不能替代本地语言知识，却使数据管线的工程假设更可检查。
+\end{knowledgebox}
+
+\subsection{极低资源语言的硬下限}
+
+最后需要界定 pipeline 无法突破的硬下限，也要把算法召回不足与互联网根本不存在足够文本区分开来。即使拥有大规模 mining，某些语言仍几乎没有足够单语网页文本；独特脚本可能让通用清洗和分词失败，网上内容还可能集中在宗教或单一领域。此时“抓更多网页”不会自动产生多样、平衡、可靠的训练信号。
+
+\lecturefigure{slide-22-very-low-resource-challenges.jpg}{极低资源语言中的单语瓶颈、脚本与领域限制}{Stanford 课堂视频 00:22:36}
+
+\begin{knowledgebox}{读图：三条挑战对应三种不可互换的补救}
+单语量不足需要社区数据、语音或其他来源；独特脚本需要定制 normalization、分词和 LID；领域集中需要有意识地扩展主题，而不是简单重复采样。更大模型不能创造不存在的文本证据，只会更充分地拟合现有偏斜。
+\end{knowledgebox}
+
+\begin{warningbox}{规模不能穿透 data floor}
+当 web presence 接近零时，mining recall 的上限由数据存在性决定；当网页只有一种领域时，增加 crawl 规模主要产生重复。工程计划必须把“缺数据”和“算法没找到数据”分开诊断。
+\end{warningbox}
+
+\teachervoice{Fan 明确说，对极低资源语言，即使做大规模 mining 也非常困难，monolingual data 才是 limiting factor。这个判断把问题从算力不足重新定位到语言数字化与数据可见性。}
+
+\subsection{本章小结}
+
+NLLB 用高质量 seed 启动 LID、encoder、mining 和 MT，再通过 LASER3 与 Stopes 建立迭代数据工厂。系统上限同时受表示质量、网页可见性、脚本处理、领域多样性和人工验证约束。
+

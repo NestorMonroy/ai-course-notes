@@ -1,0 +1,67 @@
+\section{Not All FLOPs Are Equal：Attention 的 Systems Co-design}
+
+算法论文常用 FLOPs 比较效率，实际加速却受 HBM bandwidth、on-chip SRAM、kernel fusion、parallel granularity 和 KV cache 支配。\term{HBM（High Bandwidth Memory，高带宽显存）}是 GPU 外部堆叠 DRAM，容量大但访问成本高；\term{SRAM（Static Random-Access Memory）}位于芯片上，容量小、延迟低。高性能 kernel 尽量让数据在 SRAM 中复用。
+
+\subsection{Memory Hierarchy 与 Arithmetic Intensity}
+
+\term{arithmetic intensity（算术强度）}定义为每搬运一个 byte 完成多少 FLOPs：
+\[
+I=\frac{\text{FLOPs}}{\text{bytes moved}}.
+\]
+若 $I$ 低，kernel 常受 bandwidth 限制；减少 FLOPs 却增加 HBM round trip 可能更慢。Dense matrix multiplication 规则、可 tile、数据复用高，因此经常击败理论 operation 更少的不规则算法。
+
+\lecturefigure{slide-34-flops-memory-hierarchy.jpg}{FLOPs、带宽与 GPU memory hierarchy}{官方录像恢复幻灯片 V034；00:49:36}
+
+\begin{knowledgebox}{读图：先定位数据在哪一层 memory}
+金字塔从寄存器/SRAM 到 HBM 和主存，越靠近 compute 越快但越小。先问 Q/K/V、logits 和 output 是否写回 HBM，再问是否能 tile/recompute；“少算一次”若要求多次慢速搬运，不一定节省时间。
+\end{knowledgebox}
+
+\teachervoice{Vaswani 反复说 practical bottleneck “always ends up being memory movement”。他不是否认 algorithmic complexity，而是提醒研究者：只有当稀疏、近似或低精度方案能形成规则、高复用 kernel 时，论文中的 FLOP reduction 才可能变成 wall-clock gain。}
+
+\subsection{KV Cache、MQA 与 GQA}
+
+Autoregressive inference 会缓存历史 keys/values，避免每步重算。\term{KV cache} 的大小近似与 layer 数、context length、KV head 数和 head dimension 成正比。Multi-query attention（MQA）让所有 query heads 共享一组 K/V；grouped-query attention（GQA）在若干 query heads 之间共享一组 K/V，在质量与 memory/bandwidth 间折中。
+
+\lecturefigure{slide-35-gqa-mqa-activation-memory.jpg}{MHA、GQA 与 MQA 的 KV activation memory}{官方录像恢复幻灯片 V035；00:51:06}
+
+\begin{knowledgebox}{读图：Queries 与 KV heads 不必一一对应}
+左图 MHA 为每个 query head 保存独立 K/V，中图按 group 共享，右图 MQA 只保留一组。先数 K/V columns，再估算 decode 时读取量；减少 KV heads 可显著降低 memory bandwidth，但共享过强可能损失某些 relation capacity。
+\end{knowledgebox}
+
+\subsection{Online Softmax 与 Fused Kernel}
+
+普通 softmax 需要先找 row max、再求指数和、再归一化，多次读取 scores。Online algorithm 在流式 block 中维护 running max $m$ 和 normalization $\ell$：
+\[
+m' = \max(m,\max_j s_j),\qquad
+\ell'=e^{m-m'}\ell+\sum_j e^{s_j-m'}.
+\]
+其中 $s_j$ 是新 block scores。配合 tiled attention，可在 SRAM 中完成 normalization 与 value accumulation，不 materialize 完整 $n^2$ matrix。\term{fused kernel（融合算子）}把多个 GPU 操作合成一个 kernel，减少 HBM 读写和 launch overhead。
+
+\lecturefigure{slide-36-online-softmax-systems.jpg}{Online softmax 与 bandwidth-aware attention optimization}{官方录像恢复幻灯片 V036；00:51:27}
+
+\begin{knowledgebox}{读图：算法公式与 kernel schedule 是两层设计}
+页面同时放 online normalization、memory hierarchy 和 tiled attention。先看数值等价性，再看 block 如何留在 SRAM；FlashAttention 类方法的优势来自 IO-aware schedule，不是改变模型定义。结果也依赖 GPU architecture、shape 和 implementation quality。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Online softmax 的流式归一化概念伪代码}]
+running_max = -inf
+running_sum = 0.0
+weighted_value = 0.0
+for score_block, value_block in blocks:
+    new_max = max(running_max, max(score_block))
+    old_scale = exp(running_max - new_max)
+    block_weight = exp(score_block - new_max)
+    running_sum = old_scale * running_sum + sum(block_weight)
+    weighted_value = old_scale * weighted_value + block_weight @ value_block
+    running_max = new_max
+output = weighted_value / running_sum
+\end{lstlisting}
+
+\begin{warningbox}{不要用 Parameter Count 代替 Serving Cost}
+同参数模型可因 KV heads、context length、batching、precision、parallelism 和 kernel 不同而有完全不同 latency/throughput。训练 FLOPs、prefill FLOPs、decode bandwidth 与 end-to-end request cost 必须分开报告。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Attention optimization 从 equation 延伸到 data movement。Memory hierarchy 解释 FLOP reduction 为何可能无效，MQA/GQA 改变 KV state，online softmax/fusion 改变执行 schedule。现代 Transformer architecture 与 systems 已不可分割。
+
