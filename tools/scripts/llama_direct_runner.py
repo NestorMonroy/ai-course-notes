@@ -62,6 +62,34 @@ def build_message(template: str, zh: Path) -> str:
     return "".join(parts)
 
 
+def cached_result(out_dir: Path, zh: Path) -> dict | None:
+    """Una respuesta válida ya obtenida para este fragmento en otra ejecución del lote.
+
+    `collect_results` escribe los `.es.tex` sólo cuando el runner termina el
+    lote entero; un reinicio del anfitrión a mitad tira lo traducido. Aquí se
+    recupera de los `<n>.json` de ejecuciones anteriores, salvo que una
+    corrección (`.correccion.md`) sea más nueva que esa respuesta: entonces la
+    retraducción es lo que se pide.
+    """
+    correction = zh.with_name(zh.name.replace(".zh.tex", ".correccion.md"))
+    corrected_at = correction.stat().st_mtime if correction != zh and correction.is_file() else 0.0
+    for index in sorted(out_dir.parent.glob("*/index.tsv"), reverse=True):
+        if index.parent == out_dir:
+            continue
+        for line in index.read_text(encoding="utf-8").splitlines():
+            n, _, path = line.partition("\t")
+            if path != str(zh):
+                continue
+            result_file = index.parent / f"{n}.json"
+            try:
+                record = json.loads(result_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if "<<<ES" in record.get("result", "") and result_file.stat().st_mtime > corrected_at:
+                return {**record, "reused_from": str(result_file)}
+    return None
+
+
 def chat(url: str, model: str, message: str, timeout: int) -> dict:
     body = json.dumps({
         "model": model, "stream": False, "think": False,
@@ -88,6 +116,12 @@ def main(argv: list[str]) -> int:
             index.write(f"{n}\t{zh}\n")
             index.flush()
             started = time.monotonic()
+            reused = cached_result(args.out, zh)
+            if reused is not None:
+                reused["duration_s"] = 0.0
+                (args.out / f"{n}.json").write_text(json.dumps(reused, ensure_ascii=False), encoding="utf-8")
+                print(f"llama-direct: {n}/{len(items)} reutilizado {zh.name}", file=sys.stderr, flush=True)
+                continue
             try:
                 reply = chat(url, model, build_message(template, zh), args.timeout)
                 record = {
