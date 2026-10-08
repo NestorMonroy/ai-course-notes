@@ -40,6 +40,15 @@ integrada (`2156f9cc2`): trae las correcciones de TASK-THYROX-1032 (`7dd5fc784`,
 07:58Z sobre `2156f9cc2`. Disco libre al lanzar: 17 571 332 096 B. VM C estimó la cadena
 completa en ≈20,8 GB (con copia en el almacén de Ollama, supuesta): puede no caber.
 
+Resultado: `status failed`, `stage materialize`, `downloaded false`, `installed false`:
+`rate_limited: 429 Too Many Requests {"kind":"pull-rate","limit":100,"remaining":0,
+"windowSeconds":3600,"source":"160.79.106.143"}`. Docker Hub agotó la cuota de *pulls* de la IP
+de salida (compartida con las otras VMs, ventana de 1 h). El disco bajó de 17 GB a 11 GB
+durante la ejecución: algo se trajo antes del 429 (sin medir qué).
+
+`VM_ES-C_LOCAL_WORKER = BLOCKED docker-hub-429-pull-rate` (no 1032 ni 0944). Se reintenta
+pasada la ventana; con 11 GB libres puede no caber el resto de la cadena.
+
 ## Avance por lote (trabajo determinista, sin modelo)
 
 `translation_loop.py prepare` por lote, sin `advance` ni barrido; no toca
