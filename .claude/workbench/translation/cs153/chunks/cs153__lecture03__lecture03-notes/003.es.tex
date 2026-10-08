@@ -1,0 +1,95 @@
+\section{Apollo: convertir la entrega de software en un Desired-State Control Loop}
+
+Antes de Apollo, la entrega dependía de que una persona llevara medios físicos al entorno del cliente, iniciara sesión en las máquinas, recordara las dependencias entre servicios y luego intentara la actualización según su experiencia. Este proceso todavía era sostenible con unas decenas de servicios y pocos entornos; al pasar a microservices y a una fleet de gran escala, la memoria de trabajo humana ya no puede manejar de forma confiable la compatibilidad de versiones, la schema migration, el estado de salud y la reversión. El cambio central de Apollo consiste en colocar los objetivos, las restricciones y el estado observado dentro del mismo lazo de control, de modo que el sistema calcule de manera continua cómo hacer que el estado actual converja hacia el desired state.
+
+\subsection{Desired state, observed state y plan}
+
+El \term{Desired state} es la versión de software, la configuración y las políticas que se espera que ejecute un entorno; el \term{observed state} es la versión, la salud y el estado de los recursos que el sistema reporta en realidad. El Orchestrator compara ambos, genera un plan y lo entrega al deployment component dentro del entorno para que lo ejecute. El nuevo estado tras la ejecución se reporta de nuevo y así se cierra el lazo. La automatización aquí no es un pipeline fijo, porque cada entorno puede requerir rutas, tiempos de espera y condiciones de aprobación distintos.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{images/03-apollo-control-loop.png}
+\caption{Lazo de control de Apollo: declaración del desarrollador, agregación en el catalog, planeación del orchestrator, ejecución en el entorno y reporte de salud.}
+\figsource{Redibujado a partir de los subtítulos y de materiales oficiales de Palantir Apollo, `images/03-apollo-control-loop.png`.}
+\end{figure}
+
+\begin{importantbox}{Lectura de la figura: la automatización no elimina la responsabilidad del ingeniero de producto}
+El ponente enfatiza que el service owner sigue siendo responsable de la operación. La plataforma ofrece telemetría, publicación y remediation unificadas, mientras que los ingenieros deben declarar las dependencias, las condiciones de salud y los límites de compatibilidad. Si un equipo solo le entrega el binary a un «robot de operaciones» sin codificar lo que se espera del software, el plano de control no puede distinguir entre una actualización segura y una ruptura silenciosa.
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{images/official-apollo-fleet-overview.png}
+\caption{La interfaz oficial del producto Apollo muestra una vista general de environments, release map, alerts e installation.}
+\figsource{PDF oficial del Palantir Apollo Demo Day, página 8 de capturas del producto, `images/official-apollo-fleet-overview.png`.}
+\end{figure}
+
+\begin{knowledgebox}{Lectura de la figura: el fleet overview debe responder tres preguntas operativas}
+Primero, qué installation están en la versión objetivo y cuáles van atrasadas o fallaron; segundo, si los problemas se concentran en una categoría de entorno, un release channel o una versión de software; tercero, si el operator puede pasar del estado agregado a la health específica y al historial de cambios. El valor del tablero no es que «todas las celdas se pongan en verde», sino acortar el camino desde la anomalía hasta una remediation explicable.
+\end{knowledgebox}
+
+\subsection{Catalog: el contrato de despliegue del propio software}
+
+Los materiales oficiales de Apollo describen el catalog como un conjunto de metadata del software que incluye versiones, dependencias, resource requests, schema compatibility y los resultados de vulnerability scanner externos. El \term{Schema} es la estructura de los datos junto con sus reglas de compatibilidad; solo si un servicio de almacenamiento declara qué schema version puede leer y escribir, el plano de control puede planear la migration e impedir la operación cuando una reversión dañaría los datos. Por eso el catalog no es el catálogo de una tienda de software, sino el sistema de tipos y la biblioteca de restricciones de la entrega automatizada.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{images/official-apollo-software-catalog.png}
+\caption{El Apollo Software Catalog reúne las versiones y el estado de los servicios, así como la metadata utilizable para la orquestación.}
+\figsource{PDF oficial del Palantir Apollo Demo Day, página 11 de capturas del producto, `images/official-apollo-software-catalog.png`.}
+\end{figure}
+
+\begin{knowledgebox}{Lectura de la figura: el Catalog permite componer los cambios entre equipos}
+Cuando cada equipo publica de forma independiente, el CI dentro de un solo repository solo puede demostrar que el propio servicio se construyó correctamente. Un Fleet upgrade necesita conocer además las dependencias aguas abajo, el schema de los datos, las restricciones del entorno y los hallazgos de seguridad. El Catalog coloca esta información en un plano de control compartido, de modo que el orchestrator pueda determinar «si se puede actualizar», «a quién actualizar primero» y «si se puede revertir tras una falla», en lugar de que el operator tenga que consultar sobre la marcha a decenas de equipos en medio de un incidente.
+\end{knowledgebox}
+
+\subsection{Release channel: organizar el rollout según la confianza}
+
+El \term{Release channel} organiza los entornos por etapa de publicación o por tolerancia al riesgo, de modo que una misma versión de software pueda entrar primero en canary y luego extenderse gradualmente. El \term{Canary} es un despliegue anticipado de alcance reducido que usa poco tráfico real o pocos entornos para exponer problemas; solo se continúa cuando la salud es estable. Los entornos Air-gapped pueden recibir el bundle con retraso y los entornos regulados pueden exigir aprobaciones adicionales; por eso el rollout es un grafo de estados no lineal, no una única cadena de despliegue semanal compartida por todos los servicios.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{images/04-release-confidence.png}
+\caption{El Release channel organiza un rollout no lineal mediante la confianza en cada entorno y sus restricciones.}
+\figsource{Redibujado a partir de los conceptos oficiales de Apollo y de los subtítulos, `images/04-release-confidence.png`.}
+\end{figure}
+
+\figurepair{images/official-apollo-release-channels.png}{images/official-apollo-rollout-status.png}{Release channels, environment rollout y estado de versiones en la interfaz oficial de Apollo.}{PDF oficial del Palantir Apollo Demo Day}{`images/official-apollo-release-channels.png` y `images/official-apollo-rollout-status.png`}
+
+\begin{importantbox}{Lectura de la figura: cada etapa de publicación debe tener condiciones de entrada y de salida}
+Un Canary no se reduce a «desplegar primero algunas instancias». Cada channel debe definir el tiempo de espera, el health threshold, el failure budget permitido, la aprobación manual y las condiciones de rollback automático. Distintos entornos pueden quedarse en versiones distintas, siempre que el catalog y las políticas de seguridad gestionen esa diferencia de forma explícita. Buscar que toda la fleet esté sincronizada, en cambio, propagaría un mismo defecto a todos los entornos de misión al mismo tiempo.
+\end{importantbox}
+
+\subsection{Health, monitor y rollback}
+
+\term{Rollback} se refiere a devolver el software a una versión que se sabe buena. Solo es seguro cuando la versión anterior sigue siendo compatible con el schema de datos, la configuración y las dependencias actuales. El ejemplo oficial del Demo Day hace que el operator defina un monitor, observe el estado del deployment y revierta cuando la nueva versión activa una condición de falla. La parte realmente difícil no es hacer clic en un botón, sino declarar de antemano qué significa estar sano, cómo asociar las métricas con las versiones y cómo manejar, tras la reversión, los datos ya generados y las acciones externas ya realizadas.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{images/official-apollo-monitor-definition.png}
+\caption{Apollo monitor definition: conecta las condiciones de detección, el historial y la remediation con una versión específica del software.}
+\figsource{PDF oficial del Palantir Apollo Demo Day, página 9 de capturas del producto, `images/official-apollo-monitor-definition.png`.}
+\end{figure}
+
+\begin{knowledgebox}{Lectura de la figura: las condiciones de salud deben acercarse lo más posible al resultado para el usuario o la misión}
+El CPU, la memory y que el process siga vivo son señales necesarias, pero no demuestran que el software sea correcto. Un monitor más sólido verifica el API success, la integridad de los datos, los workflow críticos y las políticas de seguridad. En los sistemas de misión, además, hay que distinguir entre «el servicio es accesible» y «la salida de decisión es confiable». Cuanto más cerca esté la métrica del resultado real, mejor podrá el rollback evitar que se conserve una versión técnicamente en línea pero funcionalmente errónea.
+\end{knowledgebox}
+
+\subsection{Software supply chain y correcciones de emergencia}
+
+SolarWinds y Log4j convirtieron el riesgo de la software supply chain en un problema de nivel empresarial. Ante una vulnerabilidad, la organización necesita saber qué component se ejecutan en la fleet, qué versiones están afectadas, en qué entornos se encuentran, si pueden actualizarse de inmediato y cuándo recibirán la corrección los entornos sin conexión a la red. El catalog y el estado de los entornos de Apollo proporcionan el inventory, el orchestrator ejecuta la remediation y el historial de auditoría registra quién aprobó qué cambio.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{images/official-apollo-vulnerability.png}
+\caption{El ejemplo oficial de Apollo asocia un vulnerability finding con un component y una versión específicos.}
+\figsource{PDF oficial del Palantir Apollo Demo Day, página 12 de capturas del producto, `images/official-apollo-vulnerability.png`.}
+\end{figure}
+
+\begin{warningbox}{La respuesta a vulnerabilidades no puede depender solo de «actualizar todo»}
+Una actualización de emergencia todavía debe considerar el schema, las ventanas de misión, el air-gap bundle y la autorización del owner de cada entorno. Algunos sistemas no pueden detenerse de inmediato y algunas versiones antiguas pueden estar limitadas por otras dependencias. Un plano de control confiable debe ofrecer un inventory preciso, clasificación por niveles de riesgo, controles compensatorios y excepciones rastreables, en lugar de ocultar con velocidad un impacto desconocido.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Apollo coloca el software, los entornos y la metadata de seguridad dentro de un lazo de control desired-state. El Catalog aporta restricciones componibles, el release channel gestiona la confianza, el monitor conecta la salud con las versiones, y el rollback y la remediation permiten que la fleet se recupere ante anomalías. El siguiente paso requiere además un substrate de ejecución unificado, para evitar que cada equipo de aplicación tenga que volver a aprender distintos detalles de Kubernetes y de cumplimiento normativo.
