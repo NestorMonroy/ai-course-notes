@@ -1,0 +1,68 @@
+\subsection{Activation Checkpointing（梯度检查点）}
+
+\begin{importantbox}{Activation Checkpointing 的核心思想}
+反向传播需要前向过程中保存的激活值来计算梯度。对于深层网络，所有层的激活值同时驻留在 GPU 内存中，内存开销巨大。
+
+\textbf{Activation checkpointing}（也叫 gradient checkpointing 或 rematerialization）的策略是：只保存部分层的激活值（称为 checkpoint），丢弃其余层的激活值。反向传播到某一层时，从最近的 checkpoint 重新做前向计算来恢复所需的激活值。
+
+这是一个经典的\textbf{时间换空间}权衡。
+\end{importantbox}
+
+假设模型有 $L$ 层，每层激活值占 $a$ 内存：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.22\textwidth}p{0.22\textwidth}p{0.22\textwidth}p{0.18\textwidth}}
+\toprule
+\textbf{策略} & \textbf{激活值内存} & \textbf{额外计算} & \textbf{适用场景} \\
+\midrule
+不做 checkpointing & $L \cdot a$ & 0 & 内存充足 \\
+每 $\sqrt{L}$ 层 checkpoint & $\sqrt{L} \cdot a$ & $\sim 33\%$ 前向 & 经典权衡 \\
+每层 checkpoint & $a$ (仅 1 层) & $\sim 100\%$ 前向 & 极端内存受限 \\
+\bottomrule
+\end{tabular}
+\caption{Activation checkpointing 的不同策略}
+\end{table}
+
+PyTorch 提供了 \texttt{torch.utils.checkpoint.checkpoint} 函数来实现这一功能：
+
+\begin{lstlisting}[caption={使用 activation checkpointing 的示例}]
+from torch.utils.checkpoint import checkpoint
+
+class TransformerBlock(nn.Module):
+    def forward(self, x):
+        # ... transformer block logic ...
+        return output
+
+class Model(nn.Module):
+    def __init__(self, num_layers):
+        super().__init__()
+        self.layers = nn.ModuleList(
+            {[}TransformerBlock() for _ in range(num_layers){]}
+        )
+
+    def forward(self, x):
+        for layer in self.layers:
+            # Wrap each layer with checkpointing
+            x = checkpoint(layer, x, use_reentrant=False)
+        return x
+\end{lstlisting}
+
+\begin{warningbox}{Activation Checkpointing 的陷阱}
+\begin{itemize}
+    \item \textbf{计算开销}：每个被 checkpoint 的段在反向时会重新执行前向计算，总计算量增加约 33\%（如果每 $\sqrt{L}$ 层 checkpoint）。
+    \item \textbf{不可 checkpoint 的操作}：含有副作用（如 dropout 的随机状态）的层需要特殊处理，否则重新计算时行为会不一致。
+    \item \textbf{与 AMP 的交互}：在混合精度训练中使用 checkpointing 时，需要确保 autocast 上下文在 checkpoint 段内正确传播。
+\end{itemize}
+\end{warningbox}
+
+\begin{knowledgebox}{Activation Checkpointing 的内存收益实例}
+以 70B 模型（约 80 层 Transformer）为例，假设每层激活值约占 200 MB（取决于 batch size 和序列长度）：
+\begin{itemize}
+    \item 不做 checkpointing：$80 \times 200 = 16,000$ MB $= 16$ GB
+    \item 每 $\sqrt{80} \approx 9$ 层 checkpoint：$9 \times 200 = 1,800$ MB $\approx 1.8$ GB
+    \item 代价：约 33\% 额外前向计算
+\end{itemize}
+这意味着可以节省约 14 GB 激活值内存，代价是每步训练时间增加约 33\%。在 GPU 内存紧张时，这个权衡几乎总是值得的。
+\end{knowledgebox}
+

@@ -1,0 +1,69 @@
+\section{总结与延伸}
+本讲把 GPU kernel 工作流压缩成一条路径：理解硬件层级，写出正确 kernel，benchmark 测端到端时间，profile 找真实 kernel 和瓶颈，再用 Triton 调整 block、mask、tiling 和 fusion。
+\begin{importantbox}{最终 takeaway}
+性能优化不是玄学。每一次优化都应该能回答：减少了哪次 HBM 读写？增加了多少复用？提高了 occupancy 还是降低了 bank conflict？benchmark 和 profiler 是否支持这个判断？
+\end{importantbox}
+\subsection{拓展阅读}
+
+下面的材料分别补足 Triton 算法、CUDA 硬件语义、GEMM 实现与测量工具。阅读时不要只抄 API，而要为每份材料记录“它解释了哪一次数据移动、哪一级并行和哪一个 profiler 指标”。
+
+\begin{longtable}{p{0.28\textwidth}p{0.30\textwidth}p{0.32\textwidth}}
+\toprule
+\textbf{材料} & \textbf{重点问题} & \textbf{读完应能做什么} \\
+\midrule
+Triton fused softmax tutorial & 一行如何映射到一个 program；mask、reduction 与 num warps & 独立写出 row-fit-in-block 的 softmax，并数 HBM reads/writes。 \\
+NVIDIA CUDA programming guide & warp、shared memory、coalescing、occupancy & 用硬件术语解释一个正确 kernel 为什么仍然慢。 \\
+CUTLASS GEMM documentation & tile hierarchy、tensor core shape、pipeline & 从 kernel 名与 tile 配置反推数据复用和 resource pressure。 \\
+PyTorch profiler + Nsight guides & end-to-end、kernel timeline、memory/warp stalls & 把 timing 异常定位到 launch、kernel、memory 或 occupancy。 \\
+\bottomrule
+\end{longtable}
+
+\subsection{复现实验：从 shape sweep 到 profiler attribution}
+
+选择 GeLU、row sum 或 matmul 中任意一个算子，固定 dtype 与 device，执行一次小型 hold-out 实验：
+
+\begin{enumerate}
+    \item 预先写下随 shape 增长的延迟趋势，以及何时可能从固定开销区进入 bandwidth/compute 主导区。
+    \item 对每个 shape 做 warmup 和多次 CUDA-event 计时，保留均值与方差。
+    \item 只对转折点前后两个 shape 做 profiler，记录 kernel 数、kernel 名、CUDA time 与关键 memory/occupancy 指标。
+    \item 修改一个变量，例如 fusion、block size 或 tile shape，再重复同一协议；若预测失败，优先修正心智模型而不是挑选对自己有利的样本。
+\end{enumerate}
+
+\subsection{Kernel 优化交付清单}
+
+最后把实验结果整理成一份可复核交付，而不是散落的截图和最快数字。每一项都应能指向代码、命令或 profiler 证据：
+
+\begin{longtable}{p{0.25\textwidth}p{0.29\textwidth}p{0.36\textwidth}}
+\toprule
+\textbf{验收项} & \textbf{必须记录} & \textbf{不合格信号} \\
+\midrule
+Correctness & reference、容差、边界 shape、mask 与 dtype & 只测一个整齐 shape，或用速度掩盖数值错误。 \\
+Measurement & warmup、trials、CUDA events、均值与方差 & 混入编译/CPU launch，只报告最快一次。 \\
+Scaling & 多个 shape、转折点、预先预测 & 只在单点比 baseline，无法判断适用范围。 \\
+Attribution & kernel 数/名、CUDA time、memory/occupancy 指标 & 只有 wall-clock，没有解释时间为何变化。 \\
+Mechanism & 减少的 HBM bytes、增加的 reuse、改变的 tile/fusion & 用“编译器更聪明”代替可检验机制。 \\
+Portability & 至少一个 hold-out shape 或 dtype & 配置只对调参样本有效，换输入立即退化。 \\
+\bottomrule
+\end{longtable}
+
+\begin{warningbox}{实验验收不是“最快一次”}
+合格证据必须包含 reference correctness、完整 shape sweep、steady-state timing、profile attribution 与失败 case。只报告单个最佳数字，无法证明优化机制，也无法迁移到新 shape。
+\end{warningbox}
+
+\subsection{失败诊断：看到什么先查什么}
+
+当结果不符合预测时，先用最便宜的证据缩小范围，再打开更重的 Nsight 指标：
+
+\begin{longtable}{p{0.31\textwidth}p{0.27\textwidth}p{0.32\textwidth}}
+\toprule
+\textbf{症状} & \textbf{第一证据} & \textbf{优先排查} \\
+\midrule
+小 shape 几乎一样慢 & CUDA-event 延迟与 kernel 数 & launch/dispatch 固定开销，工作量不足以占满设备。 \\
+大 shape scaling 突然变差 & kernel 名、tile、memory throughput & kernel selection 改变、tile 边界、bandwidth 或 workspace。 \\
+Fusion 后没有加速 & profiler 的中间 kernel 与 HBM traffic & 编译器未 fusion、额外 layout copy，或原算子并非 memory-bound。 \\
+增大 block/tile 反而变慢 & registers、shared memory、active warps & resource pressure 降低 occupancy，或 tail/wave quantization 恶化。 \\
+结果只在边界 shape 错 & reference diff、mask、stride、accumulator dtype & 越界 load/store、非连续 layout、reduction 精度或尾 tile。 \\
+\bottomrule
+\end{longtable}
+
+\end{document}

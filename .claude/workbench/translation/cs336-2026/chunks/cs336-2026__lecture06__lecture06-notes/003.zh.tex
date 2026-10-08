@@ -1,0 +1,51 @@
+\section{Benchmarking 与 Profiling：先量再改}
+
+Source coverage: \texttt{benchmarking/profiling}. 本节覆盖的核心概念包括：benchmarking, profiling, CUDA synchronize, CUDA events, torch profiler。
+
+\begin{knowledgebox}{老师强调：成功 recipe 是测量闭环}
+源码把流程写成三步：先 benchmark 与 profile，做出修改，再重新 benchmark 与 profile。Benchmark 只回答端到端 wall-clock 与 scaling，profiling 才回答时间花在哪里、底层实际调用了什么；没有第二轮测量，就无法证明改动解决了原先的瓶颈，也无法排除只是缓存、编译或输入 shape 改变造成的假提升。
+\end{knowledgebox}
+
+
+\begin{longtable}{p{0.22\textwidth}p{0.34\textwidth}p{0.34\textwidth}}
+\toprule\textbf{方法} & \textbf{回答的问题} & \textbf{常见陷阱} \\
+\midrule
+Benchmark & 这个操作端到端多快？随 shape 如何变化？ & 未同步 CUDA、warmup 不足、只测一次。 \\
+Profiler & 时间花在哪些 kernels 上？实际调用了什么？ & 只看总时间，不看 kernel 名和 shape。 \\
+Nsight & 更底层地看 occupancy、memory、warp stalls & 信息量大，需要明确假设再查。 \\
+\bottomrule
+\end{longtable}
+\begin{lstlisting}[caption={CUDA event benchmark 的关键结构}]
+for _ in range(num_warmups):
+    run()
+torch.cuda.synchronize()
+start_event.record()
+run()
+end_event.record()
+torch.cuda.synchronize()
+time_ms = start_event.elapsed_time(end_event)
+\end{lstlisting}
+\begin{warningbox}{benchmark 必须同步}
+CUDA kernel launch 是异步的。如果不调用 \texttt{torch.cuda.synchronize()} 或 CUDA events，测到的可能只是 CPU 发起 kernel 的时间，而不是 GPU 真正执行时间。
+\end{warningbox}
+
+\subsection{Profiler case matrix：三种 shape}
+
+课程把同一 profiler 放到三个 case 上，不是为了背 kernel 名，而是训练“高层算子 + shape 会选择不同底层实现”的直觉。逐元素加法主要暴露 launch 与 memory traffic；大矩阵乘法进入高吞吐 GEMM；小矩阵乘法的工作量不足以摊薄 launch、调度与 tile 边界开销。
+
+\begin{longtable}{p{0.27\textwidth}p{0.28\textwidth}p{0.35\textwidth}}
+\toprule
+\textbf{Profiler case} & \textbf{先看什么} & \textbf{应形成的判断} \\
+\midrule
+\texttt{add(dim=2048)} & kernel 数、CUDA 时间、HBM 读写 & Pointwise 算子 FLOPs 少，常受 memory bandwidth 与 launch overhead 主导。 \\
+\texttt{matmul(dim=2048)} & GEMM kernel、tile、dtype、总 CUDA 时间 & 尺寸足够大时，矩阵乘法可形成高 arithmetic intensity，接近 compute-bound。 \\
+\texttt{matmul(dim=128)} & 是否换 kernel、每次 launch 时间占比 & 小 shape 即使算法仍是 \(O(n^3)\)，实际延迟也可能由固定开销主导。 \\
+\bottomrule
+\end{longtable}
+
+\begin{knowledgebox}{课堂提示：先看 scaling，再读 kernel 名}
+老师指出，小 dimension 时 timing 大致恒定，尺寸足够大后才显现 cubic scaling。Profiler 进一步显示 tensor dimensions 不同会调用不同 CUDA kernels；像 \texttt{cutlass3x\_sm100\_...\_64x64x16} 这样的名字会暴露库、架构、dtype 与 tile shape。读 kernel 名的目的，是把测到的曲线连接到实际实现，而不是把长字符串当作噪声忽略。
+\end{knowledgebox}
+\subsection{本章小结}
+本节说明了一个 kernel optimization 的共同模式：先确认语义正确，再测时间，再看 profiler，最后用 block、shared memory、tiling、fusion 或 layout 调整降低数据移动。
+

@@ -1,0 +1,73 @@
+\section{本讲主线：从单卡局部性到集群局部性}
+
+Lecture 5 和 Lecture 6 讲的是单张 GPU 内部的并行：如何让 tensor core 吃饱，如何用 fusion 和 tiling 减少 HBM 往返，如何用 Triton 把一个算子写成更接近硬件的数据搬运程序。Lecture 7 把同一个问题放大到多 GPU 和多节点。官方源文件把这一部分命名为 \textbf{Part 1: building blocks of distributed communication/computation}，然后再进入 \textbf{Part 2: distributed training}。这两个名字很重要：先学通信语言，再学训练策略。
+
+\begin{knowledgebox}{术语消化：本讲第一批系统词}
+\begin{tabular}{L{0.2\textwidth}L{0.32\textwidth}L{0.38\textwidth}}
+\toprule
+术语 & 字面含义 & 本讲中的作用 \\
+\midrule
+HBM & High Bandwidth Memory，高带宽显存，是 GPU 上的 DRAM 形态。 & 单卡上参数、激活和中间张量主要存放在这里；上一讲优化 HBM traffic，本讲则把瓶颈扩展到 GPU 间通信。 \\
+sharding & 分片；把原本完整复制的数据切开，让每张 GPU 只存其中一部分。 & ZeRO/FSDP、tensor parallel、pipeline parallel 都是在不同对象上做 sharding。 \\
+ZeRO & Zero Redundancy Optimizer；在 data parallel rank 之间分片 optimizer state、gradients、parameters，常按 stage 1/2/3 区分。 & 本讲先用 all-gather 和 reduce-scatter 建立直觉，下一讲会系统解释 ZeRO/FSDP 如何降低显存。 \\
+collective & 集合通信；所有 rank 共同进入同一个通信原语。 & 分布式训练的基本词汇，后面所有并行策略都能拆成若干 collectives。 \\
+\bottomrule
+\end{tabular}
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{gpu-node-overview.png}
+\caption{现代 GPU 节点和集群拓扑：节点内通过 NVLink/NVSwitch，节点间通过 HCA/NIC 和 InfiniBand/RoCE。}
+\figsource{CS336 Spring 2026 Lecture 7 官方可执行讲义图像。}
+\end{figure}
+
+\begin{knowledgebox}{读图：这张节点拓扑图应该怎么看}
+先看最内层：每张 GPU 旁边都有自己的 HBM，计算单元访问本卡 HBM 比访问其他 GPU 的数据快得多。再看节点内互连：NVLink/NVSwitch 把多张 GPU 连成一个高带宽域，适合频繁交换激活或分片参数。最后看节点外：HCA/NIC、交换机、跨机链路把节点连成集群，带宽和延迟都明显更差。因此同样是“通信”，在一台机器里和跨机器的含义不同；tensor parallel 这种每层通信的策略必须尽量放在快互连上，data/pipeline parallel 这种通信频率较低的策略更能承受慢链路。
+\end{knowledgebox}
+
+\begin{importantbox}{统一主题：compute 离 data 总是有距离}
+单卡性能工程是在 HBM、cache、register 之间安排数据；多卡性能工程是在 GPU、node、pod 之间安排数据。上一讲用 fusion/tiling 减少内存访问，本讲用 replication/sharding 减少或重排通信。真正的问题不是“用了多少张卡”，而是每一步训练中数据必须移动多远、移动多少、何时移动。
+\end{importantbox}
+
+\begin{knowledgebox}{课堂提示：这是同一个 locality 问题的放大版}
+官方可执行讲义先把“上周”和“本周”并排：上周在一张 GPU 内用 fusion/tiling 减少数据搬运，本周在多张 GPU 和多个节点间用 replication/sharding 重排数据。老师要读者保留的不是某个 API，而是一条连续主线：算力离输入输出越远，越需要把计算安排到数据附近，或减少数据必须跨越的层级。
+\end{knowledgebox}
+
+\subsection{为什么要多 GPU}
+
+多 GPU 的动机可以分成两类。第一类是容量：模型参数、梯度、optimizer state 和激活放不进一张卡。第二类是速度：单卡算力太小，训练 wall-clock time 不可接受，需要更多 FLOPs。实际大模型训练通常先被容量推着走，然后再被速度逼着优化并行效率。
+
+\[
+M_{\text{train}}
+    \approx M_{\text{params}}
+    + M_{\text{grads}}
+    + M_{\text{optimizer}}
+    + M_{\text{activations}} .
+\]
+
+其中 \(M_{\text{params}}\) 是权重显存，\(M_{\text{grads}}\) 是反向传播后的梯度，\(M_{\text{optimizer}}\) 是 Adam/AdamW 的一阶动量 \(m\) 和二阶动量 \(v\) 等状态，\(M_{\text{activations}}\) 是前向保存给反向使用的激活。这个公式不是精确预算，而是告诉我们：训练显存不是只由参数量决定。
+
+\begin{warningbox}{多 GPU 不是自动加速按钮}
+更多 GPU 只提供潜在算力。若每个 step 的通信量太大、通信无法与计算重叠、或并行策略与硬件拓扑不匹配，实际吞吐可能几乎不涨，甚至因为同步和调度开销变慢。
+\end{warningbox}
+
+\subsection{泛化的层次结构}
+
+\begin{center}
+\begin{tabular}{L{0.25\textwidth}L{0.3\textwidth}L{0.35\textwidth}}
+\toprule
+层次 & 典型介质 & 优化含义 \\
+\midrule
+单 GPU 片上 & registers、L1、shared memory & fusion、tiling、kernel design，尽量不把中间结果写回 HBM。 \\
+单 GPU 片外 & HBM & 提高 arithmetic intensity，减少 HBM traffic。 \\
+单节点多 GPU & NVLink、NVSwitch、PCIe & 可承载较频繁 collective，但仍比本卡内存慢。 \\
+多节点多 GPU & InfiniBand、RoCE、Ethernet & 适合较粗粒度并行，必须减少同步次数并隐藏延迟。 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{本章小结}
+
+Lecture 7 的主线是：把一个训练 step 拆成\textbf{本地计算、状态放置、通信原语、硬件路径}四层来看。后面所有 data parallelism、tensor parallelism、pipeline parallelism 都是这四层的不同组合。
+

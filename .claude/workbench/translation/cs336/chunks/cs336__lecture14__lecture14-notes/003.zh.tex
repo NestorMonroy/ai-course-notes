@@ -1,0 +1,137 @@
+\section{KenLM：用语言概率筛数据}
+
+\subsection{n-gram 语言模型}
+
+KenLM 在数据过滤里的作用是一个很典型的例子：它并不追求最聪明，但它足够快。对一个三元模型，最大似然估计可以写成
+\[
+p(w_i\mid w_{i-2},w_{i-1})=\frac{\mathrm{count}(w_{i-2},w_{i-1},w_i)}{\mathrm{count}(w_{i-2},w_{i-1})}.
+\]
+这就是“计数再归一化”。思想简单，工程上也容易并行化。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=1.2cm, every node/.style={font=\small}]
+\node[draw, rounded corners, fill=blue!12, minimum width=1.9cm, minimum height=0.8cm] (w1) {the};
+\node[draw, rounded corners, fill=blue!12, right=of w1, minimum width=1.9cm, minimum height=0.8cm] (w2) {cat};
+\node[draw, rounded corners, fill=blue!12, right=of w2, minimum width=1.9cm, minimum height=0.8cm] (w3) {in};
+\node[draw, rounded corners, fill=blue!12, right=of w3, minimum width=1.9cm, minimum height=0.8cm] (w4) {the};
+\node[draw, rounded corners, fill=blue!12, right=of w4, minimum width=1.9cm, minimum height=0.8cm] (w5) {hat};
+\draw[-{Latex[length=3mm]}, thick] (w1) -- (w2);
+\draw[-{Latex[length=3mm]}, thick] (w2) -- (w3);
+\draw[-{Latex[length=3mm]}, thick] (w3) -- (w4);
+\draw[-{Latex[length=3mm]}, thick] (w4) -- (w5);
+\node[below=0.7cm of w3, align=center] {条件概率由前两个词决定\\n-gram 就是在数这种局部上下文};
+\end{tikzpicture}
+\caption{n-gram 的直觉：用有限窗口的上下文预测下一个词}
+\end{figure}
+
+\begin{knowledgebox}{Kneser-Ney 的作用}
+当高阶上下文稀疏到不可信时，就回退到更短的上下文。它不是“凭空补概率”，而是在统计证据不足时，把判断交给更稳的低阶模型。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=1.1cm, every node/.style={font=\small, align=center}]
+\node[draw, rounded corners, fill=yellow!10, minimum width=2.8cm, minimum height=0.8cm] (h3) {3-gram};
+\node[draw, rounded corners, fill=yellow!16, below=of h3, minimum width=2.8cm, minimum height=0.8cm] (h2) {2-gram};
+\node[draw, rounded corners, fill=yellow!22, below=of h2, minimum width=2.8cm, minimum height=0.8cm] (h1) {1-gram};
+\draw[-{Latex[length=3mm]}, thick] (h3) -- (h2);
+\draw[-{Latex[length=3mm]}, thick] (h2) -- (h1);
+\node[right=1.5cm of h2, align=left] {sparse counts\\$\to$ backoff\\$\to$ interpolation};
+\end{tikzpicture}
+\caption{Kneser-Ney 的核心直觉：高阶不可靠就回退，短上下文提供更稳定的统计支撑}
+\end{figure}
+
+\subsection{Perplexity 作为打分}
+
+对于一段文本 $x = w_1,\dots,w_n$，perplexity 的形式常写成
+\[
+\mathrm{ppl}(x)=\exp\!\left(-\frac{1}{n}\sum_{i=1}^n \log p(w_i\mid w_{<i})\right).
+\]
+它越低，说明文本越像训练出来的语言模型认为“自然”的文本。KenLM 用它过滤网页时，目标不是判断这段话是否“有价值”，而是先剔除那些明显不像自然语言的垃圾片段。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[every node/.style={font=\small, align=center}]
+\node[draw, rounded corners, fill=green!10, minimum width=3.4cm, minimum height=0.9cm] (wiki) at (0,0) {Wikipedia sentence\\low perplexity};
+\node[draw, rounded corners, fill=yellow!14, minimum width=3.6cm, minimum height=0.9cm] (cs) at (5.0,0) {CS336 course page\\medium perplexity};
+\node[draw, rounded corners, fill=red!12, minimum width=3.6cm, minimum height=0.9cm] (gib) at (10.0,0) {gibberish\\high perplexity};
+\draw[-{Latex[length=3mm]}, thick] (wiki) -- (cs);
+\draw[-{Latex[length=3mm]}, thick] (cs) -- (gib);
+\node[below=0.8cm of cs] {perplexity 上升意味着“更不像训练语料”};
+\end{tikzpicture}
+\caption{perplexity 的过滤意义：不是审美判断，而是“像不像自然文本”的粗粒度度量}
+\end{figure}
+
+\begin{warningbox}{KenLM 的边界}
+它擅长抓“明显不像人话”的内容，但不擅长判断逻辑、事实、长程一致性和内容价值。它更像一个廉价的门卫，而不是一个老师。
+\end{warningbox}
+
+\subsection{Kneser-Ney 的具体形式}
+
+如果把回退写得更具体一点，常见形式是
+\[
+p_{\mathrm{KN}}(w_i\mid h)=\frac{\max(c(h,w_i)-d,0)}{c(h)}+\lambda(h)\,p_{\mathrm{KN}}(w_i\mid h'),
+\]
+其中 $h$ 是当前上下文，$h'$ 是更短的回退上下文，$d$ 是折扣项。前一项保留显式计数，后一项把剩余概率质量交给低阶模型。
+
+\begin{importantbox}{为什么折扣项重要}
+如果不折扣，高阶计数会把概率全吃光；如果折扣过大，高阶上下文又失去区分力。Kneser-Ney 的价值就在于：它用一个明确的概率守恒机制，把“高阶证据”和“低阶稳健性”拼起来。
+\end{importantbox}
+
+\subsection{句子级和文档级}
+
+实践里，KenLM 可以给句子打分，也可以给整篇文档打分。前者更容易发现局部乱码和拼接噪声，后者更适合做网页级排序。很多系统会把两者组合起来：先删掉单句极端异常的段落，再在文档层面做聚合。
+
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{p{2.4cm}p{4.2cm}p{4.2cm}p{3.0cm}}
+\toprule
+\textbf{粒度} & \textbf{优点} & \textbf{缺点} & \textbf{典型用法} \\
+\midrule
+sentence & 能抓局部异常 & 容易受短句波动影响 & 先做粗清洗 \\
+paragraph & 能保留局部上下文 & 需要更长文本 & CCNet 风格排序 \\
+document & 更适合网页级管线 & 可能掩盖局部噪声 & 终局保留决策 \\
+\bottomrule
+\end{tabular}
+\caption{KenLM 不同打分粒度的取舍}
+\end{table}
+
+\subsection{阈值怎么定}
+
+KenLM 的阈值通常不靠“感觉”拍脑袋，而是看一小批人工检查样本上的分布差异。最常见的做法是先看目标数据和噪声数据的 score 分布，再选择能把两者拉开的 operating point。
+
+\begin{warningbox}{阈值的一个常见误区}
+如果你只看一个绝对阈值，而不看不同域的分数分布，那么阈值会严重迁移失配。网页、书籍、代码、聊天记录的 perplexity 尺度都可能不一样。
+\end{warningbox}
+
+\subsection{CCNet 的经验}
+
+课程里提到的 CCNet 做法很朴素：以段落为单位，按 perplexity 排序，保留前 1/3。这个规则有点粗暴，但它能以极低成本把大批低质量网页剔除。后来 LLaMA 的数据管线也受到了这种思路的影响。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[every node/.style={font=\small, align=center}]
+\node[draw, rounded corners, fill=blue!8, minimum width=3cm, minimum height=0.85cm] (p1) at (0,2.0) {paragraph 1\\ppl = 12};
+\node[draw, rounded corners, fill=blue!10, minimum width=3cm, minimum height=0.85cm] (p2) at (0,0.7) {paragraph 2\\ppl = 18};
+\node[draw, rounded corners, fill=blue!14, minimum width=3cm, minimum height=0.85cm] (p3) at (0,-0.6) {paragraph 3\\ppl = 41};
+\node[draw, rounded corners, fill=blue!18, minimum width=3cm, minimum height=0.85cm] (p4) at (0,-1.9) {paragraph 4\\ppl = 80};
+\node[right=3.7cm of p2, draw, rounded corners, fill=green!12, minimum width=3.4cm, minimum height=1.2cm] (keep) {keep top 1/3\\discard the rest};
+\draw[-{Latex[length=3mm]}, thick] (p1) -- (keep);
+\draw[-{Latex[length=3mm]}, thick] (p2) -- (keep);
+\draw[-{Latex[length=3mm]}, thick] (p3) -- (keep);
+\draw[-{Latex[length=3mm]}, thick] (p4) -- (keep);
+\end{tikzpicture}
+\caption{CCNet 风格的排序筛选：把段落按 perplexity 排序，然后保留最像自然文本的一部分}
+\end{figure}
+
+\subsection{排序筛选的实际含义}
+
+排序和阈值的差别不只是形式。阈值问的是“这条样本够不够好”，排序问的是“在预算有限时，哪一批最好”。后者对大规模语料更常见，因为你常常已经知道总预算，真正的问题是如何在预算内把质量最大化。
+
+\begin{knowledgebox}{排序筛选什么时候更稳}
+当 score 的绝对值校准不稳定，但相对次序还算可靠时，排序通常比硬阈值更稳。CCNet 一类方法之所以常见，就是因为它们更多依赖相对顺序，而不是绝对概率值。
+\end{knowledgebox}
+

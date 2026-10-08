@@ -1,0 +1,388 @@
+\section{Memory Accounting}
+
+\subsection{张量是深度学习的基本单位}
+
+在 PyTorch 里，几乎所有东西最终都是张量：
+\begin{itemize}
+    \item 模型参数
+    \item 梯度
+    \item 优化器状态
+    \item 数据
+    \item 激活值
+\end{itemize}
+
+\begin{knowledgebox}{张量的两件事}
+一个 tensor 的内存成本只看两件事：
+\begin{itemize}
+    \item 元素个数 `numel()`
+    \item 每个元素占多少字节 \texttt{element\_size()}
+\end{itemize}
+因此最简单的内存估计就是
+\[
+\text{memory} = \text{numel} \times \text{element size}.
+\]
+\end{knowledgebox}
+
+\subsection{Worked example: 一个小张量到底花多少内存}
+
+先看一个最小例子。一个 \(4\times 8\) 的 float32 tensor 有 32 个元素，每个元素 4 字节，所以总内存是：
+\[
+4 \times 8 \times 4 = 128 \text{ bytes}.
+\]
+这类算式很小，但它的逻辑和大模型完全一样。训练系统里的很多 bug，本质上就是“把 128 bytes 的直觉误搬到 128 GB 的规模上”。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.22\textwidth}p{0.23\textwidth}p{0.18\textwidth}p{0.2\textwidth}}
+\toprule
+\textbf{张量} & \textbf{形状} & \textbf{dtype} & \textbf{内存} \\
+\midrule
+Toy matrix & \(4\times 8\) & float32 & 128 B \\
+Hidden state batch & \(32\times 2048\times 4096\) & bfloat16 & \(\approx 512\) MB \\
+FFN weight & \(4096\times 16384\) & float32 & \(\approx 256\) MB \\
+Adam states & same as weight & float32 \(\times 2\) & \(\approx 512\) MB \\
+\bottomrule
+\end{tabular}
+\caption{从玩具张量到大模型参数，内存公式本质上没有变}
+\end{table}
+
+\begin{importantbox}{实战里最常见的误解}
+很多人只看参数量，不看激活值和 optimizer state。实际上，训练时最贵的往往不是模型前向本身，而是“参数 + 梯度 + 优化器状态 + 激活值”四者叠加后的总账。
+\end{importantbox}
+
+\subsection{Worked example: 为什么激活值会突然吃掉显存}
+
+参数内存是静态的，激活值内存是随 batch size 和 sequence length 线性增长的。对于一个形状为 \(B\times L\times H\) 的激活张量，如果使用 bfloat16，它的内存大约是：
+\[
+2 \times B \times L \times H \text{ bytes}.
+\]
+这就是为什么你明明觉得“模型参数没那么大”，训练时还是会 OOM：真正爆掉的可能是中间激活，而不是权重本身。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.23\textwidth}p{0.18\textwidth}p{0.22\textwidth}p{0.23\textwidth}}
+\toprule
+\textbf{对象} & \textbf{典型形状} & \textbf{每元素字节数} & \textbf{增长方式} \\
+\midrule
+参数 & 固定形状 & 2 或 4 & 随模型规模增长 \\
+激活值 & \(B\times L\times H\) & 2 或 4 & 随 batch 和序列长度增长 \\
+梯度 & 与参数同形状 & 2 或 4 & 每次反向都要存 \\
+优化器状态 & 与参数同形状 & 4 或更多 & 只和参数量相关 \\
+\bottomrule
+\end{tabular}
+\caption{训练显存最重要的差别：参数是固定成本，激活值是动态成本}
+\end{table}
+
+\begin{importantbox}{为什么这件事和 Assignment 1 直接相关}
+你在实现 Transformer 时，batch size、sequence length、hidden size、attention head 数都会联动影响激活值的总量。只盯参数量，往往会把最关键的显存瓶颈看漏。
+\end{importantbox}
+
+\subsection{常见浮点类型}
+
+浮点数的表示由三部分组成：\textbf{符号位}（sign）、\textbf{指数位}（exponent）和\textbf{尾数位}（mantissa/significand）。不同数据类型在这三部分的分配上做了不同的权衡。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccccl}
+\toprule
+\textbf{类型} & \textbf{字节} & \textbf{指数位} & \textbf{尾数位} & \textbf{动态范围} & \textbf{训练常见用途} \\
+\midrule
+float32 (FP32) & 4 & 8 & 23 & $\sim 10^{\pm 38}$ & 主权重、优化器状态 \\
+float16 (FP16) & 2 & 5 & 10 & $\sim 10^{\pm 5}$ & 部分前向/激活 \\
+bfloat16 (BF16) & 2 & 8 & 7 & $\sim 10^{\pm 38}$ & 训练和推理的主流选择 \\
+fp8 (E4M3) & 1 & 4 & 3 & $\sim 10^{\pm 2}$ & 前沿训练/推理实验 \\
+fp8 (E5M2) & 1 & 5 & 2 & $\sim 10^{\pm 5}$ & 梯度计算 \\
+\bottomrule
+\end{tabular}
+\caption{常见数值类型的位分配与动态范围对比}
+\end{table}
+
+这里最重要的结论是：\textbf{bfloat16 不是”更小的 float32”，而是”保留了 float32 的指数范围，但牺牲一些尾数精度”}。在深度学习里，这种取舍通常比 float16 更稳。
+
+\begin{warningbox}{bf16 vs fp16：看起来都是 2 字节，但行为完全不同}
+fp16 只有 5 位指数，动态范围仅约 $10^{\pm 5}$，这意味着绝对值小于 $\sim 6 \times 10^{-8}$ 的数会被截断为零（underflow），大于 65504 的数会溢出为 inf。在训练中，梯度值经常非常小，fp16 的 underflow 会导致梯度”消失”，必须配合 \textbf{loss scaling} 来人为放大 loss，使梯度落入 fp16 的可表示范围。
+
+bf16 有 8 位指数，动态范围和 fp32 一样大（$\sim 10^{\pm 38}$），因此\textbf{不需要 loss scaling}。代价是尾数只有 7 位（fp16 有 10 位），精度较低。但实践表明，对于大多数深度学习任务，动态范围比尾数精度更重要。
+
+\textbf{结论}：如果硬件支持 bf16（如 A100、H100），优先选 bf16 而非 fp16。
+\end{warningbox}
+
+\begin{importantbox}{为什么训练比推理更难低精度化}
+训练时会同时涉及参数、梯度、优化器状态和反向传播链式法则。数值误差会在更新过程中累积，因此训练对数值稳定性更敏感；推理阶段没有反向传播，通常可以更激进地量化。
+\end{importantbox}
+
+\subsubsection{Worked Example: 混合精度节省了多少计算和内存}
+
+考虑一个矩阵乘法 $Y = XW$，其中 $X \in \mathbb{R}^{4096 \times 4096}$，$W \in \mathbb{R}^{4096 \times 4096}$。
+
+\textbf{内存对比}：
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{dtype} & \textbf{$X$ 内存} & \textbf{$X + W$ 总内存} \\
+\midrule
+float32 & $4096^2 \times 4 = 64$ MB & 128 MB \\
+bfloat16 & $4096^2 \times 2 = 32$ MB & 64 MB \\
+fp8 & $4096^2 \times 1 = 16$ MB & 32 MB \\
+\bottomrule
+\end{tabular}
+\caption{同一矩阵在不同精度下的内存占用}
+\end{table}
+
+\textbf{计算吞吐对比}（以 H100 SXM 为例）：
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{dtype} & \textbf{峰值 TFLOP/s} & \textbf{相对 FP32 加速} \\
+\midrule
+FP32 & 67 & $1\times$ \\
+TF32 (Tensor Core) & 495 & $\sim 7\times$ \\
+BF16/FP16 (Tensor Core) & 990 & $\sim 15\times$ \\
+FP8 (Tensor Core) & 1979 & $\sim 30\times$ \\
+\bottomrule
+\end{tabular}
+\caption{H100 SXM 在不同数据类型下的理论峰值算力}
+\end{table}
+
+这解释了为什么混合精度训练不只是”省内存”——它同时带来了巨大的\textbf{计算加速}。从 fp32 切到 bf16，理论上可以获得约 15 倍的矩阵乘法加速。
+
+\subsection{不同模型规模的内存占用对比}
+
+下表展示了从 1B 到 70B 不同规模模型在使用 AdamW 混合精度训练时的静态内存需求（不含激活值）：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccccc}
+\toprule
+\textbf{模型规模} & \textbf{参数 (bf16)} & \textbf{梯度 (bf16)} & \textbf{主权重 (fp32)} & \textbf{Adam 状态 (fp32)} & \textbf{总计} \\
+\midrule
+1B & 2 GB & 2 GB & 4 GB & 8 GB & 16 GB \\
+7B & 14 GB & 14 GB & 28 GB & 56 GB & 112 GB \\
+13B & 26 GB & 26 GB & 52 GB & 104 GB & 208 GB \\
+30B & 60 GB & 60 GB & 120 GB & 240 GB & 480 GB \\
+70B & 140 GB & 140 GB & 280 GB & 560 GB & 1120 GB \\
+\bottomrule
+\end{tabular}
+\caption{不同规模模型使用 AdamW 混合精度训练的静态内存需求}
+\end{table}
+
+\begin{knowledgebox}{快速心算规则}
+对于 AdamW 混合精度训练，每个参数的静态内存约为 $2 + 2 + 4 + 4 + 4 = 16$ bytes。因此：
+\begin{itemize}
+    \item 1B 模型 $\approx$ 16 GB（1 张 H100 刚好）
+    \item 7B 模型 $\approx$ 112 GB（至少 2 张 H100）
+    \item 70B 模型 $\approx$ 1120 GB（至少 14 张 H100，纯装参数和状态）
+\end{itemize}
+这还没有算激活值！实际训练通常需要更多显存或使用模型并行。
+\end{knowledgebox}
+
+\subsection{GPU 内存层次与带宽}
+
+理解 GPU 的内存层次对于优化训练性能至关重要。GPU 的内存系统是分层的，越靠近计算单元速度越快、容量越小：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.20\textwidth}p{0.14\textwidth}p{0.18\textwidth}p{0.30\textwidth}}
+\toprule
+\textbf{层级} & \textbf{容量} & \textbf{带宽} & \textbf{说明} \\
+\midrule
+寄存器 & KB 级 & --- & 每个线程私有 \\
+共享内存/L1 & 128--228 KB/SM & $\sim$100 TB/s & SM 内共享，用户可编程 \\
+L2 缓存 & 50--60 MB & $\sim$12 TB/s & 全 GPU 共享 \\
+HBM (显存) & 80 GB & 3.35 TB/s & H100 SXM 规格 \\
+NVLink & --- & 900 GB/s & GPU 间互联 \\
+PCIe 5.0 & --- & 128 GB/s & CPU--GPU 互联 \\
+\bottomrule
+\end{tabular}
+\caption{H100 SXM GPU 的内存层次（数值为近似值）}
+\end{table}
+
+\begin{importantbox}{Arithmetic Intensity 与带宽瓶颈}
+一个操作是\textbf{计算瓶颈}（compute-bound）还是\textbf{带宽瓶颈}（memory-bound），取决于它的 \textbf{arithmetic intensity}（每字节数据传输执行的 FLOPs 数）：
+$$
+\text{Arithmetic Intensity} = \frac{\text{FLOPs}}{\text{Bytes accessed}}
+$$
+\begin{itemize}
+    \item \textbf{矩阵乘法}：arithmetic intensity 高（$O(n)$ FLOPs per byte），通常是 compute-bound，能充分利用 Tensor Core。
+    \item \textbf{逐元素操作}（如 ReLU、LayerNorm、softmax）：arithmetic intensity 低（$O(1)$ FLOPs per byte），通常是 memory-bound，瓶颈在显存带宽。
+\end{itemize}
+这就解释了为什么 Transformer 的矩阵乘法可以通过低精度获得近线性加速，而 LayerNorm 等操作的加速效果有限。
+\end{importantbox}
+
+\begin{knowledgebox}{Roofline 模型}
+Roofline 模型是分析 GPU 性能的经典工具。它给出了给定 arithmetic intensity 下的理论性能上限：
+$$
+\text{Attainable FLOP/s} = \min\left(\text{Peak FLOP/s},\;\text{Bandwidth} \times \text{Arithmetic Intensity}\right)
+$$
+当 arithmetic intensity 低于某个拐点（= Peak FLOP/s / Bandwidth）时，性能受带宽限制；超过拐点后，性能受计算能力限制。对 H100 SXM bf16 而言，这个拐点约为 $990 \text{ TFLOP/s} / 3.35 \text{ TB/s} \approx 295$ FLOPs/Byte。
+\end{knowledgebox}
+
+\subsection{CPU 与 GPU 的内存位置}
+
+默认情况下，PyTorch tensor 存在 CPU 内存中。要利用 GPU 的并行计算能力，必须显式把 tensor 迁移到 GPU 显存中。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{位置} & \textbf{特点} & \textbf{常见操作} \\
+\midrule
+CPU paged memory & 默认、可分页、适合常规处理 & 数据预处理、批生成 \\
+CPU pinned memory & 页锁定，可异步拷贝到 GPU & 数据加载器预取 \\
+GPU memory & 计算速度最快、容量最宝贵 & 参数、激活、临时计算结果 \\
+\bottomrule
+\end{tabular}
+\caption{训练中常见的内存位置}
+\end{table}
+
+\begin{knowledgebox}{Pinned memory 的意义}
+把 CPU 上的 batch 放到 pinned memory 后，可以用 \texttt{non\_blocking=True} 异步拷贝到 GPU。这样可以把“CPU 取下一批数据”和“GPU 处理当前批数据”重叠起来。
+\end{knowledgebox}
+
+\subsection{数据位置的局限}
+
+CPU 内存、pinned memory 和 GPU 显存各有分工，但也各有上限。CPU 便宜但慢，GPU 快但贵，pinned memory 便于搬运但不是无限大。训练系统经常死在“所有东西都放 GPU”这种简单化思路上。真正的工程做法是让数据尽量在正确的位置停留尽量短的时间。
+
+\subsection{Tensor storage, stride 和 view}
+
+PyTorch tensor 不只是“值的集合”，它更像是：
+\begin{itemize}
+    \item 一块连续或者非连续的底层存储；
+    \item 加上一组元数据，告诉你每个维度怎么映射到存储地址；
+    \item 以及形状、dtype、device 等信息。
+\end{itemize}
+
+在二维张量里，`stride(0)` 表示跨行要跳多少元素，`stride(1)` 表示跨列要跳多少元素。对一个标准行主序矩阵来说，行 stride 通常等于列数，列 stride 通常为 1。
+
+\begin{importantbox}{view 是免费的，copy 不是}
+`view`、切片和转置很多时候都只是不同的“视图”，不会复制底层数据，因此几乎不耗额外内存。真正触发 `.contiguous()` 或显式拷贝时，才会同时增加内存和计算成本。
+\end{importantbox}
+
+一个容易踩坑的点是：不是所有视图都能再 `view` 成任意形状。若张量是非连续的，直接 `view` 常常会报错，这时要先调用 `.contiguous()`。
+
+\subsection{View 的机制细节}
+
+`view` 的前提是底层存储布局能被新的形状解释。如果张量是转置后的非连续布局，就不能直接靠 `view` 改形状。这就是为什么 `contiguous()` 不是多余操作，而是把“逻辑视图”重新落回“物理连续存储”的一步。
+
+\begin{warningbox}{为什么这一点重要}
+很多模型代码看起来只是“换了个形状”，实际上却偷偷复制了一大块张量。只要复制发生得不该发生，内存就会涨，性能也会掉。
+\end{warningbox}
+
+\subsection{切片、转置和掩码}
+
+切片、列选择、转置等操作通常只返回新的视图而不是复制数据。对于 causal attention 这类场景，`triu` 很常见，因为它可以快速生成上三角矩阵，用来屏蔽未来 token 的信息。
+
+\begin{knowledgebox}{causal mask 的直觉}
+如果 \(M[i,j]=1\) 表示位置 \(i\) 对位置 \(j\) 有贡献，那么自回归语言模型要求未来位置不能泄露到过去，于是只保留上三角或下三角的合法连接。
+\end{knowledgebox}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.22\textwidth}p{0.26\textwidth}p{0.32\textwidth}}
+\toprule
+\textbf{操作} & \textbf{是否复制数据} & \textbf{常见用途} \\
+\midrule
+切片 `x[:, 1]` & 通常不复制 & 选列、选 token、选 channel \\
+转置 `transpose` & 不复制，但可能非连续 & 改变矩阵方向 \\
+`contiguous()` & 会复制 & 把非连续视图落回连续内存 \\
+`triu()` & 生成新张量 & causal mask、上三角约束 \\
+\bottomrule
+\end{tabular}
+\caption{哪些操作免费、哪些会复制，是内存优化的基础判断}
+\end{table}
+
+\subsection{逐元素运算和矩阵乘法}
+
+逐元素运算包括加法、乘法、平方、开方、`triu` 等。这类操作一般是线性的，FLOPs 规模约为 \(O(mn)\)。
+
+真正的深度学习主角还是矩阵乘法：
+\[
+X \in \mathbb{R}^{B\times D}, \quad W \in \mathbb{R}^{D\times K}, \quad Y = XW \in \mathbb{R}^{B\times K}.
+\]
+这里的 FLOPs 约为
+\[
+2BDK,
+\]
+因为每个输出元素都需要一次乘法和一次加法。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{运算} & \textbf{复杂度} & \textbf{备注} \\
+\midrule
+逐元素加/乘 & \(O(mn)\) & 规模线性 \\
+矩阵乘法 & \(O(mnp)\) & 通常是计算瓶颈 \\
+反向传播 & 约为前向的 2 倍到 3 倍 & 依赖具体图结构 \\
+\bottomrule
+\end{tabular}
+\caption{训练里最常见的计算量级}
+\end{table}
+
+当输入张量多出 batch 维和 sequence 维时，PyTorch 的矩阵乘法会自动在前面的维度上广播并批处理。也就是说，只要最后两维满足矩阵乘法规则，前面的维度会被视作并行的“外层循环”。
+
+\subsection{内存碎片与 OOM 调试}
+
+GPU 内存并不是一个可以任意使用的大池子。PyTorch 的 CUDA 内存分配器会缓存已释放的内存块以加速后续分配，但这也会导致\textbf{内存碎片化}——总可用内存看起来足够，但没有足够大的连续块来满足一次大的分配请求。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.22\textwidth}p{0.30\textwidth}p{0.32\textwidth}}
+\toprule
+\textbf{OOM 类型} & \textbf{表现} & \textbf{排查方法} \\
+\midrule
+真实 OOM & 显存确实不够 & 减小 batch size 或用模型并行 \\
+碎片化 OOM & 总量够但连续块不够 & \texttt{torch.cuda.memory\_summary()} \\
+泄漏式 OOM & 显存随步数缓慢增长 & 检查是否把 tensor 挂在 history 上 \\
+激活值爆炸 & 某步突然 OOM & 检查输入序列长度异常值 \\
+\bottomrule
+\end{tabular}
+\caption{常见的 GPU OOM 场景与排查方法}
+\end{table}
+
+\begin{warningbox}{常见的内存泄漏陷阱}
+以下写法会意外保留计算图，导致内存持续增长：
+\begin{itemize}
+    \item 把 \texttt{loss} 直接 append 到 Python list 中（应使用 \texttt{loss.item()}）
+    \item 在循环外部持有中间 tensor 的引用而不 detach
+    \item 忘记调用 \texttt{optimizer.zero\_grad(set\_to\_none=True)}，导致梯度在多步间累积
+\end{itemize}
+\end{warningbox}
+
+PyTorch 提供了一套实用的内存调试工具：
+
+\begin{lstlisting}[caption={GPU 内存调试常用命令}]
+# 查看当前显存使用
+print(torch.cuda.memory_allocated() / 1e9, "GB allocated")
+print(torch.cuda.memory_reserved() / 1e9, "GB reserved")
+
+# 打印详细内存摘要
+print(torch.cuda.memory_summary())
+
+# 记录内存快照用于分析
+torch.cuda.memory._record_memory_history()
+# ... run some code ...
+torch.cuda.memory._dump_snapshot("mem_snapshot.pickle")
+\end{lstlisting}
+
+\subsection{Einops 和维度命名}
+
+原生 PyTorch 容易在 `-2`、`-1` 这种负索引里把维度写乱。`einops` 的价值在于把维度变成可读的名字。
+
+\begin{knowledgebox}{维度命名的价值}
+\begin{itemize}
+    \item `batch seq hidden` 一眼就知道张量语义。
+    \item `einsum` 可以把广播和求和写得更清楚。
+    \item `reduce` 和 `rearrange` 让 reshape 逻辑更不容易出错。
+\end{itemize}
+\end{knowledgebox}
+
+这讲里最常见的三种写法是：
+\begin{itemize}
+    \item `einsum(x, y, "batch seq1 hidden, batch seq2 hidden -> batch seq1 seq2")`
+    \item `reduce(x, "... hidden -> ...", "sum")`
+    \item `rearrange(x, "... (heads hidden1) -> ... heads hidden1", heads=2)`
+\end{itemize}
+

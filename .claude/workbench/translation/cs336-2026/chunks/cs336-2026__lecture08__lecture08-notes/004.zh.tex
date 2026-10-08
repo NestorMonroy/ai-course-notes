@@ -1,0 +1,35 @@
+\subsection{naive data parallelism 与它的显存问题}
+
+最自然的起点是 data parallelism：每个 rank 持有完整模型，只切分 batch，并在反向传播后同步梯度。它几乎不改变单卡算子形态，所以吞吐扩展直接、实现成熟；但参数、梯度和 Adam optimizer state 全部复制，单卡显存并不会随 rank 数下降。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-015.jpg}
+\caption{Slide 15：naive data parallelism，把 batch 切给多台机器，交换梯度以同步参数。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读公式：Slide 15 中 SGD 的分布式语义}
+公式 \(\theta_{t+1}=\theta_t-\eta\sum_{i=1}^{B}\nabla f(x_i)\) 中，\(\theta_t\) 是第 \(t\) 步参数，\(\eta\) 是学习率，\(B\) 是 global batch size。data parallel 把 \(B\) 切成 \(M\) 份，每个 rank 算本地梯度，再通过 all-reduce 得到等价于大 batch 的平均梯度。
+\end{knowledgebox}
+
+
+\singleslide{slides-images/slide-016.jpg}{Naive data parallel 的根本显存问题：每张 GPU 都复制完整参数和训练状态。}{16}
+
+Slide 16 把 DDP 的瓶颈从 compute 转回 state replication。数据切分让每张卡只处理局部 batch，却没有减少参数、梯度和 Adam states；增加 GPU 只扩大 global batch，不扩大单卡可容纳的模型。ZeRO 的任务就是逐层删除这些冗余副本。
+
+\begin{warningbox}{讲义补充：源 Slide 16 的“memory problem”不是小修小补}
+DDP 的模型复制让每张卡都有完整参数、完整梯度和完整 optimizer state。即使 batch 被分开，模型状态没有被分开。对超大模型来说，增加 GPU 数并不会降低单卡模型状态，普通 DDP 只能扩吞吐，不能扩容量。
+\end{warningbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-017.jpg}
+\caption{Slide 17：naive data parallel 的显存账本，混合精度 Adam 训练可能需要每参数 16 bytes 级别。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读表：Slide 17 的 16 bytes per param 从哪里来}
+这页把训练状态拆开：BF16/FP16 模型参数、梯度、FP32 master weights、Adam 一阶动量 \(m\)、二阶动量 \(v\) 等。具体 byte 数会随训练配方变化，但结论稳定：optimizer state 往往比参数本身更重。若每张 GPU 都复制这些状态，显存浪费非常大。
+\end{knowledgebox}
+

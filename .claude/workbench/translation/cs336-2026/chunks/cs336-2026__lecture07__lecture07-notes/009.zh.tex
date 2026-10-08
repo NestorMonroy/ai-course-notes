@@ -1,0 +1,52 @@
+\section{三种并行策略的比较与组合}
+
+\subsection{切分对象决定通信形态}
+
+\begin{longtable}{L{0.18\textwidth}L{0.16\textwidth}L{0.25\textwidth}L{0.25\textwidth}}
+\toprule
+并行方式 & 切分对象 & 优点 & 主要代价 \\
+\midrule
+\endhead
+Data parallelism & batch & 简单、吞吐扩展好、每卡完整 forward/backward。 & 模型状态复制，梯度 all-reduce 随参数量增长。 \\
+Tensor parallelism & layer width / tensor dimension & 单层参数和计算可跨卡分摊。 & 每层高频通信，强依赖 NVLink/NVSwitch。 \\
+Pipeline parallelism & layer depth & 模型深度可跨卡放置，通信较粗粒度。 & pipeline bubble、调度复杂、stage 负载均衡困难。 \\
+Sequence/expert parallelism & sequence 或 experts & 支持长上下文或 MoE 参数扩展。 & attention/expert routing 通信和负载均衡复杂。 \\
+\bottomrule
+\end{longtable}
+
+\begin{importantbox}{选择并行策略的第一原则}
+先看瓶颈是什么：如果单卡放不下状态，考虑 ZeRO/FSDP 或 pipeline；如果单层太宽，考虑 tensor parallel；如果吞吐不够但单卡放得下，先做 data parallel；如果 MoE expert 太多，考虑 expert parallel 和 all-to-all 负载均衡。
+\end{importantbox}
+
+\subsection{recompute、memory、communication 三角}
+
+官方总结里有一句非常好的工程判断：可以 recompute，可以存在本地 memory，也可以存在其他 GPU 的 memory 然后 communicate。三者是同一个问题的三个出口。
+
+\begin{knowledgebox}{术语消化：三角权衡}
+\begin{tabular}{L{0.2\textwidth}L{0.35\textwidth}L{0.35\textwidth}}
+\toprule
+选择 & 省了什么 & 付出什么 \\
+\midrule
+memory & 不重算，不通信，最快读取。 & 占 HBM，单卡容量压力大。 \\
+recompute & 少存激活或中间结果。 & 增加 FLOPs，可能拉长 backward。 \\
+communication & 把状态放到别的 rank 或分片存储。 & 消耗网络带宽，增加同步依赖。 \\
+\bottomrule
+\end{tabular}
+\end{knowledgebox}
+
+\subsection{JAX/TPU 路线为什么看起来不同}
+
+官方源提到 JAX/TPU 路线：定义模型、定义 sharding strategy，编译器负责很多底层映射。PyTorch 课程选择从 primitives 讲起，是为了让读者看见底层机制。两者不是谁高谁低，而是抽象层不同：高层 sharding API 更省心，但当性能异常时，仍然需要理解 collectives、拓扑和通信账本。
+
+\begin{knowledgebox}{课堂提示：选择 PyTorch 是为了看见 primitive 如何搭起来}
+官方源主动说明：JAX/TPU 可以让用户声明模型和 sharding strategy，再由编译器处理大量细节；本讲仍用 PyTorch，是为了展示如何从 collective primitives 一层层构造训练策略。这个取舍限定了课程目标：学会读底层通信账本，而不是断言手写 PyTorch 永远优于编译器自动 sharding。
+\end{knowledgebox}
+
+\begin{warningbox}{抽象越高，越不能忘记通信账本}
+自动 sharding 可以搜索或生成并行计划，但目标函数仍然受物理通信约束。性能调试时，如果不知道某个 tensor 被 all-gather 了几次、某个 expert routing 是否 all-to-all，就很难解释 step time。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Data、tensor、pipeline 不是互斥选项。真实大模型训练常把它们组合成 3D/4D parallelism：节点内 tensor parallel，节点间 data/FSDP，模型深度再 pipeline，MoE 层另加 expert parallel。组合的核心仍然是让高频通信留在快链路，让低频通信跨慢链路。
+

@@ -1,0 +1,60 @@
+\section{一次请求怎样变成连续输出的 token}
+
+前面已经定义了 SLA，本节把它落到执行路径。推理引擎本质上是一个长期运行的控制循环，而不是“收到请求就调用一次模型”。它要不断接收新请求、决定谁进入 batch、管理 KV cache、执行 prefill/decode、采样 token、检查停止条件，再把未完成请求送回下一轮。
+
+\subsection{Request-to-token 数据流}
+
+下面沿着单个请求追踪数据流。请求先被 tokenizer 转成 token IDs，scheduler 根据资源和优先级选择执行位置。Prefill 计算输入上下文并生成 KV state；decode 读取权重和缓存，每轮产生一个或少量 token；detokenizer、stop condition 和安全/格式检查再把模型输出变成用户看到的文本。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.91\textwidth]{00-16-00-request-to-token.jpg}
+\caption{从请求到流式 token：prefill 与 decode 处在同一控制循环中。}
+\figsource{课堂视频 00:14:12--00:16:21。}
+\end{figure}
+
+\subsection{Continuous batching：batch 每一步都在变化}
+
+静态 batching 会等一批请求全部结束后再装入下一批，短请求因此被长请求拖住。Continuous batching 在每个 decode step 后检查完成请求，释放其 KV blocks，并把新请求插入可用槽位。这样可以提高利用率，但 scheduler 必须同时满足显存、KV block、优先级和 SLA 约束。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.91\textwidth]{00-16-40-continuous-batching.jpg}
+\caption{Continuous batching：请求在不同 step 到达、结束或因资源不足而排队。}
+\figsource{课堂视频 00:16:23--00:18:02。}
+\end{figure}
+
+读图时应沿时间轴向下看：蓝色长请求占据资源，绿色短请求完成后腾出空间，橙色请求若没有足够 KV capacity 就只能等待。这里的核心不是颜色，而是资源状态会在每一步改变，batch 不是固定数组，而是动态集合。
+
+\subsection{Prefix sharing：缓存的是已经完成的计算}
+
+前面看到 batch 会动态变化，这里进一步利用请求之间的重复。多轮对话、共享 system prompt 和重复长文都会产生公共 prefix。如果每次都重新 prefill，相当于重复计算相同的 key/value。Radix Tree 或 trie 可以按 token prefix 索引已存在的 KV blocks：最长匹配部分直接复用，只有 cache miss 的后缀需要新计算。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{00-18-30-radix-prefix-cache.jpg}
+\caption{Radix Tree prefix sharing：共享 system prompt 与会话前缀只计算一次。}
+\figsource{课堂视频 00:18:02--00:19:13。}
+\end{figure}
+
+\begin{warningbox}{Prefix 相同不等于语义相似}
+KV reuse 通常要求 token 序列精确匹配，不能因为两段文本“意思相近”就直接复用。模型版本、RoPE 设置、量化格式和 adapter 状态变化也会让旧 KV state 失效。
+\end{warningbox}
+
+\subsection{Prefill/decode disaggregation}
+
+因此，既然 prefill 偏计算、decode 偏带宽，就可以把它们放到不同 worker pool：prefill worker 处理长上下文并生成 KV，decode worker 接收 KV 后专注低延迟自回归。这样可以独立扩容两类资源，也能采用不同并行策略和硬件配置。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{00-20-30-prefill-decode-disaggregation.jpg}
+\caption{Prefill/decode disaggregation：在两个资源池之间传输 KV state。}
+\figsource{课堂视频 00:19:13--00:21:10。}
+\end{figure}
+
+分离并非免费：KV transfer 会消耗网络带宽并增加 TTFT；路由错误可能让某一池饱和、另一池空闲；多轮对话若频繁跨节点搬运 KV，收益会被抵消。因此 disaggregation 需要和 cache locality、network topology、append-prefill 比例一起设计。
+
+\subsection{本章小结}
+
+推理引擎是 scheduler、cache manager 与模型执行器组成的循环。Continuous batching 提高资源复用，prefix sharing 避免重复 prefill，prefill/decode disaggregation 允许按不同资源属性扩容；三者都依赖准确的状态追踪与路由。
+

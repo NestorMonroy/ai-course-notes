@@ -1,0 +1,69 @@
+\section{Transformation：先承认格式转换必然有损}
+
+从原始对象进入训练管线的第一道门不是 filter，而是 representation。模型通常消费 token 序列，但原始世界并不是纯文本：网页有导航、脚本、表格和图片；PDF 有二维版面、公式与扫描页；代码仓库有目录结构、依赖关系和 commit 历史。Transformation 的任务不是简单调用 \texttt{strip\_html()}，而是在可扩展成本下决定哪些结构值得保留，并把不可避免的损失变成可观测信号。
+
+\subsection{HTML 到文本：删除 boilerplate 只是第一步}
+
+本节先看最常见的 HTML，因为它最容易制造“已经是文本，所以转换很简单”的错觉。规则型工具如 trafilatura、resiliparse、jusText 会尝试识别正文块并移除广告、导航和页脚；但网页内容抽取具有三个不可避免的困难：第一，DOM 顺序不总是阅读顺序；第二，表格和图片很难线性化；第三，网站模板变化会让规则失效。真正的验收对象不是 parser 是否返回字符串，而是返回的字符串是否仍保留原页面承担教学或事实表达的结构。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.78\textwidth]{dclm-wet.png}
+\caption{DCLM 对 Common Crawl WET 文本质量的分析示例。}
+\figsource{Stanford CS336 2026 Lecture 14 官方可执行讲义，\texttt{images/dclm-wet.png}。}
+\end{figure}
+
+这张图的价值不在于给出一个“最佳 parser”，而在于提醒我们：原始 WET 文本已经经过一次抽取，错误会被静默写进训练集。若正文被截断、菜单被保留、公式被打碎，后面的质量分类器可能把 parser 风格当成内容质量的信号。
+
+\begin{knowledgebox}{读图：不要只看平均抽取成功率}
+先区分图中不同来源或 parser 的比较对象，再看正文保留、boilerplate 残留与失败样本的尾部，而不是只盯住一个总体均值。对训练数据而言，少量系统性错误比随机噪声更危险：如果某类网站总被截断，后续 filter 会把该 domain 的残缺文本当成它的正常风格，最终造成稳定而隐蔽的分布偏差。
+\end{knowledgebox}
+
+\begin{warningbox}{不要把 parser 输出当成 ground truth}
+抽取后的文本应保留 source URL、抓取时间、content type、parser version 和失败标记。否则当模型出现奇怪模板化行为时，无法判断问题来自原网页、转换器还是过滤器。
+\end{warningbox}
+
+\subsection{PDF 与代码仓库：二维结构和目录结构不能被忽略}
+
+进一步看 PDF 与代码仓库，问题会从“删掉噪声”升级为“恢复原对象中的关系”。PDF 处理通常需要 OCR、layout analysis、公式识别和 reading-order reconstruction。FinePDFs 一类流程会重新抓取被截断的 PDF，并结合 VLM/OCR 工具恢复内容；但转换后仍可能丢失图表、脚注和多栏关系。代码仓库则需要决定文件拼接顺序、是否保留测试、issue、PR 和 commit message，以及怎样避免把 vendor 或 generated files 当成高价值代码。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{finepdfs-pdf-structure.png}
+\caption{PDF source code 与视觉版面的对应：文字、字体、坐标、图片和绘制指令共同决定最终页面。}
+\figsource{Stanford CS336 2026 Lecture 14 官方可执行讲义引用的 FinePDFs 图，本地化为 \texttt{images/finepdfs-pdf-structure.png}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：PDF 不是“带换行的纯文本”}
+先看左侧对象流：header、字体对象、page content stream 与外部图片资源彼此引用；再看右侧渲染结果，同一段可见文字依赖字体、坐标和绘制顺序才能恢复。图支持的结论是 PDF extraction 必须重建 reading order 与版面关系，而不是按文件字节顺序抄出字符串。它没有保证 OCR/VLM 一定恢复正确，因此多栏、公式、表格和扫描页仍要单独做 slice audit。
+\end{knowledgebox}
+
+\begin{knowledgebox}{结构是一种监督信号}
+对代码而言，目录、import graph、测试与实现的对应关系本身就是语义；对论文而言，标题层级、公式编号、图注和引用关系也是语义。将一切压成无结构文本虽然方便，却可能主动丢掉模型最需要学习的关联。
+\end{knowledgebox}
+
+\teachervoice{课堂提醒：转换阶段看似“只是工程”，但 parser accuracy 会直接影响后续数据选择。处理万亿 token 时，一个很小的系统性错误也会被重复数十亿次。}
+
+\begin{knowledgebox}{讲义提醒：Transformation QA 不能只抽查“看起来正常”的样本}
+讲义建议主动寻找失败面：多栏论文、扫描 PDF、公式密集页面、动态渲染网页、超长代码文件和含大量生成文件的 repository。随机抽样主要估计平均质量；针对高风险 slice 的抽样才有机会暴露会被规模放大的系统性缺陷。
+\end{knowledgebox}
+
+\subsection{Transformation QA：把损失写成可测量指标}
+
+为了让转换器可迭代，需要把“文本看起来还行”改成分层验收。下面的表不是要求每种对象都达到同一分数，而是要求团队提前声明保真目标，并为无法保留的结构输出 failure flag。这样后续 filter 才能区分内容低质与解析失败。
+
+\begin{longtable}{L{0.17\textwidth}L{0.24\textwidth}L{0.24\textwidth}L{0.21\textwidth}}
+\toprule
+对象 & 自动指标 & 人工抽查 & 失败后的处理 \\
+\midrule
+HTML & 正文长度比、链接密度、重复导航率 & 标题层级、表格、图片上下文是否保留 & 回退 parser 或标记低置信度 \\
+PDF & OCR 字错率、reading-order 一致率、公式/图注检出率 & 多栏、脚注、跨页表格、扫描页 & 保留页面图并单独走 VLM/OCR \\
+代码仓库 & 可解析文件率、generated/vendor 占比、测试关联率 & 文件顺序、依赖、issue--patch--test 对齐 & 排除噪声目录或按 repository 打包 \\
+所有对象 & parser 失败码、版本、吞吐与成本 & 按 source/domain/长度做 slice audit & 将 provenance 传给下游，不静默丢弃 \\
+\bottomrule
+\end{longtable}
+
+\subsection{本章小结}
+
+Transformation 的目标不是无损复原——多数情况下做不到——而是让损失可度量、可追踪、可迭代。一个好的转换器既输出文本，也输出 provenance 和 uncertainty。
+

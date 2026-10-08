@@ -1,0 +1,98 @@
+\subsection{Checkpointing}
+
+训练语言模型往往很久，而且很容易中断（硬件故障、抢占、OOM）。所以要定期保存 checkpoint。
+
+\begin{lstlisting}[caption={保存 checkpoint 的标准写法}]
+checkpoint = {
+    'model_state_dict': model.state_dict(),
+    'optimizer_state_dict': optimizer.state_dict(),
+    'step': step,
+    'loss': loss.item(),
+    'rng_state': torch.random.get_rng_state(),
+}
+torch.save(checkpoint, f'checkpoint_step_{step}.pt')
+\end{lstlisting}
+
+\begin{lstlisting}[caption={恢复 checkpoint 的标准写法}]
+checkpoint = torch.load(f'checkpoint_step_{step}.pt')
+model.load_state_dict(checkpoint{[}'model_state_dict'{]})
+optimizer.load_state_dict(checkpoint{[}'optimizer_state_dict'{]})
+torch.random.set_rng_state(checkpoint{[}'rng_state'{]})
+start_step = checkpoint{[}'step'{]}
+\end{lstlisting}
+
+\begin{warningbox}{只存模型不够}
+如果只存 model，不存 optimizer，那么恢复后学习率状态、动量累积、平方梯度缓存都没了，训练行为会和之前不一样。尤其是 Adam 系列优化器，$m_t$ 和 $v_t$ 需要大量 step 才能预热到稳定状态，丢失后相当于重新开始预热。
+\end{warningbox}
+
+\subsubsection{Checkpoint 频率与存储成本}
+
+Checkpoint 的频率需要在”恢复代价”和”存储成本”之间权衡：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.18\textwidth}p{0.28\textwidth}p{0.35\textwidth}}
+\toprule
+\textbf{策略} & \textbf{频率} & \textbf{权衡} \\
+\midrule
+保守 & 每 1000 步 & 存储开销小，但中断后最多浪费 1000 步 \\
+激进 & 每 100 步 & 恢复损失小，但存储快速增长 \\
+混合 & 近期密集 + 远期稀疏 & 保留最近 5 个 + 每 N 步一个永久 \\
+\bottomrule
+\end{tabular}
+\caption{checkpoint 频率策略的常见选择}
+\end{table}
+
+以 7B 模型为例，一个完整 checkpoint（模型 + 优化器 + RNG）大约需要：
+$$
+\underbrace{7 \times 10^9 \times 2}_{\text{bf16 参数}} + \underbrace{7 \times 10^9 \times (4+4+4)}_{\text{fp32 主权重 + } m + v} \approx 14 + 84 = 98 \text{ GB}
+$$
+
+如果每 100 步存一个、保留最近 10 个，光 checkpoint 就需要约 1 TB 存储。
+
+\subsubsection{Checkpoint 的异步保存}
+
+大规模训练中，同步保存 checkpoint 会阻塞训练。常见做法是把 checkpoint 数据先拷贝到 CPU 内存（或 pinned memory），然后在后台线程中异步写入磁盘，同时 GPU 继续下一步训练。
+
+\begin{knowledgebox}{分布式 checkpoint}
+当模型被切分到多张 GPU 上（模型并行/数据并行）时，每张卡只保存自己的那部分状态。恢复时需要确保切分方式完全一致，否则状态会对不上。PyTorch 的 \texttt{DistributedStateDictSaveLoad} 和 DeepSpeed 的 checkpoint 引擎都提供了自动化的分布式 checkpoint 管理。
+\end{knowledgebox}
+
+\subsubsection{Checkpoint 格式选择}
+
+不同的 checkpoint 格式有不同的权衡：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.17\textwidth}p{0.22\textwidth}p{0.22\textwidth}p{0.22\textwidth}}
+\toprule
+\textbf{格式} & \textbf{优点} & \textbf{缺点} & \textbf{适用场景} \\
+\midrule
+\texttt{torch.save} (pickle) & PyTorch 原生、支持任意对象 & 安全风险（pickle 反序列化）、不支持部分加载 & 训练中间 checkpoint \\
+\texttt{safetensors} & 安全、支持 mmap 部分加载、跨框架 & 只能存 tensor 字典 & 模型发布与共享 \\
+\texttt{torch.distributed .checkpoint} & 支持分布式保存/加载、resharding & API 较新、生态不够成熟 & 大规模分布式训练 \\
+\bottomrule
+\end{tabular}
+\caption{常见 checkpoint 格式的对比}
+\end{table}
+
+\begin{warningbox}{pickle 的安全风险}
+\texttt{torch.save} 使用 Python 的 pickle 协议，这意味着加载一个不受信任的 checkpoint 文件可能执行任意代码。在加载来自互联网的模型权重时，优先选择 \texttt{safetensors} 格式，或者使用 \texttt{torch.load(..., weights\_only=True)} 来限制反序列化行为。
+\end{warningbox}
+
+\subsubsection{长训练的 Checkpoint 最佳实践}
+
+对于持续数周甚至数月的大规模训练，checkpoint 策略需要更加系统化：
+
+\begin{enumerate}
+    \item \textbf{滚动保留}：保留最近 $k$ 个 checkpoint（如最近 5 个），自动删除更早的，防止存储爆炸。
+    \item \textbf{里程碑永久保存}：在关键节点（如每 10\% 训练进度）永久保存一个 checkpoint，用于后续分析。
+    \item \textbf{保存训练指标}：除了模型和优化器状态，还要保存 loss 曲线、学习率、梯度范数等指标，方便恢复后验证一致性。
+    \item \textbf{预留时间}：在集群抢占或定时任务到期前，提前触发一次 checkpoint（如收到 SIGTERM 信号时）。
+    \item \textbf{校验完整性}：保存后立即验证 checkpoint 文件的完整性（如 checksum），避免写入中断导致的损坏。
+\end{enumerate}
+
+\begin{knowledgebox}{Checkpoint 与训练的 wall-clock 开销}
+以 7B 模型为例，一个完整 checkpoint 约 98 GB。在 NVMe SSD（写入 3 GB/s）上，同步保存需要约 33 秒。如果每 100 步存一次，且每步约 2 秒，那么 checkpoint 开销约为 $33 / (100 \times 2) \approx 16\%$。使用异步保存可以将这个开销降到接近零。
+\end{knowledgebox}
+

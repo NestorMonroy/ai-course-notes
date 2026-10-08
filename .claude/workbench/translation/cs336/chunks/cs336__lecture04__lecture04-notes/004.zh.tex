@@ -1,0 +1,150 @@
+\section{MoE 的训练挑战}
+
+MoE 的训练远比 Dense 模型复杂。核心挑战在于：\textbf{训练时必须保持稀疏激活}（否则 FLOPs 与 Dense 无异），但稀疏路由决策不可微。
+
+\subsection{三种训练策略}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-023.jpg}
+\caption{MoE 训练的三种策略：强化学习（RL）、随机近似、启发式损失\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第24页。}
+
+\begin{enumerate}
+    \item \textbf{强化学习（RL）}：最原则化——将路由视为策略，用 policy gradient 优化。但计算开销大、梯度方差高，实践中效果不如更简单的方法。
+    \item \textbf{随机近似（Stochastic Approximation）}：在路由分数上添加噪声，实现探索-利用权衡
+    \item \textbf{启发式辅助损失（Heuristic Auxiliary Loss）}：添加额外的损失项鼓励负载均衡——\textbf{这是目前所有主流系统使用的方法}
+\end{enumerate}
+
+\subsection{随机路由：Shazeer 2017}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-025.jpg}
+\caption{Shazeer et al. 2017 的随机路由方案：在 affinity 分数上添加可学习的高斯噪声\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第26页。来自 Shazeer et al. 2017。}
+
+Shazeer 2017 的方案在标准路由分数上添加\textbf{可学习幅度的高斯噪声}：
+
+$$H(x)_i = (x \cdot W_g)_i + \text{StandardNormal}() \cdot \text{Softplus}((x \cdot W_{\text{noise}})_i)$$
+$$G(x) = \text{Softmax}(\text{KeepTopK}(H(x), k))$$
+
+其中 $W_{\text{noise}}$ 控制噪声的幅度，可以通过学习来调节探索-利用权衡。
+
+\begin{knowledgebox}{随机路由的权衡}
+\begin{itemize}
+    \item \textbf{优点}：噪声使每个 expert 随机接收一些``意外'' token，减少过度专业化，增强鲁棒性
+    \item \textbf{缺点}：随机性降低了专业化程度，导致效率损失；如果训练时有随机性但测试时没有，会产生 train-test mismatch
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{辅助损失（Auxiliary Loss）：负载均衡的启发式方法}
+
+辅助损失是目前最广泛使用的训练策略。核心问题是：如果没有负载均衡约束，MoE 训练会发生什么？
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-030.jpg}
+\caption{没有负载均衡时的 expert 分配情况（OLMoE）：少数 expert 垄断大量 token（Expert Collapse），训练和验证 loss 都更差\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第31页。来自 OLMoE。}
+
+\begin{warningbox}{Expert Collapse：MoE 训练的最大敌人}
+没有负载均衡约束时，路由器会进入\textbf{正反馈循环}：某个 expert 获得更多 token $\rightarrow$ 获得更多训练 $\rightarrow$ 变得更好 $\rightarrow$ 吸引更多 token。最终只有 2--3 个 expert 处理所有 token，其余 expert ``死亡''。这被称为 Expert Collapse，会严重浪费模型容量。
+\end{warningbox}
+
+\subsubsection{标准辅助损失（Load Balancing Loss）}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-027.jpg}
+\caption{辅助损失的数学定义：通过 $f_i$（expert $i$ 的实际负载）和 $P_i$（expert $i$ 的路由概率）的内积来惩罚不均衡\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第28页。来自 Fedus et al. 2022。}
+
+标准负载均衡损失的形式为：
+
+$$\mathcal{L}_{\text{balance}} = \alpha \cdot N \sum_{i=1}^{N} f_i \cdot P_i$$
+
+其中：
+\begin{itemize}
+    \item $f_i = \frac{1}{T} \sum_{t=1}^{T} \mathbf{1}(\text{Token } t \text{ selects Expert } i)$：expert $i$ 被选中的频率
+    \item $P_i = \frac{1}{T} \sum_{t=1}^{T} s_{i,t}$：expert $i$ 的平均路由概率
+    \item $\alpha$：辅助损失权重（超参数）
+\end{itemize}
+
+\begin{warningbox}{辅助损失权重 $\alpha$ 需要精心调节}
+$\alpha$ 过大会过度干扰语言模型的主损失，降低模型质量；$\alpha$ 过小则无法有效防止 Expert Collapse。这是 MoE 训练中最需要调参的超参数之一。
+\end{warningbox}
+
+\subsubsection{Z-Loss：稳定路由器}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-035.jpg}
+\caption{Z-Loss 的效果：没有 Z-Loss（青色）的训练极不稳定，出现剧烈的 loss 尖峰；加入 Z-Loss（粉色）后训练显著平稳\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第36页。来自 OLMoE。}
+
+Z-Loss（来自 ST-MoE）通过惩罚路由器 logits 的绝对值来防止数值不稳定：
+
+$$\mathcal{L}_z = \frac{1}{T} \sum_{t=1}^{T} \left(\log \sum_{i=1}^{N} e^{x_{i,t}}\right)^2$$
+
+\begin{importantbox}{Z-Loss 对训练稳定性至关重要}
+OLMoE 的实验表明，去掉 Z-Loss 会导致训练出现\textbf{灾难性的 loss 尖峰}——Validation loss 骤升、HellaSwag 性能暴跌。Z-Loss 是 MoE 训练的``安全网''。
+\end{importantbox}
+
+\subsection{DeepSeek V3 的创新：Auxiliary-Loss-Free Balancing}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-033.jpg}
+\caption{DeepSeek V3 的 Auxiliary-Loss-Free Balancing：通过可学习的偏置项 $b_i$ 进行在线负载均衡，无需辅助损失\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第34页。来自 DeepSeek V3 论文。}
+
+DeepSeek V3 提出了一种优雅的替代方案：
+
+\begin{enumerate}
+    \item 在路由分数上添加一个\textbf{per-expert 偏置} $b_i$：$s'_{i,t} = s_{i,t} + b_i$
+    \item 用 $s'_{i,t}$ 做 Top-K 路由决策，但\textbf{门控权重仍然使用原始的 $s_{i,t}$}
+    \item $b_i$ 通过简单的在线学习更新：如果 expert $i$ 的 token 不足，增大 $b_i$（$b_i \mathrel{+}= \gamma$）；如果过多，减小 $b_i$（$b_i \mathrel{-}= \gamma$）
+\end{enumerate}
+
+\begin{knowledgebox}{DeepSeek V3 的``非完全无辅助损失''}
+尽管 DeepSeek V3 论文大力宣传 Auxiliary-Loss-Free Balancing 的稳定性优势，但细读论文会发现他们\textbf{仍然保留了一个 sequence-level 的辅助损失}来实现序列级别的负载均衡。因此这个方法并非完全``loss-free''。
+\end{knowledgebox}
+
+\subsection{多层次负载均衡}
+
+DeepSeek 实践中使用多层次的负载均衡：
+
+\begin{enumerate}
+    \item \textbf{Per-Expert Balancing}（每批次）：确保每个 expert 在每个 batch 中获得大致相同数量的 token
+    \item \textbf{Per-Device Balancing}：确保每个设备上的 expert 总共获得大致相同数量的 token，优化硬件利用率
+    \item \textbf{Per-Sequence Balancing}（DeepSeek V3）：确保在序列级别也保持均衡
+\end{enumerate}
+
+\subsection{Token Dropping 与容量因子}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-036.jpg}
+\caption{Token Dropping 机制：当某个 expert 的 token 超过容量上限时，多余的 token 通过残差连接``跳过'' MoE 层\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第37页。}
+
+当某个 expert 接收到过多 token 时，超出容量的 token 会被``丢弃''——它们不经过任何 expert，直接通过残差连接传递。这引入了一个\textbf{容量因子}（Capacity Factor）超参数，控制每个 expert 能接受的最大 token 数。
+
+\begin{warningbox}{Token Dropping 会导致推理时的非确定性}
+在推理时，如果请求被 batch 处理，不同请求的 token 可能竞争同一个 expert 的容量。这意味着\textbf{相同的输入在不同 batch 中可能产生不同输出}——这可能是 GPT-4 在 temperature=0 时仍然非确定性的原因之一。
+\end{warningbox}
+
+\subsection{本章小结}
+
+MoE 训练的核心挑战是平衡\textbf{路由质量}和\textbf{负载均衡}。行业共识是使用辅助损失 + Z-Loss 的组合。DeepSeek V3 的 bias-based balancing 是一个有趣的替代方案，但并非完全取代辅助损失。Expert Collapse 是最需要警惕的问题——没有负载均衡约束的 MoE 训练几乎必然失败。
+
+%% ========== Part 5: 系统与推理 ==========
+

@@ -1,0 +1,118 @@
+\section{DPO：把 RLHF 转成离线 pairwise classification}
+
+本节承接 PPO 的工程负担。DPO 从 KL-regularized RL objective 出发，在非参数最优解下把 reward 写成 policy 与 reference policy 的 log-ratio，再代回 Bradley--Terry likelihood，从而消除显式 reward model 和 on-policy rollout loop。
+
+\subsection{从 implied reward 到 DPO loss}
+
+接下来把同一个受约束目标改写成离线分类。关键不是假设 reward 已知，而是利用最优 policy 与 reference 的 log-ratio 反推出一个 implied reward；在同一 prompt 的 preferred/rejected 差值中，无法观测的 partition function 会抵消。
+
+KL-regularized objective 的最优 policy 满足：
+
+$$
+\pi^*(y\mid x)
+=\frac{1}{Z(x)}\pi_{\mathrm{ref}}(y\mid x)\exp\!\left(\frac{1}{\beta}r(x,y)\right).
+$$
+
+因此 reward 可写成：
+
+$$
+r(x,y)=\beta\log\frac{\pi^*(y\mid x)}{\pi_{\mathrm{ref}}(y\mid x)}+\beta\log Z(x).
+$$
+
+在同一 prompt 的 pairwise difference 中，$\log Z(x)$ 抵消。DPO 最小化：
+
+$$
+\mathcal{L}_{\mathrm{DPO}}(\theta)
+=-\mathbb{E}_{(x,y^+,y^-)}
+\log\sigma\!\left[
+\beta\left(
+\log\frac{\pi_\theta(y^+\mid x)}{\pi_{\mathrm{ref}}(y^+\mid x)}
+-\log\frac{\pi_\theta(y^-\mid x)}{\pi_{\mathrm{ref}}(y^-\mid x)}
+\right)
+\right].
+$$
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{slide-55.jpg}
+\caption{DPO 的目标：去掉显式 reward model 与 on-policy rollout。}
+\figsource{CS336 Spring 2026 Lecture 15，Slide 55。}
+\end{figure}
+
+Slide 55 给出 DPO 的工程承诺：不再维护显式 reward model、value model 与 on-policy rollout outer loop，而是直接对 preferred response 做正向更新、对 rejected response 做负向更新。但“适当加权”是关键，简单地分别最大化和最小化 likelihood 会导致不受约束的漂移；DPO 的推导负责给出 reference-relative 的权重与饱和机制。
+
+\singleslide{slide-56.jpg}{从 KL-regularized RLHF 目标求出最优 policy，并反解 policy 所隐含的 reward。}{56}
+
+Slide 56 的第一步是假设优化空间包含所有条件分布，即 nonparametric assumption。在此理想化条件下，最优 policy 是 reference policy 乘以 reward 的指数权重，再由 $Z(x)$ 归一化。反解后，reward 等于 policy/reference log-ratio 加上只依赖 prompt 的常数；这个闭式关系是 DPO 消除显式 reward model 的桥梁，也意味着推导依赖理想化假设。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{slide-57.jpg}
+\caption{DPO derivation：把 implied reward 代入 pairwise likelihood。}
+\figsource{CS336 Spring 2026 Lecture 15，Slide 57。}
+\end{figure}
+
+Slide 57 把 implied reward 代回 Bradley--Terry preference likelihood。因为 $y^+$ 与 $y^-$ 共享 prompt，$\log Z(x)$ 在 reward difference 中消失，最终只剩 policy 和 reference 对两条回答的 log-probability。DPO 因此看起来像监督学习，但监督目标不是复现赢家文本，而是拟合一组由 RL 最优条件诱导出的 pairwise reward differences。
+
+\singleslide{slide-58.jpg}{DPO 梯度分解：提高赢家、压低输家，并按当前 implied-reward prediction error 调节强度。}{58}
+
+老师在这里强调，理解 DPO 最直观的方法是看梯度。若模型仍把 rejected response 判得更高，sigmoid 权重较大，更新会同时提高 $\log\pi_\theta(y^+\mid x)$ 并降低 $\log\pi_\theta(y^-\mid x)$；当 pair 已被正确分开，权重逐渐变小。Reference 项虽然不更新，却决定“当前 policy 相对起点改变了多少”。
+
+\begin{knowledgebox}{读图：DPO 更新在做什么}
+当 policy 对 preferred response 的相对 log-ratio 不够高时，loss 增大；梯度提高 $y^+$ 的相对概率并压低 $y^-$。Reference policy 提供锚点，$\beta$ 控制偏离幅度。它不是“只在好答案上做 SFT”，因为 rejected response 也进入相对目标。
+\end{knowledgebox}
+
+\subsection{Worked example：DPO margin 的三个区域}
+
+为了看清一条 pair 何时仍有梯度，本节把 DPO 的长公式压缩成一个标量。定义相对 margin 为“preferred 相对 reference 的提升”减去“rejected 相对 reference 的提升”；它直接衡量当前 policy 是否比 reference 更偏向标注中的赢家：
+
+$$
+m_\theta=
+\left[\log\pi_\theta(y^+\mid x)-\log\pi_{\mathrm{ref}}(y^+\mid x)\right]
+-\left[\log\pi_\theta(y^-\mid x)-\log\pi_{\mathrm{ref}}(y^-\mid x)\right].
+$$
+
+DPO loss 就是 $-\log\sigma(\beta m_\theta)$。当 $m_\theta<0$ 时，当前 policy 相对 reference 更偏向 rejected answer，梯度最强；当 $m_\theta=0$ 时，pair 尚未被区分；当 $m_\theta\gg0$ 时，loss 饱和，继续拉大 margin 的收益变小。
+
+\begin{importantbox}{DPO 的学习信号来自“相对 reference 的差中之差”}
+若 preferred 和 rejected 都同时被 policy 提高相同幅度，$m_\theta$ 不变；若 pair 本身只差长度或格式，模型就会把这些属性当成最便宜的分类特征。因此 pair construction 决定了 DPO 最终学到什么。
+\end{importantbox}
+
+\subsection{Variants 与 empirical contingency}
+
+进一步，SimPO 去掉 explicit reference，length-normalized DPO 试图减少长度偏差，其他变体修改 margin、label smoothing、sampling 或 weighting。课程的重点不是记住所有缩写，而是理解：很多 empirical result 高度依赖 base model、pair generation、length distribution 和 evaluation setup。
+
+\slidepair{slide-59.jpg}{slide-60.jpg}{开源模型中的 DPO + expert iteration，以及 SimPO、length-normalized DPO 等变体。}{59--60}
+
+Slide 59 表明实际 recipe 很少是“一次静态 DPO”：模型先生成新候选，由 judge 或 verifier 选出更好轨迹，再把新 pairs 回灌训练，形成 expert iteration。Slide 60 的 SimPO 去掉显式 reference，length-normalized DPO 则修正序列 log-prob 随长度累积的问题。每个变体都在改变锚点、margin 或长度归一化，不能只用缩写比较结果。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{slide-61.jpg}
+\caption{PPO 与 DPO 的比较并不存在脱离 recipe 的统一赢家。}
+\figsource{CS336 Spring 2026 Lecture 15，Slide 61。}
+\end{figure}
+
+\begin{warningbox}{Offline preference optimization 的支持集问题}
+DPO 只学习数据中出现的 pairs。若 candidate policy 从未生成某类高质量行为，DPO 无法凭空发现；若 rejected responses 太弱，模型只学会容易的区别。Preference collection 与 optimization 必须共同设计。
+\end{warningbox}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{L{0.18\textwidth}L{0.31\textwidth}L{0.41\textwidth}}
+\toprule
+选择 & 更适合 & 主要代价 \\
+\midrule
+PPO / online RL & verifier/reward 可在线调用，需要探索新行为 & 多模型系统、rollout 成本、稳定性复杂 \\
+DPO / offline pairs & 已有高质量 pairs，希望快速稳定训练 & 受 support 限制，无法主动发现新策略 \\
+Iterative DPO & 可周期性重新采样 candidates & 仍需维护数据新鲜度与 judge 可靠性 \\
+SFT + rejection sampling & verifier 强、只需保留优质轨迹 & 不直接学习 rejected signal，探索依赖 generator \\
+\bottomrule
+\end{tabular}
+\caption{Preference optimization 路线选择。}
+\end{table}
+
+\subsection{本章小结}
+
+DPO 用 closed-form implied reward 把 RLHF 变成离线 pairwise objective，显著简化训练。但它仍受 preference data 覆盖、reference policy、长度偏差和超参数影响，并不消除 reward specification 问题。
+

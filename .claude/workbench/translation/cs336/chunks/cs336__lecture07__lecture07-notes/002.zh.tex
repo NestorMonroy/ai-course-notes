@@ -1,0 +1,82 @@
+\section{网络层次与集合通信}
+
+在讨论并行算法之前，我们需要理解 GPU 之间的通信拓扑。这一节课聚焦于硬件互连层次以及构建并行算法的基本通信原语。
+
+\subsection{GPU 互连层次结构}
+
+GPU 不是孤立存在的。在 NVIDIA 的典型配置中，一台\textbf{节点}（node）包含 8 个 GPU，通过 \textbf{NVSwitch/NVLink} 实现超高速互连。不同节点之间则通过 \textbf{InfiniBand} 等网络互连，速度明显更低。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-004.jpg}
+\caption{GPU 节点内部架构示意：8 GPU 通过 NVSwitch 互连，节点间通过 InfiniBand 连接\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第5页。来自 GPT-NeoX 论文，同样的层次结构适用于 H100 机器。}
+
+\begin{importantbox}{三级带宽层次}
+\begin{enumerate}
+    \item \textbf{节点内（Intra-node）}：NVLink/NVSwitch，8 GPU 全互连，带宽极高（约 900 GB/s per GPU on H100）
+    \item \textbf{机架内（Intra-rack）}：InfiniBand/RoCE，约 256 GPU 全互连，带宽约为节点内的 $1/8$
+    \item \textbf{跨机架（Inter-rack）}：通过叶脊网络（leaf-spine），带宽进一步下降
+\end{enumerate}
+\end{importantbox}
+
+这种\textbf{异构}的带宽层次将直接决定我们在不同层级上使用哪种并行策略。
+
+\subsection{集合通信原语}
+
+并行算法的核心构建块是一组\textbf{集合通信}（collective communication）操作。掌握它们是理解所有并行策略的基础。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-005.jpg}
+\caption{集合通信操作一览：All-Reduce、Broadcast、Reduce、All-Gather、Reduce-Scatter\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第6页。}
+
+\begin{knowledgebox}{五种基本集合通信操作}
+\begin{itemize}
+    \item \textbf{All-Reduce}：每个 rank 拥有一份数据，对所有数据执行归约（如求和），结果复制到所有 rank。通信量约 $2 \times |data|$
+    \item \textbf{Broadcast}：一个 rank 的数据复制到所有 rank。通信量约 $1 \times |data|$
+    \item \textbf{Reduce}：所有 rank 的数据归约到一个 rank。通信量约 $1 \times |data|$
+    \item \textbf{All-Gather}：每个 rank 拥有数据的一个分片，收集后所有 rank 拥有完整数据。通信量约 $1 \times |data|$
+    \item \textbf{Reduce-Scatter}：每个 rank 拥有完整数据，归约后将结果的不同分片分发到对应 rank。通信量约 $1 \times |data|$
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{核心恒等式：All-Reduce = Reduce-Scatter + All-Gather}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-006.jpg}
+\caption{All-Reduce 可以分解为 Reduce-Scatter + All-Gather，且带宽开销相同\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第7页。}
+
+\begin{importantbox}{关键恒等式}
+$$\text{All-Reduce} \equiv \text{Reduce-Scatter} + \text{All-Gather}$$
+在带宽受限的情况下，这两种实现方式的通信开销\textbf{完全等价}。这一恒等式是理解 ZeRO 优化器和 FSDP 为何"零额外通信开销"的关键。
+\end{importantbox}
+
+\subsection{GPU 与 TPU 网络拓扑对比}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-008.jpg}
+\caption{GPU 交换机网络 vs. TPU 环面网格（Toroidal Mesh）拓扑\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第9页。}
+
+\begin{knowledgebox}{GPU vs. TPU 网络设计哲学}
+\begin{itemize}
+    \item \textbf{GPU（NVIDIA）}：节点内 8 GPU 全互连 $\rightarrow$ 约 256 GPU 通过交换机全互连 $\rightarrow$ 更大规模需叶脊网络。全互连(all-to-all) 通信快速，但扩展到数千 GPU 时出现瓶颈。
+    \item \textbf{TPU（Google）}：采用\textbf{环面网格}拓扑，每个 TPU 只与邻居通信。扩展性极佳（无 256 GPU 阈值），且集合通信效率不逊于全互连。Google 因此可以减少对流水线并行的依赖。
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+硬件层次结构决定了并行策略的选择。节点内的高速 NVLink 适合通信密集的张量并行；节点间较慢的 InfiniBand 适合通信量较小的数据并行和流水线并行。所有并行算法都可以用集合通信原语来描述和分析，其中 All-Reduce = Reduce-Scatter + All-Gather 是最重要的恒等式。
+
+%% ========== Part 3: 数据并行 ==========
+

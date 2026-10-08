@@ -1,0 +1,75 @@
+\section{PagedAttention：用操作系统思想管理 KV cache}
+
+前面的 Continuous batching 让请求集合动态变化，传统为每条序列预留连续最大 cache 的方法会产生严重碎片。本部分借用虚拟内存思想，把逻辑 KV 序列映射到固定大小的物理 blocks，使系统能够按需分配、非连续存储、共享 prefix，并在写入时执行 copy-on-write。
+
+\begin{knowledgebox}{课堂提示：PagedAttention 直接借用操作系统 paging}
+老师先把旧方案类比为硬盘碎片：按最大长度预留会产生 internal fragmentation，请求释放后还会留下 external fragmentation。解决方案是把每条序列的 KV cache 切成非连续 blocks，用逻辑映射隐藏物理位置；共享 prefix 时复用 blocks，分叉写入时 copy-on-write。这里的模型服务创新来自操作系统思想，而不是新的 attention 数学。
+\end{knowledgebox}
+
+\subsection{fragmentation 与 blocks}
+
+本节先区分 internal fragmentation 与 external fragmentation。前者来自为短请求预留未使用空间，后者来自空闲区域不连续而无法容纳新请求；固定大小 blocks 将分配单位标准化，再通过 block table 把逻辑 token 位置映射到任意物理页。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{paged-attention-fragmentation.png}
+\caption{传统 KV cache 预分配会产生 internal/external fragmentation。}
+\figsource{vLLM/PagedAttention 论文图，供 CS336 Lecture 10 使用。}
+\end{figure}
+
+\begin{knowledgebox}{读图：KV cache fragmentation}
+如果为每个请求按最大长度预留连续空间，实际生成较短时会产生 internal fragmentation；不同请求释放/分配后，空洞之间不连续，又会产生 external fragmentation。显存看似充足，却无法容纳新的长请求。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{paged-attention-blocks.png}
+\caption{PagedAttention 把每个序列的 KV cache 切成非连续 blocks。}
+\figsource{vLLM/PagedAttention 论文图，供 CS336 Lecture 10 使用。}
+\end{figure}
+
+\begin{knowledgebox}{读图：blocks 像虚拟内存页}
+每个请求看到的是逻辑连续的 token 序列，但物理 KV blocks 可以分散在显存里。调度器维护 block table，把逻辑位置映射到物理块。这样可以按需增长，而不是一开始预留最大长度。
+\end{knowledgebox}
+
+\subsection{sharing、copy-on-write 与并行读取}
+
+有了逻辑到物理 block 映射后，系统可以进一步共享相同 system prompt 或多样本生成的 prefix。多个请求先引用同一只读 blocks，只有某个分支写入新 token 时才复制对应页；attention kernel 则根据 block table 并行读取非连续 cache，避免先搬成连续大缓冲区。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{paged-attention-logical.png}
+\caption{PagedAttention 的逻辑视图：请求可以共享 prefix 的 KV blocks。}
+\figsource{vLLM/PagedAttention 论文图，供 CS336 Lecture 10 使用。}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{paged-attention-sharing.png}
+\caption{KV cache sharing 场景：共享 system prompt、多样本生成、程序合成等。}
+\figsource{vLLM/PagedAttention 论文图，供 CS336 Lecture 10 使用。}
+\end{figure}
+
+\begin{knowledgebox}{读图：prefix sharing 为什么省显存}
+多个请求若有相同 system prompt 或同一 prompt 的多个 samples，前缀 KV 完全相同。PagedAttention 可让它们共享同一批 blocks；当某个请求继续生成并发生分叉时，再 copy-on-write 新 blocks。这和操作系统共享内存页的思路一致。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{paged-attention-parallel.png}
+\caption{PagedAttention 并行读取 blocks 并执行 attention。}
+\figsource{vLLM/PagedAttention 论文图，供 CS336 Lecture 10 使用。}
+\end{figure}
+
+\begin{knowledgebox}{读图：PagedAttention 不只是内存分配器}
+为了让非连续 blocks 不拖慢 attention，系统还需要 kernel 支持：融合 block read 和 attention，减少 launch overhead，配合 FlashAttention/FlashDecoding/CUDA graphs。内存管理和 kernel design 必须一起做。
+\end{knowledgebox}
+
+\begin{importantbox}{PagedAttention 的系统意义}
+PagedAttention 把 KV cache 从“连续大数组”变成“可分页的逻辑地址空间”。它直接服务动态 workload：变长请求、共享前缀、多样本生成、早停、长上下文。vLLM 的成功说明，LLM serving 的关键创新不只在模型结构，也在操作系统式资源管理。
+\end{importantbox}
+
+\subsection{本章小结}
+
+Continuous batching 解决时间维度的动态性，PagedAttention 解决空间维度的动态性。前者让 batch 随请求到达和完成不断变化；后者让 KV cache 随序列增长和共享动态分配。
+

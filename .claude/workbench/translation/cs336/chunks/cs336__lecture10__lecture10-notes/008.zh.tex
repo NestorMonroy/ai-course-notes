@@ -1,0 +1,66 @@
+\subsection{延迟与吞吐量的理论分析}
+
+既然推理是内存受限的，性能瓶颈在于内存传输速度。以 Llama 2 13B 在单个 H100 上的推理为例：
+
+\textbf{模型配置}：$S=1024$, $D=5120$, $F=13824$, $N=40$, $K=40$, $H=128$, $L=40$, $V=32000$。
+
+\begin{itemize}
+    \item \textbf{参数数量}：约 130 亿
+    \item \textbf{参数存储}（bf16）：$\text{num\_params} \times 2$ 字节
+    \item \textbf{KV Cache}（每序列）：$S \times K \times H \times L \times 2 \times 2$ 字节
+    \item \textbf{总内存} = $B \times \text{KV Cache} + \text{参数存储}$
+\end{itemize}
+
+延迟（每个 token 的生成时间）由内存传输决定：
+
+$$\text{Latency} = \frac{\text{Total Memory}}{\text{Memory Bandwidth}}$$
+
+$$\text{Throughput} = \frac{B}{\text{Latency}}$$
+
+不同批大小下的表现：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{cccc}
+\toprule
+$B$ & 内存占用 & 延迟 (ms/token) & 吞吐量 (tokens/s) \\
+\midrule
+1 & $\sim$26 GB & $\sim$8 & $\sim$124 \\
+64 & $\sim$79 GB & $\sim$24 & $\sim$2700 \\
+256 & $\sim$240 GB & --- & --- \\
+\bottomrule
+\end{tabular}
+\caption{Llama 2 13B 在 H100 上不同批大小下的推理性能（理论值）}
+\end{table}
+
+\begin{importantbox}{延迟与吞吐量的权衡}
+\begin{itemize}
+    \item 小批大小 $\rightarrow$ 低延迟，低吞吐量
+    \item 大批大小 $\rightarrow$ 高延迟，高吞吐量（但有上限，且受内存容量限制）
+    \item $B=256$ 时，Llama 2 13B 已超出 H100 的 80GB HBM 容量
+\end{itemize}
+\end{importantbox}
+
+\textbf{并行策略}：
+
+\begin{itemize}
+    \item \textbf{简单并行}：启动 $M$ 个模型副本，延迟不变，吞吐量提升 $M$ 倍
+    \item \textbf{模型并行}：将模型和 KV Cache 分片到多个 GPU 上（更复杂，但能处理单卡放不下的模型）
+\end{itemize}
+
+\begin{knowledgebox}{TTFT 与 Prefill 的关系}
+首 token 延迟（TTFT）本质上由 Prefill 阶段决定。实际部署中可以采用分离策略：
+\begin{itemize}
+    \item Prefill 阶段使用较小的批大小，以缩短 TTFT
+    \item Generation 阶段使用较大的批大小，以提高吞吐量
+\end{itemize}
+\end{knowledgebox}
+
+\begin{warningbox}{Prefill 与 Generation 的资源竞争}
+在同一 GPU 上混合处理 Prefill 和 Generation 请求时，两者会竞争计算资源和内存带宽。一个长 prompt 的 Prefill 可能阻塞所有正在进行的 Generation 请求。生产环境中的解决方案包括：
+\begin{itemize}
+    \item \textbf{Prefill/Generation 分离}：使用不同的 GPU 池分别处理两个阶段
+    \item \textbf{分块 Prefill}（Chunked Prefill）：将长 prompt 切成小块，与 Generation 交替执行
+\end{itemize}
+\end{warningbox}
+

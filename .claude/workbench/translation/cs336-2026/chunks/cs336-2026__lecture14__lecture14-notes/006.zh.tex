@@ -1,0 +1,125 @@
+\section{Synthetic Data：把任务、验证器和环境变成数据工厂}
+
+前面的管线都在处理已有语料，而本节进一步讨论主动制造训练经验。在 mid-training 与 post-training 阶段，数据越来越像 evaluation：有明确 prompt、期望输出、工具环境、测试用例或 verifier。Synthetic data 的价值不是“让模型自己写更多文字”，而是将稀缺任务结构扩展为可验证的大规模 curriculum；它的上限由生成能力决定，下限则由验证可靠性决定。
+
+\subsection{OpenThoughts：来源、生成、过滤三层分离}
+
+为了看清合成数据不是单一模型调用，本节用 OpenThoughts 把 pipeline 拆成 source、generator 与 verifier 三层。source 决定任务覆盖和难度分布，generator 决定候选解法及表达风格，verifier 决定哪些轨迹获得监督权重；只有三者分开记录，错误才可追踪。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{openthoughts-sources.png}
+\caption{OpenThoughts 的题目来源覆盖数学、代码、科学与推理数据。}
+\figsource{Stanford CS336 2026 Lecture 14 官方可执行讲义，\texttt{images/openthoughts-sources.png}。}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{openthoughts-pipeline.png}
+\caption{OpenThoughts pipeline：采集问题、teacher 生成 reasoning、verifier/filters 保留高质量轨迹。}
+\figsource{Stanford CS336 2026 Lecture 14 官方可执行讲义，\texttt{images/openthoughts-pipeline.png}。}
+\end{figure}
+
+两张图一起看才完整：source diversity 决定问题覆盖，teacher 决定候选轨迹，verifier 决定哪些轨迹成为监督。只扩大 generation count 会同时扩大正确解和高置信错误；没有 verifier 的 synthetic data 很容易变成自我蒸馏噪声。
+
+\begin{knowledgebox}{课堂提示：更强的模型不一定是更好的 teacher}
+OpenThoughts 的课堂分析给出一个反直觉结果：当时更强的 DeepSeek-R1 并没有自动成为更好的 teacher，QwQ-32B 反而产生了更有效的训练数据；同时，多次采样答案比盲目扩大 source 数更有帮助，简单 answer filtering 也没有稳定收益。teacher selection 因而应看学生模型的学习效果，而不是只看 teacher 自身 benchmark 排名。
+\end{knowledgebox}
+
+\begin{knowledgebox}{读图：左边解决覆盖，右边解决可信度}
+先从 source 图检查数学、代码、科学与通用推理是否被少数数据集支配，再沿 pipeline 图追踪一个问题如何经过 teacher sampling、格式检查、答案验证与去重。两图共同支持的结论是：题目多样性和答案正确性是独立维度；更多 source 不能弥补 verifier 薄弱，更严格 verifier 也不能弥补任务分布单一。
+\end{knowledgebox}
+
+\begin{importantbox}{Synthetic data 的四元组}
+一条可审计的合成样本应记录 $(q, y, g, v)$：任务 $q$、生成结果 $y$、generator $g$、验证过程 $v$。如果缺少 generator version、sampling parameters、tests 或 judge trace，就无法复现实验，也无法追踪某种错误来自哪里。
+\end{importantbox}
+
+\subsection{从代码仓库构造 agent tasks}
+
+接下来把同一思想放到软件工程环境里：任务不再只有 prompt 与答案，而是包含 repository state、依赖、可执行测试和 patch。这里的核心问题不是能否生成一段自然语言 issue，而是生成的任务是否对应真实代码状态、是否存在可复现的成功条件，以及 verifier 是否能区分真正修复与测试投机。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{swe-smith.png}
+\caption{SWE-smith：从真实 repository 生成可执行的软件工程任务与环境。}
+\figsource{Stanford CS336 2026 Lecture 14 官方可执行讲义，\texttt{images/swe-smith.png}。}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{swe-rebench.png}
+\caption{SWE-rebench：持续更新任务以降低 benchmark saturation 与训练污染。}
+\figsource{Stanford CS336 2026 Lecture 14 官方可执行讲义，\texttt{images/swe-rebench.png}。}
+\end{figure}
+
+软件工程任务的关键是环境可执行。问题描述、base commit、tests、dependency lock、patch 和 judge 必须一致；否则“成功”可能只是测试缺失或环境错误。SWE-rebench 进一步强调时间滚动：静态 benchmark 一旦被广泛训练，就很难继续测量泛化。
+
+\begin{knowledgebox}{讲义提醒：环境本身也是训练标签的一部分}
+代码任务中的“答案”不只是 patch 文本，而是 patch 在指定 base commit、依赖和测试上的行为。若 environment 无法重放，pass/fail 标签就不可靠；若 benchmark 长期不更新，训练集与评测集的时间边界也会逐渐失效。这是由课程展示的 dependency nightmare、execution feedback 与 rolling tasks 进一步得到的审计结论。
+\end{knowledgebox}
+
+\subsection{SWE-zero：减少人工 issue 依赖}
+
+前面的 SWE-smith 与 SWE-rebench 仍依赖真实 issue 或持续收集任务；SWE-zero 进一步尝试从 repository 状态自动构造可执行问题，从而扩大任务供给。名称中的 ``zero'' 指减少对人工 issue 的依赖；它与训练系统中的 Zero Redundancy Optimizer（ZeRO）无关，后者是把 Adam 优化器状态、梯度或参数在多张 GPU 上分片的显存优化技术。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{swezero-prompt.png}
+\caption{SWE-zero 的任务提示构造：从仓库状态生成可执行问题。}
+\figsource{Stanford CS336 2026 Lecture 14 官方可执行讲义，\texttt{images/swezero-prompt.png}。}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{swezero-noexec.png}
+\caption{不执行环境时，任务质量和验证可靠性会显著下降。}
+\figsource{Stanford CS336 2026 Lecture 14 官方可执行讲义，\texttt{images/swezero-noexec.png}。}
+\end{figure}
+
+\begin{knowledgebox}{课堂提示：没有 execution feedback 仍能解题意味着什么}
+老师指出，强代码模型在禁用仓库执行时仍能解决相当一部分真实 PR 任务，这暗示模型内部已经形成了某种 code-semantics ``world model''。但无执行轨迹不等于结果可验证：SWE-zero 仍需过滤那些偷偷调用执行工具的轨迹，并用少量需要 execution feedback 的 SWE-Hero 数据继续训练。这里应区分“能生成候选解”与“能证明候选解正确”。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{swezero-results.png}
+\caption{SWE-zero 结果：环境构造、筛选与可执行验证共同决定训练价值。}
+\figsource{Stanford CS336 2026 Lecture 14 官方可执行讲义，\texttt{images/swezero-results.png}。}
+\end{figure}
+
+这三张图形成一条证据链：任务可以由模型生成，但是否有学习价值取决于 execution；不执行就无法区分正确 patch、测试投机和不可复现环境。Synthetic data 的“synthetic”只描述任务来源，不意味着验证也可以是虚的。
+
+\begin{knowledgebox}{读图：三张 SWE-zero 图要按“构造—消融—结果”阅读}
+第一张先确认任务 prompt 从哪些 repository 信号生成；第二张比较移除 execution 后哪些质量控制失效；第三张再看最终训练或评测结果。不要倒过来只读最后一张柱状图，因为结果提升无法单独说明来自更多任务、任务更难，还是可执行 verifier 更可靠。真正可迁移的机制是闭环，而不是某个绝对分数。
+\end{knowledgebox}
+
+\begin{warningbox}{Verifier hacking}
+当 reward 只检查少量 tests，模型可能学会绕过测试而非解决问题；当 judge 是另一个 LM，generator 可能学会迎合 judge style。必须使用 hidden tests、多样 verifier、人工抽查和 adversarial cases 检查 reward channel。
+\end{warningbox}
+
+\subsection{Verifier audit：验证器也要被当作模型评测}
+
+为了防止“有 verifier”被误当成“标签可靠”，应把验证器本身放进审计表。一个好的 verifier 不只在已知答案上准确，还要对对抗性解法、环境错误和分布变化保持敏感，并给出足够 provenance 供人工复核。
+
+\begin{longtable}{L{0.19\textwidth}L{0.24\textwidth}L{0.24\textwidth}L{0.20\textwidth}}
+\toprule
+Verifier 类型 & 能证明什么 & 不能证明什么 & 最小审计 \\
+\midrule
+Exact answer & 输出与标准答案一致 & 推理过程正确、等价答案被接受 & 多格式/等价答案测试 \\
+Unit tests & patch 通过已知行为检查 & 未覆盖路径正确、没有 hard-code & hidden tests、mutation tests \\
+Execution sandbox & 程序可运行并满足资源限制 & 结果在真实部署稳定、安全 & 环境重放、依赖锁定 \\
+LM judge & 输出符合 rubric 或偏好 & 事实绝对正确、没有 style bias & 多 judge、一致性与人工抽查 \\
+Formal checker & 满足形式约束或可验证证明 & 规格本身完整、现实假设成立 & 规格审查与反例生成 \\
+\bottomrule
+\end{longtable}
+
+\begin{knowledgebox}{讲义提醒：generator 和 verifier 不能共享同一盲点}
+如果同一家族模型既生成答案又充当 judge，它们可能共享风格偏好、事实错误和安全盲区。讲义建议尽量引入异质证据：执行结果、符号检查器、独立模型、人工样本和时间更新的数据共同组成验证链，而不是让一个高分 judge 成为单点真相。
+\end{knowledgebox}
+
+\teachervoice{课堂总结把 post-training data 归纳成 prompts、真实或合成 environments、capable teacher responses，以及大量 filtering details；这意味着数据集规格必须同时描述任务来源、响应生成和环境约束，不能只发布最终对话文本。}
+
+\subsection{本章小结}
+
+Synthetic data 有效的前提是“生成容易，验证可靠”。高质量 pipeline 把 source、generator、verifier、filter 和 environment 分开记录，并通过执行或可复核证据筛选样本。
+

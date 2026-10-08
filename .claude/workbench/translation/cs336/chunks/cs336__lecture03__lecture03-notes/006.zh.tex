@@ -1,0 +1,100 @@
+\section{训练稳定性技巧}
+
+\subsection{稳定性问题的来源}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-050.jpg}
+\caption{不稳定训练（蓝色）vs 稳定训练（橙色）的对比：不稳定训练的梯度范数出现大量尖刺\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第51页。来自 OLMo 2 论文。}
+
+随着模型规模增大和训练时间延长，训练不稳定问题日益突出。梯度范数的剧烈尖刺可能导致训练崩溃，这在大规模训练中是一个严重的工程问题。
+
+\begin{knowledgebox}{Softmax 是稳定性的``问题儿童''}
+Transformer 中有两个 softmax 操作，它们是稳定性问题的主要来源：
+\begin{enumerate}
+    \item \textbf{输出层 softmax}：将 logits 转换为概率分布
+    \item \textbf{注意力 softmax}：将 attention scores 转换为权重
+\end{enumerate}
+Softmax 涉及指数运算和除法，都是数值敏感的操作。logits 过大会导致指数溢出，归一化因子 $Z$ 过大会导致数值不稳定。
+\end{knowledgebox}
+
+\subsection{Z-loss：稳定输出 softmax}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-052.jpg}
+\caption{Z-loss 的推导：添加辅助损失项 $\alpha \cdot \log^2 Z(x)$，鼓励 softmax 归一化因子接近 1\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第53页。}
+
+Z-loss 的核心思想是：如果 softmax 的归一化因子 $Z(x) = \sum_i e^{u_i(x)}$ 接近 1（即 $\log Z \approx 0$），那么 softmax 就处于数值稳定的状态。
+
+损失函数变为：
+$$\mathcal{L}_\text{total} = \mathcal{L}_\text{CE} + \alpha \cdot \log^2 Z(x)$$
+
+\begin{itemize}
+    \item $\mathcal{L}_\text{CE}$：标准交叉熵损失
+    \item $\alpha$：Z-loss 的权重（PaLM 使用 $10^{-4}$）
+    \item $\log^2 Z(x)$：惩罚归一化因子偏离 1 的程度
+\end{itemize}
+
+\begin{importantbox}{Z-loss 的直觉}
+当 Z-loss 成功将 $\log Z(x)$ 压到接近 0 时，softmax 中的指数和对数运算互相抵消，输出退化为简单的线性操作 $u_i(x) / 1 = u_i(x)$，这是一个数值非常稳定的状态。PaLM 最早在大规模语言模型中采用此技巧，随后被 OLMo、DCLM、Baichuan 2 等模型采纳。
+\end{importantbox}
+
+\subsection{QK-norm：稳定注意力 softmax}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-054.jpg}
+\caption{QK-norm：在 query 和 key 的内积之前添加 LayerNorm，控制 attention softmax 的输入大小\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第55页。来自 NVIDIA 的工作。}
+
+QK-norm 的做法是在计算 attention scores 之前，对 query 和 key 向量分别进行 LayerNorm：
+
+$$\text{attn}(Q, K, V) = \text{softmax}\left(\frac{\text{Norm}(Q) \cdot \text{Norm}(K)^T}{\sqrt{d_k}}\right) V$$
+
+\begin{importantbox}{QK-norm 的来源与效果}
+QK-norm 最初来自视觉和多模态模型社区（Dehghani 2023，训练大型 Vision Transformer 时提出）。后被 Chameleon、Gemma 2、DCLM、OLMo 2 等文本模型采用。NVIDIA 的实验表明，QK-norm 不仅提升稳定性，还能\textbf{提升模型质量}——因为训练更稳定后可以使用更激进的学习率，将优化器``推得更远''。
+\end{importantbox}
+
+\subsection{Logit Soft Capping}
+
+另一种稳定 attention softmax 的方法是\textbf{软截断}（soft capping）：
+
+$$\text{logits}_\text{capped} = \text{cap} \cdot \tanh\left(\frac{\text{logits}}{\text{cap}}\right)$$
+
+当 logits 远超过 cap 值时，$\tanh$ 将其截断到 $\pm 1$，从而限制 softmax 的最大输入。Gemma 2 使用了这种技术。但 NVIDIA 的评估表明，soft capping 在某些情况下反而降低性能，因此其采用不如 QK-norm 广泛。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-056.jpg}
+\caption{各种稳定性技巧的对比：QK-norm 同时提升稳定性和性能，soft capping 可能降低性能\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第57页。}
+
+\begin{knowledgebox}{LayerNorm 的惊人有效性}
+纵观整个课程的架构讨论，LayerNorm 在稳定训练方面的有效性令人印象深刻：
+\begin{enumerate}
+    \item Pre-norm：LayerNorm 放在残差分支前端
+    \item Double-norm：LayerNorm 放在残差分支前后
+    \item QK-norm：LayerNorm 放在 query 和 key 上
+\end{enumerate}
+LayerNorm 几乎是``遇到不稳定就加 norm''的万能工具，而且通常不会损害模型质量。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+\begin{itemize}
+    \item 训练不稳定的主要来源是 softmax 操作中的指数运算和除法
+    \item \textbf{Z-loss}：通过辅助损失项稳定输出 softmax 的归一化因子
+    \item \textbf{QK-norm}：通过 LayerNorm 控制注意力 softmax 的输入大小
+    \item \textbf{Soft capping}：通过 tanh 截断限制 logits 大小（效果不如 QK-norm）
+    \item 这些技巧在过去一年成为大规模训练的标配，尤其是 Z-loss + QK-norm 的组合
+\end{itemize}
+
+%% ========== Part 7: 注意力变体 ==========
+

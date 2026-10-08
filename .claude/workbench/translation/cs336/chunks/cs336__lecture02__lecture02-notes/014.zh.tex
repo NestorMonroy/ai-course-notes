@@ -1,0 +1,40 @@
+\subsection{梯度累积：用小 batch 模拟大 batch}
+
+当 GPU 显存不足以容纳理想的 batch size 时，\textbf{梯度累积}（gradient accumulation）是最简单的解决方案。其原理是：连续做多次前向+反向但不执行 \texttt{optimizer.step()}，让梯度在多个 micro-batch 上累积，最后一次性更新参数。
+
+\begin{lstlisting}[caption={梯度累积的标准实现}]
+accumulation_steps = 4  # effective batch = micro_batch * 4
+
+for step in range(num_train_steps):
+    for micro_step in range(accumulation_steps):
+        x, y = get_batch(B=micro_batch_size)
+        pred = model(x)
+        loss = loss_fn(pred, y) / accumulation_steps  # scale loss
+        loss.backward()  # gradients accumulate
+
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+\end{lstlisting}
+
+\begin{warningbox}{梯度累积的两个常见错误}
+\begin{itemize}
+    \item \textbf{忘记缩放 loss}：如果不除以 \texttt{accumulation\_steps}，累积的梯度会比真正大 batch 的梯度大 $k$ 倍（$k$ 为累积步数），等效于学习率放大了 $k$ 倍。
+    \item \textbf{与 BatchNorm 的冲突}：BatchNorm 的统计量是在每个 micro-batch 上独立计算的，和真正的大 batch 行为不同。LLM 通常使用 LayerNorm，不受此影响。
+\end{itemize}
+\end{warningbox}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.22\textwidth}p{0.14\textwidth}p{0.14\textwidth}p{0.14\textwidth}p{0.16\textwidth}}
+\toprule
+\textbf{方法} & \textbf{Micro BS} & \textbf{累积步数} & \textbf{有效 BS} & \textbf{显存占用} \\
+\midrule
+直接大 batch & 64 & 1 & 64 & 极高 \\
+梯度累积 & 16 & 4 & 64 & 中等 \\
+梯度累积 & 4 & 16 & 64 & 较低 \\
+梯度累积 & 1 & 64 & 64 & 最低 \\
+\bottomrule
+\end{tabular}
+\caption{梯度累积在数学上等价于大 batch，但显存和吞吐有差异}
+\end{table}
+

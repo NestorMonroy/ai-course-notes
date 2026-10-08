@@ -1,0 +1,122 @@
+\section{处理动态工作负载}
+
+前面的优化方法关注单个请求或静态批处理的效率。在实际在线服务中，请求是动态到达的，带来了额外的系统级挑战。
+
+\begin{knowledgebox}{在线推理服务的挑战}
+与训练时拥有整齐的 token 块（batch size $\times$ sequence length）不同，在线推理面临三个问题：
+\begin{enumerate}
+    \item 请求到达时间不同（等待凑批会伤害先到的请求）
+    \item 部分序列共享前缀（如系统提示、同一 prompt 的多次采样）
+    \item 序列长度各不相同（填充 padding 浪费资源）
+\end{enumerate}
+\end{knowledgebox}
+
+\subsection{连续批处理（Continuous Batching）}
+
+\begin{importantbox}{连续批处理的核心思想}
+不再等待一个批次全部完成后才开始下一个批次。而是：
+\begin{enumerate}
+    \item 逐步解码，每生成一个 token 后将控制权交还给调度器
+    \item 新到达的请求可以\textbf{立即加入}当前批次
+    \item 完成生成的请求立即退出，为新请求腾出位置
+\end{enumerate}
+这种``迭代级调度''（iteration-level scheduling）来自 Orca 系统。
+\end{importantbox}
+
+\begin{knowledgebox}{Worked Example：连续批处理的效率提升}
+假设 3 个请求分别需要生成 10、50、100 个 token，GPU 最大批大小为 3。
+
+\textbf{静态批处理}：所有请求必须等最长的（100 步）完成。请求 1 在第 10 步完成后空等 90 步——GPU 利用率仅 $(10+50+100)/(3 \times 100) \approx 53\%$。
+
+\textbf{连续批处理}：请求 1 在第 10 步完成后立即退出，新请求 4 立即加入。GPU 始终满载，利用率接近 100\%。
+
+在请求长度差异大的实际场景中，连续批处理可以将吞吐量提升 2--3 倍。
+\end{knowledgebox}
+
+\textbf{选择性批处理}（Selective Batching）解决不同长度序列的批处理问题：
+
+\begin{itemize}
+    \item \textbf{注意力计算}：每个序列必须单独处理（因为 KV Cache 长度不同）
+    \item \textbf{MLP 计算}：所有序列的 token 可以拼接在一起——将 $[3, H], [9, H], [5, H]$ 拼为 $[17, H]$，因为 MLP 对每个 token 独立作用
+\end{itemize}
+
+\subsection{PagedAttention 与 vLLM}
+
+PagedAttention 是 vLLM 系统的核心创新，解决了 KV Cache 的\textbf{内存碎片化}问题。
+
+\textbf{传统方式的问题}：
+
+\begin{itemize}
+    \item 请求到达时，为其分配最大可能长度的 KV Cache 空间
+    \item \textbf{内部碎片}：实际生成的 token 数远少于预分配空间
+    \item \textbf{外部碎片}：不同请求之间有未使用的内存间隙
+\end{itemize}
+
+\begin{importantbox}{PagedAttention 的核心思想}
+借鉴操作系统的\textbf{虚拟内存分页}机制：
+\begin{enumerate}
+    \item 将 KV Cache 划分为固定大小的\textbf{页}（block）
+    \item 页可以在物理内存中\textbf{不连续}存储
+    \item 使用页表（block table）维护逻辑地址到物理地址的映射
+    \item 按需分配页，不预分配
+\end{enumerate}
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    block/.style={draw, minimum width=1cm, minimum height=0.6cm, align=center, font=\tiny},
+    arrow/.style={->, thick, >=stealth}
+]
+% Traditional allocation
+\node[font=\small\bfseries] at (2, 3.5) {传统分配方式};
+\node[block, fill=blue!20] at (0, 2.5) {Req 1};
+\node[block, fill=blue!20] at (1, 2.5) {Req 1};
+\node[block, fill=blue!10] at (2, 2.5) {预留};
+\node[block, fill=gray!10] at (3, 2.5) {空闲};
+\node[block, fill=red!20] at (4, 2.5) {Req 2};
+\node[block, fill=red!10] at (5, 2.5) {预留};
+\draw[red, thick, decorate, decoration={brace, amplitude=4pt}] (2, 2.1) -- (3, 2.1) node[midway, below=5pt, font=\tiny, red]{碎片};
+
+% Paged allocation
+\node[font=\small\bfseries] at (2, 1.2) {PagedAttention};
+\node[block, fill=blue!20] at (0, 0.3) {Req 1};
+\node[block, fill=red!20] at (1, 0.3) {Req 2};
+\node[block, fill=blue!20] at (2, 0.3) {Req 1};
+\node[block, fill=red!20] at (3, 0.3) {Req 2};
+\node[block, fill=green!20] at (4, 0.3) {空闲};
+\node[block, fill=green!20] at (5, 0.3) {空闲};
+\node[font=\tiny, gray] at (2.5, -0.3) {非连续存储，无碎片};
+\end{tikzpicture}
+\caption{传统连续分配 vs. PagedAttention：页式存储消除了内部和外部碎片。}
+\end{figure}
+
+PagedAttention 还支持高效的\textbf{前缀共享}：
+
+\begin{itemize}
+    \item 多个请求共享相同的系统提示——共享对应的 KV Cache 页
+    \item 同一 prompt 生成多个响应——共享 prompt 部分的页
+    \item 使用\textbf{写时复制}（Copy-on-Write）：当共享页需要被修改时才复制
+\end{itemize}
+
+\begin{knowledgebox}{vLLM 的其他优化}
+除 PagedAttention 外，vLLM 还包含多项系统优化：
+\begin{itemize}
+    \item 融合 kernel：将块读取和注意力计算合并为一个 CUDA kernel，减少启动开销
+    \item 使用最新的计算 kernel（FlashAttention、FlashDecoding）
+    \item CUDA Graphs：预编译执行图，减少 kernel 启动开销
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+\begin{itemize}
+    \item 在线推理服务面临动态、异构的请求流
+    \item 连续批处理消除了等待凑批的延迟浪费
+    \item 选择性批处理允许不同长度序列共存于同一批次
+    \item PagedAttention 将操作系统的内存管理思想应用于 KV Cache，消除碎片化
+    \item 前缀共享和写时复制进一步提高了内存利用率
+\end{itemize}
+
+%% ========== Section 8: 总结与延伸 ==========
+

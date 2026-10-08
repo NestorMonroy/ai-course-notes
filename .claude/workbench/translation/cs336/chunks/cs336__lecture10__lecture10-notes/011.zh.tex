@@ -1,0 +1,128 @@
+\section{Transformer 的替代架构}
+
+前一节在 Transformer 框架内进行优化。本节探讨更激进的方向：是否可以\textbf{跳出 Transformer}，从根本上改变推理的计算特性？
+
+\begin{knowledgebox}{为什么需要新架构？}
+Transformer 的设计初衷是高效\textbf{训练}（通过并行处理序列），但自回归生成+全注意力的组合导致了推理的内存瓶颈。注意力层在生成阶段的算术强度 $< 1$，这是\textbf{架构层面的根本限制}，无法通过系统优化完全克服。
+\end{knowledgebox}
+
+\subsection{状态空间模型（SSM）}
+
+状态空间模型借鉴信号处理和控制论的思想，试图用\textbf{次二次时间复杂度}处理长序列。
+
+\textbf{发展脉络}：
+
+\begin{enumerate}
+    \item \textbf{S4}（2021）：基于经典线性动力系统，具有 RNN 和卷积两种解释方式。在合成长序列任务上表现出色，但在语言建模上效果不佳
+
+    \item \textbf{问题诊断}：SSM 在\textbf{关联检索}（Associative Recall）任务上表现差——给定一系列键值对，查找特定键对应的值。这类任务需要``精确查找''能力，而 SSM 更擅长平滑的信号处理
+
+    \item \textbf{Mamba}（2023）：让 SSM 参数依赖于输入（input-dependent），在 1B 规模上匹配 Transformer 性能
+
+    \item \textbf{Jamba}（AI21, 2024）：交替使用 Transformer 和 Mamba 层（比例约 1:7），总参数 52B（MoE 架构）。仍然需要少量 Transformer 层
+
+    \item \textbf{BASED}：线性注意力 + 局部注意力的组合
+
+    \item \textbf{MiniMax-01}：线性注意力 + 全注意力的混合架构，456B MoE，达到 SOTA 水平
+\end{enumerate}
+
+\subsubsection{Mamba 的核心机制：输入依赖选择}
+
+经典 SSM（如 S4）的状态转移参数是固定的，不依赖于输入内容。这意味着模型对所有 token 一视同仁地更新状态——无法根据内容``选择性记忆''或``选择性遗忘''。
+
+\begin{importantbox}{Mamba 的关键创新：选择性状态空间}
+经典 SSM 的离散化状态转移方程为：
+$$h_t = \bar{A} h_{t-1} + \bar{B} x_t, \quad y_t = C h_t$$
+其中 $\bar{A}$, $\bar{B}$ 是固定参数。
+
+Mamba 的核心改变：让 $\bar{B}$, $C$ 和离散化步长 $\Delta$ 成为\textbf{输入的函数}：
+$$\bar{B}_t = f_B(x_t), \quad C_t = f_C(x_t), \quad \Delta_t = f_\Delta(x_t)$$
+
+其中 $\Delta_t$ 控制``记忆门''：
+\begin{itemize}
+    \item $\Delta_t$ 大 $\rightarrow$ 更多地关注当前输入，``忘记''历史
+    \item $\Delta_t$ 小 $\rightarrow$ 更多地保留历史状态，``忽略''当前输入
+\end{itemize}
+这赋予了模型根据内容动态调整信息流的能力。
+\end{importantbox}
+
+\begin{knowledgebox}{为什么输入依赖性能解决关联检索？}
+考虑关联检索任务：``\texttt{key1:val1 key2:val2 ... query:key2 answer:?}''
+
+固定参数的 SSM 无法``选择性存储''特定键值对——它只能将所有信息平滑地压缩到固定大小的状态中。而 Mamba 可以根据 token 内容决定：遇到键值对时增大 $\Delta$ 以写入状态，遇到无关 token 时减小 $\Delta$ 以保护已存储的信息。
+\end{knowledgebox}
+
+然而，输入依赖性带来了一个工程问题：经典 SSM 可以用快速卷积实现（因为参数固定），但 Mamba 的参数随输入变化，无法直接使用卷积。Mamba 论文的另一个重要贡献是设计了一种\textbf{硬件感知的并行扫描算法}（hardware-aware parallel scan），能够在 GPU 上高效实现输入依赖的状态更新。
+
+\subsubsection{Jamba：混合架构的设计权衡}
+
+纯 Mamba 架构在 1B 规模上匹配 Transformer，但在更大规模上仍有差距。Jamba（AI21, 2024）采取了务实的混合策略：
+
+\begin{importantbox}{Jamba 的架构设计}
+\begin{itemize}
+    \item \textbf{层构成}：每 8 层中有 1 层 Transformer（全注意力），其余 7 层为 Mamba
+    \item \textbf{MoE}：在 MLP 层中使用 Mixture-of-Experts（总参数 52B，活跃参数 12B）
+    \item \textbf{上下文长度}：支持 256K token
+\end{itemize}
+\end{importantbox}
+
+\begin{warningbox}{为什么不能完全去掉 Transformer 层？}
+目前的证据表明，纯 SSM 架构在以下任务上仍弱于 Transformer：
+\begin{itemize}
+    \item \textbf{精确信息检索}：从长上下文中提取特定事实
+    \item \textbf{上下文学习}（In-context Learning）：从少量示例中学习新模式
+    \item \textbf{复杂推理链}：需要精确维护多步中间结果
+\end{itemize}
+少量全注意力层提供了``精确查找''能力，弥补了 SSM 的短板。混合架构是当前最务实的平衡点。
+\end{warningbox}
+
+Jamba 的推理效率优势显著：相比同参数量的纯 Transformer 模型，KV Cache 缩减约 8 倍（因为只有 1/8 的层需要全注意力缓存），256K 上下文时内存节省尤为明显。
+
+\begin{importantbox}{SSM 对推理的意义}
+SSM 将 $O(T)$ 的 KV Cache 替换为 $O(1)$ 的固定状态——这从根本上改变了内存瓶颈。当前的趋势是混合架构（少量全注意力层 + 大量线性/局部注意力层），在保持精度的同时大幅提升推理效率。
+\end{importantbox}
+
+\subsection{扩散模型}
+
+扩散模型是另一个有前景的方向，其核心思想是\textbf{并行生成所有 token}（而非自回归逐个生成）。
+
+\begin{itemize}
+    \item 传统方法：从随机噪声开始，通过多步迭代精炼生成整个序列
+    \item 扩散模型在图像生成中已非常成功，但在文本生成中还不够成熟
+    \item Inception Labs 的最新结果显示，扩散语言模型在代码生成基准测试上速度远超自回归模型
+\end{itemize}
+
+\begin{knowledgebox}{扩散模型为什么能加速推理？}
+自回归生成的根本瓶颈是顺序依赖——每个 token 依赖前一个 token。扩散模型打破了这一约束，可以并行生成所有位置的 token，然后通过多步精炼逐渐提高质量。虽然需要多次迭代，但每次迭代可以充分利用 GPU 的并行计算能力。
+\end{knowledgebox}
+
+\begin{importantbox}{扩散语言模型的关键挑战}
+将扩散模型从连续域（图像像素）迁移到离散域（文本 token）面临独特困难：
+\begin{itemize}
+    \item \textbf{离散性}：文本 token 是离散的，不能像像素一样直接加高斯噪声。解决方案包括：在 embedding 空间做扩散、使用离散扩散过程（masking/absorbing）
+    \item \textbf{长度可变}：文本长度不固定，需要额外的长度预测机制或使用 padding
+    \item \textbf{精确性要求}：代码、数学等任务要求 token 级别的精确输出，容错空间极小
+\end{itemize}
+\end{importantbox}
+
+\begin{knowledgebox}{扩散模型 vs. 自回归模型的 Roofline 分析}
+假设生成 $T$ 个 token，扩散模型需要 $R$ 步精炼（典型 $R=8$--$32$），每步处理整个序列：
+\begin{itemize}
+    \item \textbf{自回归模型}：$T$ 次前向传播，每次 $B \cdot 1$ token $\rightarrow$ 内存受限
+    \item \textbf{扩散模型}：$R$ 次前向传播，每次 $B \cdot T$ token $\rightarrow$ 计算受限（$R \ll T$ 时）
+\end{itemize}
+扩散模型将推理从内存受限区域``推到''计算受限区域，从而更好地利用 GPU 的算力。代价是每步的计算量更大，但总步数大幅减少。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+替代架构的意义在于\textbf{绕过} Transformer 推理的根本限制：
+\begin{itemize}
+    \item SSM：$O(1)$ 固定状态替代 $O(T)$ KV Cache，彻底消除缓存瓶颈
+    \item 扩散模型：并行生成替代自回归生成，充分利用 GPU 并行计算
+    \item 当前 SOTA 采用混合架构（少量全注意力 + 大量高效层）
+    \item 架构创新可能带来比系统优化更大的推理加速
+\end{itemize}
+
+%% ========== Section 5: 量化 ==========
+

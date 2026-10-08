@@ -1,0 +1,68 @@
+\section{Tensor Parallelism：沿 width 维切分}
+
+前面的 data parallelism 沿 batch 复制模型，pipeline parallelism 沿 depth 切层；本部分转向同一层内部的 width 维。Tensor parallelism 让多个 ranks 协作完成一个矩阵乘和 Transformer block，适合单层权重过大或希望使用节点内高速互连的场景，但通信会进入每层关键路径。
+
+\subsection{基本策略}
+
+本节先建立最小策略：Tensor parallelism 沿层内部张量维度切分，例如把矩阵乘法的输出宽度切给多个 rank。每个 rank 保存该层参数的一部分，计算一部分激活，然后通过 all-gather 或 all-reduce 恢复下一层需要的完整张量；列切、行切的选择决定通信发生在层间哪个边界。
+
+\begin{knowledgebox}{课堂提示：TP 通常应留在最快互连域}
+官方总结强调 tensor parallel 需要 very fast interconnects。原因是 TP 的 collective 几乎每层都会发生，频率远高于只在 step 边界同步的 data parallel。跨节点扩展 TP 很容易让网络延迟和带宽进入关键路径，因此常把 TP size 绑定到单机 NVLink/NVSwitch 域，再用 PP 或 DP 扩展到更多节点。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.58\textwidth]{tensor-parallelism.png}
+\caption{Tensor parallelism：切分 layer width，每层内跨 rank 协作。}
+\figsource{CS336 Spring 2026 Lecture 7 官方可执行讲义图像。}
+\end{figure}
+
+\begin{knowledgebox}{读图：tensor parallel 图说明的不是“多放几层”}
+图中每一层都被横向拆开，不同 rank 负责同一层的不同列或通道。这样可以让单层参数和计算分摊到多张卡上，但下一层往往需要完整激活，因此每层都可能发生通信。读图时要把它和 pipeline parallel 区分：tensor parallel 是同一层多卡一起算，pipeline parallel 是不同层放在不同卡上。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Lecture 7 的 tensor parallel 前向：局部 matmul 后 all-gather 激活}]
+local_num_dim = num_dim // world_size
+params = [get_init_params(num_dim, local_num_dim, rank)
+          for layer in range(num_layers)]
+
+x = data
+for layer in range(num_layers):
+    x = x @ params[layer]
+    x = F.gelu(x)
+    activations = [
+        torch.empty(batch_size, local_num_dim, device=device)
+        for _ in range(world_size)
+    ]
+    dist.all_gather(tensor_list=activations, tensor=x,
+                    async_op=False)
+    x = torch.cat(activations, dim=1)
+\end{lstlisting}
+
+\subsection{列切、行切和通信位置}
+
+设输入 \(X\in\mathbb{R}^{B\times d}\)，权重 \(W\in\mathbb{R}^{d\times h}\)。若按输出宽度切分 \(W=[W_1,W_2,\dots,W_N]\)，rank \(i\) 计算：
+
+\[
+Y_i = X W_i,\qquad
+Y = [Y_1,Y_2,\dots,Y_N].
+\]
+
+其中 \(B\) 是 batch tokens 数，\(d\) 是输入 hidden size，\(h\) 是输出 hidden size，\(N\) 是 tensor-parallel world size。每个 rank 只算 \(Y_i\)，但若下一层需要完整 \(Y\)，就要 all-gather。Megatron-LM 风格会交替使用 column-parallel 和 row-parallel linear，把某些通信推迟或合并，但基本账本不变：切 layer width 就要在层边界恢复一致语义。
+
+\begin{importantbox}{Tensor parallel 的通信频率很高}
+Tensor parallel 的通信常发生在每个 Transformer block 的多个线性层或 attention 子层边界。它适合放在 NVLink/NVSwitch 这类高速节点内互连上；跨节点使用时，通信延迟和带宽很容易压过局部 matmul 的收益。
+\end{importantbox}
+
+\subsection{反向传播为什么更复杂}
+
+官方源把 backward 留作 homework，是有意的：前向只要拼激活，反向还要处理梯度如何在切分维度上归约。列切时，输出梯度对应各自分片；行切时，输入梯度通常需要 reduce。真实框架会把这些规则封装到 parallel linear layers 里，但工程师仍要理解通信发生在哪个方向。
+
+\begin{warningbox}{Tensor parallel 的正确性边界}
+不能随意把任意 tensor 切开就叫 tensor parallel。切分维度必须与算子数学结构兼容；否则虽然张量 shape 能拼回去，结果也可能不等价，或反向梯度不正确。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Tensor parallelism 解决单层太宽、单卡装不下或算不快的问题。它牺牲的是高频通信，因此硬件要求最高。判断是否适合 tensor parallel，要先问每层通信能否被节点内高速互连承受。
+

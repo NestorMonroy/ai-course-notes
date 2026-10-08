@@ -1,0 +1,115 @@
+\subsection{混合精度训练}
+
+\subsubsection{混合精度的核心思想}
+
+混合精度训练（Mixed Precision Training）的核心思想是：\textbf{用低精度做计算密集的部分（前向、反向的矩阵乘法），用高精度做数值敏感的部分（参数更新、loss 计算）}。
+
+一个典型的混合精度训练流程：
+\begin{enumerate}
+    \item 维护一份 \textbf{fp32 主权重}（master weights）
+    \item 每步开始时，将主权重转换为 bf16 副本
+    \item 用 bf16 做前向和反向传播（矩阵乘法在 Tensor Core 上加速）
+    \item 得到 bf16 梯度后，转换回 fp32
+    \item 在 fp32 精度下更新主权重
+\end{enumerate}
+
+\begin{importantbox}{混合精度的三重好处}
+\begin{enumerate}
+    \item \textbf{计算加速}：bf16 矩阵乘法在 Tensor Core 上比 fp32 快约 $8\times$--$16\times$
+    \item \textbf{内存节省}：激活值用 bf16 存储，内存减半
+    \item \textbf{带宽节省}：bf16 数据传输量减半，减少 memory bandwidth 瓶颈
+\end{enumerate}
+\end{importantbox}
+
+\subsubsection{PyTorch AMP 实现}
+
+PyTorch 的 Automatic Mixed Precision (AMP) 通过 \texttt{torch.cuda.amp} 提供了自动化的混合精度支持：
+
+\begin{lstlisting}[caption={使用 PyTorch AMP 的训练循环}]
+scaler = torch.amp.GradScaler()  # only needed for fp16
+
+for x, y in dataloader:
+    with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+        pred = model(x)
+        loss = loss_fn(pred, y)
+
+    # bf16 does not need scaler, but fp16 does
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+\end{lstlisting}
+
+\texttt{autocast} 上下文管理器会自动决定哪些操作用低精度、哪些保留 fp32。一般来说：
+\begin{itemize}
+    \item \textbf{用 bf16/fp16}：矩阵乘法、卷积、线性层
+    \item \textbf{保留 fp32}：softmax、layernorm、loss 计算、累加操作
+\end{itemize}
+
+\begin{warningbox}{Loss Scaling：fp16 的必要补丁}
+使用 fp16 时，由于动态范围只有 $10^{\pm 5}$，小梯度容易 underflow 为零。\textbf{Loss scaling} 通过在反向传播前将 loss 乘以一个大数（如 $2^{16}$），使梯度值被放大到 fp16 的可表示范围内，然后在参数更新前除回来。
+
+\texttt{GradScaler} 还会动态调整 scale 因子：如果发现梯度中有 inf/nan（overflow），就减小 scale 并跳过该步更新。
+
+\textbf{使用 bf16 时不需要 loss scaling}，因为 bf16 的动态范围和 fp32 一样大。这是 bf16 在实践中更受欢迎的另一个原因。
+\end{warningbox}
+
+\subsubsection{混合精度下的完整内存分析}
+
+以 $N$ 参数模型为例，对比纯 fp32 训练和 bf16 混合精度训练的内存：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.28\textwidth}p{0.16\textwidth}p{0.16\textwidth}p{0.22\textwidth}}
+\toprule
+\textbf{组件} & \textbf{纯 FP32} & \textbf{混合精度} & \textbf{说明} \\
+\midrule
+模型参数 & $4N$ & $2N$ (bf16) & 前向用低精度 \\
+梯度 & $4N$ & $2N$ (bf16) & 反向产生低精度梯度 \\
+主权重 & --- & $4N$ (fp32) & 混合精度额外持有 \\
+Adam $m_t$ & $4N$ & $4N$ & 始终 fp32 \\
+Adam $v_t$ & $4N$ & $4N$ & 始终 fp32 \\
+\midrule
+\textbf{静态总计} & $\mathbf{16N}$ & $\mathbf{16N}$ & 静态内存相当 \\
+激活值 & $4 \cdot A$ & $2 \cdot A$ & \textbf{激活减半是关键} \\
+\bottomrule
+\end{tabular}
+\caption{混合精度的主要内存收益来自激活值减半和计算加速}
+\end{table}
+
+关键洞察：混合精度在静态内存（参数+优化器）上并没有显著节省，因为需要额外维护 fp32 主权重。\textbf{真正的收益在于}：
+\begin{enumerate}
+    \item 激活值内存减半（对于大 batch size 和长序列影响巨大）
+    \item Tensor Core 的计算加速（$8\times$--$16\times$）
+    \item 内存带宽减半
+\end{enumerate}
+
+\subsubsection{FP8 训练：下一代低精度前沿}
+
+FP8 是 H100 及更新 GPU 支持的 8-bit 浮点格式。它有两种变体，各自针对不同的使用场景：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.12\textwidth}p{0.12\textwidth}p{0.14\textwidth}p{0.14\textwidth}p{0.30\textwidth}}
+\toprule
+\textbf{格式} & \textbf{指数位} & \textbf{尾数位} & \textbf{动态范围} & \textbf{设计目的} \\
+\midrule
+E4M3 & 4 & 3 & $\sim 10^{\pm 2}$ & 前向权重和激活（需要更高精度） \\
+E5M2 & 5 & 2 & $\sim 10^{\pm 5}$ & 反向梯度（需要更大范围） \\
+\bottomrule
+\end{tabular}
+\caption{两种 FP8 变体的设计权衡}
+\end{table}
+
+FP8 训练的关键挑战是动态范围非常有限，因此需要 \textbf{per-tensor scaling}：为每个 tensor 维护一个缩放因子，使其值域映射到 FP8 的可表示范围内。这增加了实现复杂度，但在 H100 上可以获得相比 BF16 约 $2\times$ 的额外加速。
+
+\begin{warningbox}{FP8 训练的成熟度}
+截至 2025 年，FP8 训练仍处于快速发展期。主要挑战包括：
+\begin{itemize}
+    \item 缩放因子的选择策略（延迟缩放 vs 即时缩放）
+    \item 某些层（如 attention softmax、LayerNorm）仍需更高精度
+    \item 不同框架（NVIDIA TransformerEngine、MS-AMP）的实现差异
+    \item 训练稳定性在超大规模模型上的验证仍不充分
+\end{itemize}
+FP8 在推理中的应用已相当成熟，但在训练中仍需谨慎评估。
+\end{warningbox}
+

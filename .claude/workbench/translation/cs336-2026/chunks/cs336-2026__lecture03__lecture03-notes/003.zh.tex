@@ -1,0 +1,141 @@
+\section{Norm 与 residual stream}
+
+本节解释 pre-norm、post-norm、RMSNorm、double norm 和 bias removal。核心是保护 residual stream，并减少数据移动。
+
+
+\begin{importantbox}{术语消化：norm 与 residual stream}
+\begin{itemize}
+    \item \textbf{Residual stream}：Transformer block 中跨层传递的主信号路径，残差连接让梯度和信息更容易穿过深层网络。
+    \item \textbf{Post-norm}：先做 attention/MLP 和 residual add，再 LayerNorm；原始 Transformer 和 BERT 常见。
+    \item \textbf{Pre-norm}：先 LayerNorm，再做子层计算和 residual add；现代大模型常用，训练更稳定。
+    \item \textbf{RMSNorm}：只按 root-mean-square 缩放，不减均值、通常无 bias，减少数据移动和参数。
+\end{itemize}
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-009.jpg}
+\caption{Slide 10: Pre-vs-post norm}
+\figsource{CS336 Spring 2026 Lecture 3 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}本页是 norm 部分的核心共识：现代 LM 几乎都用 pre-norm，使 LayerNorm 不阻断 residual stream 主路径。
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-010.jpg}
+\caption{Slide 11: Pre-vs-post norm data}
+\figsource{CS336 Spring 2026 Lecture 3 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}本页把经验观察和文献图放在一起：pre-norm 相对 post-norm 有更好的深层训练稳定性证据。
+
+\begin{knowledgebox}{读图：Slide 11 应该怎么看}
+这页不是装饰性截图，而是本节论点的证据页。先看图中模型/论文/曲线或表格的比较对象，再看它们支持的趋势：哪些设计已经形成共识，哪些只是局部实验结果，哪些主要由运行时或推理成本推动。读这类页时要区分 quality evidence、runtime evidence 和 stability evidence，不能把一种证据直接替换成另一种。
+\end{knowledgebox}
+
+
+
+结果页说明 pre-norm 更容易训练，但还需要机制解释。Slide 12 并列两条证据链：一条关注 post-norm 深层网络中的 gradient attenuation，另一条关注训练早期的 gradient spikes。两者共同支持的不是“LayerNorm 越多越好”，而是主 residual path 应尽量保持接近 identity，让梯度和表示可以跨很多层直接传播。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-011.jpg}
+\caption{Slide 12：pre-norm 的两类解释：gradient attenuation 与 gradient spikes。}
+\figsource{CS336 Spring 2026 Lecture 3 官方幻灯片；Xiong et al. 2020 与 Salazar/Nguyen。}
+\end{figure}
+
+\begin{knowledgebox}{读图：机制解释与工程结论}
+左侧解释为什么 post-norm 可能让跨层梯度逐步衰减，右侧解释为什么某些 placement 会产生尖峰。课程给出的现代结论是：pre-norm 的价值已不只是省掉 warmup，而是允许更深网络、较大学习率和更平滑的训练。图中机制不是互斥理论，它们描述了不同训练区间的风险。
+\end{knowledgebox}
+
+既然 norm 不应切断 residual stream，一些近期模型又引入“额外 norm”，看起来似乎矛盾。Slide 13 的关键是位置：double norm 或 non-residual postnorm 把第二个 norm 放在子层输出或 residual 主路径之外，因此可以控制 branch magnitude，却不把每层主信号强制重新归一化。Grok、Gemma 2 与 OLMo 2 的差异也提醒我们，这仍是架构级选择，不是统一标准。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-012.jpg}
+\caption{Slide 13：double norm 与 non-residual postnorm 的放置方式。}
+\figsource{CS336 Spring 2026 Lecture 3 官方幻灯片。}
+\end{figure}
+
+\begin{warningbox}{“postnorm” 名称相同，路径可能不同}
+判断一个 norm 是否危险，不能只看论文里写了 postnorm，而要沿计算图检查它是否位于 residual stream 的必经路径。若 norm 只约束 attention/MLP branch 的输出，它与原始 Transformer 在 residual add 后归一化不是同一件事。
+\end{warningbox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-013.jpg}
+\caption{Slide 14: LayerNorm vs RMSNorm}
+\figsource{CS336 Spring 2026 Lecture 3 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}本页定义 LayerNorm 和 RMSNorm 的差别：LayerNorm 减均值并归一化方差，RMSNorm 不减均值也不加 bias。
+
+
+
+从定义转到性能时，Slide 15 先给出常见说法：RMSNorm 不计算均值、通常没有 bias，因此运算和参数更少。这个说法方向正确，却不够解释端到端收益，因为大模型的大部分 FLOPs 位于矩阵乘；若只按 FLOP 占比估算，norm 的差异似乎微不足道。真正要追问的是 norm 是否需要额外读取、写回整段 activation。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-014.jpg}
+\caption{Slide 15：RMSNorm 的常见速度解释，以及“少量 FLOPs 是否真的重要”的追问。}
+\figsource{CS336 Spring 2026 Lecture 3 官方幻灯片；Ivanov et al. 2023。}
+\end{figure}
+
+\begin{knowledgebox}{第一处系统连接：算术量与数据移动}
+LayerNorm 需要读取 activation、计算 mean 和 variance、再写回归一化结果；RMSNorm 去掉 mean 与 bias 后更容易做成短路径或 fused kernel。HBM 是 High Bandwidth Memory，即 GPU 封装旁用于存放模型参数和 activation 的高带宽显存；一次 HBM 往返通常比片上寄存器或 SRAM 访问昂贵。即使节省的 FLOPs 很少，只要减少 HBM 读写或 kernel launch，wall-clock 仍可能明显改善。因此本讲把 RMSNorm 视为 architecture 与 systems 的交叉点。
+\end{knowledgebox}
+
+Slide 16 用 roofline 风格信息把这一点说得更直接：图中的 FLOP 数和 FLOP-to-memory ratio 必须一起读。低 arithmetic intensity 的算子常由 memory bandwidth 限制，GPU 算力并没有被打满；此时减少一次 activation pass 比减少同数量的矩阵乘 FLOPs 更值钱。这也为后面的 GQA、KV cache 与 local attention 埋下同一条系统主线。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-015.jpg}
+\caption{Slide 16：FLOPs 不等于 runtime；RMSNorm 的收益与数据移动和 arithmetic intensity 有关。}
+\figsource{CS336 Spring 2026 Lecture 3 官方幻灯片；Ivanov et al. 2023。}
+\end{figure}
+
+\begin{knowledgebox}{读图：不要只看左上角 FLOPs}
+图中一类标注给出算术工作量，另一类标注给出 FLOP-to-memory ratio。若 ratio 低，算子更可能是 bandwidth-bound；此时理论 FLOPs 降幅不能直接换算成运行时间。正确的验收应同时报告 kernel latency、memory traffic 和端到端 step time，而不是只引用参数量或 FLOP 数。
+\end{knowledgebox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-016.jpg}
+\caption{Slide 17: RMSNorm validation}
+\figsource{CS336 Spring 2026 Lecture 3 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}本页展示 RMSNorm runtime 和性能增益的文献证据，说明它是经验上可靠的现代默认值。
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-017.jpg}
+\caption{Slide 18: Dropping bias terms}
+\figsource{CS336 Spring 2026 Lecture 3 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}本页把无 bias 扩展到更一般的 linear/FFN 设计：现代 Transformer 常移除 bias，以减少参数移动和稳定性问题。
+
+
+
+最后的 recap 页把本节证据压缩为一条可执行 recipe：residual stream 内优先 pre-norm，必要时在 branch 外增加非残差 norm；归一化形式通常用 RMSNorm；linear 与 norm bias 常被移除。注意，这三项的证据类型不同：pre-norm 主要是优化稳定性，RMSNorm 与 no-bias 同时涉及质量持平和数据移动。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-018.jpg}
+\caption{Slide 19：norm 与 residual-stream 设计的阶段性总结。}
+\figsource{CS336 Spring 2026 Lecture 3 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{Norm recipe 的验收清单}
+实现时应检查四件事：主 residual path 是否保持 identity-like；额外 norm 是否位于 branch 而非主路径；RMSNorm kernel 是否真的减少读写或 launch；去掉 bias 后参数初始化与 checkpoint 兼容性是否处理正确。只写“使用 RMSNorm”不足以证明系统上更快。
+\end{importantbox}
+
+\subsection{本章小结}
+本节的关键不是记住所有模型名，而是把公开模型的设计选择转化成可迁移判断：共识默认值可以作为起点，例外需要知道原因，涉及系统和推理成本的选择必须结合资源账本讨论。
+

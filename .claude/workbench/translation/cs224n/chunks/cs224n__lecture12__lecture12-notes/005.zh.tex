@@ -1,0 +1,174 @@
+\section{参数高效微调：LoRA}
+
+\subsection{为什么需要参数高效微调}
+
+当以下所有手段都无法解决 OOM 问题时——混合精度训练、ZeRO Stage 3、Activation Checkpointing、batch size 已经为 1——就需要考虑\textbf{参数高效微调}（Parameter-Efficient Fine-Tuning，PEFT）。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-050.jpg}
+\caption{Parameter-Efficient Finetuning 章节封面（改编自 Diyi Yang 的 slides）\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第51页。}
+
+参数高效微调的动机不仅仅是显存限制：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-053.jpg}
+\caption{全球AI训练计算需求（红线）即将超过全球计算产能（蓝线），效率研究的重要性日益凸显\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第54页。}
+
+\begin{knowledgebox}{参数高效微调的三大动机}
+\begin{enumerate}
+    \item \textbf{显存限制}：GPT-3 有 1750 亿参数，全量微调需要海量显存
+    \item \textbf{环境与成本}：训练 GPT-3 的碳排放相当于运行燃煤电厂10小时；AI计算需求即将超过全球计算产能
+    \item \textbf{科学动机}：大模型严重过参数化，对于小数据集的下游任务，参数高效微调可能泛化更好（起到正则化作用）
+\end{enumerate}
+\end{knowledgebox}
+
+\subsection{全量微调 vs 参数高效微调}
+
+\textbf{全量微调}（Full Fine-Tuning）：更新模型的所有参数 $\theta$，寻找最优的 $\Delta\theta$。
+
+$$\theta_{\text{new}} = \theta_{\text{pretrained}} + \Delta\theta, \quad |\Delta\theta| = |\theta|$$
+
+\textbf{参数高效微调}：只更新一小部分参数，搜索空间远小于全量微调。
+
+$$\theta_{\text{new}} = \theta_{\text{pretrained}} + \Delta\theta, \quad |\Delta\theta| \ll |\theta|$$
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-055.jpg}
+\caption{参数高效微调的核心思想：只学习一个远小于原始参数空间的 $\Delta\theta$\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第56页。}
+
+参数高效微调的额外好处：每个任务只需存储一个很小的 $\Delta\theta$（而非完整的模型副本），在多任务场景下极其高效。
+
+\subsection{LoRA：低秩适配}
+
+\textbf{LoRA}（Low-Rank Adaptation）是当前最流行的参数高效微调方法。它基于一个经验观察：\textbf{大模型微调时的梯度具有低内在秩}（low intrinsic rank）。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-057.jpg}
+\caption{LoRA 的核心思想：将权重更新 $\Delta W$ 分解为两个低秩矩阵 $B \cdot A$ 的乘积\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第58页。}
+
+对于一个预训练权重矩阵 $W \in \mathbb{R}^{d \times k}$，LoRA 将更新约束为低秩形式：
+
+$$W_{\text{new}} = W + \alpha \cdot B \cdot A$$
+
+\begin{itemize}
+    \item $W \in \mathbb{R}^{d \times k}$：预训练权重（\textbf{冻结}，不参与训练）
+    \item $A \in \mathbb{R}^{r \times k}$：LoRA 矩阵 A（可训练）
+    \item $B \in \mathbb{R}^{d \times r}$：LoRA 矩阵 B（可训练）
+    \item $r$：秩，远小于 $d$ 和 $k$（典型值：$r = 8$）
+    \item $\alpha$：缩放系数，控制预训练知识与新任务知识的权衡
+\end{itemize}
+
+\begin{importantbox}{LoRA 的参数节省}
+原始权重矩阵 $W$ 有 $d \times k$ 个参数。LoRA 只需学习 $A$（$r \times k$ 个参数）和 $B$（$d \times r$ 个参数），共 $r \times (d + k)$ 个参数。当 $r \ll \min(d, k)$ 时，可训练参数量远小于原始参数量。例如，$d = k = 768$，$r = 8$ 时，可训练参数量仅为原来的 $\frac{2 \times 8}{768} \approx 2\%$。
+\end{importantbox}
+
+\subsection{LoRA 的实现}
+
+在代码层面，LoRA 的实现非常简洁：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-060.jpg}
+\caption{LoRA 代码实现：冻结原始权重，在前向传播中添加低秩偏移项 $x \cdot (W_A \cdot W_B) \cdot \alpha$\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第61页。}
+
+\begin{lstlisting}[caption={LoRA 的 PyTorch 实现}]
+input_dim = 768   # hidden size of pre-trained model
+output_dim = 768  # output size of the layer
+rank = 8          # rank 'r' for low-rank adaptation
+
+W = ...  # from pretrained network, shape: input_dim x output_dim
+
+W_A = nn.Parameter(torch.empty(input_dim, rank))  # LoRA weight A
+W_B = nn.Parameter(torch.empty(rank, output_dim)) # LoRA weight B
+
+# Initialization
+nn.init.kaiming_uniform_(W_A, a=math.sqrt(5))
+nn.init.zeros_(W_B)  # B initialized to zero!
+
+def regular_forward_matmul(x, W):
+    h = x @ W
+    return h
+
+def lora_forward_matmul(x, W, W_A, W_B):
+    h = x @ W           # regular matrix multiplication (frozen)
+    h += x @ (W_A @ W_B) * alpha  # add scaled LoRA weights
+    return h
+\end{lstlisting}
+
+\begin{knowledgebox}{LoRA 初始化策略}
+$B$ 矩阵初始化为\textbf{全零}，$A$ 矩阵使用 Kaiming 初始化。这意味着训练开始时 $\Delta W = B \cdot A = 0$，模型行为与预训练模型完全一致。随着训练进行，$B$ 逐渐偏离零，模型开始适配下游任务。这种初始化确保了训练的稳定性。
+\end{knowledgebox}
+
+\subsection{LoRA 的关键超参数}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-062.jpg}
+\caption{LoRA 应用位置的消融实验：应用于 $W_q$ 和 $W_v$（Query 和 Value 矩阵）效果最好\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第63页。}
+
+\textbf{1. 应用位置}：LoRA 应应用于 Self-Attention 中的\textbf{Query 矩阵（$W_q$）和 Value 矩阵（$W_v$）}，这是经验上效果最好的选择。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-063.jpg}
+\caption{LoRA 秩的影响：即使秩 $r$ 很小（如1--4），也能获得接近全量微调的性能\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第64页。}
+
+\textbf{2. 秩 $r$}：实验表明，即使 $r$ 非常小（$r = 1$ 或 $r = 4$），LoRA 也能获得很好的性能。$r = 8$ 是一个推荐的起始值。
+
+\textbf{3. 缩放系数 $\alpha$}：通常设为 1。$\alpha < 1$ 表示更偏向保留预训练知识，$\alpha > 1$ 表示更偏向学习新任务知识。
+
+\begin{importantbox}{LoRA 实用指南}
+\begin{itemize}
+    \item 应用于 \textbf{Query 和 Value 矩阵}
+    \item 秩设为 \textbf{$r = 8$}
+    \item $\alpha$ 设为 \textbf{1}
+    \item 这些默认值在大多数场景下效果很好，可以作为起点
+\end{itemize}
+\end{importantbox}
+
+\subsection{LoRA 的优势}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-061.jpg}
+\caption{LoRA 与其他参数高效微调方法在 GPT-3 上的对比：LoRA 用更少的可训练参数达到接近全量微调的性能\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第62页。}
+
+\begin{enumerate}
+    \item \textbf{显存高效}：只需存储和优化两个小矩阵 $A$ 和 $B$，大幅减少梯度和优化器状态的显存
+    \item \textbf{推理无开销}：训练完成后，可以将 $\alpha \cdot B \cdot A$ 直接合并到 $W$ 中，推理时与原模型无异
+    \item \textbf{多任务高效}：每个任务只需存储一组小的 $A, B$ 矩阵；切换任务时只需替换 LoRA 权重
+    \item \textbf{收敛于全量微调}：当 $r$ 增大到等于 $\min(d, k)$ 时，LoRA 等价于全量微调——提供了一个连续的控制旋钮
+    \item \textbf{正则化效果}：低秩约束天然地限制了搜索空间，在小数据集上可能泛化更好
+\end{enumerate}
+
+\subsection{本章小结}
+
+\begin{itemize}
+    \item LoRA 将权重更新约束为低秩矩阵乘积 $\Delta W = B \cdot A$，大幅减少可训练参数
+    \item 应用于 Self-Attention 的 $W_q$ 和 $W_v$ 矩阵，秩 $r = 8$，$\alpha = 1$ 是好的起点
+    \item 推理时无额外开销，多任务时只需存储小矩阵
+    \item 在资源受限环境下，LoRA 是微调大模型的首选方案
+\end{itemize}
+
+%% ========== 实用决策流程 ==========
+

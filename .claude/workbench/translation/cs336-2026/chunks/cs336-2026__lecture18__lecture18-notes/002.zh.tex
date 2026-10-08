@@ -1,0 +1,64 @@
+\section{Workload 与 SLA：先定义到底在优化什么}
+
+本节先强调，推理系统不能只用“每秒多少 token”来描述。真实请求有不同输入长度、输出长度、会话轮数、cache hit rate 和到达间隔；同一个平均吞吐数字，可能对应完全不同的用户体验。正确起点是先写出 workload 分布，再定义服务级目标。
+
+\subsection{三个常用指标回答三个不同问题}
+
+这里从三个角色理解指标：用户点击发送后，首先关心多久看到第一个 token；生成开始后，又关心文字是否流畅；平台运营者则关心每张 GPU 能承载多少流量。三者分别对应：
+
+\begin{itemize}
+  \item \term{TTFT（time to first token）}：请求到第一个输出 token 的时间，主要受排队、prefill、cache miss 和状态搬运影响；
+  \item \term{TBT/TPOT（time between tokens / time per output token）}：相邻输出 token 的间隔，主要受 decode step、batch composition 和 memory bandwidth 影响；
+  \item \term{throughput}：单位时间完成的请求或输出 token 数，常写成 QPS、tokens/s 或 QPS/GPU。
+\end{itemize}
+
+一个便于排障的 TTFT 分解是：
+
+\[
+T_{\mathrm{TTFT}}
+=T_{\mathrm{queue}}+T_{\mathrm{tokenize}}+T_{\mathrm{schedule}}
++T_{\mathrm{prefill}}+T_{\mathrm{KV\ transfer}}+T_{\mathrm{first\ decode}}.
+\]
+
+这个分解不是为了追求精确代数，而是为了防止把所有慢请求都归因于“模型太大”。如果瓶颈在 queue、KV transfer 或 cache lookup，换一个更快的矩阵乘 kernel 也未必改善 tail latency。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{00-11-40-workload-sla.jpg}
+\caption{不同 workload shape 对应不同 SLA：TTFT、TBT 与吞吐必须共同观察。}
+\figsource{课堂视频 00:10:15--00:13:10；图中示例阈值只表示一类服务目标，不是通用标准。}
+\end{figure}
+
+\subsection{Coding agent 与 batch job 为什么不是同一种服务}
+
+本节用两个极端 workload 建立直觉。Coding agent 往往携带长代码上下文，并在多轮交互中反复复用相同 prefix；它对 cache hit、TTFT 和会话连续性高度敏感。离线翻译或批量标注则可能一次性读入文档、一次性输出结果，更在乎总体成本和吞吐，而不一定在乎每轮对话的热缓存。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{L{0.18\textwidth}L{0.22\textwidth}L{0.24\textwidth}L{0.22\textwidth}}
+\toprule
+Workload & 典型形状 & 首要指标 & 架构压力 \\
+\midrule
+Coding agent & 长输入、多轮、工具调用 & TTFT、cache hit、恢复速度 & 大 KV cache、prefix reuse、稳定路由 \\
+Chat assistant & 中等输入、持续 decode & TBT、tail latency & continuous batching、decode capacity \\
+Batch processing & 大批一次性样本 & 总吞吐、成本 & 大 batch、计算利用率、弱会话状态 \\
+RAG/长文问答 & 超长 prefill、短输出 & TTFT & prefill 隔离、context parallelism \\
+\bottomrule
+\end{tabular}
+\caption{不同 workload 的最优系统设计并不相同。}
+\end{table}
+
+\teachervoice{课堂提示：先画 workload histogram，再谈“最佳配置”。输入/输出长度均值会掩盖长尾；平均 cache hit rate 会掩盖 cold request 与 warm request 的完全不同成本。}
+
+\subsection{Prefill 与 decode 的资源属性相反}
+
+进一步看执行阶段，Prefill 一次处理大量输入 token，矩阵乘更大，更容易获得高并行度，通常偏 compute-bound。Decode 每一步只产生少量 token，却需要反复读取大量权重与 KV 状态，往往偏 memory-bandwidth-bound。把二者混在同一 GPU pool 中，会让长 prefill 阻塞对延迟敏感的 decode。
+
+\begin{importantbox}{同一个 Transformer，有两种系统行为}
+训练和 prefill 更像“大块矩阵计算”；decode 更像“为了生成一个 token，把模型状态再搬一遍”。因此，训练阶段有效的优化直觉不能直接照搬到在线 decode。
+\end{importantbox}
+
+\subsection{本章小结}
+
+SLA 必须绑定 workload。TTFT、TBT 与吞吐不是可互换的单一分数；prefill 和 decode 的硬件行为也不同。只有先明确请求分布和服务约束，后续的 batching、cache、disaggregation 与 kernel 优化才有正确目标。
+

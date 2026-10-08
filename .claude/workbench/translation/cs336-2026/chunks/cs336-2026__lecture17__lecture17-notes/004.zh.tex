@@ -1,0 +1,98 @@
+\section{LLaVA-OneVision：any-resolution、视频与跨模态迁移}
+
+本节进一步处理真实输入的异质性。固定分辨率会压缩高分辨率文档或浪费小图 token；多图和视频又要求在 token budget 内保留空间/时间关系。LLaVA-OneVision 使用 any-resolution tiling 和更系统的数据 curriculum。
+
+\subsection{Any-resolution tokenization}
+
+本节先处理固定分辨率的结构性损失：把长文档或高分辨率图表缩成一个方形输入，会让文字与小目标消失；直接用原始分辨率又会产生不可控的 token 数。AnyRes 用全局缩略图保留布局，再用局部 tiles 保留细节，把失真问题转换成可预算的 token 分配问题。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{llava-onevision-anyres.png}
+\caption{AnyRes：把高分辨率图像切成多个 tiles，同时保留全局缩略图。}
+\figsource{Stanford CS336 2026 Lecture 17 官方可执行讲义，\texttt{images/llava-onevision-anyres.png}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：全局与局部为什么都需要}
+Global thumbnail 提供整体布局，local tiles 保留 OCR 和细节。Tile 数随分辨率增长，因此系统必须限制最大 visual tokens；视频通常降低每帧分辨率并做 temporal sampling，以免 context 被视觉占满。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{llava-onevision-modalities.png}
+\caption{OneVision 对单图、多图和视频采用不同分辨率/采样策略，使三种输入落入相近的 visual-token budget。}
+\figsource{Stanford CS336 2026 Lecture 17 官方可执行讲义，\texttt{images/llava-onevision-modalities.png}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：统一的不是像素数，而是 LM 看到的序列预算}
+单图可以用更多 crops 保存 OCR 细节；多图要把预算分给 $N$ 张图；视频则把预算分给更多 frames，因此每帧分辨率更低。右侧 max-tokens 列体现的是系统约束：不同 modalities 的输入物理规模不同，但进入 LM 后必须控制到可比较的 sequence length。图不能证明三种模态信息量等价，只说明训练与 serving 需要显式 token allocation policy。
+\end{knowledgebox}
+
+\subsection{Data curriculum：quality over quantity, easy to hard}
+
+接下来处理训练顺序。视觉对齐、单图问答、多图关系和视频推理对模型的要求逐级增加；若从一开始就把长视频和复杂 agent trace 混入，长样本会主导 token-level loss，基础 alignment 反而学不稳。Curriculum 的作用是先建立共享能力，再扩大任务组合。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{llava-onevision-data-1.png}
+\caption{OneVision 数据来源之一：覆盖单图、多图、视频与文档任务。}
+\figsource{Stanford CS336 2026 Lecture 17 官方可执行讲义。}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{llava-onevision-data-2.png}
+\caption{OneVision 数据清洗与任务配比：大规模原始 image-text 数据经筛选后，只保留部分高质量样本，并加入 task-specific supervision。}
+\figsource{Stanford CS336 2026 Lecture 17 官方可执行讲义，\texttt{images/llava-onevision-data-2.png}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：quality over quantity 不是一句口号}
+左侧表先比较 Original、Cleaned 与 Remaining\%：LAION-en 等超大来源只保留一小部分，而更干净的小数据集保留率更高。下方 task table 再显示 captioning、VQA、grounding、OCR 与 pure-text autoregression 的样本规模。两部分合起来说明 curriculum 同时在做 source filtering 与 capability allocation；保留率低不等于原来源无价值，也不能单凭样本数推断最终任务权重。
+\end{knowledgebox}
+
+\begin{knowledgebox}{课堂提示：quality over quantity，easier to harder}
+OneVision 把两个数据原则并列呈现：先对来源做大幅清洗，宁可保留更少但更可靠的样本；再按 alignment、单图、多图、视频与复杂任务逐步增加难度。老师借此提醒，统一 architecture 并不意味着所有 modality data 应从第一步等权混合，训练顺序本身就是能力形成机制。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{llava-onevision-training.png}
+\caption{OneVision training curriculum：从对齐、单图任务逐步扩展到复杂多模态。}
+\figsource{Stanford CS336 2026 Lecture 17 官方可执行讲义，\texttt{images/llava-onevision-training.png}。}
+\end{figure}
+
+两张图共同说明 architecture 之外的主线：先让 projector/LM 学会基本 image-text alignment，再增加高质量 task data、multi-image 和 video。直接混合所有任务会导致 gradient conflict，简单任务还可能被长视频 token 淹没。
+
+\subsection{Cross-modal transfer}
+
+进一步的问题是，单图数据学到的能力能否迁移到更昂贵的模态。答案取决于训练任务是否暴露共享 latent skills：OCR、diagram parsing、spatial relation 和 grounding 并不专属于单图，它们也构成多图比较、视频理解和 GUI agent 的基本操作。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{llava-onevision-transfer-s1.png}
+\caption{从单图 diagram/chart data 泛化到多图 reasoning。}
+\figsource{Stanford CS336 2026 Lecture 17 官方可执行讲义。}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{llava-onevision-transfer-s2.png}
+\caption{OCR 与 relational reasoning 数据向 GUI/agent tasks 迁移。}
+\figsource{Stanford CS336 2026 Lecture 17 官方可执行讲义。}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.64\textwidth]{llava-onevision-transfer-s8.png}
+\caption{单图中的 visual prompting（例如圈选目标）迁移到视频理解与时序定位。}
+\figsource{Stanford CS336 2026 Lecture 17 官方可执行讲义，\texttt{images/llava-onevision-transfer-s8.png}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：迁移来自共享技能而非共享数据格式}
+Diagram parsing、OCR、spatial relation 和 visual grounding 可在不同 modalities 间复用。训练设计应识别这些 latent skills，并用较便宜的单图数据先学习，再迁移到昂贵的多图、视频或 agent environment。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+OneVision 的 lesson 是：多模态扩展首先是 token budgeting 与 curriculum 问题。AnyRes 保留细节，分阶段高质量数据让 shared skills 跨模态迁移。
+

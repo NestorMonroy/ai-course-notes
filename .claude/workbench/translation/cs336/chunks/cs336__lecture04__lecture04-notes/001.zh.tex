@@ -1,0 +1,95 @@
+\section{引言：为什么要学习 Mixture of Experts}
+
+Mixture of Experts（MoE，混合专家模型）是当今最高性能大语言模型的核心架构之一。GPT-4（据 NVIDIA 泄露信息）很可能是 MoE 架构，DeepSeek、Grok、Mixtral、Qwen 以及最新的 Llama 4 都采用了 MoE。2025 年，MoE 相对于 Dense 架构的优势已经非常明确——几乎在所有计算规模上，训练 MoE 模型都能获得比 Dense 模型更好的性能。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-001.jpg}
+\caption{MoE 在现代大模型中的广泛应用：GPT-4、Grok、DeepSeek、Llama 4、Mixtral、OLMoE 等均采用 MoE 架构\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第2页。}
+
+\begin{importantbox}{MoE 的核心思想}
+MoE 是一种\textbf{稀疏激活}的架构：模型拥有大量参数（experts），但每次前向传播只激活其中一小部分。这意味着可以在\textbf{不增加计算量（FLOPs）}的前提下，大幅增加模型的总参数量。更多参数 $\rightarrow$ 更强的知识存储能力 $\rightarrow$ 更好的性能。
+\end{importantbox}
+
+\begin{warningbox}{``Experts'' 并不真正``专家''}
+MoE 这个名字极具误导性。你可能会以为有一个``编程专家''、一个``英语专家''、一个``数学专家''，它们各自处理对应领域的内容。但实际情况远非如此——experts 更像是一种稀疏激活的子网络，它们之间的``专业化''程度远没有名字暗示的那么高。甚至用哈希函数随机分配 token 到 expert 都能获得增益。
+\end{warningbox}
+
+\subsection{MoE 架构概述}
+
+MoE 的基本思路非常简单：将 Transformer 中的 FFN（Feed-Forward Network）层替换为多个 FFN（即 experts）加上一个路由器（Router）。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-002.jpg}
+\caption{Dense Model vs Sparse Model：左侧是标准 Transformer（单一 FFN），右侧是 MoE（多个 FFN + 选择层）。稀疏模型可以在不增加 FLOPs 的情况下增加 expert 数量\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第3页。来自 Fedus et al. 2022。}
+
+\begin{knowledgebox}{MoE 与 Dense 的关键区别}
+MoE 架构和非 MoE 架构在\textbf{绝大多数组件上是相同的}——Self-Attention、LayerNorm、Embedding 等都不变。唯一的区别在于 FFN 层：
+\begin{itemize}
+    \item \textbf{Dense}：一个大的 FFN 处理所有 token
+    \item \textbf{MoE}：多个小的 FFN（experts）+ 路由器，每个 token 只被路由到少数几个 expert
+\end{itemize}
+如果只激活一个 expert，且 expert 大小与 dense FFN 相同，那么两者的 FLOPs 完全一致。
+\end{knowledgebox}
+
+\subsection{MoE 的性能优势}
+
+大量实验表明，在相同的训练 FLOPs 下，MoE 模型显著优于 Dense 模型。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-003.jpg}
+\caption{Fedus et al. 2022 实验结果：左图——相同 FLOPs 下，更多 experts 带来更低的 Test Loss；右图——128 experts 的 Switch Transformer 训练速度远快于 T5-Base\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第4页。来自 Fedus et al. 2022。}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-004.jpg}
+\caption{左：Switch Transformer 实现约 7 倍训练加速（Fedus et al.）；右：OLMoE 对比实验，MoE（粉色）在训练损失、验证损失和 HellaSwag 上均优于 Dense（青色），节省约 3 倍 FLOPs\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第5页。左图来自 Fedus et al. 2022，右图来自 OLMoE。}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-005.jpg}
+\caption{DeepSeek-V2 在 Activated Parameters vs MMLU Performance 图上表现突出：极少的激活参数，极高的性能，远超同等规模的 Dense 模型\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第6页。来自 DeepSeek-V2 论文。}
+
+\begin{importantbox}{MoE 的三重优势}
+\begin{enumerate}
+    \item \textbf{训练效率}：相同 FLOPs 下，MoE 的 loss 下降更快（约 7x 加速）
+    \item \textbf{推理效率}：只激活部分参数，推理时的 FLOPs 远低于等效 Dense 模型
+    \item \textbf{并行化}：experts 天然适合分布到不同设备上（Expert Parallelism）
+\end{enumerate}
+\end{importantbox}
+
+\subsection{为什么 MoE 没有更早普及？}
+
+尽管 MoE 优势明显，但直到最近才被广泛采用，原因有两个：
+
+\begin{enumerate}
+    \item \textbf{系统复杂性高}：MoE 的最大优势在多节点训练时才充分体现。当模型必须跨设备切分时，expert parallelism 非常自然；但在小规模训练中，系统开销可能抵消 MoE 的收益。
+    \item \textbf{路由决策不可微}：选择哪个 expert 是一个离散决策，无法直接通过梯度下降优化。训练目标要么依赖启发式方法，要么不稳定。
+\end{enumerate}
+
+\begin{knowledgebox}{MoE 的开源发展历程}
+MoE 的核心技术主要在 Google 内部发展（Shazeer 2017、Switch Transformer 2021、Fedus et al. 2022）。但在\textbf{开源领域}，中国的实验室走在前面——Qwen 1.5 MoE 是最早的大规模开源 MoE 之一，DeepSeek 从 V1 到 V3 的 MoE 架构演进为整个领域提供了重要参考。西方开源 MoE（如 Mixtral、Llama 4）出现较晚。
+\end{knowledgebox}
+
+\subsection{MoE 应用于哪些层？}
+
+几乎所有主流 MoE 模型都只对\textbf{FFN 层}做稀疏路由。虽然理论上也可以对 Attention 层做 MoE（即 Sparse Attention），但实践中非常少见——有报告称 Attention MoE 的训练更加不稳定，且目前没有大规模开源模型采用这种方案。
+
+\subsection{本章小结}
+
+MoE 通过将 FFN 层替换为多个稀疏激活的 experts，在不增加 FLOPs 的前提下大幅增加模型参数量。实验证据表明，MoE 在几乎所有规模上都优于 Dense 架构。课程接下来将深入讨论三个核心设计问题：如何路由、expert 的数量与大小、以及如何训练路由器。
+
+%% ========== Part 2: 路由机制 ==========
+

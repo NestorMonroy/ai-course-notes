@@ -1,0 +1,174 @@
+\section{Attention variants and inference pressure}
+
+本节解释 attention head 设计为何被推理成本重新打开：MQA、GQA、local/sliding-window attention。
+
+
+\begin{importantbox}{术语消化：MHA、MQA、GQA、local attention}
+\begin{itemize}
+    \item \textbf{MHA}：每个 query head 都有自己的 key/value head，表达力强但 KV cache 大。
+    \item \textbf{MQA}：多个 query heads 共享一组 key/value，显著降低推理 KV cache，但可能轻微损失质量。
+    \item \textbf{GQA}：介于 MHA 与 MQA 之间，多个 query heads 共享一组 KV heads，是现代推理友好的折中。
+    \item \textbf{Local/sliding-window attention}：只 attend 附近窗口，降低长上下文成本，但需要周期性 full attention 或其他机制维持全局信息。
+\end{itemize}
+\end{importantbox}
+
+\begin{knowledgebox}{首用解释：perplexity 能说明什么}
+Perplexity（困惑度）是 token-level 交叉熵的指数，即 $\mathrm{PPL}=\exp(\mathcal{L}_{CE})$；可直观理解为模型在每一步面对的“有效选项数”。数值越低通常表示语言建模概率更集中。它适合检测 MQA/GQA 是否损伤基础建模质量，但不是聊天、推理或长上下文能力的完整代理，也不能跨 tokenizer 直接比较绝对数值。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-056.jpg}
+\caption{Slide 57: Attention heads}
+\figsource{CS336 Spring 2026 Lecture 3 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}本页说明大多数模型不太改 attention heads，但 inference-driven 例外越来越重要。
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-057.jpg}
+\caption{Slide 58: GQA MQA cost}
+\figsource{CS336 Spring 2026 Lecture 3 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}本页从 attention compute 角度引入 GQA/MQA，关注 key/value head 成本。
+
+\begin{knowledgebox}{读图：Slide 58 应该怎么看}
+这页不是装饰性截图，而是本节论点的证据页。先看图中模型/论文/曲线或表格的比较对象，再看它们支持的趋势：哪些设计已经形成共识，哪些只是局部实验结果，哪些主要由运行时或推理成本推动。读这类页时要区分 quality evidence、runtime evidence 和 stability evidence，不能把一种证据直接替换成另一种。
+\end{knowledgebox}
+
+
+
+训练或 prefill 可以并行处理整段序列，decode 却必须 token-by-token 进行。Slide 59 把这一差异落到 KV cache：历史 token 的 key/value 不再重复计算，而是按 layer 保存在显存中；每生成一个 token，都要读取已有 cache、计算新 attention、再追加一条 K/V。序列越长、batch 越大、KV heads 越多，memory traffic 越快成为瓶颈。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-058.jpg}
+\caption{Slide 59：增量生成中的 KV cache 更新与逐 token 依赖。}
+\figsource{CS336 Spring 2026 Lecture 3 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{KV cache 的一阶内存账本}
+若共有 $L$ 层、batch 为 $B$、已缓存长度为 $N$、KV head 数为 $H_{kv}$、每个 head 维度为 $D_h$、每元素占 $s$ bytes，则 K 和 V 合计约为
+\[
+2LBNH_{kv}D_hs.
+\]
+MHA 中 $H_{kv}$ 通常等于 query head 数；MQA 将其降为 1，GQA 则降为若干组。这个线性因子正是推理系统采用共享 KV heads 的直接动机。
+\end{importantbox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-059.jpg}
+\caption{Slide 60: Incremental arithmetic intensity}
+\figsource{CS336 Spring 2026 Lecture 3 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}本页解释 decode 的 arithmetic intensity 低，attention KV 读取会成为推理瓶颈。
+
+\begin{knowledgebox}{读图：Slide 60 应该怎么看}
+这页不是装饰性截图，而是本节论点的证据页。先看图中模型/论文/曲线或表格的比较对象，再看它们支持的趋势：哪些设计已经形成共识，哪些只是局部实验结果，哪些主要由运行时或推理成本推动。读这类页时要区分 quality evidence、runtime evidence 和 stability evidence，不能把一种证据直接替换成另一种。
+\end{knowledgebox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-060.jpg}
+\caption{Slide 61: MQA fewer key dimensions}
+\figsource{CS336 Spring 2026 Lecture 3 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}本页给出 MQA 核心：多个 query heads 共享更少的 key/value heads。
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-061.jpg}
+\caption{Slide 62: GQA extension}
+\figsource{CS336 Spring 2026 Lecture 3 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}本页给出 GQA：不极端共享到一个 KV head，而是分组共享，质量和成本折中。
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-062.jpg}
+\caption{Slide 63: MQA hurt sometimes}
+\figsource{CS336 Spring 2026 Lecture 3 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}本页展示 MQA/GQA 的 PPL 影响证据，说明质量损失通常小但不能忽略。
+
+\begin{knowledgebox}{读图：Slide 63 应该怎么看}
+这页不是装饰性截图，而是本节论点的证据页。先看图中模型/论文/曲线或表格的比较对象，再看它们支持的趋势：哪些设计已经形成共识，哪些只是局部实验结果，哪些主要由运行时或推理成本推动。读这类页时要区分 quality evidence、runtime evidence 和 stability evidence，不能把一种证据直接替换成另一种。
+\end{knowledgebox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-063.jpg}
+\caption{Slide 64: Sparse sliding window attention}
+\figsource{CS336 Spring 2026 Lecture 3 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}本页引入 sliding-window/local attention，降低长上下文完整 attention 的二次成本。
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-064.jpg}
+\caption{Slide 65: Interleaved full and local}
+\figsource{CS336 Spring 2026 Lecture 3 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}本页展示混合策略：多数层 local，周期性 full attention 保持全局信息流。
+
+\begin{knowledgebox}{读图：Slide 65 应该怎么看}
+这页不是装饰性截图，而是本节论点的证据页。先看图中模型/论文/曲线或表格的比较对象，再看它们支持的趋势：哪些设计已经形成共识，哪些只是局部实验结果，哪些主要由运行时或推理成本推动。读这类页时要区分 quality evidence、runtime evidence 和 stability evidence，不能把一种证据直接替换成另一种。
+\end{knowledgebox}
+
+
+
+一张 Command A 图还不足以说明 hybrid attention 已成趋势，因此 Slide 66 并列 Gemma 4、OLMo 3 与 Qwen 3.5/Qwen 3 Next 的近期设计。它们的共同点不是完全相同的窗口或周期，而是把 full attention 当作稀缺的全局通信层，把 local/sliding-window attention 当作多数层的低成本默认；不同模型再配合 RoPE、NoPE 或其他位置处理。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-065.jpg}
+\caption{Slide 66：Gemma、OLMo 与 Qwen 系列中的 interleaved full/local attention。}
+\figsource{CS336 Spring 2026 Lecture 3 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：比较模式，而不是照抄周期}
+先看每个模型中 full layer 的间隔、local window 的大小和 position encoding，再看它们的上下文长度与推理目标。共同趋势支持“混合全局与局部”这一设计方向，却不能推出每四层一个 full attention 是通用最优。窗口和周期会同时改变 receptive field、KV traffic、kernel shape 与长程任务质量。
+\end{knowledgebox}
+
+\subsection{本章小结}
+本节的关键不是记住所有模型名，而是把公开模型的设计选择转化成可迁移判断：共识默认值可以作为起点，例外需要知道原因，涉及系统和推理成本的选择必须结合资源账本讨论。
+
+\subsection{如何验证一个 architecture tweak}
+
+把公开模型的共同选择变成自己的 recipe，不能只做一次最终 loss 对比。一个可信的 architecture ablation 至少要固定数据顺序、token budget、optimizer、learning-rate schedule 与总参数/训练 FLOPs，并在多个随机种子或可控规模上比较。若改动同时改变参数量，例如普通 FFN 换成 GLU，就必须缩放中间维度；若改动主要声称系统收益，例如 RMSNorm、parallel block 或 GQA，就必须加入端到端 step time、decode latency、memory traffic 和 peak memory，而不能只写理论 FLOPs。
+
+\begin{longtable}{p{0.18\textwidth}p{0.32\textwidth}p{0.40\textwidth}}
+\toprule
+证据层 & 至少记录什么 & 它能排除的错误结论 \\
+\midrule
+质量 & validation loss、perplexity、目标任务指标、多个 checkpoint & 避免把短暂优化优势或 tokenizer 差异当成最终质量。 \\
+稳定性 & gradient/logit/activation RMS、spike 次数、NaN 与恢复行为 & 避免只报告成功 run，忽略更高失败率。 \\
+预算 & 参数量、训练 FLOPs、token 数、FFN/head shape & 避免改动其实只是偷偷增加模型容量。 \\
+系统 & tokens/s、kernel latency、HBM traffic、显存峰值、decode latency & 避免把 FLOPs 降低直接等同于 wall-clock 加速。 \\
+迁移 & 至少两个规模、一个未参与调参的 hold-out setting & 避免把单一规模的局部最优写成架构定律。 \\
+\bottomrule
+\end{longtable}
+
+\begin{importantbox}{本讲的正确产物不是“最佳架构名单”}
+更有价值的产物是一组带证据类型的默认值：pre-norm 主要由优化稳定性支持，RMSNorm 同时有质量持平和带宽动机，SwiGLU 有等预算消融与广泛实践，RoPE 提供相对位置几何，GQA/local attention 则主要响应推理内存和长上下文成本。知道结论依赖哪类证据，才知道换环境后应该重测什么。
+\end{importantbox}
+
+本讲按源顺序纳入 Slides 2--67 的全部教学页；Slide 1 仅为课程标题，与讲义封面重复，故有意省略。
+
+把这些页面放回同一条证据链后，可以看到“现代默认值”并不是一次性被发明出来的：一部分来自优化稳定性，一部分来自等预算质量比较，另一部分则由 HBM 带宽、KV cache 与 kernel shape 等系统约束推动。读者真正应带走的是判断方法——先确认改动解决哪类瓶颈，再检查它是否在相同参数、token 与 compute 预算下成立，最后用未参与调参的规模和任务验证能否迁移。
+

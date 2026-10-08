@@ -1,0 +1,105 @@
+\section{张量并行（Tensor Parallelism）}
+
+与流水线并行"纵向"切分不同，张量并行是"横向"切分：\textbf{将每一层的矩阵乘法分解为子矩阵，分配到不同 GPU 上并行计算}。
+
+\subsection{基本原理：矩阵乘法分块}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-038.jpg}
+\caption{张量并行的数学基础：将 $Y = XA$ 分解为 $Y = X_1 A_1 + X_2 A_2$\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第39页。}
+
+对于矩阵乘法 $Y = XA$，可以沿不同维度切分矩阵 $A$：
+
+$$Y = X \cdot A = X \cdot [A_1 | A_2] = [XA_1 | XA_2]  \quad \text{（列切分）}$$
+
+$$Y = X \cdot A = [X_1 | X_2] \cdot \begin{bmatrix} A_1 \\ A_2 \end{bmatrix} = X_1 A_1 + X_2 A_2  \quad \text{（行切分）}$$
+
+每个 GPU 负责一个子矩阵的乘法，然后通过 All-Reduce 或拼接来聚合结果。
+
+\subsection{MLP 中的张量并行}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-039.jpg}
+\caption{MLP 的张量并行实现：f 为复制/All-Reduce 同步点，g 为 All-Reduce/复制同步点\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第40页。}
+
+以两层 MLP（$Z = \text{dropout}(\text{GeLU}(XA) \cdot B)$）为例：
+
+\begin{enumerate}
+    \item \textbf{前向传播}：
+    \begin{itemize}
+        \item 在 $f$ 处复制输入 $X$ 到所有 GPU
+        \item 每个 GPU 计算 $Y_i = \text{GeLU}(X \cdot A_i)$，然后 $Z_i = Y_i \cdot B_i$
+        \item 在 $g$ 处 All-Reduce 求和：$Z = \sum_i Z_i$
+    \end{itemize}
+    \item \textbf{反向传播}：
+    \begin{itemize}
+        \item 在 $g$ 处复制梯度到所有 GPU
+        \item 各 GPU 独立计算反向
+        \item 在 $f$ 处 All-Reduce 梯度
+    \end{itemize}
+\end{enumerate}
+
+\begin{importantbox}{张量并行的同步模式}
+\textbf{每一层}需要一次前向 All-Reduce 和一次反向 All-Reduce。对于 $L$ 层 Transformer，每个训练步需要 $2L$ 次 All-Reduce，每次通信量为 $B \times S \times H$（批次 $\times$ 序列长度 $\times$ 隐藏维度）。这是一种通信密集型策略。
+\end{importantbox}
+
+\subsection{张量并行的经验法则}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-040.jpg}
+\caption{不同张量并行度下的吞吐量变化\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第41页。来自 HuggingFace 并行化教程。}
+
+\begin{warningbox}{张量并行度 $\leq$ 8（节点内 GPU 数）}
+实验数据显示：
+\begin{itemize}
+    \item TP=2: 吞吐下降约 10\%
+    \item TP=4: 吞吐下降约 10\%
+    \item TP=8: 吞吐下降约 12\%（仍在节点内）
+    \item TP=16: 吞吐下降约 \textbf{42\%}（跨节点！）
+    \item TP=32: 吞吐下降约 \textbf{65\%}
+\end{itemize}
+一旦超出节点内的 NVLink 带宽，性能急剧恶化。因此，\textbf{张量并行应始终限制在单节点内}。
+\end{warningbox}
+
+\subsection{张量并行 vs. 流水线并行}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-042.jpg}
+\caption{张量并行与流水线并行的对比分析\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第43页。}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{特性} & \textbf{流水线并行} & \textbf{张量并行} \\
+\midrule
+切分方式 & 按层（深度） & 按矩阵（宽度） \\
+通信类型 & 点对点 & All-Reduce \\
+通信量/层 & $B \times S \times H$ & $8 \times B \times S \times H$ \\
+气泡 & 有（需微批次缓解） & 无 \\
+批次消耗 & 是 & 否 \\
+实现复杂度 & 非常高 & 中等 \\
+最佳使用场景 & 跨节点慢速链路 & 节点内高速互连 \\
+\bottomrule
+\end{tabular}
+\caption{两种模型并行策略的关键区别}
+\end{table}
+
+\subsection{本章小结}
+
+张量并行通过矩阵分块将单层计算分布到多个 GPU 上，无气泡开销但通信密集。实践中应限制在单节点内（$\leq 8$ GPU），利用 NVLink 高带宽。与流水线并行互补：张量并行用于节点内，流水线并行用于跨节点。
+
+%% ========== Part 6: 序列并行与激活分片 ==========
+

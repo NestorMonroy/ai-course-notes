@@ -1,0 +1,237 @@
+\section{GPU 为什么适合大规模深度学习}
+
+本节从 compute scaling 的历史讲到 GPU 与 CPU 的区别，再拆 SM、SP、warp、block、register、shared memory 和 HBM。
+
+
+\begin{knowledgebox}{术语消化：SM、SP、warp、block}
+SM 是 Streaming Multiprocessor，是 GPU 上执行 thread blocks 的主要单元；SP/CUDA core 是 SM 内的标量执行单元；warp 是一组通常 32 个 lockstep 执行的 threads；thread block 是被调度到一个 SM 上的线程组。HBM 是 GPU 的高带宽显存，容量大但离计算单元远；SRAM/shared memory/register 更靠近 SM，容量小但快。
+\end{knowledgebox}
+
+
+\noindent\textbf{展开说明：}GPUS
+
+
+
+课程先用一张目标页明确方法：一端是“理解 GPU 何时变慢”，另一端是“把这些原因转化成快速算法”。因此本讲不会停留在 CUDA 名词解释，而会用 matrix shape、roofline、memory hierarchy 和 FlashAttention 把硬件现象与算法设计连起来。读后续性能图时，要不断问：这是峰值算力限制、带宽限制、并行度不足，还是 shape/alignment 让硬件单元闲置？
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-002.jpg}
+\caption{Slide 2：课程目标；让 CUDA/GPU 不再神秘，并从慢的原因推导快速算法。}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：两端目标必须同时验收}
+只理解 GPU block/warp 并不能自动写出高性能 kernel；只复制 FlashAttention 代码也不能解释它何时更快。左侧目标要求能诊断 bottleneck，右侧目标要求能重排算法与数据流。真正的掌握标准是：给定一个新算子，先用 profiler 和资源账本判断慢在哪里，再选择 fusion、tiling、precision 或 recomputation，而不是套固定优化清单。
+\end{knowledgebox}
+
+Slide 3 单独列出 Horace He 的博客、CUDA Mode 与 GPU/TPU 性能书等来源。它的教学价值在于说明 GPU performance 是跨层知识：硬件手册给约束，kernel 社区提供实现模式，论文展示 IO-aware algorithm。讲义应保持这些证据层分开——硬件规格不等于实际 kernel 性能，单个 benchmark 也不等于普遍算法规律。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-003.jpg}
+\caption{Slide 3：本讲 GPU 性能材料的主要公开来源。}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{证据层次：spec、microbenchmark、end-to-end}
+GPU datasheet 告诉我们峰值 FLOP/s、带宽和片上容量；microbenchmark 检查某种 shape、dtype 或访问模式能达到多少；端到端训练则包含 framework dispatch、通信和其他算子。一个优化只有在三层证据一致时才可信：规格上有上限空间，microbenchmark 证明实现接近上限，完整 workload 证明局部收益没有被别处抵消。
+\end{knowledgebox}
+
+最后的组织页把全讲分成三段：先拆 GPU 硬件与 memory model，再建立 workload performance 技巧，最后用 FlashAttention 验证这些技巧如何组合。这个顺序防止把 FlashAttention 神秘化：其核心组件——tiling、online normalization、避免中间矩阵写回——都来自前两部分已经建立的 IO 账本。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-004.jpg}
+\caption{Slide 4：本讲三段结构，从 GPU 硬件到性能模型，再到 FlashAttention。}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{全讲阅读问题}
+每一页至少回答一个问题：数据当前在 HBM、shared memory 还是 register？并行工作能否填满 SM？矩阵 shape 是否匹配 tensor core tile？减少精度或重算后，节省的 byte 是否大于新增计算？到 FlashAttention 部分时，这四个问题会被放进同一条 forward-pass 数据流。
+\end{importantbox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-005.jpg}
+\caption{Slide 5: Setting the stage: compute leads to predictable perf}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}Often times, compute leads to predictable performance gains for language models
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-006.jpg}
+\caption{Slide 6: How do we get compute scaling? Early on – Dennard scaing}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}But the traditional form of scaling (Dennard scaling) from 1980-2000s has tapped out.
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-007.jpg}
+\caption{Slide 7: Parallel scaling continues}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}Bill dally, HotChips keynote
+
+\begin{knowledgebox}{读图：Slide 7 应该怎么看}
+这页是硬件机制或性能证据页。先看数据从哪里来、在哪里复用、是否写回 HBM；再判断瓶颈是 compute、memory bandwidth、thread scheduling 还是 alignment。GPU 优化不是让公式更漂亮，而是让数据在正确层级停留更久、让 tensor cores 少等数据。
+\end{knowledgebox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-008.jpg}
+\caption{Slide 8: How is a GPU different from a CPU?}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}CPUs optimize for a few, fast threads while GPUs optimize for many many threads
+
+\begin{knowledgebox}{读图：Slide 8 应该怎么看}
+这页是硬件机制或性能证据页。先看数据从哪里来、在哪里复用、是否写回 HBM；再判断瓶颈是 compute、memory bandwidth、thread scheduling 还是 alignment。GPU 优化不是让公式更漂亮，而是让数据在正确层级停留更久、让 tensor cores 少等数据。
+\end{knowledgebox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-009.jpg}
+\caption{Slide 9: Anatomy of a GPU (execution units)}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}Each SM further contains many SPs   GPUs have many SM (streaming
+
+\begin{knowledgebox}{读图：Slide 9 应该怎么看}
+这页是硬件机制或性能证据页。先看数据从哪里来、在哪里复用、是否写回 HBM；再判断瓶颈是 compute、memory bandwidth、thread scheduling 还是 alignment。GPU 优化不是让公式更漂亮，而是让数据在正确层级停留更久、让 tensor cores 少等数据。
+\end{knowledgebox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-010.jpg}
+\caption{Slide 10: Anatomy of a GPU (memory)}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}The closer the memory to the SM, the faster it is – L1 and shared memory is inside
+
+\begin{knowledgebox}{读图：Slide 10 应该怎么看}
+这页是硬件机制或性能证据页。先看数据从哪里来、在哪里复用、是否写回 HBM；再判断瓶颈是 compute、memory bandwidth、thread scheduling 还是 alignment。GPU 优化不是让公式更漂亮，而是让数据在正确层级停留更久、让 tensor cores 少等数据。
+\end{knowledgebox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-011.jpg}
+\caption{Slide 11: Execution model of a GPU}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}There are 3 important players in the execution model
+
+\begin{knowledgebox}{读图：Slide 11 应该怎么看}
+这页是硬件机制或性能证据页。先看数据从哪里来、在哪里复用、是否写回 HBM；再判断瓶颈是 compute、memory bandwidth、thread scheduling 还是 alignment。GPU 优化不是让公式更漂亮，而是让数据在正确层级停留更久、让 tensor cores 少等数据。
+\end{knowledgebox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-012.jpg}
+\caption{Slide 12: Memory model of a GPU}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}Each thread can access its own register, and shared memory within the block.
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-013.jpg}
+\caption{Slide 13: Side thread – What about TPUs?}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}GPUs, TPUs, and many other accelerators are at a high level, similar
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-014.jpg}
+\caption{Slide 14: Side thread – What about TPUs?}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}Core structure – lightweight control, fast (big) matmul unit, fast memory.
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-015.jpg}
+\caption{Slide 15: Strengths of the GPU model}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：} Easily scales up hard workloads (by adding more SMs)
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-016.jpg}
+\caption{Slide 16: GPUs as fast matrix multipliers}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}Early days of NVIDIA GPUs – programmable shaders. Researchers hacked this to do matmuls
+
+\begin{knowledgebox}{读图：Slide 16 应该怎么看}
+这页是硬件机制或性能证据页。先看数据从哪里来、在哪里复用、是否写回 HBM；再判断瓶颈是 compute、memory bandwidth、thread scheduling 还是 alignment。GPU 优化不是让公式更漂亮，而是让数据在正确层级停留更久、让 tensor cores 少等数据。
+\end{knowledgebox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-017.jpg}
+\caption{Slide 17: New matmul hardware means matmuls are fast and special}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}Tensor cores (introduced in V, T series) are specialized matrix multiplication circuits.
+
+\begin{knowledgebox}{读图：Slide 17 应该怎么看}
+这页是硬件机制或性能证据页。先看数据从哪里来、在哪里复用、是否写回 HBM；再判断瓶颈是 compute、memory bandwidth、thread scheduling 还是 alignment。GPU 优化不是让公式更漂亮，而是让数据在正确层级停留更久、让 tensor cores 少等数据。
+\end{knowledgebox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-018.jpg}
+\caption{Slide 18: Compute scaling is faster than memory scaling}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}https://medium.com/riselab/ai-and-memory-wall-2cb4265cb0b8
+
+前 18 页的硬件事实在 Slide 19 被压缩成三条：GPU 依赖大量 workers 执行相同指令；矩阵计算峰值增长快于 memory；程序必须尊重多层 memory hierarchy。三条缺一不可——只有并行而没有复用会受带宽限制，只有 tensor cores 而 shape 不匹配会受调度限制，只有片上 memory 而 tile 设计错误也无法复用。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-019.jpg}
+\caption{Slide 19：GPU 硬件部分 recap；并行、compute-memory gap 与 memory hierarchy。}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{从硬件事实到性能诊断}
+若 kernel 低于预期，先按三层排查：warp 是否因 divergence 或工作量太小而空闲；arithmetic intensity 是否低到受 HBM bandwidth 限制；数据是否被及时搬到 shared memory/register 并重复使用。后面的低精度、fusion、coalescing 与 tiling 分别作用于这些层，而不是互相替代。
+\end{importantbox}
+
+\subsection{本章小结}
+本节的共同问题是如何减少昂贵的数据移动并提高硬件利用率。GPU 的速度来自海量并行和专用矩阵硬件，但只有当 memory access、shape、precision 和 kernel 组织匹配时，这些速度才会真正出现。
+

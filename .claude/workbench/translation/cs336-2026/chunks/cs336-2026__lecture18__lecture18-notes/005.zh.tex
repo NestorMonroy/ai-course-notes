@@ -1,0 +1,36 @@
+\section{集群级问题：长上下文、故障与 cache-aware routing}
+
+前面讨论的是单个引擎的状态管理，本节把范围扩大到集群。当模型跨越几十张 GPU、上下文达到百万 token 时，单机优化不再足够。系统需要处理节点故障、跨卡通信、context sharding 和不同请求之间的干扰；许多收益来自 routing layer 的几行决策，而不是重新写整个模型。
+
+\subsection{Context parallelism 与故障域}
+
+本节从两个同时出现的规模问题入手。百万 token 上下文可以沿 sequence dimension 切到多张 GPU，让每张卡只保存局部 KV，再在 attention 中交换必要信息。与此同时，模型若跨 64 或 72 张 GPU 执行，任何一张卡故障都可能中断整次请求；fault tolerance 必须考虑重路由、KV 恢复、冗余 expert 和局部重算。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{00-31-20-context-parallelism.jpg}
+\caption{长上下文的 context parallelism：序列与 KV 状态跨 GPU 分片。}
+\figsource{课堂视频 00:29:56--00:31:29。}
+\end{figure}
+
+\subsection{CPD：先按 cache hit 把 cold 与 warm 分开}
+
+进一步，Cache-aware prefill-decode disaggregation（CPD）在普通 PD 分离之外增加一个关键判断：新请求若几乎没有可复用 prefix，就送到 pre-prefill/cold pool；高 cache-hit 的 warm request 进入快速 prefill path；decode pool 保持延迟隔离。这样可以避免一个超长 cold prefill 阻塞大量只需追加少量 token 的会话。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{00-32-30-cache-aware-pd.jpg}
+\caption{CPD：cache-aware router 将 cold prefill、warm prefill 与 decode 分离。}
+\figsource{课堂视频 00:31:31--00:33:37；机制与 Together AI 公开 CPD 说明交叉核验。}
+\end{figure}
+
+若平均会话约十轮，fresh request 只占一部分，但它们的 prefill 成本可能远高于续聊。CPD 利用这种异质性，把“有没有可复用状态”提升为一等调度信号。课堂报告该简单路由可带来最高约 $40\%$ 的 serving 改善；官方说明把收益表述为在特定 long-context mixed workload 下提高约 $35\%$--$40\%$ 的 sustainable throughput。
+
+\begin{importantbox}{Routing 也是算法}
+两行 routing logic 能改变整个集群的干扰结构。系统优化不一定要写新 kernel；只要识别出 cold/warm、prefill/decode、short/long 等成本类别，并让它们不再互相阻塞，就可能获得大收益。
+\end{importantbox}
+
+\subsection{本章小结}
+
+规模扩大后，sequence sharding、fault domain 与 cache locality 必须一起考虑。CPD 的关键不是多加一个服务名字，而是用 cache reuse 区分工作类别，让高成本 cold prefill 不再污染低延迟路径。
+

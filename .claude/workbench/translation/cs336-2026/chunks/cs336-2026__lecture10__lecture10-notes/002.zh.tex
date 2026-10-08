@@ -1,0 +1,123 @@
+\section{Understanding the inference workload}
+
+\subsection{推理为什么重要，以及什么叫快}
+
+Inference 出现在实际产品、模型评测、agent 内部轨迹、批量数据处理和 RL 采样中。训练是阶段性成本，推理是每次使用都要付的成本。聊天机器人里，人类等待 time-to-first-token；agent 工作流里，内部 trace 可能生成大量不可见 token；RL 中则要采样许多 completions 再打分。换句话说，tokens generated = compute spent。
+
+\begin{knowledgebox}{课堂提示：训练付一次，推理会重复付费}
+老师用数量级对比强调 inference efficiency：训练是一次性阶段成本，推理却会在产品、评测和 RL 采样中反复发生；agent 的内部 trace 还可能让生成 token 数无界增长。于是“tokens generated = compute spent”不只是口号，而是要求每个产品和平台都把推理成本当作长期系统预算。
+\end{knowledgebox}
+
+\begin{knowledgebox}{术语消化：推理服务指标}
+\begin{tabular}{L{0.22\textwidth}L{0.34\textwidth}L{0.34\textwidth}}
+\toprule
+指标 & 含义 & 主要优化方向 \\
+\midrule
+TTFT & Time-to-first-token，用户等到第一个 token 的时间。 & prefill latency，小 batch、prefix cache、prompt 处理。 \\
+Latency & 单个请求 token 出现的速度，常以 seconds/token 计。 & generation step time、KV cache 读取、batch size。 \\
+Throughput & 系统总体 tokens/second。 & batching、并发、KV memory 管理、kernel efficiency。 \\
+Memory-bound & 速度受 HBM 读写限制，而不是算力限制。 & 减少 KV cache、量化、分页、提高复用。 \\
+\bottomrule
+\end{tabular}
+\end{knowledgebox}
+
+\subsection{Transformer notation 与算术强度}
+
+为了让后面的优化能做数量级比较，本节先统一 $B,T,D,H,N,K,G,S,F$ 等维度，并把主要算子写成 FLOPs 与 bytes。核心问题是同一层在 prefill 时更像大矩阵乘，generation 时更像矩阵向量乘；shape 改变会让算术强度和瓶颈从 compute 转向 HBM bandwidth。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.78\textwidth]{transformer-diagram.png}
+\caption{Transformer 结构与维度约定：\(B,T,D,H,N,K,G,S,F\) 等符号用于后续 FLOPs 和 IO 账本。}
+\figsource{Scaling Book Transformer diagram，本地化后供 CS336 Lecture 10 使用。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Transformer 维度怎么读}
+\(B\) 是 batch size，\(T\) 是要计算的 token 数，\(S\) 是已条件化的历史 token 数，\(D\) 是 model dimension，\(H\) 是 head dimension，\(N\) 是 query heads 数，\(K\) 是 key/value heads 数，\(G=N/K\) 是 GQA group 数，\(F=4D\) 是 MLP up-projection width。后面所有推理账本都在追踪这些维度如何进入 FLOPs、HBM 读写和 KV cache。
+\end{knowledgebox}
+
+算术强度 arithmetic intensity 定义为每搬运一个 byte 做多少 FLOPs：
+\[
+I = \frac{\text{FLOPs}}{\text{HBM bytes read/write}}.
+\]
+若 \(I\) 高于硬件的 compute/bytes 比，算子 compute-bound；若低于该阈值，算子 memory-bound。矩阵乘 \(X(B,D)W(D,F)\) 的 FLOPs 约为 \(2BDF\)，但权重读取约为 \(DF\) 元素。当 \(B=1\) 时，矩阵乘退化成 matrix-vector product，读一整个权重矩阵只服务一个 token，算术强度极低。
+
+\begin{importantbox}{为什么 generation 像 batch size 为 1 的矩阵向量乘}
+训练时 \(B\times T\) 通常很大，同一个权重矩阵服务许多 tokens；generation 时每个请求每步只生成一个新 token，\(T=1\)，并发 \(B\) 又由在线流量决定。因此 generation 很难稳定形成大矩阵乘，往往被参数和 KV cache 的 HBM 读取限制。
+\end{importantbox}
+
+\subsection{MLP layers (only looking at the matrix multiplications)}
+
+把 gated MLP 只按三个矩阵乘计数：up projection、gate projection 和 down projection。若输入为 \(X\in\mathbb{R}^{B\times T\times D}\)，中间宽度 \(F\approx4D\)，则主要计算量与算术强度近似为
+
+\[
+\mathrm{FLOPs}_{\mathrm{MLP}}\approx 6BTDF,
+\qquad
+I_{\mathrm{MLP}}\approx BT.
+\]
+
+第二个近似假设权重读取 \(O(DF)\) 主导 bytes。Prefill 可用长序列和 batch 把 \(BT\) 做大；generation 的 \(T=1\)，只剩在线并发 \(B\) 能提高权重复用，因此更容易落入 memory-bound 区域。
+
+\begin{knowledgebox}{课堂提示：prefill 与 generation 的 MLP 只差 shape，不差权重}
+老师把同一组 MLP 权重放进两个阶段比较：prefill 的 \(BT\) 往往足够大，权重一次读入服务许多 tokens；generation 每次只处理一个新 token，并发请求数又不可预测。这个差异解释了为什么训练优化经验不能原样搬到在线 decode，也解释了 batching 为什么对 generation 如此关键。
+\end{knowledgebox}
+
+\subsection{Attention layers (focusing on the matrix multiplications with FlashAttention)}
+
+FlashAttention 消除了显式 \(T\times S\) attention matrix 的 HBM 往返，但 QKV projection、attention matmul 与 output projection 仍要读取权重和 KV cache。Prefill 中 \(T=S\)，attention 的复用随上下文增大；generation 中 \(T=1\)，每个新 query 都要读取该请求已有的 \(S\) 个 keys/values，因此 attention intensity 仍接近常数且通常低于 1。
+
+\begin{importantbox}{Attention generation 为什么 batching 帮助有限}
+不同请求拥有不同 KV cache。增大 batch 可以共同执行 projection，却不能让一个请求的历史 KV 被另一个请求复用；所以 MLP 的权重读取可由 batch 摊薄，attention generation 的 KV 读取则随每条序列单独增长。
+\end{importantbox}
+
+\subsection{naive inference、KV cache、prefill 与 generation}
+
+前面的 shape 账本解释了为什么逐 token 重算 prefix 非常浪费，本节比较 naive autoregressive inference 与 KV-cached inference。KV cache 把历史 key/value 从重复计算改成持续读取，显著减少 FLOPs，却让 cache 容量、HBM 带宽和请求生命周期成为新的主瓶颈。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{naive-inference-1400.png}
+\caption{Naive inference：每生成一个 token 都把完整历史重新喂进 Transformer，重复计算大量 prefix。}
+\figsource{Scaling Book naive inference diagram，本地 PNG 由官方 WebP 转换。}
+\end{figure}
+
+\begin{knowledgebox}{读图：naive inference 为什么是 \(O(T^3)\)}
+第 \(t\) 个 token 的 forward pass 会处理长度约为 \(t\) 的上下文；单次 attention 近似 \(O(t^2)\)。把 \(t=1\) 到 \(T\) 累加，整体生成 \(T\) 个 token 需要 \(O(T^3)\) 级别的重复计算。图里的关键是 prefix 被反复重算。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{cached-inference-1400.png}
+\caption{Cached inference：把历史 token 的 key/value 存进 KV cache，后续生成只计算新 token 与历史 cache 的交互。}
+\figsource{Scaling Book cached inference diagram，本地 PNG 由官方 WebP 转换。}
+\end{figure}
+
+\begin{knowledgebox}{读图：KV cache 省了计算，但制造了内存瓶颈}
+KV cache 为每个 sequence、token、layer、head 保存 \(K,V\) 向量。它避免历史 token 反复投影，复杂度大幅降低；但每个新 token 都要读取该请求历史的 KV cache。历史越长、batch 越大、层数越多，HBM 读写越重。
+\end{knowledgebox}
+
+\[
+M_{\text{KV}}
+  \approx
+2 \cdot B \cdot S \cdot L \cdot K \cdot H \cdot \text{bytes}.
+\]
+其中 \(2\) 来自 key 和 value，\(B\) 是并发请求数，\(S\) 是历史上下文长度，\(L\) 是层数，\(K\) 是 KV heads 数，\(H\) 是 head dimension。这个公式解释了为什么后面 GQA、MLA、CLA、local attention、PagedAttention 都围绕 KV cache 做文章。
+
+\begin{importantbox}{prefill 和 generation 的差别}
+Prefill：给定 prompt，一次性编码 \(S\) 个 tokens，能像训练一样并行，MLP intensity 约随 \(B S\) 提升，attention intensity 约随 \(S/2\) 提升。Generation：每次只生成一个 token，MLP intensity 约随并发 \(B\) 提升，attention generation intensity 小于 1，几乎无法靠 batching 改善，因为每个请求读取自己的 KV cache。
+\end{importantbox}
+
+\subsection{latency-throughput tradeoff}
+
+KV cache 建立后，服务系统仍要决定一次处理多少请求以及是否切分模型。本节的核心 tradeoff 是：更大 batch 和更多并发通常提高 hardware utilization 与总 throughput，却增加排队时间、每请求 cache 占用和 tail latency；因此复制模型、tensor parallel 与 pipeline parallel 要按 SLO 和 workload 选择。
+
+Batch size 增大时，模型权重读取可被更多请求摊薄，throughput 上升；但 KV cache 随 \(B\) 增大，单请求等待和每步读取也变重，latency 变差。一个简单策略是 prefill 用较小 batch 改善 TTFT，generation 用较大 batch 提高吞吐。
+
+\begin{warningbox}{复制模型和切分模型的差别}
+若启动 \(M\) 个完整模型副本，latency 基本不变，throughput 近似乘 \(M\)。若 shard 模型和 KV cache，则能服务更大模型或更大上下文，但每步推理需要跨设备通信，latency 可能上升。
+\end{warningbox}
+
+\subsection{本章小结}
+
+理解 inference 的关键是把请求拆成 prefill 和 generation，把算子拆成 FLOPs 与 HBM bytes，把状态拆成 weights 和 KV cache。Generation 的 memory-bound 特性决定了后续所有优化方向。
+

@@ -1,0 +1,113 @@
+\section{Deduplication：从 exact hash 到 fuzzy set similarity}
+
+Filtering 选择“像目标”的样本，却不会自动修正同一内容出现太多次的问题，因此下一步需要 Deduplication。重复数据会浪费 compute、放大 memorization、增加 benchmark contamination，并让某些模板在梯度中被过度加权。问题在于“重复”有很多层次：完全相同的 bytes、去掉空白后相同、局部片段重叠、镜像站点、同一文章的轻微改写。算法选择必须先回答业务定义：我们想删除完全相同的对象、共享大段文字的对象，还是任何语义相近的对象？
+
+\subsection{Exact dedup：便宜但只能抓到完全重复}
+
+本节先处理最确定的一类重复：规范化后完全相同的文档。它适合作为管线第一层，因为计算便宜、判断可复现、误删边界清楚；但它只能发现 byte-level 或 normalization-level 的一致，无法识别镜像文章、插入广告后的复制页和局部重叠。具体做法是对规范化文本计算 cryptographic hash：
+
+$$
+h(x)=\operatorname{SHA256}(\operatorname{normalize}(x)).
+$$
+
+若两个文档 hash 相同，就只保留一个。实现上可以排序 hash，或用 distributed key-value store 聚合。规范化通常包含 Unicode normalization、空白压缩和 boilerplate removal；但规范化越激进，误合并风险越高。
+
+\begin{lstlisting}[caption={Exact dedup 的最小流程}]
+def exact_dedup(documents):
+    seen = set()
+    for document in documents:
+        normalized = normalize(document.text)
+        digest = sha256(normalized.encode("utf-8")).digest()
+        if digest in seen:
+            continue
+        seen.add(digest)
+        yield document
+\end{lstlisting}
+
+Exact hash 之所以不够，可以直接从课程给出的近重复样本看出来：公共 license、网页模板和同一新闻句子的轻微排版差异都可能只占文档的一部分，整篇 hash 自然不同，但重复片段仍会被反复训练。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{near-duplicate-examples.png}
+\caption{三个语料中的 near-duplicate：主体内容相同，只在实体、标点或局部短语上变化。}
+\figsource{Stanford CS336 2026 Lecture 14 官方可执行讲义引用图，本地化为 \texttt{images/near-duplicate-examples.png}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：黄色区域应该先比较什么}
+逐行比较 Example 与 Near-Duplicate Example：Wiki-40B 只替换了作品与作者等实体，LM1B 主要是标点/版式差异，C4 则用模板替换国家和旅游词。它们说明“重复”不是二元 byte equality，而是共享大部分 shingles。图不能告诉我们应该删除哪一个版本；是否保留实体替换或模板变体仍取决于训练目标和阈值。
+\end{knowledgebox}
+
+\subsection{Jaccard similarity：把文档看成 shingle 集合}
+
+Exact hash 的召回不足后，问题就变成如何比较“部分相同”。本节把每个文档转换成连续 $n$-gram 构成的 shingle 集合，再用集合交并比描述重叠；这种表示忽略了长距离语序，却能对插入少量广告、改动标题或移动段落保持一定鲁棒性。
+
+将文档切成 $k$-gram 或 token shingles，得到集合 $A$、$B$。Jaccard similarity 定义为：
+
+$$
+J(A,B)=\frac{|A\cap B|}{|A\cup B|}.
+$$
+
+其中 $|A\cap B|$ 是共同 shingle 数，$|A\cup B|$ 是总的不同 shingle 数。若两个网页只是替换标题、日期或少量句子，Jaccard 仍可能很高。
+
+\begin{knowledgebox}{Worked example}
+设 $A=\{a,b,c,d\}$，$B=\{b,c,d,e,f\}$，则交集大小为 3，并集大小为 6，所以 $J(A,B)=0.5$。真实文档会有成千上万 shingles，直接两两比较的复杂度约为 $O(N^2)$，无法用于 web-scale corpus。
+\end{knowledgebox}
+
+\subsection{MinHash 与 LSH：用概率近似避免全量两两比较}
+
+Jaccard 定义了相似度，却仍需要 $O(N^2)$ 的全量两两比较；本节的核心是用 MinHash 压缩集合，再用 LSH 只生成可能相似的候选对。MinHash 为每个集合构造短 signature，并满足：
+
+$$
+\Pr[h_{\min}(A)=h_{\min}(B)] = J(A,B).
+$$
+
+用多个独立 hash 估计相似度，再把 signature 分成 bands。只有落入同一 bucket 的文档才进入精确比较，这就是 locality-sensitive hashing（LSH）的候选生成思想。
+
+若两个文档的真实 Jaccard similarity 为 $s$，每个 band 有 $r$ 行、共 $b$ 个 bands，那么它们至少在一个 band 完全相同、从而成为候选的概率为
+
+$$
+P_{\mathrm{candidate}}(s)=1-(1-s^r)^b.
+$$
+
+其中，$s^r$ 是一个 band 内 $r$ 行全部碰撞的概率，$1-s^r$ 是该 band 未碰撞的概率，$(1-s^r)^b$ 是所有 bands 都未碰撞的概率。这个 S 形候选曲线说明 LSH 不是精确阈值：阈值附近既会有漏检，也会有误报，最终仍需精确相似度或人工标注校准。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.78\textwidth]{lsh-collision-probability.png}
+\caption{LSH 候选概率的 S 形曲线：相似度越高，进入候选集的概率越接近 1。}
+\figsource{Stanford CS336 2026 Lecture 14 官方可执行讲义引用图，本地化为 \texttt{images/lsh-collision-probability.png}。}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.78\textwidth]{lsh-band-thresholds.png}
+\caption{固定 signature 长度时，不同 band 数 $b$ 会改变候选曲线的位置与陡峭程度。}
+\figsource{Stanford CS336 2026 Lecture 14 官方可执行讲义引用图，本地化为 \texttt{images/lsh-band-thresholds.png}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：LSH 调的是候选预算，不是“真相阈值”}
+第一张图先读横轴 Jaccard similarity $s$ 与右轴候选概率 $P$：蓝点是实际 duplicate 标签，红线是 LSH 候选机制。第二张图保持总 hash 数近似不变，比较 $b=50,25,20,5$；更多 bands 会把曲线左移，更容易召回中等相似文档，也会产生更多 false positives。两图共同说明 $b,r$ 应由候选预算、人工标签和后续精排成本校准，不能把 S 曲线的拐点当成客观重复定义。
+\end{knowledgebox}
+
+\begin{knowledgebox}{Worked example：同一 signature budget 怎样改变候选概率}
+设 $m=100$ 个 MinHash 值。方案 A 取 $b=20,r=5$；对 $s=0.8$ 的文档对，候选概率约为 $1-(1-0.8^5)^{20}\approx99.96\%$。方案 B 取 $b=10,r=10$；同样的 $s=0.8$ 只有 $1-(1-0.8^{10})^{10}\approx67.8\%$。两者存储相同，但方案 A 更偏召回，方案 B 更偏 precision。这就是参数不能只凭经验复制的原因。
+\end{knowledgebox}
+
+\begin{importantbox}{形状账本}
+若每个文档有 $m$ 个 MinHash 值，并分成 $b$ 个 bands、每 band $r$ 行，则 $m=br$。增大 $b$ 会提高召回、产生更多候选；增大 $r$ 会提高 precision、错过更多中等相似文档。这里没有免费午餐，参数必须由人工标注的 duplicate pairs 校准。
+\end{importantbox}
+
+\begin{warningbox}{去重会改变数据分布}
+高频内容不一定是垃圾：法律条款、API 文档、基础教材、代码 boilerplate 可能因实用而重复。Document-level dedup、paragraph-level dedup 和 substring dedup 会产生不同模型；过度 substring dedup 还可能破坏自然语言中的常见表达。
+\end{warningbox}
+
+\teachervoice{课堂强调：hashing 的意义不是“神奇地找到重复”，而是把昂贵的相似度比较缩小到少量候选。大规模数据工程常见的核心模式就是先做便宜、高召回筛选，再做昂贵、高精度判断。}
+
+\subsection{污染控制与训练去重不是同一件事}
+
+前面的方法主要控制训练集内部重复，但评测污染需要更严格的威胁模型。训练集内部 dedup 关注样本权重和 memorization；benchmark decontamination 关注训练样本与 eval item 的重叠。后者通常需要更保守的 substring 或 semantic matching，并且要处理答案、题干、翻译、改写和 solution traces。仅做 document hash 不能证明 benchmark 没有泄漏；反过来，为了“零污染”而删除所有相似主题，也可能把合法的背景知识一起删掉。
+
+\subsection{本章小结}
+
+Exact hash 解决完全重复，Jaccard 描述集合重叠，MinHash 近似 Jaccard，LSH 负责候选检索。真正难点是定义“应当删除的相似”，而不是实现 hash 函数。
+

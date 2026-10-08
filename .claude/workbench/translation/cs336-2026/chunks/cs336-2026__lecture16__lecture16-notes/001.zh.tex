@@ -1,0 +1,60 @@
+\section{从 RLHF 到 RLVR：把模糊偏好换成可验证结果}
+
+上一讲的 RLHF 使用 human/AI preference 作为 reward proxy，但继续优化会产生 overoptimization。RLVR（reinforcement learning from verifiable rewards）选择数学、代码、形式证明、可执行 agent tasks 等领域，利用 exact answer、unit tests 或 environment success 直接验证结果。
+
+\singleslide{slide-02.jpg}{课程从 pretraining + RLHF 的 GPT-3.5 级别控制，推进到 o1/R1 式可验证推理。}{2}
+
+Slide 2 把本讲定位成能力边界的扩张：pretraining 与 preference alignment 已能得到通用聊天助手，但复杂数学、代码与长链推理仍需要大量在线试错。关键变化不是简单“再做一次 RLHF”，而是选择 verifier 能精确判定成功的任务，使 policy 可以生成海量 trajectories 并自动获得 outcome feedback。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{slide-03.jpg}
+\caption{RLVR 的目标：在 reward 能精确验证的 domain 中扩大 RL 的范围和强度。}
+\figsource{CS336 Spring 2026 Lecture 16，Slide 3。}
+\end{figure}
+
+\begin{knowledgebox}{读图：为什么 verifiable reward 改变了可扩展性}
+Human preference 的标签成本高且 reward model 会被 exploit；可验证任务可以自动生成大量 rollouts，并对最终答案或执行结果给出稳定反馈。它并不消除 specification problem，但把“什么算成功”变得更明确。
+\end{knowledgebox}
+
+\singleslide{slide-04.jpg}{本讲路线：先审计 PPO→GRPO 与变体，再比较 R1、Kimi K1.5、Qwen3 的完整 recipes。}{4}
+
+Slide 4 规定了阅读层级。算法部分回答 advantage、baseline、normalization 与 length weighting 怎样改变梯度；案例部分回答数据如何筛选、SFT 如何启动、RL 如何在线生产轨迹、distillation 如何迁移能力，以及 rollout infrastructure 如何决定有效吞吐。只看“用了 GRPO”无法解释三家模型为何得到不同结果。
+
+\begin{importantbox}{RLVR 的基本闭环}
+从问题 $x$ 采样一组 trajectories $y_1,\ldots,y_G$，用 verifier 得到 rewards $r_i$，再提高成功轨迹的概率、降低失败轨迹的概率。数据生成与 policy 更新交替进行，因此 rollout engine、verifier 和 trainer 构成同一个系统。
+\end{importantbox}
+
+\begin{knowledgebox}{Nota de clase}
+Tatsu 将本讲分成两层：先审计 PPO/GRPO objective，再看 R1、Kimi、Qwen3 的完整 recipes。算法公式只是其中一部分，data curation、curriculum、distillation 和 infra 同样决定结果。
+\end{knowledgebox}
+
+\subsection{符号表：一次 PPO/GRPO update 在算什么}
+
+为了避免后文在 trajectory、token 和 policy 之间反复切换，本节先建立符号账本。核心区分是：$x$ 和 $y$ 描述一条样本，$t$ 描述样本内部的 token step，$i$ 描述同一 prompt 下的第几条 rollout；baseline 与 normalization 若依赖错了索引，就会改变梯度含义。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{L{0.14\textwidth}L{0.34\textwidth}L{0.42\textwidth}}
+\toprule
+符号 & 表示 & 审计问题 \\
+\midrule
+$x$ & prompt / environment initial state & 同一组 rollouts 是否真的共享同一个条件 \\
+$y_i$ & 第 $i$ 条完整 trajectory & 长度、语言和工具调用是否可比 \\
+$y_{i,t}$ & trajectory 内第 $t$ 个 token/action & mask、padding 与 stop token 是否正确 \\
+$\pi_\theta$ & 正在更新的 policy & rollout 与训练时使用的版本是否一致 \\
+$\pi_{\mathrm{old}}$ & 生成当前数据的旧 policy & importance ratio 是否过旧 \\
+$\pi_{\mathrm{ref}}$ & KL anchor/reference policy & reference 是否固定、是否与 tokenizer 一致 \\
+$r_i$ & verifier 对完整 trajectory 的 reward & reward 是否可复现、是否有 false positive \\
+$b$ / $\bar r$ & baseline 或组均值 & 是否与当前 action 条件独立 \\
+$\hat A_i$ & 用于更新的 advantage estimate & normalization 是否重写 prompt 权重 \\
+$G$ & 每个 prompt 的 rollout 数 & group 太小时 bias/variance 是否过大 \\
+\bottomrule
+\end{tabular}
+\caption{PPO/GRPO 的符号与实现检查点。}
+\end{table}
+
+\subsection{本章小结}
+
+本节把 RLVR 定位为“可验证 domain 上的 on-policy improvement”。接下来回顾 PPO，理解 GRPO 究竟删掉了什么、又引入了什么偏差。
+

@@ -1,0 +1,170 @@
+\section{无损加速：投机采样}
+
+前面的方法都在``走捷径''——通过降低精度或改变架构来换取速度，可能影响输出质量。投机采样（Speculative Sampling）提供了一种\textbf{无损}的加速方案：保证从目标模型的精确分布中采样。
+
+\subsection{核心直觉：验证比生成快}
+
+\begin{importantbox}{推理两阶段的不对称性}
+\begin{itemize}
+    \item \textbf{Prefill}：给定序列，并行编码所有 token（计算受限，很快）——这本质上就是``验证''
+    \item \textbf{Generation}：逐个生成 token（内存受限，很慢）
+\end{itemize}
+也就是说：\textbf{检查一个序列是否合理，比从头生成这个序列要快得多}。
+\end{importantbox}
+
+\subsection{投机采样算法}
+
+\begin{importantbox}{投机采样的工作流程}
+\begin{enumerate}
+    \item 使用一个\textbf{廉价的草稿模型}（draft model）$p$ 快速生成若干候选 token（如 4 个）
+    \item 将这些候选 token 送入\textbf{目标模型}（target model）$q$ 进行并行验证（Prefill 操作）
+    \item 使用改进的拒绝采样来决定接受或拒绝每个候选 token
+    \item 被接受的 token 直接使用；被拒绝时，从修正后的分布中采样一个 token
+\end{enumerate}
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    box/.style={draw, rounded corners, minimum width=2cm, minimum height=0.7cm, align=center, font=\footnotesize},
+    token/.style={draw, minimum width=0.7cm, minimum height=0.7cm, align=center, font=\footnotesize},
+    arrow/.style={->, thick, >=stealth}
+]
+% Draft model generates
+\node[box, fill=blue!10] (draft) at (0, 3) {草稿模型 $p$};
+\node[font=\footnotesize] at (0, 2.3) {快速自回归生成};
+\foreach \i/\c in {0/the, 1/cat, 2/sat, 3/on} {
+    \node[token, fill=blue!5] (d\i) at (\i*1.2-1.8, 1.3) {\c};
+}
+
+% Target model verifies
+\node[box, fill=red!10] (target) at (6, 3) {目标模型 $q$};
+\node[font=\footnotesize] at (6, 2.3) {并行验证（Prefill）};
+\foreach \i/\c/\col in {0/the/green, 1/cat/green, 2/sat/green, 3/on/red} {
+    \node[token, fill=\col!15] (t\i) at (\i*1.2+4.2, 1.3) {\c};
+}
+
+% Result
+\node[font=\footnotesize] at (3, 0.3) {接受 3 个 token，拒绝第 4 个，从修正分布采样替代};
+\node[token, fill=green!20] at (4.2, -0.3) {the};
+\node[token, fill=green!20] at (5.4, -0.3) {cat};
+\node[token, fill=green!20] at (6.6, -0.3) {sat};
+\node[token, fill=yellow!30] at (7.8, -0.3) {down};
+
+\draw[arrow] (draft) -- (1.8, 3) -- (1.8, 1.7) -- (d0);
+\draw[arrow] (4.2, 3) -- (4.2, 1.7);
+\draw[arrow, dashed, gray] (1.8, 1.3) -- (4.2, 1.3) node[midway, above, font=\footnotesize, gray]{发送候选};
+\end{tikzpicture}
+\caption{投机采样流程：草稿模型快速猜测 4 个 token，目标模型并行验证，接受前 3 个，对第 4 个从修正分布重采样。}
+\end{figure}
+
+\subsection{正确性保证}
+
+投机采样的关键性质：\textbf{保证是目标模型的精确采样}。
+
+以二元词表 $\{A, B\}$ 为例进行证明：
+
+设目标模型概率为 $[q(A), q(B)]$，草稿模型概率为 $[p(A), p(B)]$。假设 $p(A) > q(A)$（草稿模型过度采样 $A$），则 $p(B) < q(B)$。
+
+\begin{enumerate}
+    \item 草稿模型提议 token $x$，以概率 $\min(1, q(x)/p(x))$ 接受
+    \item 若接受，使用 $x$
+    \item 若拒绝，从残差分布 $\max(q - p, 0)$（归一化后）中采样
+\end{enumerate}
+
+计算总采样概率：
+
+$$P[\text{采样} A] = p(A) \cdot \frac{q(A)}{p(A)} + p(B) \cdot 1 \cdot 0 = q(A)$$
+
+$$P[\text{采样} B] = p(B) \cdot 1 + p(A) \cdot \left(1 - \frac{q(A)}{p(A)}\right) \cdot 1 = q(B)$$
+
+\begin{knowledgebox}{与标准拒绝采样的区别}
+标准拒绝采样在拒绝后会重新采样（可能循环很多次）。投机采样的修改是：拒绝后不重试，而是直接从残差分布中采样——保证每一步至少产生一个 token。这种``付出代价直接采样''的策略避免了无限循环。
+\end{knowledgebox}
+
+\subsection{实践配置与扩展}
+
+实际部署中的典型配置：
+
+\begin{itemize}
+    \item 目标模型 70B $\leftrightarrow$ 草稿模型 8B
+    \item 目标模型 8B $\leftrightarrow$ 草稿模型 1B
+    \item 草稿模型越接近目标模型，接受率越高，加速比越大
+    \item 可通过知识蒸馏让草稿模型更好地模拟目标模型
+\end{itemize}
+
+\begin{knowledgebox}{Worked Example：投机采样的加速比计算}
+设草稿模型每生成 1 个 token 耗时 $t_d$，目标模型每验证一批（$\gamma$ 个候选 token）耗时 $t_v$，平均接受率为 $\alpha$。
+
+\textbf{参数设定}：$\gamma = 4$（每轮猜 4 个 token），$\alpha = 0.8$，$t_d = 2$ ms/token，$t_v = 30$ ms/批。
+
+\textbf{标准自回归}（目标模型直接生成）：每 token 耗时 $\approx 30$ ms。
+
+\textbf{投机采样一轮}：
+\begin{itemize}
+    \item 草稿模型生成 4 token：$4 \times 2 = 8$ ms
+    \item 目标模型验证：$30$ ms
+    \item 总耗时：$38$ ms
+    \item 期望接受 token 数：$\alpha^0 + \alpha^1 + \alpha^2 + \alpha^3 + (1 - \alpha^4) = 1 + 0.8 + 0.64 + 0.512 + 0.5904 \approx 3.54$ 个
+\end{itemize}
+
+\textbf{加速比}：$\frac{3.54 \times 30}{38} \approx 2.8\times$
+
+注意：如果接受率降到 $\alpha = 0.5$，期望接受仅 $\sim$1.94 个 token，加速比降到 $\frac{1.94 \times 30}{38} \approx 1.5\times$。\textbf{接受率是决定加速效果的关键因素}。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    tstep/.style={draw, minimum height=0.5cm, align=center, font=\tiny},
+    arrow/.style={->, thick, >=stealth}
+]
+% Standard autoregressive timeline
+\node[font=\small\bfseries, anchor=east] at (-0.3, 1.5) {标准自回归};
+\foreach \i/\c in {0/A,1/B,2/C,3/D} {
+    \node[tstep, fill=red!20, minimum width=2cm] at (\i*2.1+1, 1.5) {\c};
+}
+\draw[<->, thick] (0, 0.9) -- (8.4, 0.9) node[midway, below, font=\footnotesize]{$4 \times 30 = 120$ ms};
+
+% Speculative sampling timeline
+\node[font=\small\bfseries, anchor=east] at (-0.3, -0.3) {投机采样};
+% Draft phase
+\foreach \i/\c in {0/A,1/B,2/C,3/D} {
+    \node[tstep, fill=blue!15, minimum width=0.45cm] at (\i*0.55+0.25, -0.3) {\c};
+}
+\node[font=\tiny, blue] at (1, -0.9) {草稿 8ms};
+
+% Verify phase
+\node[tstep, fill=red!20, minimum width=2cm] at (3.2, -0.3) {验证ABCD};
+\node[font=\tiny, red!60!black] at (3.2, -0.9) {目标 30ms};
+
+\draw[<->, thick] (0, -1.3) -- (4.2, -1.3) node[midway, below, font=\footnotesize]{$\sim$38 ms，输出 $\sim$3.5 token};
+\end{tikzpicture}
+\caption{标准自回归 vs. 投机采样的时间线对比。投机采样通过草稿模型快速生成+目标模型并行验证，大幅缩短生成 4 个 token 的总时间。}
+\end{figure}
+
+实验结果显示约 2 倍的端到端加速。
+
+\textbf{改进草稿模型的方向}：
+
+\begin{itemize}
+    \item \textbf{Medusa}：草稿模型并行生成多个候选 token（而非自回归）
+    \item \textbf{EAGLE}：草稿模型接收目标模型的高层特征，``寄生''在目标模型上生成候选
+\end{itemize}
+
+\begin{warningbox}{投机采样的适用条件}
+投机采样的加速效果取决于草稿模型的接受率。如果草稿模型与目标模型的分布差异过大，大量候选 token 会被拒绝，加速效果可能不明显甚至有额外开销。因此，草稿模型的质量是关键。
+\end{warningbox}
+
+\subsection{本章小结}
+
+\begin{itemize}
+    \item 投机采样利用了``验证比生成快''的不对称性
+    \item 保证从目标模型的\textbf{精确分布}中采样（无损！）
+    \item 典型加速比约 2 倍
+    \item 草稿模型的设计（Medusa、EAGLE 等）是活跃的研究方向
+    \item 可以与前述所有有损方法结合：草稿模型可以使用更激进的量化、更小的架构等
+\end{itemize}
+
+%% ========== Section 7: 动态工作负载处理 ==========
+

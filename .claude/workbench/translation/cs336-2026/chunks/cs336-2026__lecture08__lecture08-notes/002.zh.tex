@@ -1,0 +1,137 @@
+\section{Part 1：LLM 训练的网络基础}
+
+前面的总账本说明并行训练最终受状态与通信共同约束，本部分先补齐硬件前提。核心问题是：当单卡算力和显存都不足时，多卡系统能否通过合适的 collective 与拓扑，把更多设备近似变成一台更大的机器，而不让通信成本吞掉新增算力。
+
+\subsection{单 GPU scaling 的两堵墙}
+
+本节先把扩展压力拆成 compute 与 memory 两堵墙。前者要求同时动用更多算力完成给定训练预算，后者要求把参数、梯度、优化器状态、激活与临时 buffer 分散到多张卡；两者经常需要不同并行策略，因此不能只用“模型参数量除以 GPU 数”估算可行性。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-004.jpg}
+\caption{Slide 4：单 GPU compute scaling 的限制，最快超级计算机已经提供 exaflops 级算力。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 4 在提醒什么}
+这页不是说单 GPU 不重要，而是说“算力需求”已经天然越过单卡边界。LLM 训练需要的 FLOPs 可以大到只能用数据中心级计算池完成。因此训练单位从一张 GPU 变成整台服务器、整组 pod，甚至整个 datacenter。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-005.jpg}
+\caption{Slide 5：单 GPU memory scaling 的限制，模型越来越大，单卡无法容纳完整训练状态。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 5 说的是训练状态，不只是参数}
+图里强调 large models 放不进单 GPU。这里的“放不下”不能只看参数量，还要加上梯度、optimizer state、激活和临时 buffer。推理时能放下的模型，训练时可能因为 Adam 状态和激活而远远超出 HBM。
+\end{knowledgebox}
+
+\[
+M_{\text{train}}
+  =
+M_{\text{params}}
+  + M_{\text{grads}}
+  + M_{\text{optimizer}}
+  + M_{\text{activations}}
+  + M_{\text{buffers}} .
+\]
+
+其中 \(M_{\text{params}}\) 是权重，\(M_{\text{grads}}\) 是梯度，\(M_{\text{optimizer}}\) 是 Adam/AdamW 的一阶动量 \(m\)、二阶动量 \(v\) 和可能的 master weights，\(M_{\text{activations}}\) 是反向传播需要的中间激活，\(M_{\text{buffers}}\) 是通信和算子临时空间。
+
+
+\singleslide{slides-images/slide-006.jpg}{跨 GPU、跨机器切分 memory 与 compute：节点内高速互连和节点间 scale-out 网络共同组成训练机器。}{6}
+
+Slide 6 给出两层扩展域。节点内 GPU 通常通过 NVLink/NVSwitch 等高带宽连接，适合频繁的 tensor/expert communication；节点间依赖 InfiniBand 或专用 scale-out fabric，带宽更低、延迟更高。并行策略若忽略层级，把高频 all-to-all 放到慢网络上，即使显存账本可行，吞吐也会崩溃。
+
+\begin{knowledgebox}{讲义补充：源 Slide 6 的关键短语}
+这页同时出现 intra-node parallelism 和 high-speed inter-node parallelism。前者通常依赖 NVLink/NVSwitch，适合高频通信；后者依赖 InfiniBand/RoCE 等高速互连，适合更粗粒度的跨节点同步。并行训练的第一条工程规则就是：高频通信尽量留在快域，低频通信才跨慢域。
+\end{knowledgebox}
+
+\subsection{collective communication 的最小回顾}
+
+上一节说明必须跨卡，接下来就需要一套保持数学语义的通信字母表。Collective communication 不是附属 API，而是把分片状态重新组合、把局部梯度聚合、把 token 路由到目标设备的基础机制；后面的 DDP、ZeRO、TP、EP 与 CP 都只是这些原语在不同张量轴上的组合。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-007.jpg}
+\caption{Slide 7：collective communication 的基本原语：reduce、all-reduce、all-gather、broadcast、reduce-scatter。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 7 是后续所有并行策略的字母表}
+如果把分布式训练看成语言，collectives 就是字母。DDP 用 all-reduce 同步梯度；FSDP/ZeRO 用 reduce-scatter 分片梯度，用 all-gather 临时拼参数；MoE/expert parallelism 常用 all-to-all 路由 token。读后面的并行图时，不要先记名字，而要先识别它调用了哪个 collective。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-008.jpg}
+\caption{Slide 8：all-reduce 可以拆成 reduce-scatter 和 all-gather，在带宽受限区间这是最优通信量级。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{读公式：Slide 8 的等价关系}
+\[
+\text{all-reduce}
+  =
+\text{reduce-scatter}
+  +
+\text{all-gather}.
+\]
+all-reduce 的语义是“归约后每个 rank 拿到完整结果”。reduce-scatter 先让每个 rank 拿到归约结果的一片；all-gather 再把所有片拼回完整结果。ZeRO/FSDP 的关键就在于：如果每个 rank 不需要长期持有完整结果，就可以停在分片状态，从而省显存。
+\end{importantbox}
+
+\subsection{TPU 和 GPU 网络拓扑的差异}
+
+有了 collective 名称还不够，本节进一步问这些通信实际走哪条链路。Mesh、tree、switch 与 fully connected domain 对 all-reduce、all-to-all 和点对点传输的成本不同，因此同一种并行算法在 TPU pod、单机 NVLink 域和跨节点 GPU 集群上可能得到完全不同的吞吐结果。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-009.jpg}
+\caption{Slide 9：TPU 和 GPU 在通信层面的设计差异，TPU 更像 mesh，GPU 集群常强调 all-to-all 能力。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 9 应该比较什么}
+左侧 TPU mesh 强调结构化近邻连接，适合规则张量切分和编译器规划；右侧 GPU 网络强调较强的全局互连能力，尤其在 NVSwitch 或高速交换网络下有利于 less structured communication。这里不是说哪种一定更好，而是说并行策略要和网络结构一起设计。
+\end{knowledgebox}
+
+
+\slidepair{slides-images/slide-010.jpg}{slides-images/slide-011.jpg}{Mesh 与 tree/switched network 的通信取舍，以及新 TPU 拓扑对 MoE/scale-out 的适配。}{10--11}
+
+Slide 10 把网络选择与通信模式对应：规则 mesh 可以低成本实现局部、结构化 tensor communication；tree 或 switched fabric 更适合全局 all-to-all 与不规则 token routing。Slide 11 则显示硬件也在变化，TPU8i/8t 引入更接近 tree/switch 的网络，反映 MoE 与大规模 scale-out 对灵活通信的需求。
+
+\begin{knowledgebox}{讲义补充：源 Slide 10 的两个阵营}
+mesh 的优势是规则、成本较低、可以把大张量切成局部通信；tree 或 switched all-to-all 的优势是支持更不规则的通信，例如 expert parallel 的 token routing。换句话说，网络不是背景设施，而是决定你能否高效训练 MoE、长上下文模型和大 tensor-parallel block 的核心变量。
+\end{knowledgebox}
+
+
+\begin{knowledgebox}{讲义补充：源 Slide 11 说明硬件也在追随模型结构}
+这页提示一个趋势：当 MoE、长上下文和不规则并行需求变强，硬件网络也从单纯规则 mesh 向更灵活的 switched network 演化。并行算法和硬件互相塑形，不是先有固定硬件再被动适配模型。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-012.jpg}
+\caption{Slide 12：为什么不把所有东西完全互连，domain size 是成本和收益的折中。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{warningbox}{读图：Slide 12 不能推出“越大互连域越好”}
+完全互连的带宽和灵活性很诱人，但交换芯片、线缆、功耗、故障域、调度复杂度都会随 domain size 上升。训练系统通常选择分层互连：节点内很快，rack/pod 内较快，跨 pod 更慢。并行计划也要分层：高频 TP/EP 放在快域，DP/PP 放到更大域。
+\end{warningbox}
+
+
+\singleslide{slides-images/slide-013.jpg}{Part 1 回顾：训练单位变成 datacenter，同时追求近线性的 memory scaling 与 compute scaling。}{13}
+
+这页把网络部分转成两个验收指标。Memory scaling 问“增加 $N$ 张 GPU 后，可容纳状态是否接近扩大 $N$ 倍”；compute scaling 问“增加 $N$ 张 GPU 后，有效训练 FLOPs 是否接近扩大 $N$ 倍”。强 sharding 常改善前者却增加通信，后续每种 primitive 都是在两个目标之间重新分配成本。
+
+\begin{importantbox}{讲义补充：源 Slide 13 的 recap 如何落到工程目标}
+线性 memory scaling 指最大模型状态随 GPU 数接近线性增长；线性 compute scaling 指可用 FLOPs 随 GPU 数接近线性增长。二者往往冲突：更强的 sharding 提升 memory scaling，但可能增加通信，损害 compute scaling。并行训练设计就是在这两个线性目标之间找可接受的折中。
+\end{importantbox}
+
+\subsection{Part 1 小结}
+
+本部分建立了三件事：第一，训练单位已经从单 GPU 变成 datacenter；第二，collectives 是所有并行策略的底层语言；第三，网络拓扑决定哪些通信模式可行。
+

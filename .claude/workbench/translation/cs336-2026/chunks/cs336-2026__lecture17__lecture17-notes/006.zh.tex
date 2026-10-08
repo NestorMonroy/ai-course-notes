@@ -1,0 +1,58 @@
+\section{Chameleon：把图像也离散成 autoregressive tokens}
+
+前面的 VLM 都使用连续视觉 embeddings 输入 LM，生成图像仍需 diffusion decoder。Chameleon 选择另一条路线：用 VQ-VAE 把图像离散化为 codebook indices，与 text tokens 一起 autoregressive modeling。
+
+\subsection{VQ-VAE：从连续 latent 到离散 codebook}
+
+Encoder 产生 latent $z_e(x)$，再选择最近 codebook vector：
+
+$$
+k^*=\arg\min_k\|z_e(x)-e_k\|_2^2,
+\qquad z_q(x)=e_{k^*}.
+$$
+
+Decoder 从 $z_q$ 重建图像。Codebook index $k^*$ 就是 image token。512\,$\times$\,512 图像可被编码为约 1024 tokens，codebook size 约 8192。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{vq-vae.png}
+\caption{VQ-VAE：encoder、nearest codebook lookup 与 decoder reconstruction。}
+\figsource{Stanford CS336 2026 Lecture 17 官方可执行讲义，\texttt{images/vq-vae.png}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：离散化换来了统一接口，也带来信息瓶颈}
+离散 tokens 可以被普通 autoregressive LM 生成，因此理解与生成统一；但 codebook quantization 会丢失细节，OCR 和精细纹理尤其敏感。Codebook collapse、dead codes 和 reconstruction quality 都会限制上层模型。
+\end{knowledgebox}
+
+\subsection{Unified sequence 与 training stability}
+
+本节把“统一 token 接口”与“统一优化难度”分开。Text tokens 与 image codebook tokens 可以放进同一 autoregressive sequence，但二者的 entropy、局部相关性和最优 logit scale 不同；如果没有额外稳定化，模型可能在某一模态上 norm 增长、logit 漂移或遗忘另一模态。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{chameleon.png}
+\caption{Chameleon：text tokens 与 image tokens 在同一个 autoregressive sequence 中建模。}
+\figsource{Stanford CS336 2026 Lecture 17 官方可执行讲义，\texttt{images/chameleon.png}。}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{chameleon-example.png}
+\caption{Chameleon 的 interleaved text-image generation 示例。}
+\figsource{Stanford CS336 2026 Lecture 17 官方可执行讲义。}
+\end{figure}
+
+Text token entropy 与 image token entropy 差异很大，混合训练会引起 norm growth 和 logit drift。Chameleon 使用 QK norm、z-loss 等稳定化手段，并在大规模 unsupervised mixture 后加入高质量 stage。
+
+\begin{importantbox}{Comprehension 与 generation 的 representation 需求不同}
+理解更关心高层 semantics，连续 CLIP-like embeddings 很有效；生成需要保留局部细节与高频信息，离散 tokenizer 或 diffusion latent 更合适。一个 representation 很难同时做到极强理解、无损重建和低 token count。
+\end{importantbox}
+
+\begin{warningbox}{“统一模型”不等于“统一难度”}
+把所有模态写成 tokens 只统一了 API。不同模态的 entropy、token density、loss scale、decoder 和 evaluation 仍然不同，训练稳定性问题不会因 sequence format 统一而消失。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Chameleon 展示了 native multimodal generation 的优雅路线：所有内容都变成离散 tokens。但 quantization loss 和跨模态训练稳定性使它暂时不如 modular VLM + diffusion 方案成熟。
+

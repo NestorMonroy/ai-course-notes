@@ -1,0 +1,126 @@
+\section{Basics 扩展：最小语言模型管线}
+
+\subsection{Tokenization}
+
+tokenization 的目标，是把原始字符串转成模型可以处理的整数序列，同时尽量控制序列长度和词表大小。字符级太大，字节级太长，词级又太稀疏，因此 BPE 成为课程中的默认选择。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=1.0cm, every node/.style={font=\small, align=center}]
+\node[draw, rounded corners, fill=yellow!12, minimum width=3.2cm, minimum height=0.8cm] (raw) {raw text};
+\node[draw, rounded corners, fill=yellow!20, right=1.5cm of raw, minimum width=3.2cm, minimum height=0.8cm] (tok) {tokenizer};
+\node[draw, rounded corners, fill=yellow!28, right=1.5cm of tok, minimum width=3.2cm, minimum height=0.8cm] (ids) {token IDs};
+\draw[-{Latex[length=3mm]}, thick] (raw) -- node[above]{encode} (tok);
+\draw[-{Latex[length=3mm]}, thick] (tok) -- node[above]{decode} (ids);
+\end{tikzpicture}
+\caption{tokenizer 的双向接口：字符串与整数序列之间的 encode/decode}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{3cm}p{4cm}p{5.8cm}}
+\toprule
+\textbf{方案} & \textbf{优点} & \textbf{缺点} \\
+\midrule
+Character-based & 可逆、直观 & vocab 太大，稀有字符浪费 \\
+Byte-based & vocab 很小 & 序列太长，attention 成本高 \\
+Word-based & 语义清楚 & OOV 和词表爆炸 \\
+BPE & 兼顾压缩率和覆盖率 & 需要训练和高效实现 \\
+\bottomrule
+\end{tabular}
+\caption{几种 tokenization 方案的折中}
+\end{table}
+
+\begin{knowledgebox}{为什么 tokenization 还是必要的}
+因为 attention 的代价和序列长度强相关。
+直接用 bytes 看似优雅，但会把上下文很快吃满；直接用 words 又会让词表和稀疏性失控。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[every node/.style={font=\small, align=center}]
+\node[draw, rounded corners, fill=orange!12, minimum width=2.2cm, minimum height=0.8cm] (b1) {b};
+\node[draw, rounded corners, fill=orange!12, right=0.3cm of b1, minimum width=2.2cm, minimum height=0.8cm] (b2) {o};
+\node[draw, rounded corners, fill=orange!12, right=0.3cm of b2, minimum width=2.2cm, minimum height=0.8cm] (b3) {o};
+\node[draw, rounded corners, fill=orange!12, right=0.3cm of b3, minimum width=2.2cm, minimum height=0.8cm] (b4) {k};
+\node[draw, rounded corners, fill=yellow!24, below=1.1cm of b2, minimum width=2.8cm, minimum height=0.8cm] (m1) {bo};
+\node[draw, rounded corners, fill=yellow!32, right=0.6cm of m1, minimum width=2.8cm, minimum height=0.8cm] (m2) {ok};
+\draw[-{Latex[length=3mm]}, thick] (b1) -- (m1);
+\draw[-{Latex[length=3mm]}, thick] (b2) -- (m1);
+\draw[-{Latex[length=3mm]}, thick] (b3) -- (m2);
+\draw[-{Latex[length=3mm]}, thick] (b4) -- (m2);
+\end{tikzpicture}
+\caption{BPE 的 merge 直觉：高频相邻片段会逐步合并成更大的 token}
+\end{figure}
+
+\begin{warningbox}{tokenization 的工程边界}
+tokenization 不是“越精致越好”，而是越能压缩常见模式、同时不把序列长度拉爆越好。
+\end{warningbox}
+
+\subsection{Architecture}
+
+课程从原始 Transformer 出发，再讨论常见变体。每种变体都不是“为了炫技”，而是在解决表达、稳定性或效率问题。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=0.75cm, every node/.style={font=\small, align=center}]
+\node[draw, rounded corners, fill=blue!10, minimum width=3.2cm, minimum height=0.8cm] (e) {embedding};
+\node[draw, rounded corners, fill=blue!18, below=of e, minimum width=3.2cm, minimum height=0.8cm] (p) {position};
+\node[draw, rounded corners, fill=blue!26, below=of p, minimum width=3.2cm, minimum height=0.8cm] (a) {self-attention};
+\node[draw, rounded corners, fill=blue!34, below=of a, minimum width=3.2cm, minimum height=0.8cm] (m) {MLP / FFN};
+\node[draw, rounded corners, fill=blue!42, below=of m, minimum width=3.2cm, minimum height=0.8cm] (o) {logits};
+\draw[-{Latex[length=3mm]}, thick] (e) -- (p);
+\draw[-{Latex[length=3mm]}, thick] (p) -- (a);
+\draw[-{Latex[length=3mm]}, thick] (a) -- (m);
+\draw[-{Latex[length=3mm]}, thick] (m) -- (o);
+\end{tikzpicture}
+\caption{Transformer 的最小数据流：embedding、位置、attention、MLP、输出}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{3cm}p{4cm}p{5.8cm}}
+\toprule
+\textbf{变体} & \textbf{想解决什么} & \textbf{工程影响} \\
+\midrule
+SwiGLU & 更强非线性 & MLP 更强，常见于大模型 \\
+RoPE & 位置表示更自然 & 长上下文外推更稳 \\
+RMSNorm & 训练更稳定 & 比 LayerNorm 更轻 \\
+pre-norm & 深层更好训练 & 梯度流更稳 \\
+MoE & 容量与 FLOPs 解耦 & 用稀疏激活换大参数容量 \\
+\bottomrule
+\end{tabular}
+\caption{课程关注的架构变体和动机}
+\end{table}
+
+\begin{importantbox}{架构讨论的关键标准}
+一个改动是否有价值，不看它有多新，而看它是否在更大规模和更高约束下继续成立。
+\end{importantbox}
+
+\subsection{Training}
+
+训练不是一个按钮，而是一个反馈系统：token、模型、loss 和 optimizer 构成闭环。课程会讲 optimizer、学习率 schedule、batch size、正则化和超参搜索。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=0.95cm, every node/.style={font=\small, align=center}]
+\node[draw, rounded corners, fill=green!10, minimum width=3.0cm, minimum height=0.8cm] (d1) {data};
+\node[draw, rounded corners, fill=green!18, right=1.4cm of d1, minimum width=3.0cm, minimum height=0.8cm] (d2) {model};
+\node[draw, rounded corners, fill=green!26, right=1.4cm of d2, minimum width=3.0cm, minimum height=0.8cm] (d3) {loss};
+\node[draw, rounded corners, fill=green!34, right=1.4cm of d3, minimum width=3.0cm, minimum height=0.8cm] (d4) {optimizer};
+\draw[-{Latex[length=3mm]}, thick] (d1) -- (d2);
+\draw[-{Latex[length=3mm]}, thick] (d2) -- (d3);
+\draw[-{Latex[length=3mm]}, thick] (d3) -- (d4);
+\draw[-{Latex[length=3mm]}, thick, bend left=25] (d4.north) to node[above]{iterate} (d2.north);
+\end{tikzpicture}
+\caption{训练闭环：训练是 feedback system，不是单一 loss 最小化}
+\end{figure}
+
+\begin{knowledgebox}{训练阶段要记住的事}
+\begin{itemize}
+    \item 训练不是追求 loss 越小越好，而是让有限预算下的有效学习最大化。
+    \item 超参数耦合很强。
+    \item 小规模有效的设置，未必能外推到大规模。
+\end{itemize}
+\end{knowledgebox}
+

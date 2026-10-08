@@ -1,0 +1,72 @@
+\section{Memory Optimization：用资源交换资源}
+
+\subsection{Gradient accumulation}
+
+大 batch 提高训练稳定性，但 activation memory 随 batch 增长。Gradient accumulation 把 global batch 切成多个 micro-batches，每个 micro-batch 计算梯度并累积，累积够再 step。
+
+\[
+\text{micro batch size}=\frac{\text{global batch size}}{\text{accumulation steps}}.
+\]
+
+\begin{importantbox}{Gradient accumulation 的 tradeoff}
+它降低每次 forward/backward 的 activation 峰值，但不会减少总 FLOPs；代价是一次参数更新前要跑多个 micro-batches。
+\end{importantbox}
+
+\begin{knowledgebox}{老师强调：global batch 与 micro-batch 解决不同问题}
+课程先说 large batch 有助于训练稳定，再指出 activation memory 会随 batch 增长而耗尽。Gradient accumulation 保留较大的 global batch 语义，却把一次更新拆成多个可放入显存的 micro-batches；关键实现细节是中间不能清零 gradient，只有累计到目标 batch 后才执行 optimizer step 并清零。因此它解决峰值显存，不会让每次参数更新所需的样本计算凭空消失。
+\end{knowledgebox}
+
+\subsection{Activation checkpointing}
+
+Activation checkpointing 也叫 gradient checkpointing 或 rematerialization。它不是“把模型权重保存到磁盘”的 model checkpointing，而是 forward 时只保存部分 activations；backward 需要未保存的 activation 时，从最近 checkpoint 重新计算一段 forward。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{deep-network.png}
+\caption{Activation checkpointing 关注的是哪些中间 activations 被保存，哪些在 backward 时重算。}
+\figsource{CS336 Spring 2026 Lecture 2 官方可执行讲义，\texttt{activation\_checkpointing()}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：同一张 deep network 图的第二种读法}
+前面这张图用于计算 forward/backward FLOPs；这里它用于追踪 activation 生命周期。若保存每层输出，显存是 \(O(L)\)；若只保存检查点，中间 activation 可以重算，从而用更多 compute 换更少 memory。
+\end{knowledgebox}
+
+\begin{longtable}{p{0.26\textwidth}p{0.28\textwidth}p{0.36\textwidth}}
+\toprule
+\textbf{策略} & \textbf{activation memory} & \textbf{compute overhead} \\
+\midrule
+存所有层 & \(O(L)\) & 无额外重算。 \\
+不存中间层 & \(O(1)\) & 可能 \(O(L^2)\)，每层 backward 前从头重算。 \\
+每 \(\sqrt L\) 层存 checkpoint & \(O(\sqrt L)\) & \(O(L)\) 级别重算，常见折中。 \\
+\bottomrule
+\end{longtable}
+
+\begin{importantbox}{内存优化不是免费午餐}
+Gradient accumulation 用更多 micro-step 换更低 activation 峰值；activation checkpointing 用重算换显存；ZeRO/FSDP 用通信换显存。所有技巧都是资源交换，必须放回整体训练时间和稳定性中判断。
+\end{importantbox}
+
+\begin{knowledgebox}{课堂提示：checkpoint frequency 是复杂度选择}
+老师把 activation checkpointing 总结为“trade off memory for compute”，并比较三个端点：每层都存是 \(O(L)\) activation memory 且无需重算；完全不存可降到 \(O(1)\) memory，却可能为每层 backward 从头重算，达到 \(O(L^2)\) compute；每隔 \(\sqrt L\) 层存一次则把显存与重算都控制在更实用的量级。频率不是固定 recipe，而是由层数、显存和可接受的重算时间共同决定。
+\end{knowledgebox}
+
+\subsection{端到端训练前 checklist}
+
+\begin{longtable}{p{0.20\textwidth}p{0.34\textwidth}p{0.36\textwidth}}
+\toprule
+\textbf{检查项} & \textbf{手算方法} & \textbf{失败信号} \\
+\midrule
+参数量 & 逐层数矩阵大小，或粗估 \(P\) & 参数相关显存已超设备容量。 \\
+训练 FLOPs & \(C\approx 6P D_{\text{tokens}}\) & 训练时间远超预算。 \\
+参数/梯度/优化器显存 & bf16 参数 2B、梯度 2B、Adam state 8B/param & 不算 activation 都放不下。 \\
+Activation memory & 粗估 \(O(BSLD)\) 或 profiler 外推 & batch/context 一大就 OOM。 \\
+Arithmetic intensity & FLOPs / bytes moved & 太低说明 kernel 可能 memory-bound。 \\
+MFU & actual FLOP/s / promised FLOP/s & 远低于 0.5 需要检查 kernel、通信和数据加载。 \\
+\bottomrule
+\end{longtable}
+
+\subsection{本章小结}
+
+Memory optimization 的核心是 tradeoff。没有一种技巧单独解决所有问题；实际大模型训练往往组合 gradient accumulation、checkpointing、ZeRO/FSDP、tensor/pipeline parallelism 和 kernel fusion。
+
+
+

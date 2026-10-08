@@ -1,0 +1,62 @@
+\section{KV cache：推理系统里的“内存层级”}
+
+KV cache 把过去 token 的 attention key/value 保存下来，避免 decode 时重复计算历史。它把计算问题转化成容量、带宽和 locality 问题：模型越大、上下文越长、并发会话越多，缓存就越可能成为系统的真正稀缺资源。
+
+\subsection{先做一个容量估算}
+
+本节先做容量账本，再讨论调度。设 Transformer 有 $L$ 层，每层有 $n_{kv}$ 个 KV heads，head dimension 为 $d_h$，序列长度为 $T$，每个元素占 $b$ bytes。忽略 metadata，一个会话的 KV cache 近似为：
+
+\[
+M_{\mathrm{KV}} \approx 2L T n_{kv} d_h b.
+\]
+
+系数 $2$ 来自 key 和 value。这个公式解释了为什么 MQA/GQA、低比特 KV、分页缓存与 prefix reuse 会直接改变服务容量，也解释了为什么长上下文不是“只把 max sequence length 改大”那么简单。
+
+\subsection{GPU、CPU DRAM 与 SSD 形成缓存层级}
+
+在容量公式之后，接下来要决定状态放在哪里。最热的 KV blocks 留在 GPU HBM，较冷状态被 pin 到 CPU DRAM，更冷的会话可以落到 NVMe 或分布式 store。新请求到达时，scheduler 尝试提前 prefetch；资源紧张时，根据未来复用概率和 SLA 选择 eviction。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{00-26-30-kv-cache-hierarchy.jpg}
+\caption{KV cache 的层级化管理：offload、prefetch、共享与淘汰。}
+\figsource{课堂视频 00:25:33--00:29:54；图中文字只作示意，层级机制由课堂口述核验。}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{L{0.14\textwidth}L{0.18\textwidth}L{0.25\textwidth}L{0.27\textwidth}}
+\toprule
+层级 & 优点 & 代价 & 适合保存 \\
+\midrule
+GPU HBM & 最低访问延迟 & 容量贵、与权重竞争 & 当前 batch、热会话、即将 decode 的 blocks \\
+CPU DRAM & 容量更大 & PCIe/NVLink 搬运延迟 & 暂停会话、近期可能复用的 prefix \\
+NVMe/SSD & 容量最大、成本低 & 延迟高、带宽共享 & 长时间冷却但仍有恢复价值的会话 \\
+Distributed store & 跨节点共享 & 网络与一致性复杂 & 大规模共享 prefix、集群级 cache \\
+\bottomrule
+\end{tabular}
+\caption{KV cache hierarchy 的典型权衡。}
+\end{table}
+
+\subsection{这其实是经典操作系统问题}
+
+LRU、working set、prefetch、page fault 和 admission control 都会重新出现。区别在于“页面”现在是 KV blocks，miss 的代价可能是重新做长 prefill，访问模式又受到用户行为、agent loop 和 router 决策影响。若用户刚打开一个月前的会话页面，这本身就是强 prefetch 信号。
+
+\teachervoice{课堂提示：最优淘汰需要知道未来；工程系统只能预测未来。比起盲目套用 LRU，更重要的是记录会话恢复概率、KV 大小、重算成本和 SLA 违约成本。}
+
+\subsection{Production bug 为什么需要 observability}
+
+回到真实系统，讲者列出三类故障：早期 kernel launch 产生 NaN；tool-call 相关变更导致输出长度分布突然漂移；一个 off-by-one kernel bug 读到未初始化显存，最终让模型随机输出中文字符并沿错误上下文继续生成。第三个例子说明，模型行为异常不一定来自训练数据或量化，也可能来自底层内存错误。
+
+\begin{knowledgebox}{课堂提示：万亿 token 规模会把“几乎不发生”变成日常事故}
+讲者强调，小规模测试看似稳定的系统，在每天服务万亿级 token 时一定会遇到 $0.001\%$ 甚至更低概率的边界条件。NaN 重复 token、tool-call doom loop 和未初始化显存导致的随机中文输出，分别要求监控数值、长度分布和语言分布。事故的共同教训是：模型输出本身就是 systems telemetry，不能只看 kernel 单测是否通过。
+\end{knowledgebox}
+
+\begin{warningbox}{单元测试覆盖不了流量分布}
+Kernel 测试可能只验证常见 shape，却遗漏特定 batch、长度或边界条件。线上必须监控 valid output rate、token length distribution、language distribution、NaN/Inf、cache hit、queue delay 和模型版本切换点，并保留可回放请求。
+\end{warningbox}
+
+\subsection{本章小结}
+
+KV cache 是推理系统的状态核心。容量公式决定并发上限，层级化存储决定 miss 成本，预取与淘汰决定 TTFT。调试时也要把模型输出与 kernel、内存、流量分布和版本变化联动观察。
+

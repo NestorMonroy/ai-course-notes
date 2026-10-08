@@ -1,0 +1,105 @@
+\subsection{回顾：算术强度}
+
+\begin{knowledgebox}{符号约定}
+本节使用的符号（与 Scaling Book 一致）：
+\begin{itemize}
+    \item $B$：批大小（batch size）
+    \item $S$：条件序列长度（prompt 长度）
+    \item $T$：生成序列长度
+    \item $D$：模型隐藏维度
+    \item $F$：MLP 隐藏维度（通常 $F = 4D$）
+    \item $N$：Query 注意力头数
+    \item $K$：Key/Value 注意力头数
+    \item $H$：每个头的维度（$N \times H = D$）
+    \item $L$：层数
+    \item $V$：词表大小
+\end{itemize}
+\end{knowledgebox}
+
+\textbf{算术强度}（Arithmetic Intensity）是衡量计算效率的核心指标：每传输一个字节数据能完成多少次浮点运算。
+
+以基本的矩阵乘法 $Y = X \cdot W$ 为例，其中 $X$ 的形状为 $B \times D$，$W$ 的形状为 $D \times F$：
+
+\begin{enumerate}
+    \item 从 HBM 读取 $X$：传输 $2BD$ 字节（bf16）
+    \item 从 HBM 读取 $W$：传输 $2DF$ 字节
+    \item 计算 $Y = X \cdot W$：$2BDF$ FLOPs
+    \item 将 $Y$ 写回 HBM：传输 $2BF$ 字节
+\end{enumerate}
+
+$$\text{算术强度} = \frac{\text{FLOPs}}{\text{bytes transferred}} = \frac{2BDF}{2BD + 2DF + 2BF}$$
+
+当 $B \ll D, F$ 时（这是推理中的常见情况），可简化为：
+
+$$\text{算术强度} \approx B$$
+
+\begin{knowledgebox}{Worked Example：Llama 3 405B 的算术强度}
+以 Llama 3 405B 的第一个 MLP 层为例，权重矩阵 $W_\text{up}$ 的形状为 $D \times F = 16384 \times 53248$（bf16）。
+
+\textbf{情况 1}：$B=1$（单请求生成）
+$$\text{算术强度} = \frac{2 \times 1 \times 16384 \times 53248}{2 \times 1 \times 16384 + 2 \times 16384 \times 53248 + 2 \times 1 \times 53248} \approx \frac{1.74 \times 10^9}{1.74 \times 10^9} \approx 1.0$$
+GPU 几乎所有时间在等内存传输。
+
+\textbf{情况 2}：$B=256$（大批量）
+$$\text{算术强度} \approx B = 256$$
+仍低于 H100 的加速器强度 295，依然处于内存受限区域——但已接近拐点。
+
+\textbf{结论}：即使是大批量推理，405B 模型在 H100 上仍然很难达到计算受限。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    width=10cm, height=6.5cm,
+    xlabel={算术强度 (FLOPs/Byte)},
+    ylabel={性能 (TFLOPS)},
+    xmode=log, ymode=log,
+    xmin=0.5, xmax=2000,
+    ymin=1, ymax=2000,
+    grid=both,
+    legend pos=south east,
+    title={Roofline Model（H100 SXM）}
+]
+% Memory roof
+\addplot[blue, thick, domain=0.5:295] {3.35*x};
+% Compute roof
+\addplot[red, thick, domain=295:2000] {989};
+% Intersection point
+\addplot[only marks, mark=*, mark size=3pt, black] coordinates {(295, 989)};
+\node[font=\footnotesize] at (axis cs:295, 500) {$B=295$};
+
+% Annotations
+\node[font=\footnotesize, blue] at (axis cs:5, 50) {内存受限};
+\node[font=\footnotesize, red] at (axis cs:700, 700) {计算受限};
+
+% Generation point
+\addplot[only marks, mark=triangle*, mark size=4pt, orange] coordinates {(1, 3.35)};
+\node[font=\footnotesize, orange, anchor=west] at (axis cs:1.5, 5) {Generation ($B=1$)};
+
+% Prefill point
+\addplot[only marks, mark=square*, mark size=3pt, green!60!black] coordinates {(512, 989)};
+\node[font=\footnotesize, green!60!black, anchor=east] at (axis cs:400, 600) {Prefill};
+\end{axis}
+\end{tikzpicture}
+\caption{H100 的 Roofline 模型。Generation 阶段（$B=1$）位于内存受限区域的最低端，Prefill 则可以达到计算受限区域。}
+\end{figure}
+
+\begin{importantbox}{H100 的加速器强度}
+对于 H100 GPU：
+\begin{itemize}
+    \item bf16 峰值算力：989 TFLOPS
+    \item HBM 带宽：3.35 TB/s
+    \item 加速器强度 = $989 / 3.35 \approx 295$
+\end{itemize}
+因此：
+\begin{itemize}
+    \item 当 $B > 295$ 时：\textbf{计算受限}（compute-limited）——GPU 利用率高，效率好
+    \item 当 $B < 295$ 时：\textbf{内存受限}（memory-limited）——GPU 大部分时间在等待数据传输
+\end{itemize}
+\end{importantbox}
+
+\begin{warningbox}{B=1 的极端情况}
+当 $B=1$ 时（矩阵-向量乘法），算术强度仅为 1。这意味着每读取一个权重元素只做一次乘加运算——几乎所有时间都花在内存读取上。\textbf{这正是自回归生成的典型场景}。
+\end{warningbox}
+

@@ -1,0 +1,87 @@
+\section{PPO：在 reward 下做受约束的 on-policy optimization}
+
+现在已经有 reward model，下一问题是怎样更新语言模型。经典 RLHF 使用 PPO：从当前 policy 采样 responses，用 reward model 打分，再在不偏离 reference policy 太远的约束下更新参数。
+
+\singleslide{slide-51.jpg}{InstructGPT 中的 PPO 阶段：policy、reward model、reference 与 prompt distribution 共同构成训练环。}{51}
+
+Slide 51 的图看起来只有“采样→打分→更新”三步，但每个箭头都对应一个系统组件。Prompt 从训练分布进入当前 policy，完整 response 由 rollout engine 生成；reward model 给序列分数，reference policy 提供 KL 锚点，value model 估计 return，随后 optimizer 才能更新 policy。任何模型版本、tokenizer、chat template 或 mask 不一致都可能破坏训练。
+
+\singleslide{slide-52.jpg}{Stiennon summarization 系统给出的更完整 PPO 背景：先学习偏好，再用 learned reward 更新生成策略。}{52}
+
+Slide 52 说明 InstructGPT 并非凭空出现：早期 summarization-from-feedback 工作已经把 preference collection、reward modeling 与 policy optimization 串成闭环。读图时应区分离线与在线部分：人类 pairs 可重复使用来训练 reward model，但 PPO 的 responses 必须来自不断变化的当前 policy；旧 rollout 太多会让 importance ratio 与 advantage 失真。
+
+\subsection{KL-regularized objective}
+
+本节先写出 PPO 真正优化的两股力量：reward 把 policy 推向高分回答，KL regularization 把它拉回 reference distribution。若只看 reward 项，最优解可能集中到 reward model 的漏洞；若 KL 太强，policy 又几乎不能离开 SFT 行为。
+
+常见目标写作：
+
+$$
+\max_\pi\;
+\mathbb{E}_{x\sim\mathcal{D},\,y\sim\pi(\cdot\mid x)}[r(x,y)]
+-\beta\,\mathbb{E}_{x}\left[D_{\mathrm{KL}}\!\left(\pi(\cdot\mid x)\|\pi_{\mathrm{ref}}(\cdot\mid x)\right)\right].
+$$
+
+$r(x,y)$ 是 learned reward；$\pi_{\mathrm{ref}}$ 通常是 SFT model；$\beta$ 控制 reward improvement 与 distribution drift 的权衡。没有 KL 约束时，policy 容易利用 reward model 的漏洞。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{slide-53.jpg}
+\caption{PPO 的概念演化：policy gradient、TRPO 到 clipped surrogate objective。}
+\figsource{CS336 Spring 2026 Lecture 15，Slide 53。}
+\end{figure}
+
+\begin{knowledgebox}{读图：PPO 为什么“看起来简单、实现很重”}
+公式核心是限制 policy ratio，但完整系统还要维护 rollout engine、reward model、value model、reference model、advantage estimation、minibatch epochs 和 KL controller。语言模型序列长、显存大，使这些组件的同步与稳定性变得昂贵。
+\end{knowledgebox}
+
+PPO clipped objective 常写成：
+
+$$
+\mathcal{L}_{\mathrm{PPO}}
+=\mathbb{E}_t\left[
+\min\left(
+\rho_t A_t,
+\operatorname{clip}(\rho_t,1-\epsilon,1+\epsilon)A_t
+\right)\right],
+$$
+
+其中 $\rho_t=\pi_\theta(a_t\mid s_t)/\pi_{\mathrm{old}}(a_t\mid s_t)$ 是 probability ratio；$A_t$ 是 advantage；$\epsilon$ 是 clip range。Clipping 不是保证单调改进，只是限制一次更新不要过大。
+
+\begin{warningbox}{PPO 的稳定性来自一组共同工作的护栏}
+Reward normalization、value loss、ratio clipping、KL penalty、gradient clipping、batch construction 和 rollout freshness 都会影响结果。只复制一个 loss 公式而忽略训练系统，很难复现论文曲线。
+\end{warningbox}
+
+\subsection{Worked example：ratio clipping 到底截断了什么}
+
+为了建立数值直觉，设某 token 在旧 policy 下概率为 $0.10$，新 policy 提高到 $0.14$，则 $\rho=1.4$。若 $\epsilon=0.2$ 且 $A_t>0$，unclipped term 想获得 $1.4A_t$ 的收益，但 clipped surrogate 只按 $1.2A_t$ 计算，继续增大该 token 概率不会在当前 minibatch 中获得更多一阶奖励。
+
+反过来，若 $A_t<0$，clipping 防止 policy 通过一次更新把坏 action 的概率降得过猛。它限制的是当前 batch 上的 probability ratio，不是全局 KL，也不保证所有 token、所有 prompt 都处在 trust region 内。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{L{0.23\textwidth}L{0.28\textwidth}L{0.39\textwidth}}
+\toprule
+观测 & 可能含义 & 应同时检查 \\
+\midrule
+Clip fraction 很高 & update 太激进或 advantage 尺度过大 & learning rate、reward normalization、batch freshness \\
+KL 持续上升 & policy 离开 reference support & held-out quality、reward hacking、adaptive $\beta$ \\
+Reward 上升但 human eval 下降 & reward model 被 exploit & 新鲜 pairwise eval、length/style slices \\
+Value loss 爆炸 & return prediction 或 mask 有问题 & truncation、GAE、padding、reward scale \\
+\bottomrule
+\end{tabular}
+\caption{PPO 指标不能脱离其他护栏单独解读。}
+\end{table}
+
+\singleslide{slide-54.jpg}{摆脱 PPO 的几种直接尝试：控制 token、只训练赢家、rejection sampling 与 best-of-$N$。}{54}
+
+Slide 54 的问题不是“PPO 是否过时”，而是哪些收益必须依赖 on-policy RL。控制 token 与 winner-only SFT 实现简单，却弱化了 rejected response 的信息；reward model 加 rejection sampling 可以从许多候选中保留高分轨迹，但模型只模仿搜索结果，无法直接沿 reward 梯度探索。Best-of-$N$ 在 inference 或数据生成时有效，成本则随 $N$ 线性增长。
+
+\begin{knowledgebox}{路线选择：搜索、模仿与在线优化}
+Rejection sampling 把计算放在候选搜索，再用 SFT 蒸馏赢家；PPO 把计算放在在线 rollout 与 policy update；DPO 则把比较信号压进离线 pairwise loss。三者不是只有 loss 不同，而是对 generator、verifier、数据新鲜度和训练基础设施提出了不同要求。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+PPO 直接优化 reward，表达能力强，但依赖 on-policy rollouts 和多个模型组件。它的复杂度推动了一个问题：能否直接从静态 preference pairs 学到相同的受约束最优 policy？
+

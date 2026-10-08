@@ -1,0 +1,75 @@
+\subsection{expert parallelism 与 context parallelism}
+
+当模型结构从 dense Transformer 扩展到 MoE 或超长上下文时，还需要新的切分轴。Expert parallelism 把不同 experts 放到不同设备并通过 all-to-all 路由 token；context parallelism 则沿序列或 KV 维度分片长上下文计算。二者分别把负载均衡与环形通信带入主路径。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-050.jpg}
+\caption{Slide 50：expert parallelism 不切 matmul，而是切 experts 并路由 activations。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 50 的 EP 与 TP 差异}
+TP 把一个 dense matmul 切成子矩阵；EP 把不同 experts 放到不同 rank，token 根据 router 选择 expert。EP 的参数容量扩展更自然，但通信变成 token dispatch 和 all-to-all，负载均衡成为核心问题。
+\end{knowledgebox}
+
+
+\singleslide{slides-images/slide-051.jpg}{为什么使用 expert parallel：对 MoE MLP 路由 activations，避免把每个 expert 的 matmul 都做 tensor split。}{51}
+
+Expert parallel 与 TP 都能分散 MLP 参数，但计算形态不同。TP 让每个 token 参与多个 rank 的子矩阵并高频归约；EP 先 all-to-all 把 token 路由到少数 experts，再在本地执行较完整 matmul。后者通常有更好矩阵效率，却依赖负载均衡与 all-to-all 网络。
+
+\begin{knowledgebox}{讲义补充：源 Slide 51 的系统取舍}
+TP 保持 dense computation，但子矩阵切分可能让 GEMM shape 不理想；EP 保持每个 expert 的 matmul 更完整，但要把 token 路由到对应 rank。哪种更快取决于 expert 数、token 分布、all-to-all 带宽、负载均衡和 kernel efficiency。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-052.jpg}
+\caption{Slide 52：EP 可以和其他并行组合，但 DP、TP、EP 的相互作用会影响利用率。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{warningbox}{读图：Slide 52 的组合不是乘法那么简单}
+理论上 DP、TP、PP、EP 都能组合；实践中 process group 会互相嵌套，某些切分维度会让 GEMM 变小或让 all-to-all 跨慢链路。EP 通常需要让 expert group 和 data group 的关系谨慎设计，否则负载均衡和通信域都会出问题。
+\end{warningbox}
+
+
+\singleslide{slides-images/slide-053.jpg}{Attention 与 MoE MLP 需要不同并行度：Megatron 将 TP/CP/DP 与 ETP/EP/EDP 解耦。}{53}
+
+MoE 只替换 MLP，attention 仍需要 TP/CP；若用统一 TP degree，attention 可能希望更高 TP，而 expert MLP 更希望用 EP 保持大 matmul。Slide 53 因而引入解耦配置：attention 与 experts 使用不同的 tensor、context、data parallel groups，再在 block 边界重排。
+
+\begin{knowledgebox}{讲义补充：源 Slide 53 的不平衡来自结构异质性}
+MoE 层通常替换 FFN/MLP，而 attention 仍是 dense 或其他结构。因此 MLP 部分可能需要 EP，attention 部分可能仍需要 TP/SP/CP。若把同一并行配置强加给两者，可能导致一部分算子利用率高，另一部分通信或计算失衡。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-054.jpg}
+\caption{Slide 54：context parallel / ring attention 沿长序列切分 activations。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{术语消化：SP 与 CP 的区别}
+Sequence parallel 通常服务于点操作 activation memory 的线性缩放；context parallel 或 ring attention 处理的是长上下文 attention 中序列维度的跨设备计算。CP 需要在 attention 计算中交换 K/V 或中间统计量，目标是让超长 sequence 不被单卡 HBM 和 attention 计算图限制。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slide-055.jpg}
+\caption{Slide 55：LLM parallelism recap table，总结各方法对参数、activation/KV、通信、global batch 和易用性的影响。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{读表：Slide 55 应该横向比较}
+先看每 rank 参数显存：DDP/ZeRO-1 不降参数，ZeRO-3、TP、PP、EP 可降不同部分。再看 activation/KV：TP/SP/CP 对 activation 或长上下文更关键。然后看 main bandwidth cost：all-reduce、all-gather、reduce-scatter、all-to-all 的频率不同。最后看 global batch scaling：DP 扩 batch，模型并行不一定扩 batch。
+\end{importantbox}
+
+
+\singleslide{slides-images/slide-056.jpg}{Model/tensor parallel 的批量约束：global batch 被 DP 分摊，单 rank batch 决定 kernel 与通信效率。}{56}
+
+Slide 56 的关键量是 global batch 除以 data-parallel degree。DP 开太大时，每个 replica 的 microbatch 变小，matmul 利用率下降且 collective latency 占比上升；TP/PP 虽帮助模型放入显存，也会改变可用 microbatch。并行配置必须同时满足 memory、bandwidth 与 optimizer batch-size 三套约束。
+
+\begin{knowledgebox}{讲义补充：源 Slide 56 提醒 batch 与并行配置耦合}
+global batch 被 GPU 数切分后，per-device batch 会影响算子效率和优化。若 GPU 太多而 batch 不够大，data parallel 会把每卡工作量切得太薄；此时更需要 model/tensor/pipeline parallel 来增加每卡有效计算，而不是继续扩大 DP。
+\end{knowledgebox}
+

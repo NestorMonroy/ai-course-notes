@@ -1,0 +1,119 @@
+\section{语言模型发展版图：从 Shannon 到 agents}
+
+前面的尺度讨论解释了为什么课程不能只追最新模型，本部分因此按问题形态回看语言模型历史：从统计序列预测、神经表示与 attention，到 foundation models、instruction following 和 agents。主线不是模型名年表，而是训练目标、接口和可执行能力如何逐层扩展。
+
+\subsection{Pre-neural：Shannon 熵、n-gram 与困惑度}
+
+本节从最早的统计语言建模出发。早期 language model 主要服务于英语熵估计、机器翻译和语音识别。Shannon 的语言熵工作说明：预测下一个符号本身就是理解语言统计结构的一种方式；n-gram 则用固定长度上下文和计数来估计序列概率。Perplexity（PPL，困惑度）是平均交叉熵的指数，可直观理解为每个 token 位置的有效候选数，因此成为贯穿后续课程的共同评测语言。
+
+\begin{figure}[H]
+\centering
+\resizebox{0.98\textwidth}{!}{%
+\begin{tikzpicture}[
+    font=\small,
+    node distance=0.9cm and 1.1cm,
+    box/.style={draw, rounded corners, align=center, minimum width=3.4cm, minimum height=1.0cm, inner sep=6pt},
+    wide/.style={draw, rounded corners, align=center, minimum width=5.5cm, minimum height=1.05cm, inner sep=6pt},
+    note/.style={draw, rounded corners, align=left, text width=3.25cm, inner sep=5pt, fill=black!3},
+    arrow/.style={-{Stealth[length=2.2mm]}, thick}
+]
+\node[wide, fill=blue!8] (seq) {语言序列\\$w_1,w_2,\ldots,w_T$};
+\node[box, fill=yellow!14, below left=of seq] (entropy) {Shannon 熵/熵率\\平均还剩多少不确定性};
+\node[box, fill=green!12, below right=of seq] (lm) {语言模型\\预测下一个符号};
+\node[box, fill=orange!14, below=of entropy] (ngram) {n-gram 近似\\只看前 $n-1$ 个词};
+\node[box, fill=red!8, below=of lm] (smooth) {计数 + smoothing\\避免未见片段概率为 0};
+\node[wide, fill=purple!8, below right=0.9cm and -1.8cm of ngram] (eval) {Held-out likelihood / 困惑度\\验证预测器好坏};
+\node[note, right=0.45cm of smooth] (formula) {
+\textbf{关键公式}\\
+\(\displaystyle H(X)=-\sum_xp(x)\log_2p(x)\)\\[2pt]
+\(\displaystyle p(w_t\mid w_{<t})\approx p(w_t\mid h)\)\\[2pt]
+\(\displaystyle \mathrm{PPL}=2^{\widehat H}\)
+};
+\draw[arrow] (seq) -- (entropy);
+\draw[arrow] (seq) -- (lm);
+\draw[arrow] (entropy) -- node[left, font=\footnotesize, align=center] {不确定性越低\\越容易预测} (ngram);
+\draw[arrow] (lm) -- node[right, font=\footnotesize, align=center] {给出\\$p(w_t\mid w_{<t})$} (smooth);
+\draw[arrow] (ngram) -- (eval);
+\draw[arrow] (smooth) -- (eval);
+\draw[arrow] (formula.west) -- (smooth.east);
+\end{tikzpicture}
+}
+\caption{从 Shannon 熵到 n-gram：早期语言模型把语言结构落成“预测下一个符号并在 held-out 数据上评估”。}
+\end{figure}
+
+\begin{knowledgebox}{背景概念：Shannon 语言熵}
+熵衡量不确定性。若看到前文后越容易猜出下一个字符或词，语言熵率就越低。语言模型的 next-token prediction 不是文字游戏，而是在测模型能否捕捉语言中的冗余、语法、语义和世界知识线索。
+\end{knowledgebox}
+
+\begin{importantbox}{背景概念：n-gram}
+n-gram 是连续 \(n\) 个符号组成的片段。n-gram 语言模型假设预测 \(w_t\) 时只看前 \(n-1\) 个词：
+\[
+p(w_t\mid w_1,\ldots,w_{t-1})\approx p(w_t\mid w_{t-n+1},\ldots,w_{t-1}).
+\]
+它用计数估计条件概率。问题是未见片段会得到 0 概率，所以需要 smoothing、backoff 或 interpolation。
+\end{importantbox}
+
+\begin{knowledgebox}{背景概念：perplexity 的直觉}
+Perplexity（困惑度，常缩写为 PPL）通常写作 \(\mathrm{PPL}=2^{\widehat H}\) 或 \(\exp(H)\)，其中 \(H\) 是平均交叉熵。直觉上，PPL 约等于模型在每个 token 位置“等效面对多少个均匀候选”。PPL = 1 表示完美预测；PPL 接近词表大小表示近似瞎猜。这个直觉有用，但 PPL 不等价于有用性、安全性或推理能力。
+\end{knowledgebox}
+
+\begin{warningbox}{perplexity 的边界}
+Perplexity 是语言建模 held-out likelihood 的变体，适合比较同一 tokenizer、同一数据分布上的 next-token prediction。不同 tokenizer、不同数据清洗方式、不同评测集污染程度都会改变 PPL 的可比性。它能告诉我们模型是否更会预测文本，却不能直接告诉我们模型是否更会推理、更安全或更会调用工具。
+\end{warningbox}
+
+\subsection{Neural ingredients：术语不是名单，而是问题-机制对}
+
+2010 年代的关键积木不是孤立论文名，而是围绕三个瓶颈展开：表示稀疏、序列信息路由、系统扩展。
+
+\begin{longtable}{p{0.16\textwidth}p{0.31\textwidth}p{0.43\textwidth}}
+\toprule
+\textbf{术语} & \textbf{解决的问题} & \textbf{核心机制与课程关系} \\
+\midrule
+LSTM & RNN 难以长期保存信息 & 用 gates 控制 cell state 写入、遗忘、读取；证明可学习记忆重要，但串行结构不利于大规模并行。 \\
+Neural LM & n-gram 稀疏和未见组合泛化差 & 用连续向量表示词和上下文，让相似片段共享统计强度。 \\
+Seq2seq & 传统 MT 依赖手工特征 pipeline & encoder 编码输入、decoder 生成输出，把翻译写成端到端条件生成。 \\
+Attention & 固定向量瓶颈丢失长句信息 & decoder 动态查看输入位置；后来发展为 self-attention。 \\
+Adam & 深层网络训练对学习率敏感 & 用一阶/二阶动量自适应缩放更新，降低调参难度。 \\
+Transformer & RNN 串行限制并行训练 & self-attention + MLP + residual/norm，成为现代 LLM 主干。 \\
+MoE & dense 模型每 token 激活全部参数，计算贵 & router 只激活少量 experts，实现大参数量和低每 token compute 的折中。 \\
+GPipe & 单设备放不下深模型 & 按 layers 切 pipeline，用 microbatch 降低 bubble。 \\
+ZeRO & data parallel 下 optimizer state、grad、param 重复存储 & ZeRO 即 Zero Redundancy Optimizer：在 DP ranks 之间分片这些训练状态。ZeRO-1 切 optimizer state，ZeRO-2 再切 gradients，ZeRO-3 连 parameters 也切；stage 越高越省显存但通信越多。 \\
+Megatron-LM & 单层矩阵太大，单卡算不动 & 用 tensor parallelism 切矩阵乘法，并与 data/pipeline parallelism 组合。 \\
+\bottomrule
+\end{longtable}
+
+\begin{knowledgebox}{first-use glossary：sharding 与 state sharding}
+Sharding 就是分片：原本每张 GPU 都保存完整对象，分片后每张 GPU 只保存一部分。State sharding 特指把训练状态分片，例如 optimizer state、gradient、parameter。它不是让单卡独立完成完整 forward，而是在通信配合下减少重复显存。
+\end{knowledgebox}
+
+\subsection{Foundation models、scaling、open models}
+
+ELMo、BERT、T5 展示了预训练再适配；GPT-2、GPT-3、PaLM、Chinchilla 把 scaling laws 推到中心；Llama、Mistral、DeepSeek、Qwen、Olmo、Nemotron、Marin 等开放模型让外部研究和教学能看到更多 recipe。
+
+\begin{longtable}{p{0.24\textwidth}p{0.36\textwidth}p{0.30\textwidth}}
+\toprule
+\textbf{阶段} & \textbf{代表材料} & \textbf{给 CS336 的启发} \\
+\midrule
+Early foundation models & ELMo、BERT、T5 & 预训练成为通用能力来源，fine-tuning/text-to-text 改变任务形式。 \\
+Scaling era & GPT-2、GPT-3、PaLM、Chinchilla & 用小实验预测大训练，用 compute budget 决定参数量和 token 数。 \\
+Open-weight & Llama、Mistral、DeepSeek、Qwen 等 & 权重可用，论文可读，但数据/code/recipe 未必透明。 \\
+Open-source/open development & Olmo、Nemotron、Marin & 更适合教学和可复现研究，因为能看到数据、代码和过程。 \\
+\bottomrule
+\end{longtable}
+
+\begin{warningbox}{open-weight 不等于 open-source}
+Open-weight 只说明权重可下载；open-source/open-development 更强调数据、代码、训练 recipe、评估和开发过程透明。CS336 需要后者，因为本课关心“模型如何被造出来”。
+\end{warningbox}
+
+\subsection{语言模型对象的演化}
+
+语言模型的“使用对象”也在变化：2018 年的 BERT 是 fine-tune 的模型；2020 年的 GPT-3 是 prompt 的模型；2022 年的 ChatGPT 是对话对象；2026 年的 agent 则是会自主行动、调用工具、写代码、执行任务的系统组件。
+
+\begin{importantbox}{fundamentals 相同，specs 不同}
+底层仍是 attention、kernels、optimization、data 和 scaling；但 specs 变了：context 更长，inference efficiency 更重要，模型从生成一句话变成执行多步任务。课程后续内容都会围绕这些 specs 展开。
+\end{importantbox}
+
+\subsection{本章小结}
+
+语言模型历史不是“从 n-gram 到 GPT”的线性故事，而是概率建模、表示学习、可并行架构、系统扩展、开放生态和 agentic use case 的叠加。
+

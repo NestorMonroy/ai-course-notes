@@ -1,0 +1,125 @@
+\section{GPU 架构剖析}
+
+\subsection{CPU vs GPU：设计哲学的根本差异}
+
+CPU 和 GPU 的芯片面积分配方式截然不同：
+
+\begin{itemize}
+    \item \textbf{CPU}：大量面积用于控制逻辑（分支预测、乱序执行）和缓存，少量 ALU。优化目标是\textbf{延迟（latency）}——让单个任务尽快完成。
+    \item \textbf{GPU}：大量面积用于计算单元（ALU），极少的控制逻辑。优化目标是\textbf{吞吐量（throughput）}——在给定时间内处理尽可能多的数据。
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-007.jpg}
+\caption{CPU vs GPU 架构对比：CPU 芯片面积主要用于 Control 和 Cache，GPU 主要用于大量 ALU\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第8页。}
+
+右上角的调度示意图清楚地展示了二者的区别：CPU 串行完成 T1$\rightarrow$T2$\rightarrow$T3$\rightarrow$T4（每个任务快速完成），GPU 则让 T1--T4 并行执行（单个任务可能等待数据，但整体吞吐量高）。
+
+\subsection{GPU 的执行单元：SM 与 SP}
+
+GPU 由大量 \textbf{SM（Streaming Multiprocessor，流式多处理器）} 组成，每个 SM 内部包含多个 \textbf{SP（Streaming Processor，流处理器）}。以 A100 为例，拥有 \textbf{128 个 SM}。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-008.jpg}
+\caption{GA100 GPU 芯片结构：左侧为单个 SM 的内部组成（Tensor Core、FP32/INT32 单元、Register File），右侧为完整芯片的 128 个 SM 布局\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第9页。}
+
+\begin{importantbox}{GPU 执行层次}
+\textbf{GPU} $\supset$ \textbf{SM}（流式多处理器）$\supset$ \textbf{SP}（流处理器）\\
+每个 SM 独立执行一组``Block''（任务），每个 SP 可以并行执行多个线程。A100 拥有 128 个 SM，每个 SM 含多个 Tensor Core 和大量 FP32/INT32 计算单元。
+\end{importantbox}
+
+\subsection{GPU 内存层次}
+
+GPU 性能优化的核心在于\textbf{内存}。越靠近 SM 的内存越快：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{内存类型} & \textbf{访问延迟 (cycles)} & \textbf{位置} \\
+\midrule
+Shared Memory (SRAM) & 23/19 (load/store) & SM 内部 \\
+L1 Cache & 33 & SM 内部 \\
+L2 Cache & 200 & 芯片上 \\
+Global Memory (HBM/DRAM) & 290 & 芯片外 \\
+\bottomrule
+\end{tabular}
+\caption{A100 GPU 各级内存访问延迟}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-009.jpg}
+\caption{GPU 内存层次结构：Shared Memory 在 SM 内部（最快），L2 Cache 在芯片上，HBM 在芯片外部（最慢）\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第10页。PCIe A100 实物照片展示了 GPU 芯片与外部 HBM 芯片的物理距离。}
+
+\begin{warningbox}{内存是性能的关键瓶颈}
+SRAM（shared/cache）比 DRAM（global memory）快约 \textbf{8x}，但贵约 \textbf{100x}。全局内存访问延迟（290 cycles）是共享内存（23 cycles）的 \textbf{12.6 倍}。如果你的计算需要频繁访问全局内存，SM 上的计算单元就会空闲等待数据，造成严重的性能浪费。
+\end{warningbox}
+
+\subsection{GPU 执行模型：Thread, Block, Warp}
+
+GPU 的编程模型有三个关键概念：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-010.jpg}
+\caption{GPU 执行模型：CUDA Program 被划分为多个 Block，每个 Block 分配到一个 SM，Block 内线程以 Warp（32线程）为单位执行\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第11页。}
+
+\begin{importantbox}{GPU 执行模型三要素}
+\begin{itemize}
+    \item \textbf{Thread（线程）}：执行实际计算的最小单位。所有线程执行\textbf{相同的指令}，但操作\textbf{不同的数据}——这就是 \textbf{SIMT}（Single Instruction, Multiple Threads）模型。
+    \item \textbf{Block（线程块）}：一组线程的集合。每个 Block 运行在一个 SM 上，Block 内的线程共享该 SM 的 Shared Memory。
+    \item \textbf{Warp（线程束）}：Block 内的线程以 \textbf{32 个为一组}同步执行，称为一个 Warp。Warp 是 GPU 调度的基本单位。
+\end{itemize}
+\end{importantbox}
+
+\subsection{GPU 内存模型}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{slides-images/slide-011.jpg}
+\caption{GPU 内存模型：每个线程有自己的 Register，Block 内线程共享 Shared Memory，Block 间通过 Global Memory 通信\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第12页。}
+
+理想的执行模式：每个 Block 的数据都在 Shared Memory 中，Block 内线程高速访问，计算完成后一次性写回全局内存。如果线程需要频繁访问分散在全局内存各处的数据，性能就会急剧下降。
+
+\begin{warningbox}{跨 Block 通信代价高昂}
+Block 之间\textbf{无法直接通信}——必须通过全局内存中转。这意味着算法设计时应尽量让每个 Block 独立完成计算，最小化跨 Block 数据依赖。
+\end{warningbox}
+
+\subsection{TPU 简介}
+
+Google 的 TPU（Tensor Processing Unit）与 GPU 在高层架构上非常相似：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-012.jpg}
+\caption{TPU 架构：Scalar Unit（控制）、VPU（向量运算）、MXU（矩阵乘法）、高速片上内存和外部 HBM\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第13页。}
+
+TPU 与 GPU 的核心共同点：轻量控制逻辑 + 大型矩阵乘法单元 + 快速片上内存。
+主要差异：（1）TPU 没有 Warp 的概念，编程模型更简单；（2）加速器间的互联方式不同（在并行化课程中详细讨论）；（3）GPU 有更多 SM，TPU 有更少但更大的 TensorCore（矩阵乘法性能接近）。
+
+\subsection{本章小结}
+
+\begin{itemize}
+    \item GPU 是大规模并行处理系统，使用 SIMT 模型在大量线程上执行相同指令
+    \item SM 是 GPU 的核心执行单元，Block 映射到 SM，线程以 Warp（32线程）为单位调度
+    \item \textbf{计算（尤其是 matmul）的扩展速度远快于内存带宽}——这决定了性能优化的核心策略
+    \item 必须\textbf{尊重内存层次结构}：尽量让数据停留在快速的 Shared Memory 中
+\end{itemize}
+
+%% ========== Part 2: GPU 性能优化 ==========
+

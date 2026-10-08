@@ -1,0 +1,127 @@
+\section{GRPO：用 group-relative signal 替代 value model}
+
+本节的核心问题是：同一个 prompt 采样多个答案时，能否用这组答案本身估计 baseline？GRPO 对每个 prompt 采样 $G$ 个 trajectories，以组内平均和标准差归一化 reward。
+
+\subsection{Vanilla GRPO objective}
+
+本节先写出最常见的 vanilla 版本，再审计它隐含的权重。组内 advantage 常写成：
+
+$$
+\hat{A}_i=\frac{r_i-\bar r}{s_r+\epsilon},\qquad
+\bar r=\frac{1}{G}\sum_{j=1}^{G}r_j.
+$$
+
+其中 $s_r$ 表示组内 reward 标准差，$\epsilon$ 防止除零，$\bar r$ 是同一 prompt 的 group mean。随后把 $\hat A_i$ 代入 PPO-style clipped ratio objective，并加入 KL regularization。
+
+\subsection{Worked example：四条 rollout 怎样变成优势信号}
+
+为了看清 group-relative normalization 的行为，考虑同一 prompt 采样四条答案，verifier rewards 为 $(1,1,0,0)$。使用 population standard deviation 时，$\bar r=0.5$、$s_r=0.5$，因此 normalized advantages 为 $(1,1,-1,-1)$：两条正确轨迹被提高概率，两条错误轨迹被降低概率。
+
+若改用 leave-one-out baseline，则对第一条正确轨迹有
+
+$$
+b_{-1}=\frac{1+0+0}{3}=\frac{1}{3},
+\qquad r_1-b_{-1}=\frac{2}{3};
+$$
+
+对一条错误轨迹有 $b_{-3}=2/3$、$r_3-b_{-3}=-2/3$。方向相同，但它明确排除了当前 action 自己对 baseline 的影响。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{L{0.22\textwidth}L{0.22\textwidth}L{0.46\textwidth}}
+\toprule
+组内结果 & Advantage 行为 & 训练含义 \\
+\midrule
+有对有错 & 产生正负相对信号 & 最适合学习，能区分策略 \\
+全部正确 & variance 接近 0 & 问题已太容易，继续采样浪费 rollout \\
+全部错误 & variance 接近 0 & 问题可能太难、verifier 错或 policy 尚无探索支点 \\
+只有一条异常 & normalization 可能放大 outlier & 需要检查 reward bug 与 sampling luck \\
+\bottomrule
+\end{tabular}
+\caption{Group composition 决定 GRPO 是否有有效学习信号。}
+\end{table}
+
+\begin{importantbox}{课程难度与 group variance 是同一个信号}
+当一组答案全对或全错时，GRPO 几乎没有相对信息。因此 curriculum 不应只按人工难度标签排序，还应观察当前 policy 的 group success distribution，把 rollout 预算放在“有分歧、可改进”的 prompts 上。
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{slide-18.jpg}
+\caption{GRPO：保留 PPO ratio/KL，去掉 value function，用组内 z-score advantage。}
+\figsource{CS336 Spring 2026 Lecture 16，Slide 18。}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{slide-19.jpg}
+\caption{GRPO 的最小实现结构：rollout、reward normalization、policy loss、KL。}
+\figsource{CS336 Spring 2026 Lecture 16，Slide 19。}
+\end{figure}
+
+\begin{knowledgebox}{读图：GRPO 简化了哪里}
+它不再训练 value network，也不需要 token-level GAE；对于可验证 outcome reward，这能明显降低显存和调参复杂度。但 rollout、old-policy ratios、reference KL 和长序列训练仍然存在，因此“tiny loss”不等于“tiny system”。
+\end{knowledgebox}
+
+老师把 GRPO 的核心心智模型压缩为一句话：同一 prompt 采样一组回答，用组内 reward 的 z-score 代替 learned value baseline。这个替换删掉了 value-model forward/backward 与 GAE，但没有删掉 on-policy sampling；生成一组长 CoT 仍然是主要成本。
+
+\singleslide{slide-20.jpg}{Vanilla GRPO 的 advantage computation：组内均值、标准差与数值稳定项。}{20}
+
+Slide 20 对应前面的四条 rollout 示例。实现先按 prompt 分组，计算每组 rewards 的 mean 与 standard deviation，再给组内每条 trajectory 一个共享到所有 token 的 normalized advantage。$10^{-4}$ 稳定项避免全对/全错时除零，却不能创造学习信号；此时应调整 curriculum，而不是依赖 epsilon 放大数值噪声。
+
+\singleslide{slide-21.jpg}{原始 GRPO 结果：相对 rejection fine-tuning 的收益，以及 process supervision 的额外增益。}{21}
+
+Slide 21 提供的是“GRPO 可以工作”的经验起点，而不是算法无偏性的证明。原论文中 GRPO 优于只强化正确答案的 RFT，process supervision 还能增加收益；但后续 R1 并未依赖同样的过程奖励。比较这些结果时必须同时核对 base model、数据、verifier 与 rollout budget，不能把所有增益归因于 z-score 公式。
+
+\subsection{Baseline validity：组均值与标准差并不对称}
+
+减去只依赖 state/prompt 的 baseline 不改变 policy gradient 期望。Leave-one-out mean
+
+$$
+b_{-i}=\frac{1}{G-1}\sum_{j\ne i}r_j
+$$
+
+与当前 action $y_i$ 条件独立，因此是更干净的 baseline。直接用包含 $r_i$ 的组均值会引入有限组偏差；再除以 sample standard deviation 则引入额外的 reward-dependent reweighting。
+
+\singleslide{slide-22.jpg}{从 policy-gradient baseline 定理重新检查 GRPO：可以减去什么，不能随意除以什么。}{22}
+
+Slide 22 的 RL detour 给出判断标准：baseline 可以依赖 state，也就是当前 prompt，但不能依赖正在评分的 action。组均值若包含 $r_i$，就受当前 rollout 影响；标准差更是由整组 actions 决定。它们在大组或特定对称条件下可能近似良好，却不能仅凭“做了 normalization”就宣称保持原梯度。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{slide-23.jpg}
+\caption{GRPO baseline 与 unbiased-gradient variants 的比较。}
+\figsource{CS336 Spring 2026 Lecture 16，Slide 23。}
+\end{figure}
+
+\begin{warningbox}{标准差归一化改变了问题权重}
+当一组 rewards 几乎全对或全错时，$s_r$ 很小，归一化可能放大噪声；当 reward variance 较大时，梯度反而被缩小。它不仅“稳定尺度”，也在重新加权不同难度的 prompts。
+\end{warningbox}
+
+\subsection{Length bias：token averaging 会奖励什么}
+
+进一步审计序列聚合：若 trajectory loss 对 token 取平均，短答案的每个 token 获得更大权重；若对所有 tokens 求和，长答案可能贡献更大梯度。不同 GRPO variants 会修改 length normalizer，以避免模型通过增加无用 reasoning tokens 或过早结束来操纵 objective。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{slide-24.jpg}
+\caption{GRPO 的标准差与长度归一化会产生 prompt/sequence weighting bias。}
+\figsource{CS336 Spring 2026 Lecture 16，Slide 24。}
+\end{figure}
+
+\begin{importantbox}{审计 RL objective 的三个问题}
+一看 baseline 是否与当前 action 独立；二看 normalization 是否改变 prompt 权重；三看 token aggregation 是否偏好特定长度。很多“训练技巧”其实在悄悄重写优化目标。
+\end{importantbox}
+
+\begin{knowledgebox}{Nota de clase}
+讲者没有把 GRPO 描述成最终答案，而是把它当成一个足够简单、能扩展 RLVR 的 baseline。理解它的 bias 比背诵公式更重要，因为后续模型 recipe 往往会改 advantage、length control 和 sampling curriculum。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+GRPO 用 group-relative rewards 去掉 value model，降低了 RLVR 的实现门槛；代价是 finite-group bias、standard-deviation weighting 和 length bias。下一步看这些算法如何进入真实模型 recipe。
+
+\singleslide{slide-25.jpg}{三个公开 RLVR 案例的比较入口：DeepSeek R1、Kimi K1.5 与 Qwen3。}{25}
+
+这页不是模型排行榜，而是实验设计对照。R1 展示 GRPO、R1-Zero 与 distillation；这里的 R1-Zero 指“没有 reasoning SFT 冷启动”，与分布式训练中的 ZeRO（Zero Redundancy Optimizer，将 optimizer state、gradient 或 parameter 分片到多张 GPU）无关。Kimi 补充 difficulty curriculum、length control 与 RL infrastructure；Qwen3 则展示低数据 reasoning RL、thinking-mode fusion、general alignment 和 agentic environments。后文每个案例都按“数据→初始化→在线 RL→离线迁移→系统”同一框架阅读。
+

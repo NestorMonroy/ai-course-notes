@@ -1,0 +1,70 @@
+\section{Arithmetic Intensity 与 Roofline}
+
+FLOPs 只描述计算量，无法解释为什么两个 FLOP 数相同的算子速度差很多。本部分把数据移动加入账本：arithmetic intensity 衡量每搬运一个 byte 完成多少 FLOPs，Roofline 再用峰值带宽与峰值算力判断算子处于 memory-bound 还是 compute-bound 区域。
+
+\subsection{compute-memory 最小模型}
+
+为了不被复杂 GPU 细节淹没，本节先用一个最小模型理解所有 kernel：从 memory 读取输入，在 accelerator 上执行算术，再把结果写回。核心问题是同一数据在片上能复用多少次；若每个元素只计算一次就写回，增加更多计算单元也无法突破 memory bandwidth。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.52\textwidth]{compute-memory.png}
+\caption{计算操作的最小系统模型：从 memory 读输入，accelerator 计算，再写回 memory。}
+\figsource{CS336 Spring 2026 Lecture 2 官方可执行讲义，\texttt{arithmetic\_intensity()}。}
+\end{figure}
+
+\begin{knowledgebox}{讲义提醒：Roofline 是上界诊断，不是运行时预测器}
+Roofline 忽略 kernel launch、cache 命中、通信、并发与 shape 对齐，因此它适合排除不可能达到的性能并选择优化方向。实际 wall-clock 仍需 profiling；模型落在 roofline 下方很远时，才继续检查 fusion、tiling、occupancy 和实现开销。
+\end{knowledgebox}
+
+\begin{knowledgebox}{读图：compute-memory 图怎么连接到 roofline}
+如果每搬 1 byte 数据只做很少计算，硬件主要等 memory；如果每 byte 能复用很多次，硬件才可能接近 compute 峰值。Arithmetic intensity 就是把计算和数据移动放到同一张账本上。
+\end{knowledgebox}
+
+\[
+\text{arithmetic intensity}
+=
+\frac{\text{FLOPs}}{\text{bytes transferred}},
+\qquad
+\text{accelerator intensity}
+=
+\frac{\text{peak FLOP/s}}{\text{memory bandwidth}}.
+\]
+
+对 H100 dense bf16，峰值约 \(989.5\times 10^{12}\) FLOP/s，HBM bandwidth 约 \(3.35\times 10^{12}\) bytes/s，所以平衡点约 \(295\) FLOPs/byte。
+
+\begin{importantbox}{判断瓶颈的规则}
+Workload intensity 小于 accelerator intensity，则 memory-bound；大于 accelerator intensity，则 compute-bound。
+\end{importantbox}
+
+\begin{longtable}{p{0.20\textwidth}p{0.30\textwidth}p{0.40\textwidth}}
+\toprule
+\textbf{操作} & \textbf{intensity 直觉} & \textbf{LLM 对应场景} \\
+\midrule
+ReLU / elementwise & 每个元素少量计算但完整读写 tensor & activation、mask、small kernels，常 memory-bound。 \\
+GeLU & 比 ReLU 多算一些，但读写相同 & 单独 kernel 仍常 memory-bound。 \\
+Dot product & 有 reduction，但复用有限 & attention/normalization 的局部构件。 \\
+Matrix-vector & 读大矩阵服务少量 token & autoregressive decode 常见。 \\
+Matrix-matrix & 数据复用高，intensity 随规模增长 & training/prefill 中的大 matmul。 \\
+\bottomrule
+\end{longtable}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{roofline-improved-1400.png}
+\caption{Roofline plot 把 arithmetic intensity 与硬件可达 performance 联系起来。}
+\figsource{CS336 Spring 2026 Lecture 2 官方可执行讲义，\texttt{roofline\_plots()}，图片来自 JAX Scaling Book。}
+\end{figure}
+
+\begin{knowledgebox}{读图：roofline plot 怎么看}
+横轴是 arithmetic intensity，纵轴是可达 performance。左侧斜线由 memory bandwidth 限制，右侧平台由 peak FLOP/s 限制；拐点是 accelerator intensity。操作落在拐点左边，主要 memory-bound；落在右边，才可能 compute-bound。
+\end{knowledgebox}
+
+\begin{warningbox}{roofline 的边界}
+Roofline 不直接建模 kernel launch latency、cache hierarchy、通信、pipeline bubble、shape padding 和框架 overhead。它是第一层诊断工具，不是完整 profiler。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Arithmetic intensity 解释了为什么大 matmul 快、elementwise 小算子慢，也解释了训练和推理的基本差异：训练有大量 matrix-matrix，decode 常退化为 matrix-vector 和 cache 读取。
+

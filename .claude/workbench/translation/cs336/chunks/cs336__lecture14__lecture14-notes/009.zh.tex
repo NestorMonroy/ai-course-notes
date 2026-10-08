@@ -1,0 +1,93 @@
+\section{实战选型：如果你来搭管线}
+
+把前面的内容收束成一个更实用的问题：面对一批新语料，你到底该先上什么、后上什么、谁负责做主决策？下面这张表是一个很粗但好用的起点。
+
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{p{2.7cm}p{4.0cm}p{4.0cm}p{3.2cm}}
+\toprule
+\textbf{目标} & \textbf{优先方法} & \textbf{为什么} & \textbf{常见补充} \\
+\midrule
+语言识别 & fastText / 轻量分类器 & 直接预测类别，速度快 & KenLM 做二次筛 \\
+低质量网页剔除 & KenLM / sorting & 对自然语言程度敏感 & 规则过滤 + 黑名单 \\
+毒性过滤 & fastText / classifier & 有标签数据时最直接 & 人工审查高风险样本 \\
+分布匹配 & DSIR & 更接近目标分布 & 先粗过滤再重采样 \\
+精确重复 & hash / Bloom filter & 便宜、可并行 & 按 span / block 做 \\
+近重复 & MinHash + LSH & 可扩展到海量数据 & 结合归一化与切块 \\
+\bottomrule
+\end{tabular}
+\caption{如果要快速搭一条数据管线，可以先从这个选型表开始}
+\end{table}
+
+\subsection{一个示意性的生产管线}
+
+下面是一个示意性的数值例子，不是课程里的硬统计，而是为了说明各个模块如何把规模一层层压下去。假设你从 1 亿条网页文本开始：
+
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{p{3.0cm}p{2.8cm}p{4.5cm}p{2.7cm}}
+\toprule
+\textbf{阶段} & \textbf{剩余量} & \textbf{主要作用} & \textbf{为什么有用} \\
+\midrule
+raw crawl & 100M & 原始网页抓取 & 噪声最大 \\
+language ID & 45M & 去掉非目标语言 & 先砍掉明显无关数据 \\
+quality filter & 18M & 去掉低信息密度页 & 保住真正能学的文本 \\
+toxicity filter & 15M & 去掉风险内容 & 降低治理成本 \\
+exact dedup & 12M & 去掉完全重复内容 & 降低记忆化 \\
+near dedup & 9M & 去掉近重复模板页 & 降低结构性冗余 \\
+\bottomrule
+\end{tabular}
+\caption{一个示意性的多阶段清洗管线：每一步都在把“大而脏”压成“小而干净”}
+\end{table}
+
+\begin{importantbox}{为什么这种分层通常更合理}
+因为每一级做的事情都不同。语言识别要的是类别；质量过滤要的是信息密度；毒性过滤要的是风险；去重要的是冗余。把不同目标分开，既更清楚，也更容易调参。
+\end{importantbox}
+
+\subsection{最常见的失败模式}
+
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{p{3.0cm}p{4.2cm}p{4.0cm}}
+\toprule
+\textbf{失败模式} & \textbf{现象} & \textbf{补救方法} \\
+\midrule
+过度过滤 & 数据变少但质量并没明显变好 & 降低阈值，检查误杀样本 \\
+校准漂移 & 训练时好用，换域后失效 & 重新校准或改用排序 \\
+重复污染 & 训练损失很快下降但泛化差 & 加强 exact / near dedup \\
+候选爆炸 & LSH 候选对太多 & 提高 $r$ 或先做粗过滤 \\
+\bottomrule
+\end{tabular}
+\caption{数据管线里最常见的几类失败模式}
+\end{table}
+
+\begin{warningbox}{不要把所有事情交给一个模型}
+一条成熟的数据管线通常是多级的。每一级都只解决一个问题，而且只做它最擅长、最便宜的那部分。把语言识别、质量判断、毒性、去重全压到一个模型里，通常只会得到一个又贵又不稳的系统。
+\end{warningbox}
+
+\subsection{如果把整条管线串起来}
+
+真正的生产系统通常会把这些模块串在一起：先做语言识别，再做质量过滤，再做毒性过滤，再做精确和近重复去重。每一步都不需要完美，但每一步都得足够便宜。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=0.8cm, every node/.style={font=\scriptsize, align=center}]
+\node[draw, rounded corners, fill=blue!10, minimum width=2.4cm, minimum height=0.8cm] (a) {language ID};
+\node[draw, rounded corners, fill=blue!14, right=of a, minimum width=2.4cm, minimum height=0.8cm] (b) {quality filter};
+\node[draw, rounded corners, fill=blue!18, right=of b, minimum width=2.4cm, minimum height=0.8cm] (c) {toxicity filter};
+\node[draw, rounded corners, fill=blue!22, right=of c, minimum width=2.4cm, minimum height=0.8cm] (d) {dedup};
+\node[draw, rounded corners, fill=green!14, right=of d, minimum width=2.6cm, minimum height=0.8cm] (e) {training corpus};
+\draw[-{Latex[length=3mm]}, thick] (a) -- (b);
+\draw[-{Latex[length=3mm]}, thick] (b) -- (c);
+\draw[-{Latex[length=3mm]}, thick] (c) -- (d);
+\draw[-{Latex[length=3mm]}, thick] (d) -- (e);
+\end{tikzpicture}
+\caption{端到端数据清洗管线}
+\end{figure}
+

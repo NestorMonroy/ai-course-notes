@@ -1,0 +1,117 @@
+\section{Transformer 块结构与位置编码}
+
+\subsection{串行层 vs 并行层}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-022.jpg}
+\caption{串行层（左）vs 并行层（右）：并行层同时计算 Attention 和 MLP，然后求和加回残差流\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第23页。}
+
+标准 Transformer 块是\textbf{串行}的：先做 Attention，再做 MLP。并行变体则同时计算两者：
+
+\textbf{串行}：$x_{out} = x + \text{MLP}(x + \text{Attn}(x))$
+
+\textbf{并行}：$x_{out} = x + \text{Attn}(x) + \text{MLP}(x)$
+
+并行层的优势在于系统效率——可以融合共享的 LayerNorm，矩阵乘法可以并行执行。GPT-J 首创了这种方式，PaLM 将其扩展到大规模。但从表达能力角度看，串行层更好（因为组合两次计算比相加更具表达力），因此大多数最近的模型仍选择串行层。
+
+\subsection{位置编码的演变}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-025.jpg}
+\caption{位置编码的演变：从正弦编码到绝对编码、相对编码，最终收敛到 RoPE\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第26页。}
+
+位置编码经历了丰富的探索：
+\begin{itemize}
+    \item \textbf{正弦编码}（Sinusoidal）：原始 Transformer
+    \item \textbf{绝对位置编码}（Absolute）：GPT 系列、OPT，学习位置向量直接加到 embedding 上
+    \item \textbf{相对位置编码}（Relative）：T5、Gopher，在 attention 计算中加入相对位置信息
+    \item \textbf{ALiBi}：一度流行但已被超越
+    \item \textbf{RoPE}（Rotary Position Embedding）：\textbf{当前的绝对共识}
+\end{itemize}
+
+\subsection{RoPE：旋转位置编码}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-026.jpg}
+\caption{RoPE 的核心思想：通过旋转向量来编码相对位置，保证内积只依赖于相对距离\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第27页。}
+
+RoPE 的设计目标：找到一种位置编码函数 $f$，使得两个位置 $i$ 和 $j$ 的嵌入向量的内积\textbf{只依赖于它们的相对距离} $i - j$：
+
+$$\langle f(x, i), f(y, j) \rangle = g(x, y, i - j)$$
+
+\begin{importantbox}{RoPE 的核心思想}
+\textbf{旋转不改变向量间的夹角}，因此不改变内积。RoPE 将位置信息编码为对向量的旋转操作——位置 $m$ 的向量被旋转 $m \cdot \theta$ 角度。由于旋转的相对性质，两个向量的内积只取决于它们旋转角度的\textbf{差}，也就是位置的\textbf{差}。
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-027.jpg}
+\caption{RoPE 的 2D 直觉：同一对词（we, know）在不同绝对位置，它们的嵌入向量之间的夹角保持不变\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第28页。}
+
+在高维空间中，RoPE 将 $d$ 维向量切分为 $d/2$ 对二维子空间，每对子空间以不同的频率 $\theta_i$ 旋转：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-028.jpg}
+\caption{RoPE 的数学实现：对 $d/2$ 对维度分别进行 2D 旋转，不同频率覆盖不同范围的位置信息\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第29页。}
+
+$$R_{\theta, m} = \begin{pmatrix} \cos m\theta_1 & -\sin m\theta_1 & & \\ \sin m\theta_1 & \cos m\theta_1 & & \\ & & \ddots & \\ & & & \cos m\theta_{d/2} & -\sin m\theta_{d/2} \\ & & & \sin m\theta_{d/2} & \cos m\theta_{d/2} \end{pmatrix}$$
+
+\begin{itemize}
+    \item $m$：位置索引
+    \item $\theta_i = 10000^{-2i/d}$：第 $i$ 对维度的旋转频率
+    \item 频率从高到低排列，高频维度捕获近距离关系，低频维度捕获远距离关系
+\end{itemize}
+
+\begin{knowledgebox}{RoPE 的关键实现细节}
+与绝对/正弦位置编码不同，RoPE \textbf{不在输入层添加位置向量}，而是在\textbf{每一层 attention 计算时}，对 query 和 key 进行旋转。这意味着位置信息在每一层都被重新注入。此外，$\theta$ 是预设的（非学习参数），所以旋转操作本质上只是一个固定的矩阵乘法，不影响训练稳定性。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-029.jpg}
+\caption{RoPE 在代码中的实现：在计算 attention 前对 query 和 key 应用旋转\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第30页。来自 LLaMA 的实现。}
+
+\subsection{架构变体的总结表}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-031.jpg}
+\caption{19 个模型的架构选择趋势（颜色编码）：Pre-norm（几乎全绿）、RMS Norm（多数蓝色）、串行层（多数）、RoPE（全部收敛）\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第32页。}
+
+\subsection{本章小结}
+
+\begin{importantbox}{架构变体的共识与分歧}
+\textbf{强共识}（几乎所有模型都做的）：
+\begin{itemize}
+    \item Pre-norm（LayerNorm 在残差流外部）
+    \item RoPE 位置编码
+    \item 无偏置项
+\end{itemize}
+\textbf{中等共识}（大多数模型做的）：
+\begin{itemize}
+    \item RMS Norm 替代 LayerNorm
+    \item SwiGLU/GEGLU 替代 ReLU/GELU
+    \item 串行层（而非并行层）
+\end{itemize}
+\end{importantbox}
+
+%% ========== Part 5: 超参数 ==========
+

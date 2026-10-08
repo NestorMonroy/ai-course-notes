@@ -1,0 +1,79 @@
+\subsection{pipeline parallelism：沿 depth 维切模型}
+
+为了让单层或整段网络不再全部驻留在一张卡上，本节沿 depth 切分层。Pipeline parallelism 的优点是 stage 之间只传 activation/gradient，适合跨相对较慢链路；代价是不同 stage 的执行必须调度，microbatch 太少会产生 bubble，过度优化调度又会增加内存和通信复杂度。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-032.jpg}
+\caption{Slide 32：layer-wise parallel 把层分配到不同 GPU，激活和梯度在层边界传递。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 32 是 pipeline 的 naive 起点}
+图中模型深度被切成多个 stage。每个 GPU 保存一段连续层，前向时激活向后传，反向时梯度向前传。这个策略能让单卡只存部分层，但如果一次只处理一个 batch，绝大多数 GPU 会等待。
+\end{knowledgebox}
+
+
+\singleslide{slides-images/slide-033.jpg}{Naive layer-wise model parallel 的低利用率：每个 stage 等待前向与反向依赖，只有约 $1/N$ 时间工作。}{33}
+
+Slide 33 的空闲不是 kernel 慢，而是调度依赖造成。单个 batch 必须依次穿过所有 stages，反向再逆序返回；在任一时刻只有少数 GPU 有可执行工作。Pipeline parallel 通过 microbatches 让不同样本同时占据不同 stages，填充这条流水线。
+
+\begin{knowledgebox}{讲义补充：源 Slide 33 的空闲来自依赖链}
+前向必须从第一段层算到最后一段，反向又必须从最后一段传回第一段。如果没有 microbatch，不同 stage 很难同时工作。利用率低不是硬件慢，而是调度图本身串行。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-034.jpg}
+\caption{Slide 34：pipeline parallel 用 micro-batches 填流水线，bubble 比例约为 \((n_{stages}-1)/n_{microbatches}\) 量级。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{读公式：Slide 34 的 bubble 比例}
+若有 \(P\) 个 pipeline stages 和 \(M\) 个 microbatches，简单调度下 bubble 比例常近似写作
+\[
+\rho_{\text{bubble}}\approx\frac{P-1}{M+P-1}.
+\]
+其中 \(P-1\) 是填满或排空流水线时的空闲 stage 数，\(M\) 是 microbatch 数。增加 \(M\) 能降低 bubble，但 microbatch 过小会损害 kernel efficiency 并增加调度开销。
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-035.jpg}
+\caption{Slide 35：为什么仍使用 pipeline parallel，原因是省显存且通信对象只是 activation。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 35 的 pipeline 优势}
+pipeline parallel 的通信主要是 stage 边界 activation，大小约随 batch、sequence、hidden dimension 增长，而不是每层都同步整个参数矩阵。因此它比 tensor parallel 更能跨较慢链路使用，也能明显降低每卡参数显存。
+\end{knowledgebox}
+
+
+\singleslide{slides-images/slide-036.jpg}{Pipeline throughput 对 microbatch 数高度敏感：batch 太小无法隐藏 fill/drain bubble。}{36}
+
+Slide 36 展示 pipeline efficiency 随 microbatch 增加才接近理想值。Stage 数越多，填充和排空的固定成本越大；若 global batch 受优化稳定性限制，就不能无限增加 microbatches。Pipeline degree、gradient accumulation 与优化 batch size 必须联合选择。
+
+\begin{warningbox}{讲义补充：源 Slide 36 的曲线意味着调度和优化耦合}
+为了提升 pipeline 利用率，常希望更多 microbatches；但 microbatch 数和 global batch、gradient accumulation、optimizer stability 相关。系统吞吐不能脱离训练优化讨论，单纯把 pipeline 填满可能改变有效 batch 和收敛行为。
+\end{warningbox}
+
+
+\singleslide{slides-images/slide-037.jpg}{更激进的 pipeline schedules：用更复杂交错换取更少 bubble，但增加通信和状态管理。}{37}
+
+Slide 37 提醒 zero-bubble/交错调度没有免费收益。为了让所有 stages 更持续地工作，系统可能切更细 virtual stages、保存更多在途 activations、增加点对点消息并约束 backward 顺序。吞吐提高的同时，显存、带宽与实现复杂度也会上升。
+
+\begin{knowledgebox}{讲义补充：源 Slide 37 的 trade-off}
+复杂 pipeline 调度能减少空闲时间，但代价通常是更多 activation 交换、更复杂 buffer 管理，以及更难和 tensor/data parallel 组合。高利用率并不总是端到端最优，还要看通信链路是否承受得住。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-038.jpg}
+\caption{Slide 38：zero bubble pipelining，把 backward 拆成 activation gradient 和 weight gradient 两部分。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 38 为什么能减少 bubble}
+反向传播可以拆成对输入激活的梯度传播，以及对权重梯度的计算。前者影响前一 stage 的反向进度，后者有更多调度自由度。zero-bubble 思路利用这种依赖差异，把可延后的 weight-gradient 计算放到原本空闲的时间段。
+\end{knowledgebox}
+

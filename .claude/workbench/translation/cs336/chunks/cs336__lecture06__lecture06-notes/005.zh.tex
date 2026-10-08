@@ -1,0 +1,97 @@
+\section{性能分析（Profiling）}
+
+\subsection{从端到端到深入内部}
+
+基准测试给出端到端时间，性能分析则揭示\textbf{时间花在了哪里}。更深层地，性能分析让你看到 PyTorch 高层调用背后实际执行的 CUDA 内核。
+
+\begin{importantbox}{Profiling 的两层价值}
+\begin{enumerate}
+    \item \textbf{显式价值}：哪些函数占用了最多时间？应该优化哪里？
+    \item \textbf{隐式价值}：PyTorch 调用在底层映射为哪些 CUDA 内核？理解这些映射关系帮助你建立对 GPU 执行的直觉。
+\end{enumerate}
+\end{importantbox}
+
+\subsection{PyTorch 内置 Profiler}
+
+PyTorch 提供了方便的内置性能分析器，无需离开 Python 环境：
+
+\begin{lstlisting}[caption={PyTorch Profiler 使用模板}]
+def profile(description, run, num_warmups=1, with_stack=False):
+    # Warmup
+    for _ in range(num_warmups):
+        run()
+    torch.cuda.synchronize()
+
+    # Profile
+    with torch.profiler.profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        with_stack=with_stack,
+    ) as prof:
+        run()
+        torch.cuda.synchronize()
+
+    # Print results
+    table = prof.key_averages().table(
+        sort_by="cuda_time_total",
+        row_limit=10
+    )
+    return table
+\end{lstlisting}
+
+\subsection{Profiling 案例：简单操作}
+
+\subsubsection{矩阵加法}
+
+Profile 矩阵加法 \texttt{a + b}（维度 $2048 \times 2048$）：
+\begin{itemize}
+    \item PyTorch 层面：调用 \texttt{aten::add}（C++ 接口）
+    \item GPU 层面：启动一个 CUDA 内核 \texttt{vectorized\_elementwise\_kernel}
+    \item 这是最简单的一对一映射：一个 PyTorch 操作 $\rightarrow$ 一个 CUDA 内核
+\end{itemize}
+
+\subsubsection{矩阵乘法}
+
+Profile 矩阵乘法 \texttt{a @ b}：
+\begin{itemize}
+    \item 大矩阵（$2048 \times 2048$）：调用 CUTLASS 库的内核，如 \texttt{cutlass\_80\_simt\_sgemm\_256x128\_8x4\_nn\_align1}
+    \item 小矩阵（$128 \times 128$）：调用不同的内核，如 \texttt{xmma\_gemm\_f32f32}
+    \item 内核名称本身包含丰富信息：\texttt{cutlass}（NVIDIA 线性代数库）、\texttt{256x128}（tile 大小）
+\end{itemize}
+
+\begin{knowledgebox}{不同维度调度不同内核}
+PyTorch 的矩阵乘法 \texttt{a @ b} 在高层只是一行代码，但底层会根据矩阵维度、硬件类型等因素调度到\textbf{完全不同的 CUDA 内核}。\texttt{torch.compile} 甚至可以自动微基准测试不同的内核，选择最优的——这就是为什么它能给你``免费''的 10\% 加速。
+\end{knowledgebox}
+
+\subsubsection{复合操作：cdist}
+
+\texttt{torch.cdist(a, b)} 计算两组向量的欧氏距离矩阵：
+\begin{itemize}
+    \item 映射到 \texttt{aten::cdist} $\rightarrow$ \texttt{aten::euclidean\_dist}
+    \item 分解为多个原语：\texttt{aten::mm}（矩阵乘法，占 78\% GPU 时间）、\texttt{aten::pow}（5\%）、\texttt{aten::sum}（3\%）、数组拼接（6\%）
+    \item 这告诉我们：如果要优化 cdist，应该集中精力在矩阵乘法上
+\end{itemize}
+
+\subsubsection{GeLU 与 Softmax}
+
+GeLU（\texttt{a + b} 后接 GeLU）和 Softmax 是本课的两个核心案例，将在后续章节详细分析。
+
+\subsection{Profiling 案例：MLP（Nsight 火焰图）}
+
+对一个较大的 MLP（$\text{dim}=2048$, 64 层, $\text{batch}=1024$）进行 Profiling，使用 NVIDIA Nsight 可视化工具可以看到\textbf{火焰图}（flame graph）：
+
+\begin{knowledgebox}{CPU 与 GPU 的异步执行}
+Profiling 揭示了一个关键事实：CPU 和 GPU 是\textbf{异步执行}的。CPU 会持续向 GPU 发送内核调用命令（``run this next, run this next...''），远远领先于 GPU 的实际执行。例如：当 GPU 还在执行 Layer 1 时，CPU 可能已经在排队 Layer 9 的命令了。
+\end{knowledgebox}
+
+\begin{warningbox}{print 语句的隐藏性能影响}
+在训练循环中打印损失值（如 \texttt{print(loss.item())}）看似无害，但会\textbf{强制 CPU-GPU 同步}——CPU 必须等待 GPU 计算完损失值才能打印。这会破坏异步执行，让 CPU 和 GPU 变成锁步（lock-step）执行，显著降低性能。
+
+正确做法：只在必要时（如每 $N$ 步）打印，或使用日志缓冲区。
+\end{warningbox}
+
+\subsection{本章小结}
+
+性能分析是定位瓶颈的关键工具。它让你看到 PyTorch 高层调用背后的 CUDA 内核，理解 CPU-GPU 异步执行模型，发现隐藏的性能陷阱（如同步开销）。\textbf{每次修改代码后，都应该重新基准测试和 Profile}。
+
+%% ========== Section 5: Kernel Fusion ==========
+

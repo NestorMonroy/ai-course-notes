@@ -1,0 +1,153 @@
+\section{对齐的核心概念与定义}
+
+\subsection{术语辨析}
+
+在后训练领域，有大量容易混淆的术语。Lambert 对此做了清晰的区分：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-010.jpg}
+\caption{模型"对齐"的相关定义\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第11页。}
+
+\begin{importantbox}{五个关键定义}
+\begin{itemize}
+    \item \textbf{指令微调（Instruction Fine-Tuning, IFT）}：训练模型遵循用户指令，通常使用自回归 LM 损失
+    \item \textbf{监督微调（Supervised Fine-Tuning, SFT）}：训练模型学习特定任务能力，同样使用自回归损失
+    \item \textbf{对齐（Alignment）}：训练模型使其行为与用户意图一致的通用概念，不限于特定损失函数
+    \item \textbf{基于人类反馈的强化学习（RLHF）}：使用人类反馈数据训练模型的特定技术工具
+    \item \textbf{偏好微调（Preference Fine-Tuning）}：使用标注的偏好数据微调语言模型（可用 RL 或 DPO 等损失函数）
+\end{itemize}
+\end{importantbox}
+
+\begin{warningbox}{指令微调 $\neq$ 监督微调}
+这两个概念经常被混用，但有重要区别。指令微调侧重于让模型学会"遵循指令"的通用能力，数据形式通常是 instruction-response 对；监督微调则更侧重于特定领域的能力提升。两者都使用自回归损失函数，但目标和数据分布不同。
+\end{warningbox}
+
+指令微调中的一个重要概念是\textbf{系统提示词（System Prompt）}。OpenAI 在其 Model Spec 文档中甚至引入了"第二级系统提示词"的概念，为模型接收数据提供结构化方式，使得开发者可以传递用户看不到的信息。
+
+\subsection{指令微调的数据来源}
+
+指令微调的数据通常来源于：
+\begin{itemize}
+    \item Stack Overflow、Reddit 等问答数据
+    \item 合成数据（如使用 GPT-4 生成）
+    \item 专门收集的 instruction-response 对
+\end{itemize}
+
+Lambert 强调，大量学术研究表明"仅靠指令微调就够了"，但他认为这个结论过于简化。指令微调是正确的起点，但要达到 ChatGPT 级别的效果，还需要偏好微调和 RLHF。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-012.jpg}
+\caption{指令微调的数据格式：系统提示 + 用户输入 + 模型回复\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第13页。}
+
+\subsection{RLHF 目标函数}
+
+RLHF 的核心目标函数可以写为：
+
+$$\max_{\pi_\theta} \mathbb{E}_{x \sim \mathcal{D}, y \sim \pi_\theta(y|x)} \left[ r_\phi(x, y) \right] - \beta \mathbb{D}_{\mathrm{KL}} \left[ \pi_\theta(y|x) \| \pi_{\mathrm{ref}}(y|x) \right]$$
+
+其中：
+\begin{itemize}
+    \item $\pi_\theta$：当前策略（即正在训练的语言模型）
+    \item $\pi_{\mathrm{ref}}$：参考策略（训练起点的基础模型）
+    \item $r_\phi(x, y)$：奖励函数，来自人类偏好
+    \item $\beta$：KL 散度惩罚系数
+    \item $x$：提示（prompt），$y$：补全（completion）
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-015.jpg}
+\caption{RLHF 目标函数：左侧为奖励最大化项，右侧为 KL 约束项\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第16页。}
+
+\begin{knowledgebox}{KL 散度约束的作用}
+目标函数右侧的 KL 散度项起到\textbf{正则化}作用：它约束训练后的策略 $\pi_\theta$ 不要偏离参考策略 $\pi_{\mathrm{ref}}$ 太远。这是为了防止\textbf{过度优化（over-optimization）}——如果不加约束地最大化奖励，模型可能会找到奖励模型的漏洞（reward hacking），产生高分但低质量的输出。
+\end{knowledgebox}
+
+RLHF 的两个核心问题是：
+\begin{enumerate}
+    \item \textbf{如何实现奖励函数}$r(x,y)$？——需要训练一个专门的奖励模型
+    \item \textbf{如何优化奖励}？——需要选择合适的策略优化算法（PPO、REINFORCE 等）
+\end{enumerate}
+
+\subsection{Bradley-Terry 偏好模型}
+
+奖励模型的训练基于 \textbf{Bradley-Terry 模型}——一个源自 1950 年代经济学的成对比较概率模型。该模型定义了在给定两个选项时，其中一个被选中的概率：
+
+$$P(y_1 \succ y_2 | x) = \sigma(r(x, y_1) - r(x, y_2))$$
+
+其中 $\sigma$ 是 sigmoid 函数。这个模型的一个关键假设是：\textbf{成对偏好概率可以由个体的标量分数之差来决定}。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-016.jpg}
+\caption{Bradley-Terry 偏好模型与奖励函数\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第17页。}
+
+\begin{warningbox}{从偏好概率到奖励分数的跳跃}
+Lambert 特别指出，从成对偏好概率到将其输出直接用作奖励分数，存在一个"mental crazy step"：我们原本训练的是一个判断"A 比 B 好"的概率模型，但在实际使用时却把它当作单个输入的评分器——传入一段文本，得到的是"该文本被选中而非任意其他文本"的概率。这个假设虽然在实践中有效，但从理论上说是一个不小的飞跃。
+\end{warningbox}
+
+\subsection{DPO：直接偏好优化}
+
+DPO（Direct Preference Optimization）的核心思想是：\textbf{为什么不能直接对 RLHF 目标函数做梯度上升，而非经过训练单独奖励模型再做 RL？}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-018.jpg}
+\caption{DPO 的核心思想：直接对偏好数据做梯度上升\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第19页。}
+
+DPO 的损失函数极其简洁：
+
+$$\mathcal{L}_{\mathrm{DPO}}(\pi_\theta; \pi_{\mathrm{ref}}) = -\mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}} \left[ \log \sigma \left( \beta \log \frac{\pi_\theta(y_w|x)}{\pi_{\mathrm{ref}}(y_w|x)} - \beta \log \frac{\pi_\theta(y_l|x)}{\pi_{\mathrm{ref}}(y_l|x)} \right) \right]$$
+
+其中 $y_w$ 是被选中的（chosen）回复，$y_l$ 是被拒绝的（rejected）回复。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-019.jpg}
+\caption{DPO 的损失函数与参考实现代码：实现极其简洁\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第20页。}
+
+\begin{importantbox}{DPO 的三大优势}
+\begin{enumerate}
+    \item \textbf{实现简单}：只需修改损失函数，不需要构建完整的 RL 基础设施
+    \item \textbf{计算扩展更容易}：不需要同时维护多个模型（策略、奖励、价值函数）
+    \item \textbf{调试容易}：相比 PPO 的众多超参数，DPO 更容易排查问题
+\end{enumerate}
+\end{importantbox}
+
+\subsection{DPO vs PPO：不同但可以共存}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-020.jpg}
+\caption{DPO 与 PPO/REINFORCE 的对比：它们是不同的优化器，但可以得到相似的结果\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第21页。}
+
+Lambert 强调：DPO 和 PPO 是\textbf{根本不同}的损失函数，做着不同的事情，但可以得到类似的结果。DPO 直接从偏好数据中学习，而 PPO 使用 RL 更新规则。DPO 也不是严格意义上的 online vs offline RL 之分，但这两者经常在讨论中被混淆。
+
+核心结论是：\textbf{如果两种方法都能得到相似结果，而其中一种简单得多，那就应该从简单的开始}。这就是为什么 DPO 成为了大多数人的起点。
+
+\begin{knowledgebox}{DPO 仍然隐含了一个奖励模型}
+一个重要但容易被忽略的数学事实是：DPO 的推导中仍然隐含了一个奖励模型。DPO 使用语言模型本身作为一种"不同类型的奖励模型"——奖励通过策略与参考模型的对数概率比来定义。这对后续的模型评估和使用方式有重要影响。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+对齐研究涉及多个层次的概念：从指令微调到 RLHF 再到 DPO，每一层都有其特定的数据需求和技术特点。RLHF 通过 Bradley-Terry 模型将人类偏好转化为可优化的奖励信号；DPO 则绕过了显式奖励模型的训练，直接在偏好数据上做梯度优化。两者各有优势，在实践中可以互补使用。
+
+%% ========== Part 3: 从 DPO 到实际训练 ==========
+
