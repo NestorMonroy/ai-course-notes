@@ -44,8 +44,25 @@ DIRECT_NOTE = (
     "\n\n## Modo directo\n\n"
     "No hay herramientas: el fragmento (y su corrección, si existe) ya van abajo. "
     "Ignora las instrucciones de leer con `Read` o buscar con `Grep`. "
-    "Responde sólo con el fragmento traducido entre `<<<ES` y `ES>>>`.\n"
+    "Responde sólo con el fragmento traducido entre `<<<ES` y `ES>>>`: la última línea "
+    "de tu respuesta es `ES>>>`, no la cerca ```` que rodea al fragmento de abajo.\n"
 )
+
+
+def close_markers(result: str) -> str:
+    """Cierra con `ES>>>` una respuesta que abrió `<<<ES` y terminó en la cerca.
+
+    El 9B copia la cerca ```` que rodea al fragmento en el mensaje y la usa de
+    cierre (lote 26, `translate/20261008T062556/`: 6 de 6 respuestas con
+    `done_reason` stop rechazadas por `extract_translation`). Sólo se toca el
+    marcador: si falta la apertura o ya hay cierre, el texto queda igual.
+    """
+    lines = result.rstrip().splitlines()
+    if not lines or lines[0].strip() != "<<<ES" or any(line.strip() == "ES>>>" for line in lines):
+        return result
+    while lines and (lines[-1].strip().startswith("````") or not lines[-1].strip()):
+        lines.pop()
+    return "\n".join(lines + ["ES>>>"]) + "\n"
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -96,7 +113,8 @@ def cached_result(out_dir: Path, zh: Path) -> dict | None:
             # Sólo una respuesta que el ciclo aceptaría: marcadores y la misma
             # estructura de entornos. Reutilizar una rechazada la repetiría
             # en cada vuelta sin volver a pedirla al modelo.
-            text = loop.extract_translation(record.get("result", "") or "")
+            record = {**record, "result": close_markers(record.get("result", "") or "")}
+            text = loop.extract_translation(record["result"])
             if text is not None and not loop.structure_problem(zh.read_text(encoding="utf-8"), text):
                 return {**record, "reused_from": str(result_file)}
     return None
@@ -141,7 +159,7 @@ def main(argv: list[str]) -> int:
             try:
                 reply = chat(url, model, build_message(template, zh), timeout)
                 record = {
-                    "result": reply.get("message", {}).get("content", ""),
+                    "result": close_markers(reply.get("message", {}).get("content", "")),
                     "model": model, "runtime": "llama-direct", "sampling_profile": SAMPLING_PROFILE,
                     "usage": {"input_tokens": reply.get("prompt_eval_count", 0),
                               "output_tokens": reply.get("eval_count", 0)},

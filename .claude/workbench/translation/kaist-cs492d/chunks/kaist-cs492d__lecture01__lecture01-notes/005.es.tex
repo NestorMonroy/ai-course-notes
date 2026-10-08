@@ -1,0 +1,198 @@
+\section{VAE: variational autoencoder}
+
+\subsection{Motivación de pasar de GAN a VAE}
+
+La dificultad central de los GAN radica en la optimización minimax. La idea detrás del VAE es: \textbf{¿podemos evitar el entrenamiento adversarial y aprender la mapeo de la distribución latente a la distribución de datos mediante una forma más estable?}
+
+La innovación clave del VAE consiste en dejar de aprender una función de mapeo determinista $G_\theta(z)$ para aprender una \textbf{distribución de probabilidad condicional} $p_\theta(x|z)$, es decir, la distribución de los datos $x$ dado que tenemos la variable latente $z$.
+
+\subsection{Marco probabilístico del VAE}
+
+\subsubsection{Proceso generativo}
+
+El VAE define el siguiente proceso generativo:
+
+\begin{enumerate}
+    \item Muestreo desde una distribución a priori: $z \sim p(z) = \mathcal{N}(\mathbf{0}, \mathbf{I})$
+    \item Muestreo desde la distribución de verosimilitud: $x \sim p_\theta(x|z) = \mathcal{N}(\mu_\theta(z), \sigma^2 \mathbf{I})$
+\end{enumerate}
+
+Donde $\mu_\theta(z)$ es la salida de la red neuronal del decodificador (la predicción del valor medio de $x$ dado $z$) y $\sigma^2$ es un hiperparámetro de varianza fija.
+
+\begin{importantbox}{Modelo probabilístico generativo del VAE}
+$$p_\theta(x, z) = p_\theta(x|z) \cdot p(z)$$
+Donde:
+\begin{itemize}
+    \item $p(z) = \mathcal{N}(\mathbf{0}, \mathbf{I})$: distribución a priori (prior), conocida.
+    \item $p_\theta(x|z) = \mathcal{N}(\mu_\theta(z), \sigma^2 \mathbf{I})$: distribución de verosimilitud (likelihood), parametrizada por el decodificador.
+    \item $p_\theta(x) = \int p_\theta(x|z) p(z) \, dz$: verosimilitud marginal (marginal likelihood), obtenida integrando respecto a $z$.
+\end{itemize}
+\end{importantbox}
+
+\subsubsection{Objetivo de entrenamiento: maximizar la verosimilitud marginal}
+
+En principio, deseamos maximizar el logaritmo de la verosimilitud marginal de los datos:
+
+$$\max_\theta \; \mathbb{E}_{x \sim p_{\text{data}}} [\log p_\theta(x)] = \max_\theta \; \mathbb{E}_{x \sim p_{\text{data}}} \left[\log \int p_\theta(x|z) p(z) \, dz \right]$$
+
+\begin{warningbox}{La verosimilitud marginal no es calculable}
+La integral $p_\theta(x) = \int p_\theta(x|z) p(z) \, dz$ \textbf{no puede calcularse de forma exacta} en espacios de alta dimensión. Intuitivamente: la dimensión del espacio latente podría ser de cientos de dimensiones, e integrar sobre todos los posibles $z$ no es factible. Por eso necesitamos inferencia variacional (Variational Inference).
+\end{warningbox}
+
+\subsection{Repaso de probabilidad: herramientas matemáticas necesarias para el VAE}
+
+\subsubsection{Marginalización}
+
+Dada una distribución conjunta $p(x, z)$, se puede obtener la distribución marginal de otra variable integrando (o sumando) respecto a una de ellas:
+
+$$p(x) = \int p(x, z) \, dz = \int p(x|z) p(z) \, dz$$
+
+\subsubsection{Teorema de Bayes}
+
+$$p(z|x) = \frac{p(x|z) p(z)}{p(x)}$$
+
+Convención de terminología para cada término:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ll}
+\toprule
+Símbolo & Nombre \\
+\midrule
+$p(z)$ & Prior (a priori): conocimiento a priori sobre $z$ \\
+$p(x|z)$ & Likelihood (verosimilitud): probabilidad de observar $x$ dado $z$ \\
+$p(z|x)$ & Posterior (a posteriori): creencia actualizada sobre $z$ tras observar $x$ \\
+$p(x)$ & Evidence / Marginal Likelihood (evidencia): probabilidad marginal de los datos \\
+\bottomrule
+\end{tabular}
+\caption{Terminología de los términos en el teorema de Bayes}
+\end{table}
+
+\subsubsection{Divergencia de Kullback-Leibler}
+
+La divergencia de Kullback-Leibler mide la "distancia" entre dos distribuciones de probabilidad (nota: no es simétrica, por lo que no es estrictamente una métrica de distancia):
+
+$$D_{\mathrm{KL}}(p \| q) = \mathbb{E}_{x \sim p} \left[\log \frac{p(x)}{q(x)}\right] = \int p(x) \log \frac{p(x)}{q(x)} \, dx$$
+
+\begin{importantbox}{Propiedades clave de la divergencia de KL}
+\begin{itemize}
+    \item \textbf{No negatividad}: $D_{\mathrm{KL}}(p \| q) \geq 0$, con igualdad si y solo si $p = q$ casi en todas partes.
+    \item \textbf{Asimetría}: generalmente $D_{\mathrm{KL}}(p \| q) \neq D_{\mathrm{KL}}(q \| p)$.
+    \item \textbf{Forma cerrada para la divergencia KL entre dos distribuciones gaussianas}.
+\end{itemize}
+\end{importantbox}
+
+\begin{knowledgebox}{Divergencia KL entre dos distribuciones gaussianas multivariadas}
+Supongamos $p = \mathcal{N}(\boldsymbol{\mu}_1, \boldsymbol{\Sigma}_1)$ y $q = \mathcal{N}(\boldsymbol{\mu}_2, \boldsymbol{\Sigma}_2)$. Entonces:
+$$D_{\mathrm{KL}}(p \| q) = \frac{1}{2}\left[\log\frac{|\boldsymbol{\Sigma}_2|}{|\boldsymbol{\Sigma}_1|} - d + \mathrm{tr}(\boldsymbol{\Sigma}_2^{-1}\boldsymbol{\Sigma}_1) + (\boldsymbol{\mu}_2 - \boldsymbol{\mu}_1)^T \boldsymbol{\Sigma}_2^{-1} (\boldsymbol{\mu}_2 - \boldsymbol{\mu}_1)\right]$$
+donde $d$ es la dimensión. En particular, cuando $q = \mathcal{N}(\mathbf{0}, \mathbf{I})$:
+$$D_{\mathrm{KL}}(\mathcal{N}(\boldsymbol{\mu}, \boldsymbol{\Sigma}) \| \mathcal{N}(\mathbf{0}, \mathbf{I})) = \frac{1}{2}\left[-\log|\boldsymbol{\Sigma}| - d + \mathrm{tr}(\boldsymbol{\Sigma}) + \boldsymbol{\mu}^T\boldsymbol{\mu}\right]$$
+Esta fórmula se usa directamente en el entrenamiento del VAE.
+\end{knowledgebox}
+
+\subsection{Derivación de la desigualdad de Jensen y el ELBO}
+
+\subsubsection{Funciones convexas e inecuación de Jensen}
+
+\textbf{Función convexa (Convex Function)}: se define como aquella que, para cualquier par de puntos $x_1, \ldots, x_n$ y pesos $t_1, \ldots, t_n$ ($t_i \geq 0$, $\sum t_i = 1$), cumple:
+
+$$f\left(\sum_i t_i x_i\right) \leq \sum_i t_i f(x_i)$$
+
+Intuitivamente, el gráfico de una función convexa se curva "hacia abajo", y cualquier segmento que une dos puntos yace sobre el gráfico de la función.
+
+Una \textbf{función cóncava (Concave Function)} es lo opuesto a la convexa: su gráfico se curva "hacia arriba" y $-f$ es una función convexa. La función $\log$ es una función cóncava importante.
+
+\begin{importantbox}{Inecuación de Jensen}
+Si $f$ es una función convexa y $X$ es una variable aleatoria, entonces:
+$$f(\mathbb{E}{[}X{]}) \leq \mathbb{E}{[}f(X){]}$$
+Si $f$ es cóncava (como $\log$), la dirección de la inecuación se invierte:
+$$f(\mathbb{E}{[}X{]}) \geq \mathbb{E}{[}f(X){]}$$
+Es decir, $\log(\mathbb{E}{[}X{]}) \geq \mathbb{E}{[}\log X{]}$.
+\end{importantbox}
+
+\subsubsection{Derivación del ELBO}
+
+El ELBO (Evidence Lower Bound) es el objetivo central del entrenamiento del VAE. A continuación se muestra el proceso de derivación completo.
+
+\textbf{Punto de partida}: queremos maximizar el logaritmo de la verosimilitud marginal $\log p_\theta(x)$, pero no puede calcularse directamente. Introduciendo una distribución a posteriori aproximada $q_\phi(z|x)$ (encoder), tenemos:
+
+\begin{align}
+\log p_\theta(x) &= \log \int p_\theta(x, z) \, dz \nonumber \\
+&= \log \int \frac{p_\theta(x, z)}{q_\phi(z|x)} q_\phi(z|x) \, dz \nonumber \\
+&= \log \mathbb{E}_{z \sim q_\phi(z|x)} \left[\frac{p_\theta(x, z)}{q_\phi(z|x)}\right] \nonumber \\
+&\geq \mathbb{E}_{z \sim q_\phi(z|x)} \left[\log \frac{p_\theta(x, z)}{q_\phi(z|x)}\right] \quad \text{(Inecuación de Jensen, $\log$ es cóncava)}
+\end{align}
+
+La última línea es el ELBO:
+
+$$\text{ELBO}(\theta, \phi; x) = \mathbb{E}_{z \sim q_\phi(z|x)} \left[\log \frac{p_\theta(x, z)}{q_\phi(z|x)}\right]$$
+
+\begin{importantbox}{Descomposición del ELBO}
+Sustituyendo $p_\theta(x, z) = p_\theta(x|z)p(z)$, el ELBO se puede descomponer en dos términos:
+\begin{align}
+\text{ELBO} &= \mathbb{E}_{z \sim q_\phi(z|x)} \left[\log p_\theta(x|z)\right] - D_{\mathrm{KL}}(q_\phi(z|x) \| p(z)) \nonumber
+\end{align}
+\begin{itemize}
+    \item \textbf{Término de reconstrucción (Reconstruction Term)}: $\mathbb{E}_{z \sim q_\phi(z|x)} {[}\log p_\theta(x|z){]}$ —mide la capacidad del decodificador para reconstruir $x$ a partir de $z$. Cuando $p_\theta(x|z) = \mathcal{N}(\mu_\theta(z), \sigma^2 I)$, este término es equivalente al error cuadrático medio (MSE) negativo.
+    \item \textbf{Término de regularización (Regularization / KL Term)}: $-D_{\mathrm{KL}}(q_\phi(z|x) \| p(z))$ —incentiva que la distribución de salida del encoder se acerque a la a priori $p(z) = \mathcal{N}(\mathbf{0}, \mathbf{I})$, estructurando así el espacio latente.
+\end{itemize}
+\end{importantbox}
+
+\subsubsection{Relación entre ELBO y verosimilitud marginal}
+
+En realidad, se puede escribir con más precisión:
+
+$$\log p_\theta(x) = \text{ELBO}(\theta, \phi; x) + D_{\mathrm{KL}}(q_\phi(z|x) \| p_\theta(z|x))$$
+
+\begin{warningbox}{El ELBO es una cota inferior, no una igualdad}
+Dado que $D_{\mathrm{KL}}(q_\phi(z|x) \| p_\theta(z|x)) \geq 0$, el ELBO siempre será menor o igual al logaritmo de la verosimilitud marginal real $\log p_\theta(x)$. La diferencia (gap) es igual a la divergencia KL entre la a posteriori aproximada $q_\phi(z|x)$ y la a posteriori real $p_\theta(z|x)$. Cuando $q_\phi(z|x) = p_\theta(z|x)$ (la a posteriori aproximada coincide exactamente con la real), el ELBO es igual a $\log p_\theta(x)$ y el gap es cero.
+\end{warningbox}
+
+\subsection{Arquitectura de la red del VAE}
+
+En términos de implementación, el VAE incluye:
+
+\begin{itemize}
+    \item \textbf{Red Encoder} $q_\phi(z|x)$: entrada $x$, salida $\mu_\phi(x)$ y $\sigma_\phi(x)$ (media y desviación estándar de la distribución latente).
+    \item \textbf{Red Decoder} $p_\theta(x|z)$: entrada $z$, salida $\mu_\theta(z)$ (valor medio para reconstruir $x$).
+    \item \textbf{Proceso de muestreo}: se realiza mediante el truco de reparametrización para obtener $z = \mu_\phi(x) + \sigma_\phi(x) \odot \epsilon$, con $\epsilon \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$.
+\end{itemize}
+
+\begin{knowledgebox}{Papel clave del truco de reparametrización en el VAE}
+La operación de muestrear $z$ directamente desde $q_\phi(z|x) = \mathcal{N}(\mu_\phi(x), \sigma^2_\phi(x) \mathbf{I})$ no es diferenciable y no permite optimizar $\phi$ mediante retropropagación. El truco de reparametrización expresa el muestreo como $z = \mu_\phi(x) + \sigma_\phi(x) \odot \epsilon$ (donde $\epsilon \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$ es independiente de los parámetros), permitiendo que el gradiente fluya a través de $\mu_\phi$ y $\sigma_\phi$, logrando así un entrenamiento end-to-end.
+\end{knowledgebox}
+
+\subsection{Función de pérdida del VAE}
+
+Sintetizando las derivaciones anteriores, el objetivo del entrenamiento del VAE es maximizar el ELBO, lo cual equivale a minimizar la siguiente función de pérdida:
+
+$$\mathcal{L}_{\text{VAE}}(\theta, \phi; x) = -\text{ELBO} = -\mathbb{E}_{z \sim q_\phi(z|x)}{[}\log p_\theta(x|z){]} + D_{\mathrm{KL}}(q_\phi(z|x) \| p(z))$$
+
+Cuando $p_\theta(x|z) = \mathcal{N}(\mu_\theta(z), \sigma^2 \mathbf{I})$ y $p(z) = \mathcal{N}(\mathbf{0}, \mathbf{I})$:
+
+$$\mathcal{L}_{\text{VAE}} = \frac{1}{2\sigma^2}\|x - \mu_\theta(z)\|^2 + D_{\mathrm{KL}}(\mathcal{N}(\mu_\phi(x), \text{diag}(\sigma^2_\phi(x))) \| \mathcal{N}(\mathbf{0}, \mathbf{I}))$$
+
+\begin{importantbox}{Intuición detrás de la función de pérdida del VAE}
+La pérdida del VAE consta de dos partes:
+\begin{enumerate}
+    \item \textbf{Error de reconstrucción (MSE)}: obliga al modelo a reconstruir con precisión los datos de entrada.
+    \item \textbf{Penalización KL}: fuerza a que la distribución latente se acerque a una gaussiana estándar, haciendo que el espacio latente sea suave, continuo y muestreable.
+\end{enumerate}
+Existe tensión entre ambos términos: el error de reconstrucción desea que las codificaciones latentes conserven al máximo la información (lo que podría llevar a distribuciones latentes superpuestas para diferentes puntos de datos), mientras que el término KL empuja a todas las distribuciones latentes hacia la gaussiana estándar (lo que podría provocar pérdida de información). Encontrar un buen equilibrio es el núcleo del ajuste de hiperparámetros en el VAE.
+\end{importantbox}
+
+\subsection{Relación entre el VAE y los modelos de difusión}
+
+Durante la explicación del VAE, el profesor de clase adelantó varias veces: \textbf{la idea del VAE está directamente relacionada con los Modelos de Difusión}. En concreto:
+
+\begin{itemize}
+    \item Los Modelos de Difusión pueden entenderse como un tipo de VAE "jerárquico", donde las variables latentes son una serie de estados intermedios con ruido progresivo.
+    \item El método de derivación del ELBO puede generalizarse directamente a los Modelos de Difusión.
+    \item El truco de reparametrización presente en el VAE es igualmente indispensable en los Modelos de Difusión.
+\end{itemize}
+
+\subsection{Resumen de la sección}
+
+El VAE evita las dificultades de optimización minimax de los GAN mediante inferencia variacional. Introduce un encoder (a posteriori aproximada) y un decodificador (verosimilitud), entrenando maximizando el ELBO (cota inferior del logaritmo de la verosimilitud marginal). El ELBO se descompone naturalmente en un término de reconstrucción y un término de regularización KL; el equilibrio entre ambos determina tanto la calidad generativa como el grado de estructuración del espacio latente. El entrenamiento del VAE es considerablemente más estable que el de los GAN, y su marco probabilístico sienta las bases teóricas para los posteriores Modelos de Difusión.
+
+\newpage

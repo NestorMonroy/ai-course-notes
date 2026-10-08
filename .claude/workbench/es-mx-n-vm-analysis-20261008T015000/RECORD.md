@@ -152,3 +152,55 @@ con el fragmento entre marcadores, informa `errors=N`, y elige la última ejecuc
 menos una respuesta real. Con eso, el lote 26 da `LOCAL_WORKER PROVEN` sobre **3
 traducciones reales** (`outputs/proof-es-a-kaist-cs492d.tsv`), no 142. Ritmo medido en
 la ejecución en curso: 339–1171 s por fragmento; 142 pendientes.
+
+## Segunda corrección: «3 traducciones reales» tampoco era cierto (17:5xZ)
+
+La prueba de 07:2xZ miraba sólo la apertura `<<<ES`; el lazo exige además el cierre
+`ES>>>` (`translation_loop.extract_translation`) y la misma estructura de entornos
+(`structure_problem`). Medido sobre `translate/20261008T062556/`: las 6 respuestas con
+`done_reason` stop **abrían bien y cerraban con la cerca ```` del mensaje** en vez de
+`ES>>>`, porque `build_message` incrusta el fragmento en una cerca ````latex. El lazo
+rechazó las 6 y `recover_pool_results` escribió 0. El PROVEN anterior contaba respuestas
+que el lazo no acepta.
+
+Corrección:
+
+- `llama_direct_runner.close_markers`: si la respuesta abre `<<<ES` y no tiene `ES>>>`,
+  quita la cerca final y cierra. Se aplica a la respuesta nueva y a la reutilizada; el
+  mensaje además dice que la última línea es `ES>>>`.
+- `recover_pool_results` la aplica a los resultados `runtime: llama-direct` anteriores.
+  Ejecutado: 10 fragmentos escritos del lote 26 (lecture01 001–003, 005; lecture02
+  004, 006–008 y `head`; lecture03 `head`), ninguno con `ctex`.
+- `llama_direct_proof.sh` cuenta como real sólo lo que acepta el mismo
+  `extract_translation` + `structure_problem` del lazo.
+
+Resultado (`outputs/proof-es-a-kaist-cs492d.tsv`): `LOCAL_WORKER PROVEN`,
+`qwen35-9b-es-mx×6 (responses=6, errors=0)`, sin modelo remoto.
+
+Ciega a: el lazo en curso (desde 17:48Z) arrancó con el runner anterior en memoria y
+vuelve a pedir esos fragmentos; sus respuestas quedan en `<n>.json` y la siguiente
+vuelta las reutiliza ya cerradas, así que el costo es tiempo, no trabajo perdido.
+
+## Auditoría y consolidación de ES-B y ES-C (17:5xZ)
+
+Pedida por el ejecutor: si no trabajaban con modelos locales, que entregaran su trabajo
+para consolidarlo aquí. Las dos entregaron (`75b59c93` ES-B, `b1061513` ES-C) con su
+sección «Auditoría y entrega».
+
+| VM | Modelo que escribió | Estado | Causa medida | Entrega |
+|---|---|---|---|---|
+| ES-B | ninguno | `NOT_PROVEN sin acceso a thyrox` | el clasificador rehusó `add_repo`/`clone` de thyrox | preparación determinista de 28 articles (258 fragmentos), 29 berkeley f25 (213), 30 cs231n (171) |
+| ES-C | ninguno | `NOT_PROVEN docker-hub-429-pull-rate` | thyrox sí; `local-models-ensure` falló con 429 de Docker Hub | preparación determinista de 31 cs224n (165), 32 cs336 (250), 33 cs336-2026 (210); merge de fresh-clone-bootstrap en su rama de thyrox (`2156f9cc2`) |
+
+Ninguna escribió un fragmento con un modelo remoto: 0 `<n>.json` y 0 `*.es.tex` nuevos en
+sus lotes. El lote 27 cs25-v6 sólo tiene `000.es.tex` de portada (copia de `prepare`) y dos
+respuestas llama-direct de ES-A del 2026-10-07.
+
+Defecto heredado: `0580f5a1`, `372c547a` (ES-C) y `93bfc7f8`, `1b65eb85`, `75b59c93` (ES-B)
+llevan la identidad por defecto del contenedor, no la de `.claude/rules/git.md` (thyrox).
+Reescribirlos exige reescribir la historia publicada de sus ramas; se deja así y se
+declara aquí.
+
+Con eso, los lotes 27–33 siguen sin traducir y el único carril local que traduce es el de
+ES-A (lote 26). Una VM trabajadora queda útil sólo con acceso a thyrox y el 9B traído sin
+429 (autenticación de Docker Hub o espejo).

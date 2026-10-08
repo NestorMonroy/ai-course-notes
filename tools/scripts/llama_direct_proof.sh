@@ -77,9 +77,30 @@ if [[ -n "$run" ]]; then
     # Sólo cuenta una traducción real: sin `subtype` de error y con el fragmento entre
     # marcadores. Un error de conexión también lleva runtime llama-direct; contarlo
     # dio un PROVEN falso cuando el servidor murió a mitad del lote (H-THYROX-599).
-    real='select(.runtime == "llama-direct" and (.subtype == null) and ((.result // "") | test("(?m)^<<<ES$")))'
-    served="$(jq -r "$real | .model" "$run"*.json 2>/dev/null | sort | uniq -c | awk '{print $2"×"$1}' | paste -sd, -)"
-    responses="$(jq -r "$real | .model" "$run"*.json 2>/dev/null | wc -l)"
+    # «Real» es lo que el ciclo aceptaría: el mismo `extract_translation` y
+    # `structure_problem` del lazo. Mirar sólo `<<<ES` contó 6 respuestas que el
+    # lazo rechazaba por cerrar con la cerca en vez de `ES>>>`.
+    accepted="$(python3 - "$run" "$HERE" <<'PY'
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+import llama_direct_runner as runner, translation_loop as loop
+run = Path(sys.argv[1])
+for line in (run / "index.tsv").read_text(encoding="utf-8").splitlines():
+    n, _, zh = line.partition("\t")
+    try:
+        record = json.loads((run / f"{n}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        continue
+    if record.get("runtime") != "llama-direct" or record.get("subtype"):
+        continue
+    text = loop.extract_translation(runner.close_markers(record.get("result", "") or ""))
+    if text is not None and not loop.structure_problem(Path(zh).read_text(encoding="utf-8"), text):
+        print(record.get("model", ""))
+PY
+)"
+    served="$(sed '/^$/d' <<<"$accepted" | sort | uniq -c | awk '{print $2"×"$1}' | paste -sd, -)"
+    responses="$(sed '/^$/d' <<<"$accepted" | wc -l)"
     errors="$(jq -r 'select(.runtime == "llama-direct" and .subtype != null) | .subtype' "$run"*.json 2>/dev/null | wc -l)"
     jq -r '.model // empty' "$run"*.json 2>/dev/null | grep -qiE 'claude|anthropic|gpt|gemini' && remote=yes
 fi

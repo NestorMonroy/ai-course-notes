@@ -1,0 +1,131 @@
+\section{Modelos de difusión: proceso hacia adelante}
+
+\subsection{Dos decisiones de diseño clave}
+
+De VAE jerárquico a DDPM, hay dos simplificaciones de diseño clave:
+
+\begin{enumerate}
+    \item \textbf{Coincidencia dimensional}: todas las variables latentes $x_t$ y los datos $x_0$ tienen la misma dimensión. En un VAE estándar, la dimensión del espacio latente suele ser menor que la del espacio de datos, pero los modelos de difusión eligen dimensiones iguales.
+    \item \textbf{Proceso hacia adelante fijo}: la variacional posterior (proceso hacia adelante) $q(x_t|x_{t-1})$ no se parametriza mediante una red neuronal, sino que está predefinida. Esto significa que solo hay que aprender el proceso inverso $p_\theta(x_{t-1}|x_t)$.
+\end{enumerate}
+
+\begin{importantbox}{Diferencia fundamental entre modelos de difusión y VAE}
+En un VAE, tanto el codificador (proceso hacia adelante) como el decodificador (proceso inverso) \textbf{requieren aprendizaje}. En los modelos de difusión, el proceso hacia adelante está \textbf{predefinido} —simplemente añade ruido paso a paso sin ningún entrenamiento—. Lo único que hay que aprender es el proceso inverso (el proceso de eliminación de ruido). Esto simplifica enormemente el entrenamiento, ya que ya no se necesita optimizar conjuntamente dos redes.
+\end{importantbox}
+
+\subsection{Definición del proceso hacia adelante}
+
+El proceso hacia adelante (Forward Process) es el proceso de añadir ruido gaussiano a los datos $x_0$ paso a paso hasta convertirlos en puro ruido $x_T$. Su distribución de transición se define como:
+
+$$q(x_t | x_{t-1}) = \mathcal{N}(x_t; \sqrt{1 - \beta_t} \, x_{t-1}, \, \beta_t I)$$
+
+donde $\beta_t \in (0, 1)$ es un parámetro de \textbf{planificación del ruido} (noise schedule).
+
+\begin{importantbox}{Significado físico de la distribución de transición hacia adelante}
+En cada paso del proceso hacia adelante se hacen dos cosas:
+\begin{enumerate}
+    \item \textbf{Escalamiento}: multiplicar $x_{t-1}$ por $\sqrt{1-\beta_t}$ (menor que 1), haciendo que la señal decaiga gradualmente y que su media se acerque a cero.
+    \item \textbf{Añadir ruido}: añadir ruido gaussiano con varianza $\beta_t$.
+\end{enumerate}
+A medida que $t$ aumenta, $\beta_t$ crece gradualmente (siempre siendo un número pequeño), haciendo que la señal quede progresivamente sumergida en el ruido.
+\end{importantbox}
+
+Escribiendo esto en forma de muestreo, el proceso hacia adelante es equivalente a:
+
+$$x_t = \sqrt{1 - \beta_t} \, x_{t-1} + \sqrt{\beta_t} \, \epsilon_t, \quad \epsilon_t \sim \mathcal{N}(0, I)$$
+
+\subsection{Planificación del ruido (Noise Schedule)}
+
+Los parámetros $\beta_t$ deben cumplir las siguientes condiciones:
+
+\begin{itemize}
+    \item $\beta_t \in (0, 1)$ para todo $t$
+    \item $\beta_t$ es una función \textbf{no decreciente} respecto a $t$ (o al menos no decreciente)
+    \item Los valores de $\beta_t$ deben mantenerse pequeños (del orden de $10^{-4}$ a 0.02)
+\end{itemize}
+
+Las estrategias comunes de planificación del ruido incluyen:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Estrategia} & \textbf{Descripción} \\
+\midrule
+Planificación lineal (Linear) & $\beta_t$ crece linealmente desde $\beta_1$ hasta $\beta_T$ \\
+Planificación de coseno (Cosine) & Diseñada sobre una función coseno, con cambios lentos en los extremos \\
+Planificación constante & $\beta_t$ permanece invariable \\
+Planificación aprendible & $\beta_t$ como parámetro aprendible \\
+\bottomrule
+\end{tabular}
+\caption{Estrategias comunes de planificación del ruido}
+\end{table}
+
+\begin{knowledgebox}{¿Por qué $\beta_t$ necesita ser no decreciente?}
+Intuitivamente, el proceso hacia adelante debería ``destruir la información cada vez más rápido''. En las etapas tempranas, la señal sigue siendo fuerte y basta con poco ruido; en las etapas tardías, se requiere más ruido para asegurar que $x_T$ se aproxime suficientemente al puro ruido gaussiano. Un $\beta_t$ no decreciente garantiza que la tasa de adición de ruido no se ``invierta'', lo cual teóricamente asegura que el proceso hacia adelante converja finalmente a una distribución gaussiana estándar.
+\end{knowledgebox}
+
+\subsection{Simplificación de notación con $\alpha_t$}
+
+Para facilitar las derivaciones posteriores, definimos:
+
+$$\alpha_t = 1 - \beta_t$$
+
+Dado que $\beta_t$ es un número positivo no decreciente, $\alpha_t$ es no creciente y cumple $0 < \alpha_t < 1$.
+
+La distribución de transición hacia adelante puede reescribirse como:
+
+$$q(x_t | x_{t-1}) = \mathcal{N}(x_t; \sqrt{\alpha_t} \, x_{t-1}, \, (1 - \alpha_t) I)$$
+
+Además, definimos el \textbf{producto acumulado}:
+
+$$\bar{\alpha}_t = \prod_{s=1}^{t} \alpha_s$$
+
+Dado que cada $\alpha_s < 1$, a medida que $t$ aumenta, $\bar{\alpha}_t$ decrece monótonicamente y tiende a cero.
+
+\subsection{Solución en forma cerrada del proceso hacia adelante}
+
+Una ventaja clave del proceso hacia adelante jerárquico es que la distribución condicional desde $x_0$ hasta cualquier instante $x_t$ tiene una \textbf{solución en forma cerrada}, sin necesidad de muestrear paso a paso.
+
+\begin{importantbox}{Solución en forma cerrada del proceso hacia adelante (fórmula central)}
+$$q(x_t | x_0) = \mathcal{N}(x_t; \sqrt{\bar{\alpha}_t} \, x_0, \, (1 - \bar{\alpha}_t) I)$$
+
+Forma equivalente de muestreo:
+$$x_t = \sqrt{\bar{\alpha}_t} \, x_0 + \sqrt{1 - \bar{\alpha}_t} \, \epsilon, \quad \epsilon \sim \mathcal{N}(0, I)$$
+
+Esto significa que podemos obtener $x_t$ en cualquier instante desde $x_0 \textbf{en un solo paso}, sin necesidad de pasar por todos los pasos intermedios.
+\end{importantbox}
+
+\textbf{Lógica de la deducción}: utilizando la aditividad de las distribuciones gaussianas. Desplejando recursivamente $x_t = \sqrt{\alpha_t} x_{t-1} + \sqrt{1-\alpha_t} \epsilon_t$:
+
+$$x_t = \sqrt{\alpha_t} (\sqrt{\alpha_{t-1}} x_{t-2} + \sqrt{1-\alpha_{t-1}} \epsilon_{t-1}) + \sqrt{1-\alpha_t} \epsilon_t$$
+
+$$= \sqrt{\alpha_t \alpha_{t-1}} x_{t-2} + \sqrt{\alpha_t(1-\alpha_{t-1})} \epsilon_{t-1} + \sqrt{1-\alpha_t} \epsilon_t$$
+
+Dado que una combinación lineal de dos ruidos gaussianos independientes sigue siendo un ruido gaussiano:
+
+$$\sqrt{\alpha_t(1-\alpha_{t-1})} \epsilon_{t-1} + \sqrt{1-\alpha_t} \epsilon_t \sim \mathcal{N}(0, (1-\alpha_t\alpha_{t-1}) I)$$
+
+Aplicando repetidamente este proceso, finalmente obtenemos:
+
+$$x_t = \sqrt{\bar{\alpha}_t} x_0 + \sqrt{1-\bar{\alpha}_t} \epsilon$$
+
+\begin{knowledgebox}{Significado práctico de la solución en forma cerrada}
+La solución en forma cerrada es crucial durante el entrenamiento: en cada iteración de entrenamiento, necesitamos añadir ruido a $x_0$ para obtener $x_t$, y luego hacer que la red neuronal aprenda a eliminarlo. Si fuera necesario añadir el ruido secuencialmente paso a paso, la eficiencia del entrenamiento sería extremadamente baja. La solución en forma cerrada nos permite obtener directamente una versión ruidosa de cualquier instante mediante un único muestreo.
+\end{knowledgebox}
+
+\subsection{Comportamiento límite del proceso hacia adelante}
+
+Cuando $t \to T$ (con $T$ lo suficientemente grande), $\bar{\alpha}_T \to 0$, por lo tanto:
+
+$$q(x_T | x_0) \approx \mathcal{N}(x_T; 0, I)$$
+
+Esto significa que el proceso hacia adelante convertirá finalmente cualquier punto de datos $x_0$ en puro ruido cercano a una distribución gaussiana estándar. Esta propiedad garantiza que la \textbf{variacional posterior} del proceso hacia adelante maximice naturalmente el término de coincidencia con la prior en el ELBO.
+
+\begin{warningbox}{$T$ debe ser lo suficientemente grande}
+Si $T$ no es lo suficientemente grande o los $\beta_t$ están configurados inadecuadamente, $x_T$ podría aún retener información de $x_0$, sin acercarse lo bastante a $\mathcal{N}(0, I)$. Esto llevaría a una mayor pérdida en el término de coincidencia con la prior del ELBO, afectando la calidad generada. En la práctica, el artículo original de DDPM utiliza $T = 1000$.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El proceso hacia adelante de los modelos de difusión añade ruido gaussiano a los datos gradualmente mediante una planificación del ruido predefinida $\{\beta_t\}$. Su ventaja clave radica en: (1) no requiere entrenamiento, está completamente predefinido; (2) posee una solución en forma cerrada $q(x_t|x_0)$, permitiendo muestrear en un solo paso; (3) cuando $T$ es lo suficientemente grande, $x_T$ tiende naturalmente a una distribución gaussiana estándar.

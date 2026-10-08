@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import llama_direct_runner  # noqa: E402
 import translation_loop as loop  # noqa: E402
 
 THYROX_ROOT = Path(os.environ.get("THYROX_ROOT", "/home/user/thyrox"))
@@ -65,9 +66,14 @@ def recover(batch: str) -> tuple[int, int]:
             if correction.is_file() and correction.stat().st_mtime > result_file.stat().st_mtime:
                 continue
             try:
-                result = json.loads(result_file.read_text(encoding="utf-8")).get("result", "") or ""
+                record = json.loads(result_file.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
+            result = record.get("result", "") or ""
+            # El carril llama-direct cierra con la cerca en vez de `ES>>>` en las
+            # respuestas anteriores a `close_markers`; el runner las cierra igual.
+            if record.get("runtime") == "llama-direct":
+                result = llama_direct_runner.close_markers(result)
             text = loop.extract_translation(result)
             if text is None or loop.structure_problem(Path(zh).read_text(encoding="utf-8"), text):
                 rejected += 1
