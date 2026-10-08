@@ -1,0 +1,33 @@
+\section{Incidente dos: PostgreSQL Storage Pressure y la factura de la migración}
+
+El segundo incidente se centra en la presión de almacenamiento de PostgreSQL. PostgreSQL usa MVCC (Multi-Version Concurrency Control, control de concurrencia multiversión): después de un update/delete, la tuple anterior no se retira de inmediato del archivo, y se necesita vacuum para recuperar el espacio reutilizable. Las transacciones largas, el volumen de escritura, los index y el autovacuum lag provocan bloat; cuando el disco está cerca de agotarse, la propia maintenance también necesita I/O y espacio, y el riesgo de la recuperación aumenta de forma abrupta.
+
+\subsection{Dead tuple, VACUUM y disk headroom}
+
+Una \term{dead tuple} es una versión anterior de una fila que ya no es visible para ninguna transaction activa; \term{VACUUM} marca el espacio como reutilizable y mantiene la información de visibilidad, y el VACUUM ordinario por lo general no devuelve los archivos al sistema operativo; \term{VACUUM FULL} reescribe la tabla y puede recuperar más disco, pero requiere espacio adicional y bloqueos fuertes. La atención de un incidente no puede ejecutar a ciegas la maintenance más pesada cuando el sistema está saturado.
+
+\lecturefigure{08-postgres-pressure.png}{La storage pressure de PostgreSQL surge del acoplamiento entre write workload, MVCC residue, maintenance y disk headroom.}{Subtítulos locales 25:30--32:40; documentación oficial de PostgreSQL sobre vacuum.}
+
+\begin{knowledgebox}{Lectura de la figura: no se trata de que «Postgres no sea escalable»}
+Primero se revisan transaction age, dead tuple, table/index growth, WAL, autovacuum thresholds, I/O y free space, y después se decide si hacer tune, partition, archive, offload o migrate. Las dificultades del ponente provienen de un workload y un momento específicos; de ellas no se puede concluir que todos los sistemas de indexing deban evitar PostgreSQL.
+\end{knowledgebox}
+
+\begin{warningbox}{La emergency migration suma carga}
+Durante la migración, el sistema anterior sigue haciendo serving, el sistema nuevo tiene que hacer backfill, la validation requiere dual read/query y, si algo falla, además hay retry. Sin capacity independiente ni throttle, la migration misma vuelve más difícil que el sistema original se recupere. Hacer primero offload de los workload no críticos y congelar el schema suele ser más seguro que mudar todo de inmediato a máxima velocidad.
+\end{warningbox}
+
+\subsection{Cold start: reconstruir embedding y cache}
+
+Aquí, \term{cold start} no significa solo el arranque de un process nuevo, sino que el index nuevo carece de embedding, segment, cache e información estadística. Reconstruir cada repo exige leer el source, hacer chunk, llamar al embedding, escribir en el storage nuevo y luego verificar con query. En la clase se mencionó que la migration también consume inference capacity adicional; esa es precisamente la factura oculta.
+
+\lecturefigure{09-cold-start.png}{La index migration requiere backfill, dual validation, cache warming y un cutover seguro.}{Subtítulos locales 29:30--32:40; redibujo conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: antes del cutover, definir la equivalence}
+El sistema nuevo y el anterior no necesariamente devuelven exactamente el mismo top-$k$. La validation debe comparar recall/utility, filter correctness, latency, freshness y cost; para los usuarios clave se puede usar shadow query; solo después de cumplir los umbrales se cambia el tráfico de forma gradual por tenant/region, y se conservan la doble escritura o los datos fuente durante el periodo de rollback.
+\end{knowledgebox}
+
+\teachervoice{«La mejor manera de escalar una base de datos es no hacer que la base de datos se encargue de ese trabajo» es un lema de clase útil pero peligroso. La interpretación correcta es: sacar del transactional hot path los datos immutable, reconstruibles y orientados al rendimiento, no eliminar todas las database.}
+
+\subsection{Resumen de la sección}
+
+El incidente de PostgreSQL revela el acoplamiento entre la MVCC maintenance, el disk headroom y el workload de la migration. Migrar una base de datos no es copiar datos, sino reconstruir el estado derivado, verificar la equivalencia y gestionar el riesgo de operar dos sistemas a la vez.

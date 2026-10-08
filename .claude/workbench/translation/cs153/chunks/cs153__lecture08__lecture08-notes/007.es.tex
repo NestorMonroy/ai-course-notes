@@ -1,0 +1,37 @@
+\section{Integración con la plataforma: rápida, idempotente y con capacidad de auditoría}
+
+Los modelos y los principios solo producen efecto cuando entran en el upload/message path real. Esta sección trata la capacidad de seguridad infantil como un platform service de alto riesgo: necesita integración por API, por lotes o por stream; necesita reintentos y degradación; necesita una tenant isolation estricta, y además debe conectar los estados de revisión, resolución y reporte en una state machine rastreable. La baja latencia es importante, pero no puede obtenerse una disponibilidad aparente a cambio de una silent failure.
+
+\subsection{Separar el detection service de las acciones de la plataforma}
+
+La plataforma puede activar la detección antes del upload, después del almacenamiento, antes de la distribución pública o después de un reporte de un usuario; cada punto tiene un latency budget y un context distintos. El detection service devuelve match/score e información de versión; el policy engine combina la superficie del producto, la región, el historial de la cuenta y las reglas de apelación de los usuarios para decidir hold, limit, remove, review o no action. Separar ambos facilita que las actualizaciones del modelo y los cambios de policy se auditen de forma independiente.
+
+\lecturefigure{09-platform-integration.png}{La integración con la plataforma requiere cuatro capas de estado: detection, policy, action/report y audit.}{Subtítulos locales 03:20--05:50, 10:10--16:20; Thorn platform solutions; rediseño conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: los reintentos deben ser idempotentes}
+\term{idempotency} (idempotencia) significa que ejecutar repetidamente el mismo evento no produce efectos secundarios adicionales. El upload event debe llevar un event ID estable; el detection result se deduplica por content/model/version; el action service evita eliminaciones o notificaciones duplicadas; el reporting workflow evita que el mismo reporte legal se envíe varias veces por un network retry. Cada capa debe registrar request, result, retry y final disposition para poder reproducir lo ocurrido después de un incidente.
+\end{knowledgebox}
+
+\begin{importantbox}{Una máquina de estados operable}
+El estado de un objeto puede escribirse como
+\[
+\texttt{received}\rightarrow\texttt{screened}\rightarrow
+\texttt{queued}\rightarrow\texttt{reviewed}\rightarrow
+\texttt{actioned}\rightarrow\texttt{reported/closed}.
+\]
+Cada arista la activa un actor y una policy version explícitos; las fallas pasan a retry, dead-letter o manual escalation, en lugar de tratar un timeout como benign. Un objeto puede tener en paralelo un content state, un account state y un report state; no se puede representar todo su ciclo de vida con un solo campo booleano.
+\end{importantbox}
+
+\subsection{Failure mode y estrategias de degradación}
+
+Esta sección pasa de la ruta normal a las fallas: puede ocurrir que la detección de un tercero no esté disponible, un queue backlog, la reversión de un model version, una falla en un reference update, retraso en el audit log o un reporting endpoint timeout. La plataforma debe definir de antemano los límites de aplicación de fail-open, fail-closed, hold-for-review y rate-limited sampling, y permitir que el equipo on-call vea la acumulación, la antigüedad, la gravedad y la estimación de recuperación.
+
+\begin{warningbox}{Tanto fail-open como fail-closed pueden perjudicar a los usuarios}
+Fail-open puede permitir que objetos de alto riesgo sigan propagándose; fail-closed puede bloquear de forma masiva a usuarios legítimos o causar resoluciones irreversibles. Una solución más robusta suele estratificar según la confianza de la señal, la superficie del producto y el daño potencial: un known match de alta confianza puede pasar a un hold estricto, una predictive signal de baja confianza entra en una cola controlada, y ante un outage sistémico se activan la limitación de tasa, la publicación diferida y la escalación manual.
+\end{warningbox}
+
+\teachervoice{En clase se describe a la plataforma como la principal responsable de detection, removal y reporting, y no se presenta al proveedor de tecnología como una autoridad policial. Este límite exige que la integración del producto devuelva señales explicables y, al mismo tiempo, que la plataforma cliente conserve su propia policy, su relación con los usuarios y sus obligaciones legales.}
+
+\subsection{Resumen de la sección}
+
+La capacidad de seguridad infantil debe integrarse como un durable workflow, no como una sola llamada síncrona a una API. Solo al separar en capas detection, policy, action, reporting y audit puede el sistema mantener evidencia consistente durante reintentos, reversiones, degradaciones e investigaciones.

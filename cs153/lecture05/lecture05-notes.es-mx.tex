@@ -1,0 +1,428 @@
+\documentclass[a4paper]{article}
+
+\newcommand{\notetitle}{Lecture 05: El compilador en la nube de Vercel: frameworks, retroalimentación del consumo y AI Compute}
+\newcommand{\noteauthors}{Elaborado a partir de la entrevista con Guillermo Rauch, los subtítulos con marcas de tiempo y los materiales oficiales de Vercel/Next.js}
+\newcommand{\notedate}{Curso de invierno de 2025 · Versión reescrita en 2026}
+\newcommand{\videochannel}{Publicación histórica del curso Stanford CS153 (actualmente con visibilidad private)}
+\newcommand{\videopublishdate}{2025-03-10}
+\newcommand{\videoduration}{37:16}
+\newcommand{\videourl}{https://www.youtube.com/watch?v=9SqYFxp9yRM}
+\newcommand{\videocoverpath}{cover.jpg}
+
+\input{../cs153-preamble.es-mx.tex}
+\graphicspath{{./}{images/}}
+\setcounter{tocdepth}{1}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth,height=0.49\textheight,keepaspectratio]{#1}
+\caption{#2}
+\figsource{#3}
+\end{figure}
+}
+
+\begin{document}
+\makecscover
+
+\section{Auditoría de fuentes: por qué todavía se necesita una capa de plataforma sobre AWS}
+
+Esta entrevista parte de una pregunta en apariencia sencilla: si AWS ya ofrece cómputo, almacenamiento, redes y bases de datos, ¿por qué hace falta Vercel? La respuesta no puede quedarse en «una mejor experiencia de desarrollo». El verdadero problema de sistemas es este: \textbf{el hyperscaler expone primitives de propósito general, mientras que los equipos de aplicaciones necesitan una transformación determinista que lleve de la intención del producto a un sistema en funcionamiento.} A medida que crece el número de primitives, elegirlas, conectarlas, configurarlas, escalarlas hacia arriba y hacia abajo y observarlas forma por sí mismo una nueva capa de complejidad.
+
+El video público original ya era private cuando se verificó el 11 de agosto de 2026; el repositorio conserva la portada oficial y 931 subtítulos con marca de tiempo. El reconocimiento automático de los subtítulos escribió mal Vercel, v0, Guillermo y varios términos técnicos, por lo que en esta clase los nombres solo se normalizan cuando el contexto y la documentación oficial coinciden. Las cifras de Black Friday, ingresos, pérdida de clientes y uptime se consideran casos que el ponente presentó en la sesión, no datos auditados.
+
+\begin{importantbox}{Los dos ciclos de compilación y retroalimentación de esta clase}
+\begin{enumerate}
+  \item \textbf{Ciclo de diseño}: application intent $\rightarrow$ framework semantics $\rightarrow$ platform IR $\rightarrow$ infrastructure;
+  \item \textbf{Ciclo de operación}: traffic $\rightarrow$ telemetry/metering $\rightarrow$ developer decision $\rightarrow$ new immutable deployment.
+\end{enumerate}
+El valor de Vercel proviene de acortar ambos ciclos a la vez, no de ocultar todos los detalles técnicos.
+\end{importantbox}
+
+Veamos primero la posición de la plataforma dentro de toda la pila. En la base, el hyperscaler resuelve la operación física a gran escala; arriba, el framework expresa la estructura de la aplicación; la plataforma se encarga de conectar ambos en un sistema de despliegue que pueda operar de forma sostenida.
+
+\lecturefigure{01-abstraction-layers.png}{La capa de plataforma compila la intención de la aplicación en un uso administrado de las primitives del hyperscaler.}{Subtítulos locales 00:00--03:10; redibujo reproducible con \texttt{lecture05-diagrams.py}.}
+
+\begin{knowledgebox}{Lectura de la figura: una capa de abstracción no es simplemente «añadir una envoltura»}
+Una abstracción valiosa debe reducir el espacio de decisiones y aportar invariantes globales que las primitives subyacentes no pueden ofrecer; por ejemplo, que cada commit corresponda a un despliegue inmutable, que el puntero de dominio pueda cambiarse de forma atómica, que las rutas del framework se conviertan automáticamente en edge routing y que la política de caché sea coherente con la semántica del código. Si la plataforma solo le cambia la apariencia a la consola de AWS, no crea ninguna capacidad nueva del sistema.
+\end{knowledgebox}
+
+\begin{knowledgebox}{Términos clave: cuatro niveles que se confunden con facilidad}
+\begin{tabularx}{\textwidth}{L{0.20\textwidth}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+\toprule
+Nivel & Qué ofrece & Qué no ofrece automáticamente \\
+\midrule
+Hyperscaler & Regiones, hardware, redes y servicios de nube de propósito general & La semántica completa de una aplicación para un framework específico \\
+Cloud primitive & Capacidades como almacenamiento de objetos, funciones, colas y bases de datos & La combinación correcta entre primitives y los valores predeterminados del producto \\
+Platform & Build, deploy, route, scale y observe administrados & La lógica de negocio de la aplicación y los objetivos de producto correctos \\
+Framework & Estructuras como enrutamiento, rendering y data lifecycle & La infraestructura física entre regiones y su operación a largo plazo \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La razón de ser de la capa de plataforma no es que la nube subyacente «no sea lo bastante potente», sino que entre las primitives de propósito general y la intención de la aplicación sigue habiendo un costo de traducción enorme. Una plataforma de alto valor fija esa traducción en ciclos de compilación y operación repetibles.
+\section{Caso de fracaso: por qué la primera arquitectura con Kubernetes no era adecuada}
+
+La primera versión de Vercel usó Kubernetes como plataforma de ejecución de cargas de trabajo. Kubernetes en sí no era el error; el problema era que la promesa del producto consistía en que «cada Git commit se convierta en un despliegue rápido, inmutable y compartible». Si cada deployment se asigna directamente a un pod o a una unidad de recursos estáticos, el número de despliegues crece con los commits, y la idle reservation, la latencia de planificación y las scale transitions destruyen la economía unitaria.
+
+\subsection{Que algo sea técnicamente viable no significa que sea económicamente viable}
+
+Supongamos que en un día se generan $N_d$ preview deployments, que el costo de los recursos ociosos de cada deployment es $c_{idle}$ y que el costo de ejecución real es $c_{run}$; entonces el costo diario aproximado es
+\[
+C_{day}=N_d\cdot c_{idle}+\sum_j c_{run,j}.
+\]
+Cuando la mayoría de las previews casi no recibe visitas, el primer término domina el costo. El sistema debe lograr que los «despliegues sin visitas» tengan un costo de ejecución cercano a cero y, al mismo tiempo, se reactiven rápidamente cuando llega la primera solicitud; solo así puede sostener el per-commit product model.
+
+\lecturefigure{02-kubernetes-economics.png}{La promesa de producto per-commit amplifica el costo y la latencia de la asignación estática de recursos.}{Subtítulos locales 01:12--01:42, 28:50--30:10; redibujo conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: el problema no es el pod, sino la correspondencia}
+Si cada immutable deployment queda ligado de forma permanente a un pod independiente, el número de previews y los recursos en ejecución crecen de manera aproximadamente lineal. Una arquitectura más adecuada representa el despliegue como artifact + metadata y, cuando llega una solicitud, reutiliza el runtime, la cache y los recursos de planificación compartidos. Kubernetes puede servir como componente de bajo nivel, pero los objetos del producto no deben quedar ligados uno a uno con los objetos de recursos.
+\end{knowledgebox}
+
+\begin{warningbox}{«Kubernetes es demasiado pesado» no es una conclusión general}
+La valoración de la clase se refiere a la cantidad altísima de despliegues que Vercel tenía entonces, al scale-to-zero rápido y al modelo económico de las previews. Para servicios de ejecución prolongada, capacidad estable y equipos de plataforma maduros, Kubernetes todavía puede ser una opción razonable. El diseño de sistemas debe comparar la workload shape, la escala del plano de control y el costo unitario, en lugar de repetir preferencias por una herramienta.
+\end{warningbox}
+
+\teachervoice{Rauch describe este fracaso sin rodeos: la primera implementación estaba «bleeding money left and right». El valor de esta teacher voice está en que no rebajó el estándar de producto de «desplegar cada commit», sino que convirtió una meta de experiencia poco razonable en nuevos problemas de investigación sobre scheduler, placement y metadata.}
+
+\subsection{Resumen de la sección}
+
+La arquitectura debe ajustarse a la cardinalidad y al ciclo de vida de los objetos del producto. El per-commit deployment requiere artifact-first, shared-runtime y fast activation, en lugar de asignar de forma permanente cada despliegue lógico a un arrendamiento de recursos estáticos.
+\section{Framework-Defined Infrastructure: la aplicación como lenguaje de alto nivel}
+
+\term{Framework-Defined Infrastructure} (FDI) trata las convenciones del framework como un lenguaje de alto nivel. El framework sabe qué routes son estáticas, cuáles necesitan funciones, qué datos pueden almacenarse en caché y qué solicitudes necesitan middleware; la plataforma interpreta esta semántica en build time y genera la configuración de la infraestructura subyacente. A diferencia de Infrastructure as Code, el desarrollador no declara directamente cada recurso de la nube, sino la aplicación, y la infraestructura se convierte en la salida de la compilación.
+
+\subsection{Cloud compiler e intermediate representation}
+
+Sea $A$ el código fuente de la aplicación, $S_F$ el extractor de semántica del framework y $C_P$ el compilador de la plataforma; entonces el plan de despliegue puede abstraerse como
+\[
+I=C_P\bigl(S_F(A)\bigr),
+\]
+donde $S_F(A)$ no es el código fuente original, sino una \term{intermediate representation} (IR, representación intermedia): route graph, static assets, function boundaries, cache policy, runtime hints y metadatos del entorno. La IR evita que la plataforma tenga que entender la implementación interna de cada framework; solo necesita un contrato de salida estable.
+
+\lecturefigure{03-cloud-compiler.png}{La framework semantics se transforma, mediante la IR de la plataforma, en un plan de despliegue.}{Subtítulos locales 04:40--06:00; documentación oficial de Vercel sobre Framework-Defined Infrastructure.}
+
+\begin{knowledgebox}{Lectura de la figura: por qué el framework aporta más información que una IaC genérica}
+La IaC sabe «crear una function», pero no necesariamente sabe a qué route corresponde, si puede volverse estática, cuándo hacer revalidate o si requiere edge middleware. El framework conoce la semántica de la aplicación y la plataforma conoce las restricciones de ejecución; la ventaja de FDI proviene de combinar ambas en build time, no de escribir unas cuantas líneas menos de YAML.
+\end{knowledgebox}
+
+\subsection{Build Output API: la adaptación de frameworks como artifact contract}
+
+La Build Output API de Vercel define el resultado de la compilación como una especificación del sistema de archivos: los recursos estáticos, las functions, el routing y la configuración se escriben como artifacts desplegables. Así, Next.js, SvelteKit, Nuxt u otros frameworks pueden generar una IR común, y la plataforma solo necesita consumir una salida estandarizada. También permite usar un prebuilt deployment después de hacer el build en local, con lo que el build queda desacoplado del deploy.
+
+\lecturefigure{04-build-output-graph.png}{Build Output descompone una aplicación en un artifact graph desplegable.}{Documentación oficial de la Build Output API de Vercel; metáfora del cloud compiler presentada en clase.}
+
+\begin{importantbox}{Cuatro beneficios de sistema que aporta la abstracción del compilador}
+\begin{enumerate}
+  \item \textbf{Reproducible}: las mismas entradas y versiones generan salidas que pueden auditarse;
+  \item \textbf{Portable}: los frameworks se integran a la plataforma mediante el artifact contract;
+  \item \textbf{Optimizable}: la plataforma puede elegir cache, runtime y region para cada route;
+  \item \textbf{Reversible}: los objetos de despliegue son inmutables y el puntero de tráfico puede regresar a una versión anterior.
+\end{enumerate}
+\end{importantbox}
+
+\begin{warningbox}{El compilador no puede inferir toda la intención de negocio}
+La plataforma puede identificar routes y cache declarations, pero no sabe si los datos de inventario pueden estar desactualizados, si cierta API requiere consistencia fuerte ni si una falla afecta los ingresos. FDI necesita guard rails y overrides; si un valor predeterminado incorrecto se propaga automáticamente a todo el mundo, la automatización solo provoca incidentes más rápido.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La esencia de FDI es generar una IR de plataforma a partir de la semántica del framework y luego asignarla a la infraestructura. La Build Output API hace explícita esta frontera de compilación, de modo que el ecosistema de frameworks y el runtime de la plataforma pueden evolucionar de forma independiente.
+\section{ISR y caché: hacer materialize del trabajo del backend en el edge}
+
+En el comercio electrónico, el cuello de botella típico de Black Friday no es la red edge, sino que el origin/backend no soporta que cada usuario provoque un renderizado dinámico. Incremental Static Regeneration (ISR) hace \term{materialize} (materializa) el resultado de un renderizado como un artifact que se puede almacenar en caché, y lo vuelve a generar cuando vence la freshness policy o cuando ocurre un evento. Esto cambia el modelo de carga: el backend atiende los «cambios de contenido» y el edge atiende el «número de accesos».
+
+\subsection{De la request amplification al backend shielding}
+
+Si una página recibe $R$ solicitudes dentro de una freshness window, el renderizado dinámico tradicional requiere cerca de $R$ unidades de origin work; un ISR ideal solo necesita una generación y una revalidation, de modo que el trabajo del backend pasa de $O(R)$ a casi $O(1)$. Un sistema real también tiene que manejar stampede, recuperación ante fallas, cache regional, tag invalidation y stale content.
+
+\lecturefigure{05-isr-cache-loop.png}{ISR usa materialization y revalidation para trasladar las lecturas repetidas del backend al edge.}{Subtítulos locales 05:55--07:20; documentación oficial de ISR de Next.js.}
+
+\begin{knowledgebox}{Lectura de la figura: comparar la frecuencia de acceso con la frecuencia de cambio}
+ISR es más adecuado para contenido que «se lee mucho, se escribe poco y admite una freshness explícita». Si los datos son distintos en cada solicitud, la tasa de aciertos de la cache es baja; si el contenido nunca puede estar desactualizado, se necesita un origin síncrono o una invalidation más estricta. La pregunta central no es «si se puede almacenar en caché», sino qué consistency contract permite el negocio.
+\end{knowledgebox}
+
+\begin{warningbox}{La caché no permite que el origin escale sin límite}
+Los cache miss, las revalidation simultáneas, las solicitudes personalizadas y una gran cantidad de key distintas pueden seguir saturando el backend. La plataforma necesita request coalescing, stale-while-revalidate, protección de carga y un cache status visible; los desarrolladores también deben entender la semántica de la cache key y de la invalidation.
+\end{warningbox}
+
+\teachervoice{La forma de expresarse de Rauch tiene mucho sentido de ingeniería: que la nube sea «elastic» no significa que cualquier componente escale a la perfección. Uno de los valores de la plataforma es combinar automáticamente varios niveles de caché y la materialization, y convertir en capacidades del framework los patrones de Memcached, conjuntos de workers y escalamiento horizontal que antes los desarrolladores administraban a mano.}
+
+\subsection{Resumen de la sección}
+
+ISR desacopla la escala de accesos del cómputo del backend, de modo que una mayor parte del tráfico de la aplicación la absorben los artifact del edge. No consiste en volver estático todo, sino en administrar de forma explícita la freshness, la materialization y la revalidation.
+\section{Build vs. Buy: el límite de la diferenciación y el control plane global}
+
+Las empresas de plataforma caen con facilidad en el error de pensar «como la infraestructura es importante, hay que desarrollarla toda internamente». Rauch sostiene lo contrario: las regiones, la red troncal, el almacenamiento de objetos y la escala de operación física de AWS son difíciles de replicar, por lo que Vercel debería acumular su diferenciación en la application-aware layer. Build vs. Buy no es una prueba de capacidad técnica, sino un problema de asignación de capital, tiempo y efectos de aprendizaje.
+
+\subsection{Desarrollar internamente donde el insight se acumula con interés compuesto}
+
+La sección anterior ya explicó la brecha entre las hyperscaler primitives y la application intent como un «problema de la capa de compilación»; esta sección responde además la pregunta sobre los límites organizacionales: qué capas vale la pena dominar por cuenta propia y cuáles conviene apoyar en proveedores maduros. Al leer la figura, primero compara la commodity scale con el application-aware insight y después evalúa si un desarrollo interno producirá de forma sostenida conocimiento de producto, capacidades del plano de control y ventajas de economía unitaria.
+
+\lecturefigure{06-build-vs-buy.png}{Reutilizar la commodity scale y construir capacidades especializadas en la application-aware layer.}{Subtítulos locales 07:40--10:30; redibujo conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: los límites de la analogía con Apple silicon}
+En clase se usó el caso de Apple, que terminó diseñando sus propios chips, como analogía de la vertical integration: solo cuando una capa se vuelve central para la experiencia del producto y para la economía de largo plazo, y la organización cuenta con la escala y la capacidad suficientes, puede ser razonable integrarse hacia abajo. De la analogía no se deduce directamente que Vercel deba construir centros de datos; solo muestra que la build/buy boundary se desplaza conforme cambia la estrategia.
+\end{knowledgebox}
+
+\subsection{La metadata global es la verdadera diferenciación de la plataforma}
+
+Vercel se parece más a un CDN/control plane application-aware que a EC2. Cada deployment es un objeto inmutable; el domain binding es un puntero mutable; el edge global necesita obtener con rapidez el pointer y la routing metadata más recientes. Una reversión no requiere sobrescribir el despliegue anterior: basta con regresar el puntero del domain a una versión conocida.
+
+\lecturefigure{07-global-metadata.png}{Los despliegues inmutables y el domain pointer mutable separan la artifact identity de las decisiones sobre el tráfico.}{Subtítulos locales 10:00--16:40, 33:30--34:05; redibujo conceptual.}
+
+\begin{importantbox}{Control plane y data plane}
+El \term{control plane} decide deployment, domain, routing, policy y rollout; el \term{data plane} es el que realmente atiende las solicitudes de los usuarios, ejecuta funciones y devuelve assets. Las actualizaciones del plano de control deben propagarse con rapidez, pero un punto único de falla no debe interrumpir las rutas ya conocidas; el plano de datos debe mantener un comportamiento seguro cuando la metadata esté temporalmente desactualizada.
+\end{importantbox}
+
+\subsection{Ventajas y desventajas de una opinionated platform}
+
+Las convenciones del framework proporcionan guard rails que permiten a la plataforma inferir routing, cache y runtime. El costo es que se restringe parte de la libertad, y las workloads atípicas pueden necesitar una escape hatch. Una opinionated platform sana debe hacer que la ruta habitual sea mínima y, al mismo tiempo, conservar el artifact contract, los protocolos estándar y los overrides, para evitar que el ecosistema quede bloqueado.
+
+\lecturefigure{08-opinionated-platform.png}{Las convenciones del framework crean para la plataforma una superficie estructurada que puede optimizar.}{Materiales oficiales de Vercel FDI; subtítulos locales 13:30--17:15.}
+
+\begin{warningbox}{Next.js no es prueba suficiente de «encerrar a los usuarios en Vercel»}
+Entre el framework y la plataforma sí existe una retroalimentación positiva y un interés comercial, pero para juzgar el lock-in hay que examinar el código abierto, las salidas estándar, la vía de self-host, la portabilidad de los datos y el costo de sustitución. Estas notas analizan el mechanism y no sustituyen el análisis con etiquetas emocionales del tipo «Trojan horse».
+\end{warningbox}
+
+\teachervoice{En clase no se describió la relación entre Vercel y AWS como una competencia de suma cero. AWS ofrece hyperscale primitives confiables, y Vercel conecta con esas primitives, mediante un modelo de nivel más alto, las aplicaciones que todavía no han migrado a la nube. Las plataformas compiten por su parte del valor, pero también pueden ampliar mutuamente el mercado.}
+
+\subsection{Resumen de la sección}
+
+Build vs. Buy debe girar en torno a la diferenciación y al aprendizaje que se acumula con interés compuesto; las capacidades especializadas de Vercel se concentran en el framework compiler, la global metadata, el routing y el developer loop, no en repetir la escala física de los hyperscalers.
+\section{Consumption economics: devolver a los desarrolladores el efecto sobre los recursos}
+
+La nube y la IA avanzan hacia el consumption-based pricing. La cuestión no es solo si «cobrar por consumo es barato», sino si la medición puede convertirse en la \term{fitness function} del desarrollador: qué recursos consumió una query, un render, una model call o una data transfer, si eso afecta a otras workloads y si el desarrollador puede optimizar a partir de esa información.
+
+\subsection{Honest metering y recursos atribuibles}
+
+Si las dimensiones de facturación son $u_i$ y los precios unitarios son $p_i$, la factura es
+\[
+B=\sum_i u_i p_i.
+\]
+La fórmula en sí no es difícil; la dificultad está en si $u_i$ puede ponerse en correspondencia con las operaciones del desarrollador. Si un join costoso solo se manifiesta como «la base de datos en conjunto se vuelve más lenta y la factura en conjunto sube», la retroalimentación es pobre; solo si el sistema puede señalar el efecto de esa operation en lecturas, CPU, memoria y latencia, el desarrollador puede decidir si agrega un índice, usa caché, divide la consulta o acepta el costo.
+
+\lecturefigure{09-consumption-feedback.png}{La medición del consumo solo genera valor de ingeniería cuando entra en el ciclo de decisiones de desarrollo.}{Subtítulos locales 20:00--22:40; redibujo conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: la señal de precio debe verse junto con la señal de calidad}
+Mostrar solo el costo induce a optimizar en exceso; mostrar solo la latencia oculta el desperdicio de recursos. La interfaz ideal muestra al mismo tiempo request volume, latency, error, cache hit, CPU/memory, transfer y spend, y los asocia con la deployment version. Lo que el desarrollador optimiza es el costo por unidad de resultado de negocio, no la minimización de un solo indicador.
+\end{knowledgebox}
+
+\subsection{Noisy workload y aislamiento}
+
+En clase se usó la base de datos como analogía, pero lo que realmente se quería expresar es la workload attribution: en un sistema compartido, una operación costosa puede volver más lentos a sus vecinos sin que exista una medición clara. Estas notas no clasifican de forma absoluta a PostgreSQL o DynamoDB como «sistema malo/bueno», sino que comparan si una configuración concreta puede ofrecer workload isolation, horizontal scaling y operation-level evidence.
+
+\lecturefigure{10-workload-isolation.png}{El aislamiento de recursos y la operation-level accounting hacen explicables el rendimiento y el costo.}{Subtítulos locales 20:30--22:35; redibujo conceptual.}
+
+\begin{warningbox}{El cobro por consumo puede trasladar al usuario la ineficiencia de la plataforma}
+Cobrar por consumo no es justo por naturaleza. Si el runtime de la plataforma desperdicia CPU, si la estrategia de cache es ineficiente o si las dimensiones de medición no son explicables, el usuario termina pagando por los problemas de la plataforma. El proveedor debe hacer pública la semántica de la medición, ofrecer recomendaciones de optimización y permitir que el usuario distinga entre el crecimiento del negocio y las regresiones del sistema.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El núcleo de la consumption economics es la attribution. Los recursos, los precios y la calidad del servicio deben mapearse de vuelta a operations y deployments concretos para formar una retroalimentación de ingeniería, en lugar de una factura inexplicable que solo aparece a fin de mes.
+\section{Telemetry y Spend Control: ver no equivale a controlar}
+
+La sección anterior explicó que la consumption economics debe concretarse en una operation-level attribution; sin embargo, «poder medir» todavía no responde quién actúa cuando ocurre una anomalía. Esta sección conecta la telemetry casi en tiempo real con los spend controls en un ciclo cerrado: la primera relaciona los cambios de despliegue con latency, error, resource y costo; los segundos deciden si, al rebasar un umbral, se notifica, se dispara un webhook, se degrada el servicio o se pausa. Lo esencial no es tener más dashboards, sino usar señales explicables para tomar decisiones de control proporcionales al valor de negocio.
+
+\subsection{Poner deploy, latency, error y spend en la misma línea de tiempo}
+
+Esta subsección establece primero el orden causal de la observabilidad: una deployment cambia el código y la configuración, y solo después puede cambiar el rendimiento, la tasa de errores, el consumo de recursos y la factura. Al leer la figura, no observe cuatro curvas independientes una al lado de otra; recorra la misma línea de tiempo de versiones preguntando «qué cambio causó qué consecuencia», y distinga entre el crecimiento del tráfico del negocio, una regresión de la aplicación y un cambio en la medición de la plataforma.
+
+\lecturefigure{11-telemetry-loop.png}{La telemetry debe relacionar los cambios de versión con sus consecuencias en recursos, rendimiento y costo.}{Subtítulos locales 22:50--23:45; figura conceptual redibujada.}
+
+\begin{knowledgebox}{Lectura de la figura: por qué la telemetry también es una infraestructura costosa}
+Las labels de alta cardinalidad, la facturación por minuto, los registros entre regiones y los periodos largos de retención aumentan los costos de almacenamiento y de consulta. Una parte de lo que cobra la plataforma corresponde, efectivamente, al mantenimiento de esta infraestructura de retroalimentación. El usuario debe definir qué señales necesitan tiempo real, cuáles pueden muestrearse y cuáles deben conservarse a largo plazo para auditoría.
+\end{knowledgebox}
+
+\subsection{El soft cap y el hard cap persiguen objetivos distintos}
+
+El soft cap, mediante notificaciones o webhooks, impulsa a las personas y a la automatización a actuar, pero el tráfico se sigue atendiendo; el hard cap pausa el servicio al alcanzar el umbral y limita el gasto en el peor caso, aunque puede interrumpir un negocio que está generando ingresos. La documentación actual de Vercel Spend Management señala además que la verificación no es continua y que la pausa puede ocurrir varios minutos después de rebasar el umbral, por lo que el hard cap tampoco es un interruptor de circuito preciso.
+
+\lecturefigure{12-spend-controls.png}{El soft control protege el aprendizaje y la continuidad; el hard control protege contra el gasto en el peor caso.}{Subtítulos locales 23:40--24:50; documentación oficial de Vercel Spend Management.}
+
+\begin{importantbox}{Los umbrales de presupuesto deben derivarse de una función de negocio}
+La decisión de hard-stop puede escribirse de forma aproximada así: se pausa solo cuando la pérdida esperada de seguir atendiendo
+\[
+L_{continue}=P(\text{abuse})\cdot C_{abuse}+C_{runaway}
+\]
+supera la pérdida causada por la pausa
+\[
+L_{pause}=R_{lost}+C_{recovery}+C_{trust}
+\]
+Aquí $R_{lost}$ es el ingreso perdido y $C_{trust}$ es la pérdida de confianza de los usuarios. Un sistema real necesita limitación de tasa en varios niveles, attack detection y escalamiento a personas, no solo fijar un monto.
+\end{importantbox}
+
+\begin{warningbox}{El hard cap no es una frontera de seguridad en tiempo real}
+La medición, la agregación, la evaluación del umbral y la propagación de la pausa tienen retrasos. Para un AI endpoint de alto riesgo también deben usarse request rate limit, per-user quota, model budget, circuit breaker y abuse monitoring; no basta con depender del presupuesto de fin de mes.
+\end{warningbox}
+
+\teachervoice{En el caso presentado en clase, un cliente perdió ingresos porque el hard cap detuvo el servicio durante un pico de tráfico. Sean o no exactas las cifras, la conclusión es clara: el control de costos debe entender el valor de negocio. El soft cap sirve para aprender y el hard cap para riesgos inaceptables; no son intercambiables.}
+
+\subsection{Resumen de la sección}
+
+La telemetry aporta pistas causales y el Spend Control aporta acciones. Un sistema eficaz incorpora el rendimiento, el costo, el valor de negocio y el retraso de ejecución en el diseño de sus umbrales.
+\section{AI Compute Density: las solicitudes con esperas largas cambian los supuestos de serverless}
+
+Una web request tradicional busca una latencia corta: la CPU ejecuta, la base de datos responde y la solicitud termina pronto. Las aplicaciones de IA suelen llamar a un model provider externo y hacer streaming durante decenas de segundos o incluso varios minutos; en ese lapso, la CPU local puede quedar ociosa. Si cada solicitud sigue ocupando una instancia completa de forma exclusiva, el desperdicio es enorme. El producto de compute que se anunció en clase evolucionó después en Fluid Compute; la documentación oficial actual destaca la reutilización de warm instances, el procesamiento concurrente, la active CPU y un ciclo de vida de ejecución más largo.
+
+\subsection{Las solicitudes CPU-bound e I/O-bound deben planificarse por separado}
+
+Una solicitud \term{CPU-bound} pasa la mayor parte de su tiempo en cómputo local, y el exceso de concurrencia hace que compita por la CPU; una solicitud \term{I/O-bound} pasa la mayor parte de su tiempo esperando a la red, a la base de datos o al modelo, y una concurrencia moderada permite reutilizar la CPU en los intervalos de espera. Si se define la active CPU time de la solicitud $j$ como $a_j$ y su wall time como $w_j$, la proporción de espera es aproximadamente
+\[
+r_j=1-\frac{a_j}{w_j}.
+\]
+Una workload con $r_j$ alto es más adecuada para un multiplex seguro; con $r_j$ bajo se necesitan más bien scale-out y aislamiento de recursos.
+
+\lecturefigure{13-compute-density.png}{Las workloads de IA deben elegir entre scale-out y reutilización concurrente según la CPU activity y la I/O wait.}{Subtítulos locales 24:50--28:10; documentación oficial actual de Vercel sobre Fluid Compute.}
+
+\begin{knowledgebox}{Lectura de la figura: compute density no equivale a concurrencia ilimitada}
+Una solicitud I/O-bound sigue ocupando memoria, sockets, file descriptors, stream buffers y event-loop capacity. El límite de concurrencia debe determinarse a partir del latency SLO, la memoria, la downstream quota y las noisy-neighbor tests. El planificador necesita observar la active CPU y el wait profile reales, en lugar de escalar solo según el número de solicitudes.
+\end{knowledgebox}
+
+\begin{warningbox}{El anuncio en clase y el producto actual no deben confundirse}
+La entrevista solo describió la dirección de «aumentar de forma inteligente la compute density según el profile CPU-bound / I/O-bound». La active-CPU billing, la warm instance reuse, la longer execution y el background work que Fluid Compute incorporó después forman parte de la descripción oficial actual del producto, y no deben presentarse retroactivamente como detalles que en la clase de 2025 ya estaban implementados por completo.
+\end{warningbox}
+
+\teachervoice{La prioridad de Rauch es el rendimiento: no se puede permitir que, porque un cliente se vuelva popular de repente, un noisy neighbor degrade la calidad de los demás clientes. El objetivo de la compute density no es solo reducir costos, sino disminuir el idle waste manteniendo los estándares de aislamiento y latencia, y trasladar el capacity tuning de las manos del cliente a la plataforma.}
+
+\subsection{Resumen de la sección}
+
+La IA desplaza las web workloads de ráfagas cortas de CPU hacia esperas largas y streaming. El planificador necesita distinguir entre active compute e I/O wait, y reutilizar la warm capacity sin romper el aislamiento.
+\section{v0 y AI-native development: las restricciones de producto generan problemas de investigación}
+
+v0 convierte ideas en lenguaje natural en un frontend ejecutable y se ha ido ampliando hasta abarcar full-stack application. La versión temprana vigente en el momento de la clase usaba GPT-3.5 Turbo; el function calling nativo todavía no estaba maduro, así que el equipo tuvo que construir una bespoke tool invocation. Esta historia muestra que un producto de IA no consiste simplemente en llamar a la API de un modelo, sino que es un sistema conjunto de modelo, herramientas, framework knowledge, preview deployment y retroalimentación de los usuarios.
+
+\subsection{Del prompt a la aplicación en ejecución}
+
+La discusión anterior sobre compute-density se centraba en cómo ejecutar las solicitudes de forma eficiente; aquí el enfoque pasa al ciclo cerrado de generación y verificación de una AI application. Esta sección no responde a «si el modelo puede escribir un fragmento de JSX», sino a cómo un prompt, mediante tool invocation, framework-aware code generation, build, preview y human feedback, se convierte en un producto interactivo. Al leer la figura, conviene ver el preview environment como un verifier y no solo como el punto final de la publicación.
+
+\lecturefigure{14-v0-loop.png}{v0 conecta el código generado, las llamadas a herramientas, la preview URL y la retroalimentación de los usuarios en un ciclo cerrado de producto.}{Subtítulos locales 30:15--31:55; rediseño conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: por qué el entorno de ejecución es el verifier del coding agent}
+Que el código parezca razonable no significa que pueda hacer build, renderizarse y permitir interacción. El preview deployment ofrece retroalimentación ejecutable: si la compilación se completa, si la página es accesible y si el aspecto visual y el comportamiento cumplen los requisitos. El agent necesita devolver el build log, el browser result y las modificaciones del usuario al ciclo de generación.
+\end{knowledgebox}
+
+\begin{warningbox}{Fast growth no es architecture proof}
+En la clase se mencionó el rápido crecimiento de v0, pero eso solo indica una señal de demanda fuerte; no demuestra que la economía unitaria, la retention a largo plazo o la calidad de generación estén resueltas. Un producto de IA sigue necesitando métricas de largo plazo como la distribución de tareas, la tasa de éxito, el número de rondas de corrección, el token cost, la latency y la retención de usuarios.
+\end{warningbox}
+
+\teachervoice{Rauch trata «fijar estándares exageradamente altos» como un método de investigación: si el objetivo es solo automatizar un workflow existente, es posible que el equipo nunca se tope con un novel problem; si se exige que cada prompt se convierta rápidamente en un sistema ejecutable, el tool calling, el sandbox, el preview y la retroalimentación se convierten en una nueva infraestructura de investigación.}
+
+\subsection{Resumen de la sección}
+
+La unidad del sistema de v0 no es una completion, sino el ciclo prompt--tool--code--preview--feedback. Las restricciones de producto pueden crear problemas de investigación, pero deben validarse con evidencia de ejecución y no solo mostrando texto generado.
+\section{MVP inmutable, gossip y Day 1/100/1000}
+
+El MVP inicial de Vercel era sumamente acotado: una llamada a la API/CLI devolvía una deployment URL inmutable. Al principio, el sistema subyacente podía estar sobredimensionado y ser costoso, pero esa interfaz bastaba para validar si los usuarios realmente querían que «desplegar equivalga a obtener una URL». Rauch tomó como fuentes de inspiración las immutable data structures, la content identity de IPFS y la gossip propagation, y después dejó que las necesidades reales impulsaran la reestructuración interna.
+
+\subsection{Primero validar el idea-market fit, después optimizar la implementación interna}
+
+\term{immutable deployment} significa que el contenido de un despliegue, una vez generado, no se modifica en su lugar; cada versión nueva crea una identity nueva. \term{gossip protocol} hace que los nodos se propaguen metadata entre sí hasta converger en todas las réplicas globales. El puntero del dominio puede cambiar, mientras que el deployment artifact permanece igual; así se obtienen previews trazables, promote atómico y rollback rápido.
+
+\lecturefigure{15-immutable-mvp.png}{Una API/CLI acotada conecta la artifact identity, la propagación de metadata y la URL.}{Subtítulos locales 32:50--35:55; redibujo conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: el MVP puede ser ineficiente por dentro, pero el contrato externo debe ser correcto}
+Un sistema inicial puede hacer over-provision, siempre que el costo sea asumible y valga la pena validar la señal del producto; pero si la API externa expone al usuario el estado mutable de los servidores, migrar después resulta muy difícil. Un buen MVP elige una abstracción estable que siga siendo válida en el futuro y luego sustituye gradualmente la implementación interna.
+\end{knowledgebox}
+
+\subsection{Day 1, Day 100 y Day 1000 son tres criterios de aceptación distintos}
+
+La subsección anterior mostró que el MVP puede ser ineficiente por dentro de forma temporal, pero que el contrato externo debe ser correcto a largo plazo; a continuación hay que usar escalas de tiempo para comprobar si ese contrato realmente absorbe la complejidad. Day 1 evalúa el onboarding y la primera impresión; Day 100 evalúa si la plataforma deja escapar complejidad cuando el proyecto crece; Day 1000 evalúa el uptime, la recuperación, el costo y la confianza de la organización. Muchas herramientas para desarrolladores solo optimizan la demo del Day 1, pero devuelven al usuario la carga del estado a largo plazo, las dependencias y la operación; por eso la madurez no puede medirse únicamente por la velocidad del primer despliegue.
+
+\lecturefigure{16-day-maturity.png}{Un producto de infraestructura debe superar por separado las pruebas de adopción, absorción de complejidad y operación a largo plazo.}{Subtítulos locales 36:00--37:05; redibujo conceptual.}
+
+\begin{importantbox}{Preguntas de aceptación para Day 1/100/1000}
+\begin{itemize}
+  \item Day 1: ¿puede una persona recién llegada desplegar de forma segura sin conocer los detalles subyacentes?
+  \item Day 100: cuando aumentan las routes, los teams, los environments y las dependencias de datos, ¿sigue siendo claro el modelo predeterminado?
+  \item Day 1000: ante actualizaciones, incidentes, rotación de personal y cambios de proveedor, ¿puede el sistema recuperarse y conservar su capacidad de auditoría?
+\end{itemize}
+\end{importantbox}
+
+\begin{warningbox}{Un despliegue inmutable no equivale a datos inmutables}
+El código y los assets pueden ser immutable, pero las bases de datos, las colas y los sistemas externos siguen cambiando. Hacer rollback de la application version puede toparse con una schema incompatibility. La plataforma necesita una migration policy, un backward-compatible contract y data recovery; no puede aplicar mecánicamente una experiencia al estilo de Git a todo el estado.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Un buen MVP fija la abstracción externa correcta y admite ineficiencias internas temporales; un buen producto de infraestructura, además, sigue superando el Day 100 y el Day 1000, absorbe la complejidad del proyecto y mantiene la confianza en su operación.
+\section{Carrera e investigación: crear novel constraints en sistemas reales}
+
+Un estudiante le pregunta a Rauch si se arrepiente de haber entrado a la industria demasiado pronto en lugar de seguir la ruta de investigación tradicional. Su respuesta no es «la industria es mejor que la academia», sino que él mismo participó en la empresa en trabajos de tipo investigación, como el scheduler, el placement, el load balancer y el metadata store. Un producto real puede ofrecer gran escala, restricciones estrictas y retroalimentación inmediata; pero también reconoce que hacerlo todo uno mismo en exceso (DIY) puede acabar con una startup.
+
+\begin{knowledgebox}{Tres condiciones necesarias para la Applied research}
+\begin{enumerate}
+  \item El problema contiene una constraint explícita que los métodos existentes no pueden satisfacer;
+  \item el equipo puede construir experimentos, mediciones y retroalimentación de fallas, en lugar de solo escribir parches de producción;
+  \item los resultados de la investigación pueden volver a las métricas del producto y, al mismo tiempo, conservar conocimiento reutilizable y límites del sistema.
+\end{enumerate}
+\end{knowledgebox}
+
+\begin{warningbox}{«Escribirlo uno mismo» no es la ruta de aprendizaje predeterminada}
+Reescribir React, Kubernetes o un scheduler puede generar una comprensión profunda, pero también puede desperdiciar el runway de la empresa. Conviene elegir la capa que esté directamente relacionada con la diferenciación central y cuyas restricciones no puedan satisfacer las soluciones existentes; para el resto, hay que dar prioridad a la reutilización y aprender mediante la lectura del código fuente, la experimentación y los simulacros de fallas.
+\end{warningbox}
+
+\teachervoice{La verdadera tensión de la clase está en que dos frases son ciertas a la vez: too much DIY can kill you; unreasonable standards can create novel research. Un criterio maduro no consiste en «comprarlo todo» ni en «construirlo todo», sino en saber qué restricción merece que la organización invierta su vida en resolverla.}
+
+\subsection{Resumen de la sección}
+
+Los sistemas industriales pueden convertirse en un entorno de investigación, siempre que las restricciones del problema, la retroalimentación experimental y el valor para el producto estén claros. Build vs. Buy se aplica también al aprendizaje personal: profundizar en las capas clave y reutilizar las capas que no lo son.
+\section{Síntesis y ampliación}
+
+\subsection{Conclusiones centrales}
+
+\begin{importantbox}{Doce conclusiones transferibles}
+\begin{enumerate}
+  \item Entre las hyperscaler primitives y la application intent sigue haciendo falta una capa de compilación.
+  \item Una abstracción debe crear nuevos invariantes, no limitarse a cambiarle la apariencia a la consola.
+  \item La cardinalidad y el ciclo de vida de los objetos del producto determinan si el mapeo de recursos es económico.
+  \item FDI genera un IR a partir de la semántica del framework y luego lo mapea a routing, cache y functions.
+  \item ISR consume origin compute según la frecuencia con que cambia el contenido, no según la frecuencia de acceso.
+  \item En Build vs. Buy, el desarrollo propio debe ubicarse en la capa diferenciadora, donde el insight se acumula como interés compuesto.
+  \item El immutable deployment junto con un pointer mutable hace que preview, promote y rollback sean componibles.
+  \item El consumption pricing solo se convierte en una señal de retroalimentación para los desarrolladores cuando es atribuible.
+  \item La telemetry debe colocar versión, rendimiento, errores y spend en una misma línea de tiempo.
+  \item El soft cap protege el aprendizaje y la continuidad; el hard cap protege contra el peor gasto posible, pero puede interrumpir el negocio.
+  \item Un AI workload debe distinguir entre active CPU e I/O wait; la compute density no puede depender de un número fijo de pods.
+  \item El Day 1 consigue la adopción, el Day 100 absorbe la complejidad y el Day 1000 gana la confianza operativa.
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Tarea práctica: diseñar una framework-aware AI deployment platform}
+
+Elige una AI web application, por ejemplo un chat multimodelo, un coding agent, un análisis de documentos o una página de comercio electrónico generativa, y completa el siguiente diseño:
+
+\begin{enumerate}
+  \item Define la semántica de aplicación que puede aportar el framework y las restricciones de negocio que la plataforma no puede inferir automáticamente;
+  \item Diseña el Build Output / IR y enumera assets, functions, routes, cache, tools y policies;
+  \item Presenta el modelo de immutable deployment, domain pointer, preview y rollback;
+  \item Clasifica las solicitudes en cuatro tipos (CPU-bound, I/O-bound, streaming y background) y diseña la capacity policy;
+  \item Diseña el telemetry schema que relacione deployment version, latency, error, model token, CPU, memory y spend;
+  \item Diseña los soft/hard controls y explica umbrales, retraso de ejecución, continuidad del negocio y abuse handling;
+  \item Escribe por separado las pruebas de aceptación del Day 1, el Day 100 y el Day 1000.
+\end{enumerate}
+
+\begin{knowledgebox}{Criterios de aceptación}
+Una propuesta de alta calidad no se limita a decir «usar serverless con escalado automático». Debe explicar cómo entra la framework intent en el IR, cómo distingue el planificador entre active compute y wait, cómo se atribuye el costo a cada operation, cómo evita el hard control afectar por error a usos legítimos y cómo se maneja el rollback cuando se encuentra con una stateful dependency.
+\end{knowledgebox}
+
+\subsection{Lecturas adicionales}
+
+\begin{enumerate}
+  \item Vercel, \href{https://vercel.com/blog/framework-defined-infrastructure}{Framework-Defined Infrastructure}.
+  \item Vercel, \href{https://vercel.com/blog/build-output-api}{Announcing the Build Output API} y \href{https://vercel.com/docs/build-output-api/v3}{Build Output API v3}.
+  \item Vercel, \href{https://vercel.com/blog/life-of-a-request-application-aware-routing}{Life of a Vercel request: Application-aware routing}.
+  \item Next.js, \href{https://nextjs.org/docs/app/guides/incremental-static-regeneration}{Incremental Static Regeneration}.
+  \item Vercel, \href{https://vercel.com/blog/introducing-fluid-compute}{Introducing Fluid Compute} y \href{https://vercel.com/docs/fluid-compute}{current documentation}.
+  \item Vercel, \href{https://vercel.com/docs/spend-management}{Spend Management} y \href{https://vercel.com/docs/observability}{Observability}.
+  \item v0, \href{https://v0.app/docs}{Documentation}.
+\end{enumerate}
+
+\subsection{Ruta de lectura sugerida}
+
+Primero lee FDI y Build Output API, y dibuja la frontera de compilación «código fuente—semántica del framework—IR—despliegue»; después lee request routing e ISR, y sigue cómo una solicitud llega a metadata, cache, function y origin. A continuación lee Spend Management y Observability, y relaciona los elementos de monitoreo con la consumption feedback vista en clase. Por último lee Fluid Compute y usa la proporción active CPU / wall time para explicar por qué las AI requests cambiaron el objetivo de planificación de serverless. Al leer cada página oficial, registra de forma uniforme \textbf{el contrato de entrada, los recursos que se generan o administran, las señales observables, la ruta de falla/rollback y las diferencias entre la versión actual y la clase histórica}; si la página no explica con claridad un failure mode, agrega por tu cuenta los posibles riesgos del plano de control, del plano de datos y de la medición del consumo.
+
+\end{document}

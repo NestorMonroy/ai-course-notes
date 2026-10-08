@@ -1,0 +1,462 @@
+\documentclass[a4paper]{article}
+
+\newcommand{\notetitle}{Lecture 04: De LLaMA a Mistral: modelos, infraestructura y ciclo cerrado de producto}
+\newcommand{\noteauthors}{Elaborado a partir de la entrevista con Guillaume Lample, los subtítulos con marcas de tiempo y cinco artículos de fuente primaria}
+\newcommand{\notedate}{Curso de invierno de 2025 · Versión reescrita en 2026}
+\newcommand{\videochannel}{Carga de cursos anteriores de Stanford CS153 (actualmente en private)}
+\newcommand{\videopublishdate}{2025-04-25}
+\newcommand{\videoduration}{42:42}
+\newcommand{\videourl}{https://www.youtube.com/watch?v=qzT8I-J8sQ8}
+\newcommand{\videocoverpath}{cover.jpg}
+
+\input{../cs153-preamble.es-mx.tex}
+\graphicspath{{./}{images/}}
+\setcounter{tocdepth}{1}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth,height=0.49\textheight,keepaspectratio]{#1}
+\caption{#2}
+\figsource{#3}
+\end{figure}
+}
+
+\begin{document}
+\makecscover
+
+\section{Auditoría de fuentes: esta no es una clase de promoción corporativa}
+
+En apariencia, esta entrevista narra en orden cronológico la trayectoria de Guillaume Lample, desde la traducción automática no supervisada, pasando por las matemáticas formales y LLaMA, hasta Mistral; sin embargo, lo que de verdad vale la pena aprender no es el currículum, sino \textbf{cómo los problemas de investigación van cambiando continuamente los límites del sistema}. Cuando la tarea pasa de «alinear dos espacios de representación» a «buscar demostraciones verificables», y después a «entrenar y desplegar modelos de propósito general», cambian los datos, las señales de retroalimentación, la infraestructura de cómputo y las interfaces de producto que necesita el equipo. Por ello, la pregunta central de esta clase es: \textbf{¿cuándo un modelo es solo un producto de investigación y cuándo se convierte en un sistema que puede ejecutarse, personalizarse y gobernarse?}
+
+Al verificarlo el 11 de agosto de 2026, el video público original ya había pasado a ser privado; localmente se conservan la portada oficial y los subtítulos completos con marcas de tiempo. Los subtítulos son una transcripción por reconocimiento automático y contienen errores en nombres de personas y de productos, por lo que estas notas solo los normalizan cuando el contexto es claro, y los hechos sobre algoritmos, modelos y regulación se contrastan con artículos o páginas oficiales. Las cifras mencionadas en clase sobre tamaño de plantilla, costos, número de descargas, etc., se consideran en todos los casos \textbf{estimaciones orales del ponente en ese momento}, y no hechos estáticos sobre la empresa.
+
+\begin{importantbox}{Hilo conductor de la clase: cuatro ampliaciones de los límites del sistema}
+\begin{enumerate}
+  \item La traducción no supervisada define el problema como \textbf{espacios de representación y ciclo de aprendizaje};
+  \item las matemáticas formales lo definen como \textbf{entorno, acciones, verificador y búsqueda};
+  \item LLaMA lo define como \textbf{escala de datos, estabilidad numérica y costo de inferencia};
+  \item Mistral lo define como \textbf{despliegue, personalización, retroalimentación, privacidad y operación continua}.
+\end{enumerate}
+\end{importantbox}
+
+Al leer la figura con este hilo conductor en mente, no hay que ver cada etapa como un proyecto aislado. Las flechas entre ellas representan «el nuevo cuello de botella que dejó al descubierto la etapa anterior», y no una simple línea de tiempo de cambios de empleo.
+
+\lecturefigure{01-research-trajectory.png}{Los problemas de investigación se convierten paulatinamente en nuevos requisitos de infraestructura.}{Subtítulos locales con marcas de tiempo 03:00--18:00; redibujo reproducible con \texttt{lecture04-diagrams.py}.}
+
+\begin{knowledgebox}{Lectura de la figura: primero identifica la señal de retroalimentación autorizada de cada etapa}
+La traducción no supervisada no cuenta con corpus paralelos anotados por personas, así que solo puede apoyarse en la estructura de las representaciones y en la reconstrucción cíclica; en las demostraciones formales, la autoridad proviene del proof assistant y no de la autoevaluación del modelo; el preentrenamiento se apoya en la held-out loss y en las evaluaciones de tareas posteriores; los sistemas de producto, además, deben someterse a restricciones de latencia, tasa de fallas, retroalimentación de usuarios, límites de datos y costo. \textbf{Cuanto más cerca esté la señal de retroalimentación del resultado real, más confiable será la iteración del sistema.}
+\end{knowledgebox}
+
+\begin{warningbox}{open source, open weights y sistema utilizable no son sinónimos}
+La comunidad suele llamar «modelos de código abierto» a todos los pesos descargables. Esta clase distingue con más precisión: \term{open weights} significa que los parámetros están disponibles; la \term{open license} determina los límites para modificar y para el uso comercial; el \term{reference code} proporciona una implementación básica para ejecutar el modelo; un \term{production system} requiere además serving, herramientas, evaluación, seguridad, monitoreo y mecanismos de actualización. Obtener un checkpoint no equivale a obtener un producto.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Esta clase organiza el material en torno a la «ampliación de los límites del sistema» y no a la «historia del desarrollo de la empresa». Cada una de las secciones siguientes debe responder a la vez tres preguntas: cuál es el estado de la tarea, quién juzga si algo es correcto y qué componentes del sistema faltan fuera del modelo.
+\section{Traducción automática no supervisada: la intuición geométrica solo es el punto de arranque}
+
+La pregunta de investigación temprana de Lample era muy exigente: si solo se cuenta con textos monolingües de cada uno de dos idiomas, sin un corpus paralelo a nivel de oración, ¿es posible aprender a traducir? En la exposición oral de la clase se describe el hallazgo central de forma intuitiva: los espacios de vectores de palabras de distintos idiomas pueden tener estructuras geométricas similares y, tras una transformación, pueden alinearse. Esta intuición es importante, pero si solo se escribe como «los dos espacios difieren en una rotation», se omite el ciclo de entrenamiento que realmente hace funcionar al sistema.
+
+\subsection{Del espacio de representación al diccionario bilingüe}
+
+Sea $X\in\mathbb{R}^{d\times n}$ la matriz de vectores de palabras del idioma de origen y $Y\in\mathbb{R}^{d\times n}$ la matriz de puntos de anclaje del idioma de destino. Un paso de alineación clásico puede escribirse como el problema ortogonal de Procrustes:
+\[
+W^{\star}=\arg\min_{W}\|WX-Y\|_{F}^{2},
+\qquad \text{s.t.}\quad W^{\top}W=I.
+\]
+Aquí $W$ es una transformación ortogonal que conserva longitudes y ángulos, y $\|\cdot\|_{F}$ es la Frobenius norm. La intuición detrás de la restricción $W^{\top}W=I$ es la siguiente: si la geometría semántica local de los dos idiomas es similar, la alineación debe lograrse en lo posible mediante rotaciones o reflexiones, y no estirando el espacio de forma arbitraria. Un sistema real aún debe encontrar primero puntos de anclaje aproximados, tratar la frecuencia de las palabras y la polisemia, y enfrentar el hecho de que las estructuras de los dos idiomas no son completamente isomorfas.
+
+La siguiente figura separa el «arranque geométrico» del «algoritmo de aprendizaje completo». Primero se infiere un diccionario aproximado a partir de representaciones monolingües y después se mejoran repetidamente el codificador y el decodificador mediante denoising y back-translation.
+
+\lecturefigure{02-cross-lingual-alignment.png}{La traducción no supervisada arranca con la alineación de representaciones y luego mejora de forma gradual mediante entrenamiento cíclico.}{Subtítulos locales 03:00--05:00; Lample et al., \emph{Unsupervised Machine Translation Using Monolingual Corpora Only}, 2018.}
+
+\begin{knowledgebox}{Lectura de la figura: por qué la rotation no puede resolver la traducción por sí sola}
+Los vectores de palabras alineados, como mucho, aportan candidatos a nivel de palabra; no resuelven por sí mismos el orden de las palabras, los cambios morfológicos, las dependencias de largo alcance ni la ambigüedad contextual. El sistema del artículo también necesita denoising auto-encoding para que el modelo aprenda la estructura interna de cada idioma, y back-translation para traducir de nuevo la traducción actual al idioma original y formar así una señal autosupervisada. La similitud geométrica responde «por dónde empezar»; el entrenamiento cíclico responde «cómo seguir mejorando».
+\end{knowledgebox}
+
+\begin{warningbox}{No confundir la similitud de representaciones con un isomorfismo completo entre idiomas}
+Que los espacios de vectores de palabras sean aproximadamente alineables depende del corpus, la frecuencia de las palabras, el método de entrenamiento y la distancia entre los idiomas. En idiomas con pocos recursos, idiomas de morfología compleja o corpus con grandes diferencias de dominio, el diccionario aproximado puede presentar sesgos sistemáticos. Lo que este método demuestra es que «es posible construir una señal de arranque no supervisada», no que «cualquier par de idiomas difiere solo en una matriz».
+\end{warningbox}
+
+\teachervoice{Aquí el docente conserva un hábito de investigación muy valioso: buscar primero la estructura de baja dimensión en un problema de alta dimensión. Los vectores de palabras parecen difíciles de observar directamente, pero si se supone que los dos espacios comparten relaciones geométricas, un problema sin etiquetas puede convertirse en un problema de alineación optimizable. Después, el ciclo de entrenamiento corrige esta suposición demasiado fuerte.}
+
+\subsection{Resumen de la sección}
+
+La traducción automática no supervisada muestra que un buen sistema de investigación suele estar compuesto por una «suposición de arranque interpretable» y un «ciclo de retroalimentación capaz de corregirse a sí mismo». Quedarse solo con la rotation sobrestima la suposición; ignorar la back-translation subestima la ingeniería del sistema.
+\section{Matemáticas formales: objeto de búsqueda, entorno y verificador}
+
+Al pasar de la traducción a theorem proving, la tarea cambia de raíz. La generación de lenguaje natural puede aceptar varias respuestas aproximadamente correctas, mientras que una demostración formal exige que cada paso cumpla las reglas de tipos y de lógica del proof assistant. El modelo ya no solo predice tokens en el espacio del texto, sino que busca dentro de un entorno \textbf{con estado, ejecutable y capaz de rechazar acciones erróneas}.
+
+\subsection{Por qué proof search no es un árbol de búsqueda común como el de los juegos de tablero}
+
+El \term{formal prover} (probador formal) guarda el estado actual de la demostración y verifica las tactics; el \term{proof state} es el conjunto de objetivos aún no resueltos; una \term{tactic} es una transformación válida que se aplica a un objetivo; un \term{subgoal} es un objetivo nuevo producido por una tactic. Si se usa inducción matemática sobre una proposición universal, un objetivo produce a la vez dos subobjetivos, el caso base y el paso inductivo, y el objetivo padre solo se considera completo cuando ambos están completos.
+
+El proof state puede escribirse como
+\[
+\mathcal{G}=\{g_1,g_2,\ldots,g_k\},
+\qquad
+a(g_i)\rightarrow\{g_{i1},g_{i2},\ldots,g_{im}\}.
+\]
+Aquí la acción $a$ no produce un único estado sucesor, sino que puede producir un grupo de subobjetivos que deben resolverse en conjunto. Por eso la estructura de búsqueda se parece más a un hypergraph; un hyperedge conecta el objetivo padre con varios subobjetivos necesarios.
+
+\lecturefigure{03-hypertree-search.png}{Una tactic puede generar varios subgoals que deben cerrarse simultáneamente.}{Subtítulos locales 05:00--07:00; Lample et al., \emph{HyperTree Proof Search}, 2022.}
+
+\begin{knowledgebox}{Lectura de la figura: AND y OR deben coexistir}
+El modelo puede proponer varias tactics para un mismo objetivo; esa es la elección OR. En cuanto se elige induction, el caso base y el paso inductivo forman a su vez una restricción AND. La intuición de MCTS común, que solo contempla que «una acción produce un estado nuevo», no basta: el algoritmo de búsqueda debe acumular la probabilidad conjunta de éxito de un grupo de objetivos y propagar los fallos de verificación de vuelta a la política de selección.
+\end{knowledgebox}
+
+\subsection{Informal-to-formal: que el borrador reduzca el espacio de búsqueda}
+
+Internet contiene una gran cantidad de matemáticas en lenguaje natural o en \LaTeX{}, pero muy poco corpus formalizado. El puente central que se presentó en clase es este: primero, un LLM de propósito general genera una informal proof; después, el teorema y ese borrador de demostración se entregan al formal model para ayudarlo a elegir tactics. Este diseño no rebaja el criterio final de corrección, porque el proof assistant sigue verificando paso a paso la demostración completa; solo aporta al buscador una heurística con mucha información.
+
+\lecturefigure{04-informal-to-formal.png}{La demostración informal aporta la ruta; el probador formal conserva la decisión final.}{Subtítulos locales 07:00--09:10; HyperTree Proof Search y el trabajo informal-to-formal descrito oralmente en clase.}
+
+\begin{importantbox}{Separación de responsabilidades entre generador y verificador}
+El generador busca cobertura y capacidad de exploración, y puede proponer rutas incompletas o erróneas; el verificador debe comprobar las reglas de forma determinista. La confiabilidad del sistema proviene de «proponer con holgura, aceptar con rigor», no de exigir que el modelo generativo acierte por completo al primer intento. Este patrón aparece después también en la ejecución de código, los verifier matemáticos, los tool-use agent y el reasoning RL.
+\end{importantbox}
+
+\begin{warningbox}{Una informal proof no es una demostración que pueda entregarse}
+Un borrador en lenguaje natural puede saltarse pasos, usar lemas no declarados o suponer implícitamente condiciones adicionales. Su valor para la formal search es comprimir el espacio de candidatos, no sustituir al proof assistant. Si un sistema solo muestra una cadena en lenguaje natural sin verificación ejecutable, no puede afirmar que ofrece una garantía formal.
+\end{warningbox}
+
+\teachervoice{Lample enfatiza que, en ese momento, la comunidad de matemáticas formales casi no tenía API preparadas para el aprendizaje automático, y el equipo tuvo que construir por su cuenta la interfaz entre el modelo y el prover. Este detalle muestra que el cuello de botella de una nueva línea de investigación muchas veces no es «la falta de un modelo más grande», sino la falta de un entorno capaz de reiniciar, ejecutar, verificar y registrar estados por lotes.}
+
+\subsection{Por qué este proyecto generó la necesidad de un LLM propio}
+
+En los primeros experimentos se podía llamar a la Codex API externa para generar informal proofs; pero si cada expansión de un nodo de búsqueda requiere una llamada remota, el costo, la latencia, las cuotas y la reproducibilidad limitan una búsqueda a escala de MCTS. Tener un modelo propio significa poder controlar el procesamiento por lotes, la temperatura de muestreo, los rollout en paralelo, la caché y las versiones, con lo que «llamar al modelo de vez en cuando» se convierte en «el modelo está dentro del ciclo interno de la búsqueda». Esa es precisamente la motivación de sistemas para pasar de la investigación aplicada al entrenamiento de modelos fundacionales.
+
+\subsection{Resumen de la sección}
+
+La demostración formal coloca al LLM dentro de un entorno con estado: el modelo propone tactics, el proof assistant las verifica y el algoritmo de búsqueda maneja la estructura AND/OR. El valor de informal-to-formal no está en un lenguaje más elegante, sino en usar un corpus abundante para orientar una búsqueda formal que dispone de pocos datos.
+
+\section{Chinchilla y LLaMA: primero hay que precisar el objetivo de optimización}
+
+Cuando un equipo decide entrenar su propio LLM, Chinchilla ofrecía la scaling recipe pública más clara de su momento. La conclusión clásica del artículo es que, con un compute de entrenamiento fijo, el número de parámetros del modelo y los tokens de entrenamiento deben escalarse de forma más equilibrada; su modelo representativo tiene unos 70B parámetros y 1.4T tokens. Lo que la clase busca corregir no es esta conclusión, sino su aplicación errónea a otro objetivo: \textbf{si el modelo se va a desplegar una y otra vez, ¿conviene sacrificar el costo de un entrenamiento que ocurre una sola vez para reducir el costo de inferencia a largo plazo?}
+
+\subsection{Diferencia entre compute-optimal e inference-aware}
+
+De forma aproximada, el cómputo del preentrenamiento de un dense Transformer puede escribirse como
+\[
+C_{\mathrm{train}}\approx 6ND,
+\]
+donde $N$ es el número de parámetros y $D$ es el número de tokens de entrenamiento. Elegir $N$ y $D$ con $C_{\mathrm{train}}$ fijo es el problema de Chinchilla; pero el objetivo de un producto a lo largo de su ciclo de vida se parece más a
+\[
+J(N,D)=C_{\mathrm{train}}(N,D)
++Q\cdot C_{\mathrm{infer}}(N),
+\]
+donde $Q$ es el volumen acumulado de generación durante el despliegue. Si $Q$ es muy grande, un modelo más pequeño, aunque se entrene con más tokens, puede reducir de forma notable el costo total y la latencia.
+
+\lecturefigure{05-objective-mismatch.png}{La «Chinchilla trap» surge de confundir el objetivo de un presupuesto de entrenamiento fijo con el objetivo completo del producto.}{Subtítulos locales 09:20--11:40; Hoffmann et al. 2022; Touvron et al. 2023.}
+
+\begin{knowledgebox}{Lectura de la figura: primero se confirma la restricción de presupuesto y después se discute qué es «óptimo»}
+El óptimo de la izquierda significa «el presupuesto de este entrenamiento no puede aumentar»; el óptimo de la derecha significa «el entrenamiento ocurre una sola vez y la inferencia se repite». Ambos pueden ser razonables, pero no deben mezclarse. Lo que el curso llama over-train de un modelo pequeño consiste en seguir entrenando más allá del número óptimo de tokens para un compute fijo, no en repetir los mismos datos sin límite.
+\end{knowledgebox}
+
+El artículo de LLaMA reporta que los modelos de 6.7B y 13B se entrenaron con alrededor de 1.0T tokens, y los de 32.5B y 65.2B con alrededor de 1.4T tokens. Este diseño subraya que un modelo pequeño, con datos suficientes, puede alcanzar capacidades muy superiores a lo que sugería la intuición inicial, y que además es más fácil de desplegar para inferencia. No demuestra que «menos parámetros es mejor», sino que traslada la elección del modelo de un benchmark aislado a un problema conjunto de calidad, latencia, memoria de GPU, capacidad de procesamiento y escala de uso.
+
+\begin{warningbox}{«Más tokens» no equivale automáticamente a un modelo más fuerte}
+El beneficio de aumentar $D$ depende de la calidad de los datos, la tasa de repetición, la programación de la tasa de aprendizaje y la capacidad del modelo. Si los tokens nuevos son sobre todo datos repetidos de baja calidad, el entrenamiento puede limitarse a aumentar el costo; si la capacidad del modelo es insuficiente, el beneficio marginal también disminuye. El inference-aware training sigue requiriendo un scaling experiment, no basta con decir «hay que entrenar más tiempo el modelo pequeño».
+\end{warningbox}
+
+\teachervoice{El docente enfatiza que mucha gente usa «compute-optimal» como un elogio universal, sin aclarar si se optimiza la loss de entrenamiento, la calidad final, la latencia de inferencia o el costo total de propiedad. En una discusión de ingeniería, ante la palabra «optimal», la primera reacción debe ser preguntar por el objective, la constraint y el workload.}
+
+\subsection{Resumen de la sección}
+
+Chinchilla establece la regla de proporción para un presupuesto de entrenamiento fijo; la lección que la clase extrae de LLaMA es incluir la eficiencia de inferencia en el objetivo. La llamada Chinchilla trap es, en esencia, un desajuste de la función objetivo, no un error de la scaling law en sí.
+\section{Entrenamiento a gran escala: fallas numéricas, factores de confusión y el iceberg de I\&D}
+
+Cuando el entrenamiento llega a la escala de miles de GPU y semanas de ejecución, el éxito de los experimentos pequeños ya no basta para demostrar que una configuración es segura. En clase se dio un ejemplo: cierta ruta en FP16 parecía coincidir con FP32 en modelos más pequeños, pero en el entrenamiento de un modelo grande la loss empezó a subir después de unas dos semanas. Lo más difícil no es «saber que FP16 puede ser inestable», sino que, cuando ocurre la falla, coexisten numerosos \term{confounding factors} (factores de confusión): datos, optimizador, red, hardware, código y aleatoriedad.
+
+\subsection{Por qué la validación a pequeña escala no detecta errores de gran escala}
+
+\term{FP16} es punto flotante de 16 bits (16-bit floating point); ahorra memoria de video y ancho de banda, pero el rango del exponente y de la mantisa es limitado. El error puede ser pequeño en una sola capa, en secuencias cortas o en entrenamientos breves, y aun así amplificarse gradualmente con redes más profundas, un horizon más largo y una mayor varianza del gradiente. La práctica segura no consiste en volver por completo a FP32, sino en identificar los operadores sensibles y usar BF16, FP32 accumulation, loss scaling, monitoreo numérico y validación de escala por etapas.
+
+\lecturefigure{06-scale-amplifies-bugs.png}{Una aproximación numérica que pasa a pequeña escala puede convertirse en una falla diferida en un entrenamiento grande y prolongado.}{Subtítulos locales 12:08--13:35; redibujo conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: la exposición diferida cambia el diseño experimental}
+Si un error aparece hasta dos semanas después, una sola búsqueda binaria para localizarlo puede consumir miles de GPU-day. El equipo necesita registrar desde las primeras etapas del entrenamiento las normas del gradiente, los rangos de activación, la loss desagregada por grupos, los errores de hardware, los shards de datos y las versiones del código, y diseñar un canary de escala media que amplifique los riesgos lo antes posible. La observabilidad no es un informe posterior al entrenamiento, sino un instrumento experimental que reduce el espacio de búsqueda de la depuración.
+\end{knowledgebox}
+
+\subsection{Por qué el final run cost publicado es engañoso}
+
+Los artículos suelen reportar el número de GPU, los tokens y los días del entrenamiento final; esas cifras solo describen la ejecución principal exitosa y no incluyen las pruebas de receta, los checkpoint fallidos, la limpieza de datos, la optimización de kernels ni la construcción del sistema. La discusión de costos de LLaMA y DeepSeek en clase advierte que multiplicar el cómputo publicado por el precio de la nube solo da una factura aproximada de una ejecución; no permite deducir el costo total de I\&D que le llevó al equipo obtener esa receta.
+
+\lecturefigure{07-rd-iceberg.png}{El entrenamiento final exitoso es solo el costo visible; lo verdaderamente caro es todo el proceso para obtener una receta estable.}{Subtítulos locales 14:20--17:05; las estimaciones de costo del ponente son solo contexto de la clase.}
+
+\begin{warningbox}{No tome las estimaciones del ponente como datos de auditoría}
+El número de GPU, el precio por hora y el costo total de seis meses mencionados en la entrevista se dijeron de viva voz, y los subtítulos podrían confundir A100 con H100. La nota conserva la conclusión didáctica «la escala es muy grande, el ensayo y error es muy caro y el final run subestima la I\&D», y no usa estas estimaciones para extraer conclusiones financieras precisas.
+\end{warningbox}
+
+\subsection{Memoria organizacional: por qué importa «haberlo hecho una vez»}
+
+El know-how del entrenamiento a gran escala incluye mucho conocimiento operativo difícil de reconstruir a partir de los artículos: qué métrica da la alarma primero, qué tipo de loss spike es recuperable, cómo particionar los datos, cuándo reiniciar y qué optimizaciones solo funcionan en ciertas topologías. El razonamiento de Lample al emprender fue que el equipo ya había pagado meses de costo de trial-and-error en grandes empresas, por lo que podía lograr entrenamientos confiables más rápido en el entorno de una empresa emergente, con recursos más limitados.
+
+\lecturefigure{08-data-heavy-team.png}{El equipo inicial de Mistral dedicó la mayor parte de su personal a los datos, no solo a escribir código de entrenamiento.}{Subtítulos locales 17:10--18:10; «1 persona en entrenamiento, 6 en datos» es la proporción organizacional mencionada de viva voz en clase.}
+
+\begin{knowledgebox}{Lectura de la figura: por qué el data work se subestima con facilidad}
+El trabajo con datos incluye auditoría de fuentes, deduplicación, filtrado por calidad, proporción de idiomas, detección de contaminación, análisis de ejemplos difíciles y diseño de evaluation slices. No tiene un nombre llamativo de nueva architecture, pero determina directamente la señal de entrenamiento. El docente incluso usa «alienating» para describir lo poco vistoso de este trabajo, pero enseguida enfatiza que es lo más crucial; esta es precisamente la teacher voice que debe conservarse.
+\end{knowledgebox}
+
+\teachervoice{En clase también se comparó la transferibilidad de la infraestructura de distintas grandes empresas: las plataformas internas de más alto nivel facilitan el trabajo diario, pero pueden ocultar los detalles de la planificación de tareas, el almacenamiento y la pila de entrenamiento; los entornos de más bajo nivel exigen que los investigadores resuelvan más problemas por sí mismos, lo que, al dejar la organización, facilita reconstruir el sistema. No se trata de alentar a reinventar la rueda, sino de recordar al equipo que conserve la explicabilidad y la capacidad operativa de las capas clave.}
+
+\subsection{Resumen de la sección}
+
+La dificultad del entrenamiento a gran escala proviene de nuevos regímenes numéricos, ciclos de retroalimentación costosos y la naturaleza tácita del conocimiento. Un equipo confiable no solo tiene más GPU: también necesita canary, observabilidad, registro de versiones, capacidad de trabajo con datos y la experiencia de ensayo y error que ya pagó.
+\section{Mistral 7B: data-first y diseño de modelos compactos}
+
+La historia que se cuenta en clase sobre Mistral 7B retoma dos juicios: primero, la calidad de los datos es la palanca en la que más conviene invertir para un equipo pequeño; segundo, un modelo pequeño solo convierte el hecho de «tener pocos parámetros» en una ventaja real de despliegue si optimiza a la vez el entrenamiento y la arquitectura de inferencia. El artículo oficial de Mistral 7B presenta dos mecanismos centrales: Grouped-Query Attention (GQA) y Sliding Window Attention (SWA).
+
+\subsection{Qué problemas resuelven GQA y SWA}
+
+\begin{knowledgebox}{Términos clave: mecanismos de atención de los modelos compactos}
+\begin{tabularx}{\textwidth}{L{0.18\textwidth}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+\toprule
+Término & Problema que resuelve & Mecanismo central y relación con el despliegue \\
+\midrule
+GQA & KV cache y ancho de banda de decodificación demasiado grandes & Varias query heads comparten un número menor de key/value heads, lo que reduce la KV cache y el volumen de lectura, y aumenta el inference throughput. \\
+SWA & Complejidad cuadrática de la full attention en contextos largos & Cada capa atiende directamente solo una ventana local; la información se propaga gradualmente a través de varias capas, lo que amplía el campo receptivo efectivo a menor costo. \\
+KV cache & La decodificación autorregresiva recalcula las key/value del historial & Guarda los estados de atención del historial para evitar recalcularlos; su capacidad suele ser la principal restricción para el batch size y la concurrencia. \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+El artículo de Mistral 7B también publica los pesos y una implementación de referencia bajo Apache 2.0. El significado sistémico aquí no es que «la licencia crea un ecosistema por sí sola», sino que permite a los equipos desplegar, modificar y hacer fine-tune del modelo de forma local o en la nube, de modo que el modelo base se trata como un activo componible. Los pesos abiertos amplían la experimentation surface, pero también trasladan en mayor medida al integrador la responsabilidad de la seguridad, la evaluación y la operación.
+
+\begin{importantbox}{La ventaja de un modelo pequeño debe reflejarse en cuatro dimensiones de recursos}
+\begin{enumerate}
+  \item \textbf{Memoria de GPU}: si los parámetros, la KV cache y el runtime workspace caben en el hardware de destino;
+  \item \textbf{Ancho de banda}: cuántos pesos y cuánta cache hay que leer de la HBM por cada token;
+  \item \textbf{Latencia}: si el usuario puede aceptar la latencia del primer token y la latencia entre tokens;
+  \item \textbf{Rendimiento}: cuántas solicitudes concurrentes se pueden atender con un nivel de servicio dado.
+\end{enumerate}
+Si la ventaja en un Benchmark no mejora este balance de recursos, no necesariamente se traduce en una ventaja de despliegue.
+\end{importantbox}
+
+\begin{warningbox}{Un artículo de arquitectura no sustituye a un workload benchmark}
+GQA y SWA ofrecen ventajas a nivel de mecanismo, pero el beneficio real depende de la longitud de secuencia, el batching, la implementación de los kernels, la cuantización, el hardware y los objetivos de servicio. Al elegir un modelo, hay que medir con el tráfico y los datos de destino, en lugar de limitarse a copiar la puntuación promedio del artículo.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El valor didáctico de Mistral 7B está en que conecta una forma de organización data-first con una arquitectura inference-aware. Un modelo compacto no es una versión reducida de un modelo grande, sino una redistribución del presupuesto de entrenamiento y de arquitectura en torno a las restricciones de recursos de un despliegue viable.
+\section{De checkpoint a solution: el último tramo es el cuerpo principal del sistema}
+
+En clase se insistió en que la gran mayoría de las empresas, después de obtener un pretrained checkpoint, todavía no pueden usarlo directamente. A los pesos les faltan un runtime estable, una interfaz de servicio, autenticación, conexión con los datos, task-specific evaluation, una política de actualización y manejo de fallas. Por eso, el posicionamiento comercial de Mistral no consiste solo en «vender un modelo», sino en ayudar a los clientes a integrar el modelo en flujos de trabajo on-prem, private cloud o edge.
+
+\subsection{La pila de producto de cinco capas}
+
+Primero conviene revisar la estructura de cinco capas que va de los pesos a la operación. Cada capa puede convertirse por sí sola en un punto de falla: OOM en el runtime, limitación de tasa en el endpoint, errores en las llamadas a tool, aplicaciones sin límites de permisos u operaciones sin reversión. Al leer esta figura hay que preguntar de derecha a izquierda: si el resultado de negocio final falla, ¿puede el sistema recorrer operations, application, endpoint y runtime hasta ubicar la capa responsable concreta, en lugar de atribuir todos los problemas a que «el modelo no es lo bastante inteligente»?
+
+\lecturefigure{09-checkpoint-to-solution.png}{La brecha de cinco capas entre model weights y production operations.}{Subtítulos locales 20:25--24:30; rediseño conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: por qué un HTTP endpoint estable ya es una capacidad de producto}
+Un endpoint debe manejar concurrencia, tiempos de espera, colas, versiones, autenticación, cuotas, registros y la semántica de los errores. Aunque el modelo no cambie, la batching policy o la estrategia de cache también modifican la distribución de la latencia. Lo que el cliente percibe es la disponibilidad del servicio completo, no un benchmark fuera de línea.
+\end{knowledgebox}
+
+\subsection{El modo de despliegue se elige según las restricciones}
+
+\term{on-prem} significa que el modelo se ejecuta en instalaciones propias del cliente; \term{private cloud}, que se ejecuta en un entorno de nube aislado; \term{edge}, un despliegue cercano al dispositivo o al sitio, con recursos y conectividad limitados. Ninguno de los tres es «más avanzado que una API»; cada uno ocupa una posición distinta entre residencia de los datos, control, latencia, velocidad de actualización y costo. Lo importante de la comparación siguiente no son los nombres de los productos, sino qué responsabilidades deja cada modo al provider y cuáles transfiere al customer, y si esa distribución de responsabilidades corresponde a las capacidades de la organización.
+
+\lecturefigure{10-deployment-modes.png}{API, private cloud, on-prem y edge son combinaciones distintas de restricciones.}{Subtítulos locales 20:25--24:30, 32:00--36:45; rediseño conceptual.}
+
+\begin{warningbox}{Un despliegue privado no es más seguro por sí mismo}
+Llevar el modelo a la red del cliente puede reforzar el control sobre los datos, pero al mismo tiempo traslada al cliente o al proveedor la responsabilidad del patching, el control de acceso, las claves, el monitoreo y la incident response. La seguridad proviene de responsabilidades explícitas y de controles verificables, no del simple hecho de que «el servidor está en el centro de datos propio».
+\end{warningbox}
+
+\subsection{La personalización no es un solo fine-tune}
+
+El flujo real que se presentó en clase consiste en entender el use case, reunir unas cuantas muestras reales, generar synthetic data, hacer el fine-tune, evaluar y desplegar. Unas pocas muestras de alta calidad pueden mejorar notablemente el comportamiento, siempre que el sistema sepa «qué cuenta como mejora» y evite retrocesos en las capacidades generales, la seguridad o el cumplimiento del formato. El ciclo cerrado siguiente trata la personalización como un proceso de control continuo: cada despliegue produce nueva evidencia de fallas, y esa evidencia debe pasar primero por la evaluación antes de decidir si se generan datos y se actualizan los pesos.
+
+\lecturefigure{11-customization-loop.png}{La personalización empresarial debe estar impulsada por un ciclo cerrado de evaluación, no terminar tras un único entrenamiento.}{Subtítulos locales 22:40--24:30; rediseño conceptual.}
+
+\begin{importantbox}{Entregables mínimos del ciclo de personalización}
+\begin{enumerate}
+  \item Definición de la tarea y taxonomy de fallas;
+  \item Datos de entrenamiento reales/sintéticos con trazabilidad;
+  \item task metric, regression suite y pruebas de seguridad;
+  \item Configuración de entrenamiento reproducible y versión del base model;
+  \item Monitoreo del serving, condiciones de reversión y reglas de retorno de datos.
+\end{enumerate}
+Sin estos entregables, el fine-tuning es solo un cambio de pesos sin capacidad de auditoría.
+\end{importantbox}
+
+\teachervoice{El docente advierte que incluso las empresas con mayor perfil técnico quieren que los ingenieros del proveedor colaboren a fondo con los equipos de negocio, porque lo realmente difícil es convertir el criterio del dominio en datos, métricas y límites del sistema. Esta observación explica por qué la «mercantilización de la capacidad de los modelos» no elimina la ingeniería de soluciones, sino que desplaza el valor hacia la capa de integración.}
+
+\subsection{Resumen de la sección}
+
+Checkpoint-to-solution requiere runtime, interfaz, aplicación, operación y un ciclo cerrado de personalización. Ningún modo de despliegue es mejor en todos los casos: primero hay que enumerar los requisitos innegociables de privacidad, confiabilidad, latencia y control, y después elegir la arquitectura.
+\section{Le Chat: inferencia rápida, capa de herramientas y volante de retroalimentación del producto}
+
+En la entrevista, el producto de consumo cumple tres funciones: mostrar las capacidades del modelo y de las herramientas, generar una distribución real de tareas y recolectar retroalimentación sobre los fallos. La clase también señala que una inference optimization extrema puede reducir la frecuencia de actualización del modelo o la compatibilidad de arquitectura. Es un trade-off de sistemas típico: la velocidad no es gratuita, pues puede exigir un runtime fijo, un kernel especializado, una familia de modelos restringida o un proceso de publicación más complejo.
+
+\subsection{Por qué el producto forma parte del sistema de entrenamiento}
+
+Las solicitudes de los usuarios, los tool trace y las calificaciones explícitas pueden revelar problemas que el benchmark no ve: qué consultas necesitan web search, qué tareas de código fallan con frecuencia y en qué idiomas o sectores el desempeño es inestable. Después, el equipo de producto convierte esos fallos en evaluation slice y en prioridades de entrenamiento, con lo que se forma un data flywheel.
+
+\lecturefigure{12-product-feedback-flywheel.png}{Los productos del tipo de Le Chat conectan el serving, las herramientas y las prioridades de entrenamiento en un volante de retroalimentación.}{Subtítulos locales 24:45--27:40; redibujo conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: la retroalimentación primero debe convertirse en una failure taxonomy}
+Un simple thumbs up/down tiene un significado ambiguo: una calificación baja puede deberse a un error factual, al tono, a que una herramienta agotó su tiempo de espera, a la latencia de la interfaz o a un cambio en el objetivo del usuario. Un volante confiable debe conservar el request context, las versiones del modelo y de las herramientas, la latencia, el resultado final y la clasificación manual, y solo entonces decidir si se modifican los datos, el modelo, el prompt, la tool o el serving.
+\end{knowledgebox}
+
+\begin{warningbox}{«Recolectar datos del producto» requiere límites de gobernanza}
+Los registros del producto pueden contener información personal, secretos empresariales o datos regulados. Reincorporarlos al entrenamiento requiere purpose limitation, retention policy, control de acceso, elección del usuario, desidentificación y lineage de los datos. El volante de retroalimentación no consiste en agregar automáticamente todas las conversaciones al conjunto de entrenamiento.
+\end{warningbox}
+
+\teachervoice{La clase también presenta una señal concreta del producto: en cierto momento, las tareas de código representaban una proporción muy alta de las solicitudes en inglés, por lo que el equipo aumentó la inversión en code generation. Este ejemplo muestra que el roadmap no proviene solo del criterio de los directivos, sino que también puede derivarse de la distribución observable de las tareas; aun así, los datos observados deben corregirse por el sesgo de la población de usuarios.}
+
+\subsection{Resumen de la sección}
+
+El producto es a la vez una interfaz de servicio, un muestreador de tareas y un puesto de observación de fallos. Un volante de retroalimentación de alta calidad debe descomponer las señales de los usuarios en problemas localizables y devolverlas a la evaluación y al entrenamiento bajo una gobernanza de la privacidad.
+\section{Reasoning y verifier: no fijar las intuiciones demasiado pronto}
+
+La entrevista tuvo lugar poco después de la publicación de DeepSeek R1. La valoración de Lample tiene dos niveles: por un lado, reconoce que un artículo público que presenta experimentos exitosos y fallidos ahorra a toda la comunidad el costo de búsqueda; por otro, advierte que el reasoning sigue en una etapa temprana, y que las intuiciones actuales sobre el tamaño de los modelos, los métodos de RL y el test-time compute podrían volverse obsoletas tan rápido como las intuiciones de la primera época de GPT-3.
+
+\subsection{La unidad de sistema de un reasoning escalable}
+
+El reasoning training necesita un entorno que proporcione tareas y acciones ejecutables, un verifier que juzgue los resultados, una estrategia de muestreo/búsqueda que explore candidatos y, después, usar el reward o el resultado del filtrado para actualizar el modelo. Sin un verifier confiable, una chain-of-thought larga solo aumenta la longitud del texto; no garantiza la corrección.
+
+\lecturefigure{13-reasoning-verifier-loop.png}{La unidad escalable del reasoning es el ciclo cerrado environment--policy--verifier--update.}{Subtítulos locales 27:45--30:45; redibujo conceptual.}
+
+\begin{knowledgebox}{Términos clave: los cuatro niveles de un sistema de reasoning}
+\begin{tabularx}{\textwidth}{L{0.18\textwidth}X X}
+\toprule
+Nivel & Pregunta central & Fallas comunes \\
+\midrule
+Environment & Si el estado, las acciones y las condiciones de terminación son ejecutables & Tareas que no pueden reiniciarse, herramientas inestables, filtración de estado \\
+Verifier & Si puede juzgar el resultado final o los intermedios & Reward hacking, pruebas erróneas, pruebas que solo verifican el formato \\
+Search / sampling & Cómo asignar el test-time compute & Candidatos muy correlacionados, costo fuera de control, poda prematura \\
+Training update & Cómo mejorar la policy a partir de los resultados & Sobreajuste al verifier, regresión de capacidades, sesgo en los datos \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\begin{warningbox}{Los experimentos fallidos publicados también son infraestructura de alto valor}
+Cuando un artículo explica que PRM, MCTS o cierto diseño de reward no funcionó en su configuración, no se trata de una «noticia negativa», sino de una reducción del espacio de búsqueda de la comunidad bajo condiciones delimitadas. La condición es registrar el entorno, el modelo, los datos y la evaluación; de lo contrario, la falla no puede reproducirse ni trasladarse a otras configuraciones.
+\end{warningbox}
+
+\teachervoice{El docente no presentó DeepSeek R1 como un vuelco del roadmap de Mistral, sino que consideró la investigación abierta como un activo reutilizable. Más importante aún, reconoció que las intuiciones de la era del reasoning siguen siendo inestables. Este «no saber» es más adecuado para incluirse en los apuntes que una certeza fabricada a posteriori.}
+
+\subsection{Resumen de la sección}
+
+El centro de un sistema de reasoning no es un texto más largo, sino un entorno ejecutable y un verifier confiable. En la etapa temprana conviene ampliar la cobertura de los experimentos, publicar los resultados negativos y mantener los límites entre objetivos y evidencia, en lugar de idealizar una sola receta.
+\section{Regulación europea y soberanía: separar el momento de la clase de las reglas vigentes}
+
+Cuando un estudiante preguntó por la EU AI Act, la respuesta de Lample reflejó el estado de ese momento: los requisitos generales de transparencia ya estaban a la vista, pero seguía en discusión qué había que divulgar en concreto y cómo se aplicarían las plantillas técnicas. Ese juicio no puede presentarse sin cambios como la situación de 2026. Después, la Comisión Europea precisó que las obligaciones de transparencia y de derechos de autor de los proveedores de modelos general-purpose AI (GPAI) se aplican desde el 2 de agosto de 2025; los modelos introducidos en el mercado antes de esa fecha tienen un periodo de transición hasta el 2 de agosto de 2027, y los modelos que alcanzan el umbral de riesgo sistémico tienen además obligaciones de seguridad adicionales.
+
+\begin{warningbox}{Nota sobre fechas regulatorias; no constituye asesoría legal}
+Esta sección solo explica las implicaciones de infraestructura tratadas en el curso. Para saber si un modelo concreto se considera GPAI, quién es el provider, en qué momento se considera placed on the market y cómo se aplican las excepciones de código abierto o las obligaciones por riesgo sistémico, hay que consultar las directrices vigentes de la Comisión Europea y asesoría legal profesional. Las reglas y sus interpretaciones seguirán actualizándose.
+\end{warningbox}
+
+\subsection{Por qué la privacy y la reliability cambian los límites del mercado}
+
+A los clientes de finanzas, salud, defensa y seguros no solo les importa la puntuación del modelo: también les importa si los datos salen de su perímetro, si las dependencias del servicio son controlables, si las versiones pueden congelarse y si es posible revertir ante una falla. Aunque la calidad de ingeniería de una API externa sea mayor, una organización puede optar por un private deployment por los límites de responsabilidad y la continuidad del negocio. Al leer la figura, conviene tratar privacy, reliability y control como tres ejes independientes: a una organización puede faltarle solo uno de ellos, o puede estar dispuesta a asumir mayores costos de operación para obtener garantías más fuertes en los tres a la vez.
+
+\lecturefigure{15-privacy-reliability.png}{Lo que compran las organizaciones sensibles es la combinación de privacy, reliability y control.}{Subtítulos locales 35:40--37:10; concepto redibujado.}
+
+\begin{knowledgebox}{Lectura de la figura: la soberanía no es «construirlo todo por cuenta propia»}
+La soberanía se acerca más a la sustituibilidad y al poder de decisión: poder elegir el modelo, migrar los datos, auditar las dependencias, congelar versiones y mantener el servicio si el proveedor se retira. Una organización puede usar modelos externos o recursos de código abierto y, al mismo tiempo, reducir la dependencia de un proveedor mediante interfaces estándar, exportación de datos, evaluación de modelos y estrategias con varios proveedores.
+\end{knowledgebox}
+
+\teachervoice{En la clase, la motivación europea abarcaba a la vez el talento, la industria y la soberanía. Lample también aclaró que no es experto en regulación y limitó muchos de sus juicios a «too early to say». Estas notas conservan esa salvedad para no presentar la opinión de un emprendedor como si fuera un hecho de política pública.}
+
+\subsection{Resumen de la sección}
+
+La EU AI Act debe entenderse por fechas: en el momento de la clase, los detalles técnicos aún eran inciertos; después, las GPAI obligations entraron en fase de aplicación. Para el diseño de sistemas, la regulación y la soberanía terminan traduciéndose en lineage de datos, documentación, evaluación, controles de seguridad y despliegues auditables.
+\section{Post-training operating system y la pila de activos abiertos}
+
+Al final de la entrevista, el centro de la competencia se desplaza de un preentrenamiento único hacia un post-training continuo. Lample sostiene que las arquitecturas de preentrenamiento seguirán siendo parecidas durante bastante tiempo, mientras que el post-training todavía tiene mucho margen para innovar. Esto no significa que el preentrenamiento carezca de importancia, sino que la diferencia entre productos depende cada vez más de la calidad conjunta del environment, el verifier, la generación de datos, el tool use, el serving y el pipeline de experimentación rápida.
+
+\subsection{Por qué post-training no es el nombre de un algoritmo}
+
+\term{post-training} designa en general la adaptación de la conducta posterior al base model, lo que incluye supervised fine-tuning, preference optimization, RL, distillation, tool-use training y evaluation continua. Si cualquiera de estas etapas carece de versiones, métricas y reversión, al sistema le cuesta experimentar con rapidez. Por eso el post-training puede verse como un operating system: en la capa superior recibe las tareas del producto, en la inferior se conecta con el entrenamiento y el serving, y de forma transversal aporta datos, evaluación y gobernanza.
+
+\lecturefigure{14-post-training-os.png}{La competitividad del post-training proviene de un sistema completo que puede iterarse de forma repetible.}{Subtítulos locales 37:10--39:25; diagrama conceptual redibujado.}
+
+\begin{knowledgebox}{Lectura de la figura: por qué la flexibilidad puede superar a la escala por sí sola}
+Un post-training online o de alta frecuencia requiere ciclos de experimentación cortos, entornos estables, evaluación automática y una ownership clara. En una organización muy grande cuyo pipeline está disperso y cuyas aprobaciones e interfaces de datos son lentas, el compute adicional no se traduce automáticamente en velocidad de iteración; un equipo pequeño sin disciplina también termina paralizado por experimentos que no pueden reproducirse. La ventaja proviene de «cómputo suficiente + retroalimentación con mucha información + ejecución con poca fricción».
+\end{knowledgebox}
+
+\subsection{Cómo entran los modelos abiertos en la pila comercial}
+
+Cuando otros laboratorios publican modelos open-weight potentes, las empresas de soluciones pueden tratarlos como un activo cuyo compute de preentrenamiento ya fue pagado, y luego hacer adaptación al dominio, integración de herramientas y despliegue privado. El valor no desaparece, sino que se desplaza hacia arriba: de la escasez del base model a los datos, el workflow, la confiabilidad y el control.
+
+\lecturefigure{16-open-asset-stack.png}{Los pesos abiertos son una entrada de la pila del producto, no la entrega completa del valor.}{Subtítulos locales 39:30--42:30; materiales oficiales de licencia abierta y despliegue de Mistral 7B.}
+
+\begin{importantbox}{Lista de verificación de ingeniería para la pila de activos abiertos}
+\begin{enumerate}
+  \item Verificar la license, la ficha del modelo, los datos y las limitaciones conocidas;
+  \item Establecer una baseline en el hardware y la workload de destino;
+  \item Construir los datos del dominio, la evaluación y los límites de seguridad;
+  \item Incorporar herramientas, recuperación, permisos y estado del negocio en pruebas de extremo a extremo;
+  \item Preparar pruebas de compatibilidad y una ruta de reversión para las actualizaciones del base model.
+\end{enumerate}
+\end{importantbox}
+
+\begin{warningbox}{No confundir «reutilizable» con «sin barrera competitiva»}
+Los modelos abiertos reducen el costo de obtener capacidades básicas, pero también elevan lo que los clientes esperan en cuanto a migración y control. La verdadera barrera competitiva puede trasladarse a la retroalimentación de alta calidad, los derechos sobre los datos del dominio, la workflow integration, los activos de evaluación, la distribución y la confiabilidad operativa; todo ello sigue exigiendo una inversión de largo plazo.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El post-training es el sistema operativo que conecta las tareas del producto con la conducta del modelo. Los activos abiertos permiten que los equipos reutilicen compute público, pero la diferenciación debe reconstruirse mediante datos, herramientas, despliegue y ciclos cerrados de retroalimentación.
+\section{Síntesis y ampliación}
+
+\subsection{Conclusiones principales}
+
+\begin{importantbox}{Once conclusiones transferibles}
+\begin{enumerate}
+  \item El problema de investigación determina el espacio de estados, la señal de retroalimentación y la forma de la infraestructura.
+  \item La intuición geométrica puede poner en marcha el aprendizaje no supervisado, pero necesita un ciclo de entrenamiento capaz de corregir las hipótesis.
+  \item La corrección de una formal proof proviene del verifier; el LLM se encarga de proponer candidatos y de guiar la búsqueda de forma heurística.
+  \item Decir «Optimal» exige especificar al mismo tiempo el objective, el constraint y el workload.
+  \item Que algo funcione correctamente a pequeña escala no garantiza estabilidad numérica a gran escala; el entrenamiento necesita canary por etapas.
+  \item El final run cost no equivale al R\&D cost; los experimentos fallidos y la construcción del sistema forman la mayor parte del iceberg.
+  \item El trabajo con datos es poco visible, pero con frecuencia determina la calidad del modelo más que el código de entrenamiento.
+  \item Un open-weight checkpoint es solo la primera capa de la pila de producto, no una solution utilizable.
+  \item La personalización empresarial debe conectar datos, evaluación, despliegue, monitoreo y reversión.
+  \item La unidad escalable del reasoning es el ciclo environment--verifier, no un texto más largo.
+  \item El post-training y los activos abiertos desplazan la competencia hacia la iteración rápida, las herramientas, la retroalimentación y el control operativo.
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Tarea práctica: diseñar un sistema de modelo empresarial con restricciones}
+
+Elige un escenario, por ejemplo un asistente de documentación hospitalaria, un copilot de código interno, la revisión de reclamaciones de seguros o un edge agent sin conexión, y completa el siguiente diseño:
+
+\begin{enumerate}
+  \item Escribe las restricciones no negociables: residencia de datos, latencia, disponibilidad, hardware, responsabilidad y ventanas de actualización;
+  \item Elige entre external API, private cloud, on-prem o edge, y explica por qué no elegiste las demás modalidades;
+  \item Define los componentes de las cinco capas de checkpoint-to-solution y su owner;
+  \item Diseña una evaluation suite mínima que distinga entre errores del modelo, errores de herramientas y errores del sistema;
+  \item Diseña el feedback/data loop: indica qué datos pueden reincorporarse, durante cuánto tiempo se conservan y cómo se retiran;
+  \item Propón las estrategias de canary, rollback y auditoría para la actualización del base model y para las actualizaciones de post-training.
+\end{enumerate}
+
+\begin{knowledgebox}{Criterios de aceptación}
+Una propuesta de alta calidad no se limita a escribir «usar Mistral / LLaMA y hacer ajuste fino». Debe poder responder: qué entorno produce la ground truth, quién verifica los resultados, cómo se obtienen los datos, cómo se sirve el modelo, cómo se localizan las fallas, cuándo se detiene el rollout y quién responde por el resultado final de negocio.
+\end{knowledgebox}
+
+\subsection{Lecturas adicionales}
+
+\begin{enumerate}
+  \item Guillaume Lample et al., \emph{Unsupervised Machine Translation Using Monolingual Corpora Only}, 2018, véase el \href{run:source-materials/unsupervised-machine-translation.pdf}{PDF local}.
+  \item Guillaume Lample et al., \emph{HyperTree Proof Search for Neural Theorem Proving}, 2022, véase el \href{run:source-materials/hypertree-proof-search.pdf}{PDF local}.
+  \item Jordan Hoffmann et al., \emph{Training Compute-Optimal Large Language Models}, 2022, véase el \href{run:source-materials/chinchilla-scaling-laws.pdf}{PDF local}.
+  \item Hugo Touvron et al., \emph{LLaMA: Open and Efficient Foundation Language Models}, 2023, véase el \href{run:source-materials/llama.pdf}{PDF local}.
+  \item Albert Q. Jiang et al., \emph{Mistral 7B}, 2023, véase el \href{run:source-materials/mistral-7b.pdf}{PDF local}.
+  \item Página oficial de lanzamiento de Mistral 7B de Mistral AI: \href{https://mistral.ai/news/announcing-mistral-7b}{Mistral 7B}.
+  \item Directrices y calendario de la Comisión Europea sobre GPAI: \href{https://digital-strategy.ec.europa.eu/en/policies/guidelines-gpai-providers}{Guidelines for providers of general-purpose AI models}.
+\end{enumerate}
+
+\subsection{Ruta de lectura sugerida}
+
+Si el objetivo es reproducir la cadena de razonamiento de esta clase, y no leer cada artículo de forma aislada, se puede seguir el orden siguiente. Primero, lee el problem setup, el objetivo de entrenamiento y la ablation del artículo sobre traducción automática no supervisada, y observa cómo una hipótesis geométrica se corrige mediante denoising y back-translation; después, lee la interfaz del entorno, el hyper-tree backup y el online training de HTPS para entender cómo el verifier modifica el algoritmo de búsqueda. A continuación, lee Chinchilla y LLaMA en conjunto, escribe la restricción de presupuesto que optimiza cada uno y compara qué implica, para el despliegue de inferencia, entrenar un modelo pequeño con un horizon largo. Por último, lee las secciones de GQA/SWA de Mistral 7B y convierte la architecture claim en un balance de recursos: KV cache, ancho de banda, latencia y throughput.
+
+\begin{knowledgebox}{Plantilla de registro de lectura}
+Para cada material, registra al menos cinco elementos: \textbf{restricciones del problema}, \textbf{señal de retroalimentación autorizada}, \textbf{mecanismo central}, \textbf{principales ablaciones o evidencias} y \textbf{conclusiones que no se pueden derivar}. Al terminar, agrega una columna más: «si se llevara a production, qué componentes del sistema faltarían». Esta plantilla convierte la lectura de artículos, de un simple extracto de conclusiones, en un ejercicio de diseño de sistemas.
+\end{knowledgebox}
+
+\end{document}

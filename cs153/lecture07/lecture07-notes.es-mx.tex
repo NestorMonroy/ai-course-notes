@@ -1,0 +1,448 @@
+\documentclass[a4paper]{article}
+\input{../cs153-preamble.es-mx.tex}
+
+\renewcommand{\notetitle}{Lecture 07: infraestructura de Cursor: indexación, incidentes de bases de datos e inferencia global}
+\renewcommand{\noteauthors}{Elaborado a partir de la entrevista con Sualeh Asif, los subtítulos con marcas de tiempo y la documentación oficial de Cursor y de bases de datos}
+\renewcommand{\notedate}{Curso de invierno de 2025 · Versión reescrita en 2026}
+\renewcommand{\videochannel}{Publicación histórica del curso Stanford CS153 (actualmente en private)}
+\renewcommand{\videopublishdate}{2025-03-04}
+\renewcommand{\videoduration}{48:37}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=4jDQi9P9UIw}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.96\textwidth]{images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\begin{document}
+\makecscover
+
+\section{Auditoría de fuentes: reescribir la historia de crecimiento como mecanismos del sistema}
+
+Esta clase la imparte Sualeh Asif, CTO y cofundador de Cursor. Al verificarlo el 11 de agosto de 2026, el video público ya era private; el repositorio conserva 1,288 subtítulos con marca de tiempo y la portada oficial. Los subtítulos registran la experiencia de arquitectura e incidentes de marzo de 2025; la documentación de Cursor de 2026 sobre secure indexing, privacy, CursorBench, Router y agent solo se usa para verificar mecanismos persistentes o explicar su evolución posterior, y no se proyecta hacia atrás como si esas capacidades ya existieran en el momento de la clase.
+
+\begin{warningbox}{Límites de la evidencia sobre las cifras de escala}
+En la clase se mencionan cifras como un crecimiento de aproximadamente cien veces en el último año, alrededor de cien millones de llamadas diarias a los modelos propios y alrededor de mil millones de documentos diarios en el sistema de indexación. Este texto las conserva como \textbf{estimaciones del ponente/cifras de la clase}, útiles para entender la forma de la carga, y no como conclusiones auditadas sobre la escala actual, la posición comercial o las relaciones con proveedores.
+\end{warningbox}
+
+\begin{importantbox}{Los tres ciclos cerrados de toda la clase}
+\begin{enumerate}
+  \item \textbf{Context loop}: workspace change $\rightarrow$ incremental index $\rightarrow$ retrieval context;
+  \item \textbf{Edit loop}: request $\rightarrow$ model/provider $\rightarrow$ plan/edit $\rightarrow$ fast apply $\rightarrow$ validation;
+  \item \textbf{Reliability loop}: traffic/failure $\rightarrow$ telemetry $\rightarrow$ mitigation/migration $\rightarrow$ safer architecture.
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Por qué AI coding no es una API de modelo}
+
+La experiencia de usuario de AI coding depende en conjunto de la freshness del contexto, la retrieval quality, la capacidad del modelo, la provider capacity, la edit application y la editor validation. Aunque la salida del modelo sea correcta, si el índice está desactualizado, el provider tiene cola, la aplicación del patch es lenta o los diagnostics se traban, el usuario percibe que el sistema falla. Por eso la optimización de la infraestructura debe tomar como objeto la interaction loop completa.
+
+\lecturefigure{01-coding-loop.png}{Un producto de AI coding es un ciclo cerrado formado por workspace, context, model, apply y feedback.}{Subtítulos locales 00:00--05:20; redibujo conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: el latency budget pertenece a toda la cadena}
+Una interacción puede descomponerse, de forma aproximada, como
+\[
+T_{total}=T_{context}+T_{queue}+T_{model}+T_{apply}+T_{validate}.
+\]
+El p95/p99 de cualquiera de estos términos basta para romper la fluidez. El streaming puede reducir el time-to-first-token, pero no elimina la latencia de cola de context lookup, queueing, patch conflict ni diagnostics.
+\end{knowledgebox}
+
+\teachervoice{Asif advierte a los estudiantes con la frase «si cien millones de llamadas no te suenan aterradoras, en realidad sí lo son»: el crecimiento no solo cambia la capacidad, sino cada supuesto por defecto. Los retry ocasionales, los rebuild completos o las reparaciones manuales que antes eran esporádicos se convierten, a gran cardinalidad, en carga continua.}
+
+\subsection{Resumen de la sección}
+
+El protagonista de Lecture 07 no es la marca Cursor, sino un AI interaction system de alta frecuencia. Cada decisión de arquitectura que sigue debe responder: qué tramo del loop mejora, qué estado agrega y cómo se degrada ante una falla.
+\section{Tres Product-Critical Systems: Indexing, Inference y Apply}
+
+El curso primero divide el sistema en indexing, model inference y la product/apply layer. Los tres sirven al mismo editor, pero tienen curvas de recursos completamente distintas: indexing tiende a ser asíncrono y data-intensive; inference está limitado por la GPU capacity, el batching y la latency; la apply layer debe trasladar los resultados generados de forma rápida y segura al archivo que el usuario está editando.
+
+\subsection{Cada workload requiere su propio SLO}
+
+Esta sección convierte las diferencias de workload del párrafo anterior en un contrato observable. Al leer la figura, primero se define por separado qué significa «éxito, degradación y falla» para indexing, inference, apply y el data plane, y después se eligen métricas como freshness, recall, queue time, edit success o job correctness. Si todas las rutas comparten una sola cifra de availability, durante un incidente no es posible determinar qué tipo de trabajo conviene sacrificar para proteger la ruta principal de interacción.
+
+\lecturefigure{02-three-systems.png}{La escala de Cursor proviene de cuatro tipos de carga: indexing, inference, product/apply y data plane.}{Subtítulos locales 02:20--05:20; redibujo conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: primero, definir la falla de cada sistema}
+En indexing, la falla puede ser un índice stale, missing o con recall bajo; en inference, puede ser un timeout, un rate limit o baja calidad; en apply, puede ser un conflicto de patch, una posición errónea o un editor freeze; en el data plane, puede ser un job perdido, una ejecución duplicada o un billing que no se puede explicar. Solo si primero se clasifican los tipos, las alertas y las degradaciones no se contaminan entre sí.
+\end{knowledgebox}
+
+\begin{importantbox}{Un SLO no puede limitarse a «99.9\% available»}
+\begin{itemize}
+  \item Index freshness: el retraso entre un workspace change y el momento en que es recuperable;
+  \item Retrieval quality: recall/utility bajo una latency y un filter determinados;
+  \item Inference: time-to-first-token, tokens/s, error y queue time;
+  \item Apply: edit success, conflict, validation latency y undo safety.
+\end{itemize}
+\end{importantbox}
+
+\subsection{Apply model: separar «qué se quiere cambiar» de «cómo se escribe en disco»}
+
+El modelo de planificación es bueno para entender la intención, elegir archivos y generar modificaciones; el specialized apply model, en cambio, se encarga de la coincidencia de posiciones, la reescritura local y la token application de alta velocidad. Se separan porque el modelo más potente no necesariamente es el mejor en la patch application determinista y de baja latencia. El sistema necesita diseñar interfaces distintas para «pensar» y para «escribir en el editor state».
+
+\teachervoice{En clase se insiste repetidamente en que la capa de producto no es una UI delgada colocada después de la salida del modelo. Lo que realmente hace que una herramienta «se sienta cómoda de usar» suele ser el trabajo de sistemas que difícilmente aparece en un benchmark: apply, streaming, context preparation y editor integration.}
+
+\subsection{Resumen de la sección}
+
+Una plataforma de AI coding no es un único servicio de backend, sino una combinación de varios sistemas con SLO y formas de datos distintos. El valor del producto surge de la coordinación de estos sistemas dentro de una misma interacción, no de la métrica aislada de un modelo.
+\section{Monolith y Blast Radius: el límite del código no es el límite de las fallas}
+
+Asif no considera que los microservice sean un requisito para escalar. La clase se centra más en el \term{blast radius} (radio de explosión): a cuántos usuarios, funciones y region puede afectar una falla de código, de configuración o de una dependencia, y durante cuánto tiempo. Un monolith puede compartir el código y el proceso de despliegue y, al mismo tiempo, aislar las rutas de alto riesgo mediante traffic cell, queue, database, feature flag y límites de permisos.
+
+\subsection{Separar la critical path de la experimental path}
+
+Esta sección responde a la pregunta «cómo puede un solo repositorio seguir teniendo dominios de falla pequeños». Al leer la figura, no cuente el número de service; revise los límites de ejecución de auth, editor request, index job, new model y shared schema. Si el experimental code puede agotar las conexiones de la critical database o contaminar una queue compartida, el blast radius sigue siendo grande aunque ese código se haya separado en un service independiente.
+
+\lecturefigure{03-blast-radius.png}{Un monolith puede reducir el blast radius mediante cells de despliegue y límites de dependencias y de tráfico.}{Subtítulos locales 05:20--07:50; redibujo conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: cuatro controles de aislamiento}
+\textbf{Traffic} se aísla con canary y cells por tenant/region; \textbf{resource}, con quota, queue y conjunto independientes; \textbf{state}, con versioned schema y rebuildable derived data; \textbf{change}, con feature flag, rollback y deploy policy. Los microservice son solo una de las formas de implementar estos aislamientos.
+\end{knowledgebox}
+
+\begin{importantbox}{Fórmula de diagnóstico del blast radius}
+Puede escribirse de forma aproximada como
+\[
+B=A\times D\times S,
+\]
+donde $A$ son las affected requests/users, $D$ es la duración y $S$ es el daño al estado o la complejidad de la recuperación. La arquitectura debe reducir primero la $S$ irreversible; después, reducir $A$ con canary y cells, y reducir $D$ con detection/rollback.
+\end{importantbox}
+
+\begin{warningbox}{«Mantener el código simple» no significa escribir menos abstracciones}
+La simplicidad debe reflejarse en invariant explicables, pocas dependency, failure mode que puedan probarse y recovery path claras. Si la complejidad se esconde en global state, en retry implícitos o en una database compartida, el número de líneas de código puede disminuir, pero la complejidad del sistema aumenta.
+\end{warningbox}
+
+\teachervoice{La postura de Asif no es «nunca separar servicios», sino dar prioridad a que un grupo reducido de ingenieros entienda la critical path completa. Solo cuando la organización, los dominios de falla o la forma de los recursos realmente necesiten evolucionar de manera independiente conviene pagar el costo de los límites distribuidos.}
+
+\subsection{Resumen de la sección}
+
+Escalar es, ante todo, un problema de aislamiento, no de número de service. Tanto un buen monolith como un buen distributed system necesitan un blast radius explícito, presupuestos de recursos, contratos de versión y estrategias de recuperación.
+\section{Incremental Indexing: procesar solo el código que cambió}
+
+El primer principio del codebase indexing es evitar el trabajo repetido. La mayoría de los archivos del workspace no cambia entre dos sincronizaciones, así que el sistema debe identificar el delta mediante el content hash y el tree summary. Después aplica al changed content el análisis sintáctico, el chunk, el embedding y el index. La documentación actual de Cursor secure indexing describe además el content-based embedding cache y el index sharing. Esas son evoluciones posteriores, y esta nota solo las usa para explicar el durable mechanism.
+
+\subsection{Merkle-style sync y content identity}
+
+\term{Merkle tree} es un hash tree jerárquico. Los nodos hoja representan el contenido de archivos o de chunks, y el hash de cada nodo padre lo determinan sus hijos. Si dos root hash son iguales, se concluye rápidamente que ningún punto del subtree cambió. Si son distintos, se desciende por el árbol hasta localizar el cambio. Esto reduce la metadata de sincronización y los escaneos completos, pero no resuelve por sí solo los problemas de permission, rename semantics ni semantic equivalence.
+
+\lecturefigure{04-merkle-sync.png}{Merkle-style sync localiza los cambios con hashes jerárquicos, en lugar de volver a subir el workspace completo.}{Subtítulos locales 10:20--14:40; redibujo conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: qué demuestra que dos Hash sean iguales}
+La hash equality demuestra la byte-level content identity. Por eso permite reutilizar con seguridad el análisis sintáctico o el embedding. No demuestra que dos path tengan los mismos permisos, ni que un código similar tenga la misma semántica. El index key debe incluir, como mínimo, el content hash, el embedding model/version, la chunking version y el access scope.
+\end{knowledgebox}
+
+\begin{importantbox}{Modelo de costos del incremental work}
+Si el workspace tiene $N$ chunks y el cambio actual es $\Delta N$, el costo incremental ideal debería acercarse a
+\[
+C_{update}=O(\Delta N\cdot(C_{parse}+C_{embed}+C_{write}))
+\]
+en lugar de pagar $O(N)$ cada vez. Un sistema real asume además el costo de la tree comparison, el deleted/renamed content, el queue overhead y los cache miss.
+\end{importantbox}
+
+\subsection{Parse, chunk, embed, store, retrieve}
+
+\term{embedding} (representación vectorial) asigna a cada chunk de código un vector numérico, de modo que una query y un content similares queden cerca en el espacio vectorial. \term{vector search} (búsqueda vectorial) busca los vecinos más cercanos entre una gran cantidad de embeddings. No es sinónimo de «comprender todo el repo»: el chunk boundary, el metadata filter, la lexical search, el reranking y el context budget influyen en el resultado.
+
+\lecturefigure{05-index-pipeline.png}{Secure indexing es un pipeline incremental formado por parse, cache, embedding, storage y retrieval.}{Subtítulos locales 10:20--15:10; documentación oficial de Cursor secure indexing.}
+
+\begin{knowledgebox}{Lectura de la figura: Freshness, security y recall se miden por separado}
+La freshness mide cuánto tarda un nuevo edit en poder recuperarse. La security mide quién puede hacer query sobre qué chunks. \term{recall} (exhaustividad) mide qué parte del contenido relevante que debía devolverse se recupera efectivamente, y puede escribirse como $\mathrm{recall}=\frac{\text{relevant retrieved}}{\text{all relevant}}$. Un recall alto puede seguir trayendo ruido, por lo que también hay que medir la precision, la ranking utility y el éxito final de la tarea.
+\end{knowledgebox}
+
+\begin{warningbox}{El embedding cache también necesita versiones y semántica de eliminación}
+Si el contenido es idéntico, se puede reutilizar el embedding. Pero cuando cambian el model version, el chunker, el language parser o la security policy, la cache anterior puede dejar de ser válida. Si el usuario elimina un repo o cambian los permisos, el sistema también debe revocar las index reference. Las condiciones bajo las cuales la content cache puede seguir existiendo deben definirlas las políticas de retention y de aislamiento.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Lo esencial del Incremental indexing es la content identity, la versioned transform y el access scope. El hash reduce el cómputo repetido, pero la retrieval quality y la security siguen requiriendo evidencia independiente.
+\section{Evolución del modelo de datos: qué estado necesita realmente una base de datos}
+
+A medida que crece la escala del índice, colocar users, repos, jobs, documents, vectors y source artifacts en un mismo tipo de base de datos genera workloads que entran en conflicto entre sí. La transactional metadata requiere actualizaciones consistentes; el job state requiere lease y retry; los segmentos de vectores se adaptan a grandes bloques de immutable data; los source chunks deben permitir reconstruir el derived index. Esta sección sustituye la discusión sobre «qué base de datos es la mejor» por una estratificación basada en la source of truth.
+
+\subsection{Cuatro clases de estado, cuatro destinos de almacenamiento}
+
+La \term{source of truth} (fuente de datos autoritativa) es el estado original que se considera correcto durante la recuperación. El derived vector index puede reconstruirse a partir del source artifact y de la transform version, por lo que no debe asumir el papel de única truth; si se pierde el job progress, puede reintentarse, pero debe garantizarse la idempotencia; la permission metadata, en cambio, requiere restricciones fuertes y audit.
+
+\lecturefigure{06-storage-roles.png}{Metadata, job, vector/search y source artifact requieren distintos modelos de durabilidad y de consulta.}{Subtítulos locales 14:40--19:10; redibujo conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: primero pregunta «¿qué pasa si se pierde?»}
+Si, tras perderse un estado, lo único posible es disculparse con el usuario, probablemente se trata de una source of truth; si puede reconstruirse a partir del object, es derived state; si puede ejecutarse repetidamente, lo esencial es la idempotency; si solo sirve para acelerar la query, es cache. Esta clasificación es más estable que elegir primero entre PostgreSQL, MongoDB o una vector DB.
+\end{knowledgebox}
+
+\begin{importantbox}{La capacidad de reconstrucción es un activo de arquitectura}
+Para un derived index, el objetivo de recuperación no se limita a RPO/RTO; también deben registrarse: la versión de entrada, la versión de embedding/chunking, el rebuild throughput, el conjunto de validación y el método de cutover. Un «índice» sin rebuild reproducible se convierte poco a poco en una segunda base de datos autoritativa imposible de migrar.
+\end{importantbox}
+
+\subsection{Backpressure, lease e idempotencia}
+
+La \term{backpressure} (contrapresión) hace que, cuando el componente descendente se satura, el ascendente reduzca su ritmo o rechace trabajo nuevo, lo que evita que la queue crezca sin límite. Cada index job debe llevar una version y una idempotency key; el worker obtiene la propiedad del trabajo durante un tiempo limitado mediante un lease; al expirar, puede reintentarse con seguridad; una versión nueva del mismo repo puede hacer supersede de la versión anterior, lo que evita completar sin sentido un rebuild ya obsoleto.
+
+\begin{warningbox}{El retry no ofrece confiabilidad gratuita}
+Un retry sin presupuesto, jitter, deadline ni idempotency convierte un solo timeout en escrituras duplicadas y en una avalancha de conexiones. Cada retry policy debe especificar: qué errores pueden reintentarse, cuántas veces como máximo, si consumen el mismo budget y cuándo pasan a dead-letter o a atención manual.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La arquitectura de almacenamiento debe partir de la state class, la source of truth y la ruta de recuperación. La database brand es un detalle de implementación; las restricciones de largo plazo son la capacidad de reconstruir el estado, la idempotencia, el versionado y la contrapresión.
+\section{Incidente 1: la retroalimentación positiva entre Retry, Cron y Rebuild}
+
+El primer incidente de la clase no fue «se cayó una base de datos», sino la respuesta simultánea de varios mecanismos automáticos: el timeout dispara retry, el repair job y el cron aumentan la carga, la queue se alarga, y los cache miss junto con el rebuild terminan de saturar las dependencias. La primera acción de Incident response no es agregar más trabajos de reparación, sino identificar la retroalimentación positiva y detener al producer.
+
+\subsection{Del initial fault a la cascade}
+
+Esta sección reescribe el incidente de la clase como un dependency feedback graph, en lugar de relatar las operaciones en orden cronológico. Al leer la figura hay que seguir el recorrido desde el initial fault hasta la automatic reaction, la load amplification y la mitigation: lo decisivo no es qué componente reportó el error primero, sino qué retry, repair job y rebuild siguen aumentando la entrada de la saturated dependency, y qué punto de control puede reducir más rápido la ganancia del sistema.
+
+\lecturefigure{07-incident-cascade.png}{Los retry y los repair job automáticos pueden amplificar una falla local hasta convertirla en un incidente global.}{Subtítulos locales 19:10--25:30; redibujo conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: el orden de recuperación es el inverso del orden de optimización habitual}
+En condiciones normales se busca throughput y automatización; durante un incidente primero se protege el invariant: detener los producer no críticos, limitar los retry, aplicar shed load y congelar los deploy, y después restablecer la read/write path mínima. Solo cuando la dependency tiene headroom se liberan gradualmente el backlog y el rebuild.
+\end{knowledgebox}
+
+\begin{importantbox}{Retry amplification}
+Si la tasa original de solicitudes es $\lambda$, cada falla dispara en promedio $r$ reintentos y la probabilidad de falla es $p$, la carga adicional puede aproximarse como
+\[
+\lambda_{effective}\approx \lambda(1+pr+(pr)^2+\cdots).
+\]
+Cuando $pr$ se acerca a 1, la cadena de reintentos se vuelve muy sensible. Los sistemas reales controlan la amplificación con bounded retry, exponential backoff, jitter, circuit breaker y un global retry budget.
+\end{importantbox}
+
+\teachervoice{El relato del incidente en la clase tiene un fuerte tono dramático de «una persona sentada ahí salvando el sistema». Lo que de verdad hay que aprender es la command structure: quién puede detener al producer, quién evalúa el invariant de los datos, quién se encarga de la comunicación con los usuarios y qué automatizaciones deben desactivarse en degraded mode.}
+
+\subsection{Resumen de la sección}
+
+La causa raíz de una Incident cascade suele ser un feedback loop, no un componente aislado. La recuperación exige primero reducir la ganancia del sistema y después reparar el estado; el postmortem debe incorporar retry, cron, queue y migration en un mismo dependency graph.
+\section{Incidente dos: PostgreSQL Storage Pressure y la factura de la migración}
+
+El segundo incidente se centra en la presión de almacenamiento de PostgreSQL. PostgreSQL usa MVCC (Multi-Version Concurrency Control, control de concurrencia multiversión): después de un update/delete, la tuple anterior no se retira de inmediato del archivo, y se necesita vacuum para recuperar el espacio reutilizable. Las transacciones largas, el volumen de escritura, los index y el autovacuum lag provocan bloat; cuando el disco está cerca de agotarse, la propia maintenance también necesita I/O y espacio, y el riesgo de la recuperación aumenta de forma abrupta.
+
+\subsection{Dead tuple, VACUUM y disk headroom}
+
+Una \term{dead tuple} es una versión anterior de una fila que ya no es visible para ninguna transaction activa; \term{VACUUM} marca el espacio como reutilizable y mantiene la información de visibilidad, y el VACUUM ordinario por lo general no devuelve los archivos al sistema operativo; \term{VACUUM FULL} reescribe la tabla y puede recuperar más disco, pero requiere espacio adicional y bloqueos fuertes. La atención de un incidente no puede ejecutar a ciegas la maintenance más pesada cuando el sistema está saturado.
+
+\lecturefigure{08-postgres-pressure.png}{La storage pressure de PostgreSQL surge del acoplamiento entre write workload, MVCC residue, maintenance y disk headroom.}{Subtítulos locales 25:30--32:40; documentación oficial de PostgreSQL sobre vacuum.}
+
+\begin{knowledgebox}{Lectura de la figura: no se trata de que «Postgres no sea escalable»}
+Primero se revisan transaction age, dead tuple, table/index growth, WAL, autovacuum thresholds, I/O y free space, y después se decide si hacer tune, partition, archive, offload o migrate. Las dificultades del ponente provienen de un workload y un momento específicos; de ellas no se puede concluir que todos los sistemas de indexing deban evitar PostgreSQL.
+\end{knowledgebox}
+
+\begin{warningbox}{La emergency migration suma carga}
+Durante la migración, el sistema anterior sigue haciendo serving, el sistema nuevo tiene que hacer backfill, la validation requiere dual read/query y, si algo falla, además hay retry. Sin capacity independiente ni throttle, la migration misma vuelve más difícil que el sistema original se recupere. Hacer primero offload de los workload no críticos y congelar el schema suele ser más seguro que mudar todo de inmediato a máxima velocidad.
+\end{warningbox}
+
+\subsection{Cold start: reconstruir embedding y cache}
+
+Aquí, \term{cold start} no significa solo el arranque de un process nuevo, sino que el index nuevo carece de embedding, segment, cache e información estadística. Reconstruir cada repo exige leer el source, hacer chunk, llamar al embedding, escribir en el storage nuevo y luego verificar con query. En la clase se mencionó que la migration también consume inference capacity adicional; esa es precisamente la factura oculta.
+
+\lecturefigure{09-cold-start.png}{La index migration requiere backfill, dual validation, cache warming y un cutover seguro.}{Subtítulos locales 29:30--32:40; redibujo conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: antes del cutover, definir la equivalence}
+El sistema nuevo y el anterior no necesariamente devuelven exactamente el mismo top-$k$. La validation debe comparar recall/utility, filter correctness, latency, freshness y cost; para los usuarios clave se puede usar shadow query; solo después de cumplir los umbrales se cambia el tráfico de forma gradual por tenant/region, y se conservan la doble escritura o los datos fuente durante el periodo de rollback.
+\end{knowledgebox}
+
+\teachervoice{«La mejor manera de escalar una base de datos es no hacer que la base de datos se encargue de ese trabajo» es un lema de clase útil pero peligroso. La interpretación correcta es: sacar del transactional hot path los datos immutable, reconstruibles y orientados al rendimiento, no eliminar todas las database.}
+
+\subsection{Resumen de la sección}
+
+El incidente de PostgreSQL revela el acoplamiento entre la MVCC maintenance, el disk headroom y el workload de la migration. Migrar una base de datos no es copiar datos, sino reconstruir el estado derivado, verificar la equivalencia y gestionar el riesgo de operar dos sistemas a la vez.
+\section{Object-Storage-Native Search: separación entre la capa de durabilidad y la capa de consultas en caliente}
+
+Después del incidente, la dirección de la arquitectura fue colocar los grandes immutable index segment en object storage y convertir el query compute y la caché SSD/memory en capas reemplazables. Amazon S3 ofrece almacenamiento duradero a nivel de objeto y consistencia fuerte de lectura después de escritura; sistemas como turbopuffer construyen search sobre él. La ventaja es que el durable cost queda desacoplado del compute; el costo está en la primera lectura, la tail latency, la cache admission y el segment management.
+
+\subsection{Durable objects, cache y stateless compute}
+
+\term{object storage} guarda blobs y metadata bajo una object key; es adecuado para objetos grandes, durabilidad de bajo costo y namespaces masivos, y no ofrece los row update ni los join tradicionales. \term{stateless compute} significa que el query worker no tiene el único estado duradero y puede recuperarse a partir de los objetos y de la shared metadata; puede seguir teniendo una cache local, pero perder esa cache no rompe la correctness.
+
+\lecturefigure{10-object-storage-search.png}{Object-storage-native search organiza en capas los durable segment, la caché SSD/memory y el stateless query tier.}{Subtítulos locales 32:30--36:40; documentación oficial de arquitectura de turbopuffer.}
+
+\begin{knowledgebox}{Lectura de la figura: Object storage no elimina los problemas de database}
+El sistema sigue necesitando metadata catalog, segment version, compaction, cache coherence, filter index, recall measurement y deletion. La capa de objetos reduce el durability cost y simplifica el reemplazo, pero traslada los problemas de rendimiento al prefetch, la cache y el query planning.
+\end{knowledgebox}
+
+\begin{importantbox}{El valor de la cache depende del reuse}
+Si la object fetch latency es $L_o$, la cache hit latency es $L_c$ y la hit rate es $h$, la latencia media de lectura es aproximadamente
+\[
+E[L]=hL_c+(1-h)L_o.
+\]
+Sin embargo, la experiencia del usuario depende más de p95/p99; los tenant populares, las query de barrido y las cold region hacen que el promedio oculte la cola. Hay que observar la hit rate por namespace y por query type.
+\end{importantbox}
+
+\begin{warningbox}{Low cost per TB no equivale a low query cost}
+La capacidad de object storage es barata, pero los GET frecuentes, la data transfer, la decompression, el CPU ranking y los cache miss elevan el costo por query. El modelo de precios debe calcular a la vez los stored bytes, la read amplification, el QPS, el recall target y el latency SLO.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Object-storage-native search desacopla el durable state del query compute y es adecuado para index de gran escala, immutable y reconstruibles. No es una arquitectura sin base de datos, sino una redefinición de las responsabilidades de la metadata, los objetos y la cache.
+\section{Global Inference y Provider Portfolio}
+
+Cursor ejecuta modelos propios y, al mismo tiempo, llama a frontier providers. Autocomplete es extremadamente sensible a la latency: requiere GPU replicas en todo el mundo y un overload behavior definido. En las agent requests complejas importan más la calidad, el context y el tool use, y además dependen de los rate limits y de los cambios de versión de cada provider. Esta sección coloca el self-hosted serving y el multi-provider routing en un mismo plano de control de capacity/evaluation.
+
+\subsection{Region, queue y fallback del self-hosted model}
+
+Esta sección responde primero por qué autocomplete no puede desplegarse en un solo clúster centralizado. Al leer la figura, siga el recorrido por user region, router, GPU region y fallback: la distancia, la queue depth, las model replicas y la KV cache influyen en el p99. Cuando la region local se satura, el sistema debe elegir entre la latency remota, un smaller model y la graceful degradation.
+
+\lecturefigure{11-global-inference.png}{La self-hosted inference requiere diseñar la latencia de cola interactiva con enrutamiento por region, capacidad y degradación.}{Subtítulos locales 03:20--04:20, 38:10--41:40; reelaboración conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: el capacity headroom no es desperdicio}
+El interactive serving no puede llevar la utilization promedio al 100\%. El queueing crece de forma no lineal cerca de la saturación, por lo que se necesitan replica headroom, admission control, deadlines y preemption. Las tareas por lote/re-embedding de baja prioridad pueden ocupar los periodos de baja demanda, pero deben ceder los recursos cuando aumenta el tráfico en línea.
+\end{knowledgebox}
+
+\subsection{Frontier providers: rate limit, quality, cost y failover}
+
+\term{rate limit} es el límite que el provider impone a la concurrencia de requests/tokens o a una ventana de tiempo; \term{provider routing} elige el modelo según la tarea, la calidad, el estado de salud, la quota, el costo y la policy. Un round-robin simple ignora las diferencias de capacidad entre modelos y sus interfaces de context/tool; un portfolio realmente utilizable necesita normalized requests, versioned evals y un fallback específico para cada provider.
+
+\lecturefigure{12-provider-routing.png}{La multi-provider inference requiere task contract, provider state, router y evidencia continua.}{Subtítulos locales 38:10--41:40; CursorBench y materiales posteriores sobre Cursor Router.}
+
+\begin{knowledgebox}{Lectura de la figura: qué le falta a la offline eval y qué al online outcome}
+El offline benchmark es reproducible y adecuado para pruebas de regresión, pero no refleja por completo los repos reales, la latency ni la user acceptance; la online metric se acerca al resultado del producto, pero la afectan la selección, la UI y el traffic mix. El router debe usar ambas y registrar el model/version en cada request y en cada incident.
+\end{knowledgebox}
+
+\begin{importantbox}{El routing es una optimización con restricciones}
+Para una task $x$ y un model/provider candidato $m$, puede abstraerse como
+\[
+m^*=\arg\max_m Q(m,x)-\alpha C(m)-\beta L(m)
+\]
+sujeto a restricciones de privacy, availability, context, tool y quota. Los pesos $\alpha,\beta$ cambian según el plan, el tenant y la ruta de interacción, por lo que no conviene mantener un único «mejor modelo» global.
+\end{importantbox}
+
+\teachervoice{El realismo de la clase está en que los clientes de crecimiento rápido llaman una y otra vez para pedir más capacity, mientras la empresa prepara varios providers y GPU propias. La resilience no consiste en conectar un segundo proveedor de manera improvisada cuando el primero falla, sino en mantener en todo momento interfaces, evals, quotas y políticas de datos que permitan el cambio.}
+
+\subsection{Resumen de la sección}
+
+La global inference es a la vez un problema de queueing, capacity, evaluation y supply chain. Self-hosted y frontier provider no son opciones excluyentes, sino una combinación de alternativas con distinto grado de control, costo y modos de falla.
+\section{Fast Apply: convertir la salida del modelo en ediciones verificables}
+
+Después de que el modelo genera un patch, el sistema todavía tiene que localizar la posición en el archivo, manejar las modificaciones simultáneas del usuario, aplicar el diff, conservar el formato y disparar los diagnostics. Los materiales públicos que Cursor publicó más tarde sobre Fast Apply muestran que un specialized model puede encargarse de la edit application de alto rendimiento; esta sección lo trata como un durable design pattern, sin trasladar retroactivamente a la clase el desempeño posterior.
+
+\subsection{Plan, generate, apply, validate}
+
+La sección anterior resolvió «de dónde obtener la salida del modelo»; esta sección resuelve «cómo hacer que entre de forma segura al editor state». Al leer la figura, conviene fijarse en la separación de responsabilidades entre plan y apply, y en por qué validation/undo son infraestructura del producto. Si apply modifica en silencio la posición equivocada, se destruye la confianza aunque el texto sea de alta calidad.
+
+\lecturefigure{13-fast-apply.png}{El planning model y el specialized apply model se reparten la comprensión y la edición a alta velocidad.}{Subtítulos locales 04:20--05:20; materiales oficiales de Cursor Fast Apply.}
+
+\begin{knowledgebox}{Lectura de la figura: los cuatro frentes de falla de la patch application}
+Errores de localización, context drift, fallas de sintaxis/tipos y ediciones concurrentes del usuario. El sistema debe usar precondition de file/version, structured edit, parser/diagnostic, visible diff y atomic undo. Para cambios grandes, también se necesita aplicar por partes (apply por lotes) con validation intermedia, para evitar que un único patch gigantesco bloquee el editor.
+\end{knowledgebox}
+
+\begin{importantbox}{La velocidad de interacción no es solo tokens/s}
+El tiempo que percibe el usuario incluye el first useful preview, la edit stabilization y el validation complete. Un apply path más lento, pero que puede mostrarse de forma progresiva, tiene pocos conflictos y permite un undo rápido, puede ser mejor que uno con mayor token throughput puro. Las métricas deben incluir accepted edit, rework y rollback, no solo la velocidad de generación.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Fast Apply convierte AI coding de un problema de generación de texto en un problema de state transition. El modelo se encarga de proponer las modificaciones; el sistema debe encargarse de precondition, application, validation, visibility y recovery.
+\section{Security, Privacy y Abuse: el código y los Token son activos de alto valor}
+
+Una plataforma de AI coding maneja al mismo tiempo código fuente privado y quota de modelos costosa. La seguridad no se limita a «cifrar la base de datos»: también abarca workspace ignore, access scope, retention, provider data policy, agent tool approval, secrets y audit. Del mismo modo, la prevención del abuso no es un control de riesgos aislado, sino la infraestructura que protege la inference capacity y la unit economics.
+
+\subsection{Flujo de datos del código y shared responsibility}
+
+La \term{envelope encryption} (cifrado de sobre) suele cifrar los datos con una data encryption key y proteger esta última con una key encryption key. Una client-held o tenant-controlled key puede reducir lo que queda legible si el servidor se ve comprometido (server compromise), pero el key lifecycle, los metadata, el access log y la provider path siguen requiriendo gobernanza. La documentación actual de Cursor (Current Cursor docs) distingue además Privacy Mode, retention y enterprise controls.
+
+\lecturefigure{15-security-flow.png}{La code security la asumen en conjunto varias capas: workspace, index, Cursor service y model provider.}{Subtítulos locales 41:40--43:30; documentación actual de privacy/security de Cursor.}
+
+\begin{knowledgebox}{Lectura de la figura: Encryption no sustituye cinco cosas}
+Access control decide quién puede leer; retention decide cuánto tiempo se conserva; audit registra quién hizo qué; data minimization reduce las transmisiones innecesarias; provider governance limita el procesamiento por terceros. El cifrado solo protege contra riesgos específicos en reposo o en tránsito; no impide el uso indebido de una identidad legítima ni que un agent lea los secrets del workspace.
+\end{knowledgebox}
+
+\begin{warningbox}{Agent tool approval requiere niveles de riesgo}
+Read-only search, local edit, terminal command, network request y deployment tienen impactos distintos. La política predeterminada debe graduarse según tool, target, workspace trust y user intent; la UI de aprobación debe mostrar qué se va a ejecutar, en lugar de dejar que el usuario haga clic a ciegas en «Permitir».
+\end{warningbox}
+
+\subsection{Free-token arbitrage y control de recursos}
+
+La clase describe cómo los atacantes usan cuentas gratuitas o subsidiadas para obtener frontier token costosos. El sistema debe combinar identity, plan, device/payment signal, per-user/model quota, velocity y anomaly, en lugar de depender solo de CAPTCHA. El objetivo de la \term{abuse prevention} es limitar las pérdidas y conservar la posibilidad de apelación, no aumentar sin límite la fricción para los usuarios comunes.
+
+\lecturefigure{14-abuse-controls.png}{Los Free token forman una unit-economics attack surface que puede explotarse con arbitraje automatizado.}{Subtítulos locales 36:40--38:10, 43:30--45:00; redibujo conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: la Quota debe reflejar el costo real}
+Cada modelo tiene distintos costos de token price, context, cache y tool call; un request count uniforme subestima las rutas de alto costo. El Budget debe admitir ponderación por token/model, burst, daily cap, conjunto de la organización (organization pool) y suspicious velocity, y al aplicar throttling debe explicar el motivo a los usuarios legítimos.
+\end{knowledgebox}
+
+\begin{warningbox}{La prevención del abuso no debe confundir el desarrollo intensivo con un ataque}
+Un refactor grande, un CI agent o un rollout en equipo pueden generar un tráfico anormalmente alto. La Detection debe combinar account age, payment, organization, repetition pattern, concurrency y model mix, y ofrecer temporary verification o enterprise quota, en lugar de aplicar directamente un bloqueo permanente.
+\end{warningbox}
+
+\teachervoice{Es razonable que la clase haya tratado security y abuse en la misma sesión de preguntas y respuestas: la filtración de código privado daña la confianza, y el arbitraje de token daña la economía; ambos impiden que el producto sea sostenible. El equipo de seguridad y el equipo de plataforma deben compartir la telemetry de request, identity, cost e incident.}
+
+\subsection{Resumen de la sección}
+
+El perímetro de seguridad de AI coding abarca endpoint, index, service y model provider. Los Privacy controls, las agent approvals y el abuse budget deben diseñarse en conjunto para proteger a la vez el código, el control del usuario y los recursos de cómputo.
+\section{El impacto de la IA en la ingeniería de software: se necesita más Systems Judgment}
+
+El curso cierra con la educación y el futuro de los IDE. La postura de Asif no es que «los fundamentos de CS hayan perdido vigencia». Sostiene que, a medida que aumenta el código generado, importa más la capacidad de entender state, performance, security, failure e interface. Un Agent puede escribir más código, pero también crea más rápido problemas de dependencias, reintentos y permisos. El trabajo del ingeniero ya no se limita a escribir línea por línea: también abarca definir el contract, verificar la evidence y gestionar el change.
+
+\subsection{El IDE se convierte en un Agent workspace}
+
+El IDE alojará varios agent, background task, terminal, browser, test y deployment feedback. La infraestructura debe permitir que el usuario sepa qué lee, qué modifica y qué ejecuta el agent. También debe conservar un control plane que permita pausar, revisar y revertir. Una autonomy mayor no debe costar la workspace state visibility.
+
+\begin{importantbox}{Las cuatro capacidades centrales de la AI-native software engineering}
+\begin{enumerate}
+  \item Diseñar versioned interface, invariant y permission;
+  \item establecer test, eval, diff y rollback para cada generated change;
+  \item identificar los cuellos de botella del sistema en queue, database, network y provider;
+  \item convertir los incident y el user feedback en guardrail, en lugar de solo corregir el prompt.
+\end{enumerate}
+\end{importantbox}
+
+\subsection{AI-assisted incident response}
+
+La IA puede resumir logs, relacionar deploy, generar query, explicar el runbook y proponer una hypothesis. Sin embargo, un incidente en producción ocurre con evidencia incompleta y con costos que cambian rápido. La IA no debe tener production authority ilimitada. El incident commander debe confirmar el objetivo, detener el feedback loop, elegir qué riesgo asumir y registrar las decisiones.
+
+\lecturefigure{16-incident-learning.png}{La IA puede acelerar el procesamiento de la evidencia, pero las decisiones de producción siguen correspondiendo al human incident command.}{Subtítulos locales 47:50--48:37; diagrama conceptual redibujado.}
+
+\begin{knowledgebox}{Lectura de la figura: qué paso acorta mejor el Assistant}
+Puede encontrar correlaciones temporales en un volumen enorme de metrics/logs, generar una safe read-only query, comparar los deploy recientes u ordenar el historial del chat en una timeline. Los write de alto riesgo, el failover, la data repair y la customer communication siguen requiriendo un owner explícito y una approval.
+\end{knowledgebox}
+
+\begin{warningbox}{La causa raíz que genera la IA también requiere evidencia}
+Un modelo de lenguaje tiende a convertir una correlación en un relato causal. Cada hypothesis debe enlazar a un metric, trace, log, config o reproduction. El postmortem debe registrar lo unknown y cada rejected hypothesis, para no tomar una explicación fluida por un hecho.
+\end{warningbox}
+
+\teachervoice{Al final de la clase, el docente plantea el AI-assisted incident response como una dirección posible. La conclusión más segura para llevar a otros contextos es esta: la IA aumenta la evidence bandwidth, y las personas conservan el objetivo, el riesgo y la authority.}
+
+\subsection{Resumen de la sección}
+
+El AI coding no le quita valor al systems knowledge. Al contrario: cuanto más capaz es la generación, más se vuelven centrales para el producto y para la carrera profesional la verificación, el aislamiento, la recuperación, la seguridad y la contabilidad de recursos.
+\section{Síntesis y ampliación}
+
+\subsection{Conclusiones centrales}
+
+\begin{importantbox}{Ocho conclusiones transferibles}
+\begin{enumerate}
+  \item AI coding es un ciclo cerrado de context, model, apply y validation; cada capa requiere un SLO distinto.
+  \item El blast radius lo determina la runtime/state boundary, no el número de services.
+  \item La Merkle-style sync, la content cache y la retrieval evaluation convierten el trabajo completo en delta work medible.
+  \item Metadata, jobs, source objects y derived index requieren cada uno su propia source of truth y su propia rebuild path.
+  \item Retry, cron, MVCC bloat y rebuild forman una retroalimentación positiva de incidentes; al recuperarse, primero se detiene al producer.
+  \item El costo oculto de una migration es el re-embedding, la dual validation, el cache warming y la capacity temporal.
+  \item El object storage desacopla la durabilidad del compute; la global inference sigue necesitando cache, region, provider eval y fallback.
+  \item Security, abuse, tool approval e incident response son infraestructura para la continuidad del producto.
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Tarea práctica: diseñar un AI coding backend}
+
+Completa el siguiente diseño para un sistema que soporte autocomplete, repo chat y multi-file agent:
+
+\begin{enumerate}
+  \item Define el SLO y el blast radius de indexing, inference, apply y data plane;
+  \item Diseña la Merkle-style sync, la chunk/version key, la embedding cache y la deletion semantics;
+  \item Enumera la source of truth, la rebuild path y la migration validation de metadata, job, source object y vector segment;
+  \item Escribe el degraded mode para retry storm, database disk pressure, object-storage cache miss y provider rate limit;
+  \item Establece self-hosted/frontier routing, offline/online eval, privacy, quota, tool approval e incident command.
+\end{enumerate}
+
+\begin{knowledgebox}{Criterios de aceptación}
+Una propuesta de alta calidad no se limita a enumerar «vector DB + LLM + queue». Debe explicar el estado reconstruible, la amplificación por retry, la dual validation, la model version telemetry y cómo se comprenden y revocan los permisos sobre el código y la terminal.
+\end{knowledgebox}
+
+\subsection{Lecturas adicionales}
+
+Se recomienda leer, en este orden, de Cursor: \href{https://cursor.com/blog/secure-codebase-indexing}{secure indexing}, \href{https://cursor.com/blog/instant-apply}{Fast Apply}, \href{https://cursor.com/blog/cursorbench}{CursorBench}, \href{https://cursor.com/docs/enterprise/privacy-and-data-governance}{privacy} y \href{https://cursor.com/docs/agent/security}{agent security}; después, de turbopuffer: \href{https://turbopuffer.com/blog/turbopuffer}{object-storage search} y \href{https://turbopuffer.com/blog/continuous-recall}{continuous recall}; por último, contrástalos con \href{https://www.postgresql.org/docs/current/routine-vacuuming.html}{vacuum} de PostgreSQL y el \href{https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html}{object/consistency model} de Amazon S3.
+
+\end{document}

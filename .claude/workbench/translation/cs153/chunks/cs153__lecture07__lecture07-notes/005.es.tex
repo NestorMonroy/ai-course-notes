@@ -1,0 +1,29 @@
+\section{Evolución del modelo de datos: qué estado necesita realmente una base de datos}
+
+A medida que crece la escala del índice, colocar users, repos, jobs, documents, vectors y source artifacts en un mismo tipo de base de datos genera workloads que entran en conflicto entre sí. La transactional metadata requiere actualizaciones consistentes; el job state requiere lease y retry; los segmentos de vectores se adaptan a grandes bloques de immutable data; los source chunks deben permitir reconstruir el derived index. Esta sección sustituye la discusión sobre «qué base de datos es la mejor» por una estratificación basada en la source of truth.
+
+\subsection{Cuatro clases de estado, cuatro destinos de almacenamiento}
+
+La \term{source of truth} (fuente de datos autoritativa) es el estado original que se considera correcto durante la recuperación. El derived vector index puede reconstruirse a partir del source artifact y de la transform version, por lo que no debe asumir el papel de única truth; si se pierde el job progress, puede reintentarse, pero debe garantizarse la idempotencia; la permission metadata, en cambio, requiere restricciones fuertes y audit.
+
+\lecturefigure{06-storage-roles.png}{Metadata, job, vector/search y source artifact requieren distintos modelos de durabilidad y de consulta.}{Subtítulos locales 14:40--19:10; redibujo conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: primero pregunta «¿qué pasa si se pierde?»}
+Si, tras perderse un estado, lo único posible es disculparse con el usuario, probablemente se trata de una source of truth; si puede reconstruirse a partir del object, es derived state; si puede ejecutarse repetidamente, lo esencial es la idempotency; si solo sirve para acelerar la query, es cache. Esta clasificación es más estable que elegir primero entre PostgreSQL, MongoDB o una vector DB.
+\end{knowledgebox}
+
+\begin{importantbox}{La capacidad de reconstrucción es un activo de arquitectura}
+Para un derived index, el objetivo de recuperación no se limita a RPO/RTO; también deben registrarse: la versión de entrada, la versión de embedding/chunking, el rebuild throughput, el conjunto de validación y el método de cutover. Un «índice» sin rebuild reproducible se convierte poco a poco en una segunda base de datos autoritativa imposible de migrar.
+\end{importantbox}
+
+\subsection{Backpressure, lease e idempotencia}
+
+La \term{backpressure} (contrapresión) hace que, cuando el componente descendente se satura, el ascendente reduzca su ritmo o rechace trabajo nuevo, lo que evita que la queue crezca sin límite. Cada index job debe llevar una version y una idempotency key; el worker obtiene la propiedad del trabajo durante un tiempo limitado mediante un lease; al expirar, puede reintentarse con seguridad; una versión nueva del mismo repo puede hacer supersede de la versión anterior, lo que evita completar sin sentido un rebuild ya obsoleto.
+
+\begin{warningbox}{El retry no ofrece confiabilidad gratuita}
+Un retry sin presupuesto, jitter, deadline ni idempotency convierte un solo timeout en escrituras duplicadas y en una avalancha de conexiones. Cada retry policy debe especificar: qué errores pueden reintentarse, cuántas veces como máximo, si consumen el mismo budget y cuándo pasan a dead-letter o a atención manual.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La arquitectura de almacenamiento debe partir de la state class, la source of truth y la ruta de recuperación. La database brand es un detalle de implementación; las restricciones de largo plazo son la capacidad de reconstruir el estado, la idempotencia, el versionado y la contrapresión.

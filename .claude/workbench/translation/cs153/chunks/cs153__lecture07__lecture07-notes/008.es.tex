@@ -1,0 +1,29 @@
+\section{Object-Storage-Native Search: separación entre la capa de durabilidad y la capa de consultas en caliente}
+
+Después del incidente, la dirección de la arquitectura fue colocar los grandes immutable index segment en object storage y convertir el query compute y la caché SSD/memory en capas reemplazables. Amazon S3 ofrece almacenamiento duradero a nivel de objeto y consistencia fuerte de lectura después de escritura; sistemas como turbopuffer construyen search sobre él. La ventaja es que el durable cost queda desacoplado del compute; el costo está en la primera lectura, la tail latency, la cache admission y el segment management.
+
+\subsection{Durable objects, cache y stateless compute}
+
+\term{object storage} guarda blobs y metadata bajo una object key; es adecuado para objetos grandes, durabilidad de bajo costo y namespaces masivos, y no ofrece los row update ni los join tradicionales. \term{stateless compute} significa que el query worker no tiene el único estado duradero y puede recuperarse a partir de los objetos y de la shared metadata; puede seguir teniendo una cache local, pero perder esa cache no rompe la correctness.
+
+\lecturefigure{10-object-storage-search.png}{Object-storage-native search organiza en capas los durable segment, la caché SSD/memory y el stateless query tier.}{Subtítulos locales 32:30--36:40; documentación oficial de arquitectura de turbopuffer.}
+
+\begin{knowledgebox}{Lectura de la figura: Object storage no elimina los problemas de database}
+El sistema sigue necesitando metadata catalog, segment version, compaction, cache coherence, filter index, recall measurement y deletion. La capa de objetos reduce el durability cost y simplifica el reemplazo, pero traslada los problemas de rendimiento al prefetch, la cache y el query planning.
+\end{knowledgebox}
+
+\begin{importantbox}{El valor de la cache depende del reuse}
+Si la object fetch latency es $L_o$, la cache hit latency es $L_c$ y la hit rate es $h$, la latencia media de lectura es aproximadamente
+\[
+E[L]=hL_c+(1-h)L_o.
+\]
+Sin embargo, la experiencia del usuario depende más de p95/p99; los tenant populares, las query de barrido y las cold region hacen que el promedio oculte la cola. Hay que observar la hit rate por namespace y por query type.
+\end{importantbox}
+
+\begin{warningbox}{Low cost per TB no equivale a low query cost}
+La capacidad de object storage es barata, pero los GET frecuentes, la data transfer, la decompression, el CPU ranking y los cache miss elevan el costo por query. El modelo de precios debe calcular a la vez los stored bytes, la read amplification, el QPS, el recall target y el latency SLO.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Object-storage-native search desacopla el durable state del query compute y es adecuado para index de gran escala, immutable y reconstruibles. No es una arquitectura sin base de datos, sino una redefinición de las responsabilidades de la metadata, los objetos y la cache.

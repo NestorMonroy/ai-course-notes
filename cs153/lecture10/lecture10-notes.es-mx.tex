@@ -1,0 +1,387 @@
+\documentclass[a4paper]{article}
+\input{../cs153-preamble.es-mx.tex}
+
+\renewcommand{\notetitle}{Lecture 10: Scaling Frontier Models——entrenamiento, evaluación, seguridad y API Contract}
+\renewcommand{\noteauthors}{Elaborado a partir de la entrevista con Ben Mann, los subtítulos con marcas de tiempo y los materiales oficiales de Anthropic y de los artículos}
+\renewcommand{\notedate}{Curso de invierno de 2025 · versión reescrita source-first de 2026}
+\renewcommand{\videochannel}{Stanford CS153: video publicado de una edición anterior del curso}
+\renewcommand{\videopublishdate}{2025-02-03}
+\renewcommand{\videoduration}{41:56}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=UdxSCFmUk9o}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.96\textwidth]{images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\begin{document}
+\makecscover
+
+\section{Auditoría de fuentes: el scaling no es una curva, sino todo un Operating System}
+
+Esta clase la imparte Ben Mann, cofundador de Anthropic, en febrero de 2025. La sesión va de GPT-2/GPT-3 y las scaling laws a las distributed failure del frontier training, los loss spike, RLHF/Constitutional AI, la evaluación de seguridad, la Responsible Scaling Policy (RSP), la interpretabilidad mecanicista y las distintas disciplinas de lanzamiento de los productos de chat y de la API. El repositorio conserva la portada oficial y 1,025 subtítulos con marca de tiempo; esta nota verifica los mecanismos con artículos y materiales oficiales de Anthropic, y no proyecta hacia la clase el estado posterior de los modelos, los ingresos, la RSP ni los productos.
+
+\begin{warningbox}{Lo que dijo la clase y los límites de versión}
+Cifras como «crecimiento de diez veces en el último año» o «el coding segment creció diez veces en tres meses» se toman solo como la descripción del workload que dio el ponente en ese momento, no como conclusiones financieras auditadas. La clase usa el relato de los AI Safety Level (ASL) de la era 2025; al 11 de agosto de 2026, Anthropic ya había publicado el 24 de febrero de 2026 la RSP v3.0, que adopta un marco actualizado con capability thresholds, required safeguards, entre otros elementos. Esta nota primero explica fielmente la clase histórica y después señala por separado la evolución posterior.
+\end{warningbox}
+
+\begin{importantbox}{Los cuatro ciclos cerrados de un frontier model program}
+\begin{enumerate}
+  \item \textbf{Scaling loop}: hypothesis $\rightarrow$ pilot runs $\rightarrow$ fit/forecast $\rightarrow$ compute allocation;
+  \item \textbf{Training loop}: telemetry $\rightarrow$ anomaly $\rightarrow$ checkpoint/replay $\rightarrow$ fix/resume;
+  \item \textbf{Safety loop}: preentrenamiento $\rightarrow$ post-training $\rightarrow$ evaluation $\rightarrow$ safeguards/deployment;
+  \item \textbf{Product loop}: chat experiment $\rightarrow$ behavior evidence $\rightarrow$ API contract $\rightarrow$ migration/deprecation.
+\end{enumerate}
+\end{importantbox}
+
+\begin{knowledgebox}{Términos clave: hay que distinguir cuatro tipos de «escala»}
+\textbf{Training scale} se refiere a los parámetros, los token y los FLOPs de entrenamiento; \textbf{serving scale}, al volumen de solicitudes, el context, la latency y la accelerator fleet; \textbf{capability scale}, al éxito en las tareas, la generalización y el tool use; \textbf{risk scale}, al impacto potencial que surge de la combinación de la capacidad del modelo, la forma de acceso y las safeguard failure. El crecimiento de los ingresos o del tráfico no demuestra por sí mismo la capability, y el avance en los benchmark tampoco demuestra automáticamente la safety.
+\end{knowledgebox}
+
+\subsection{Por qué el crecimiento cambia los supuestos de ingeniería}
+
+Un crecimiento rápido de la demanda no significa solo «comprar más GPU». Training e inference compiten por la capacity, los usuarios de la API exigen un contract estable, los usuarios del chat esperan iteraciones más rápidas, el equipo de seguridad tiene que atender más adversarial traffic y el on-call enfrenta un costo de falla más alto. El program necesita colocar capability, compute, reliability y safeguards en un mismo modelo de recursos, en lugar de optimizarlos por separado.
+
+\lecturefigure{01-scaling-program.png}{El frontier scaling es un program en el que están acoplados demand, capability, compute y reliability.}{Subtítulos locales 00:00--01:00; diagrama conceptual redibujado.}
+
+\begin{knowledgebox}{Lectura de la figura: el crecimiento genera retroalimentación positiva, pero también riesgos que se acumulan}
+La demand aporta ingresos y tareas reales; la capability eleva la adoption; el compute sostiene el entrenamiento y el serving; la reliability mantiene la confianza de los usuarios. Cualquier eslabón desequilibrado amplifica el efecto en sentido inverso: un capability release sin serving capacity provoca colas, el traffic sin abuse control amplía el riesgo, el entrenamiento que desplaza a la inference perjudica a los clientes actuales y una API regression convierte la actualización del modelo en un outage del negocio.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El objeto de un scaling program es el ciclo de vida completo. Las secciones siguientes no tomarán un «modelo más grande» como respuesta única, sino que examinarán cómo la predicción, el entrenamiento, la recuperación, la alineación, la evaluación, el lanzamiento y la compatibilidad se sostienen en conjunto.
+\section{De GPT-2 a GPT-3: convertir la intuición en una Scaling Hypothesis verificable}
+
+Mann considera que ImageNet en 2015 y la posterior aparición de GPT-2 fueron un field signal decisivo: las redes neuronales, que durante mucho tiempo se habían visto solo como una academic promise, empezaron a mostrar capacidades transferibles en tareas reales. GPT-2 sugería que «hacer next-token prediction sobre texto de internet a gran escala podría producir capacidades amplias», y GPT-3 usó experimentos a múltiples escalas para verificar si el crecimiento de los parámetros, los datos y el compute mejoraba de forma estable la loss y la few-shot performance.
+
+\subsection{Observation, hypothesis, pilot y frontier run}
+
+La \term{scaling law} (ley de escalamiento) es una regularidad empírica entre el desempeño o la loss de un modelo y el compute, el dataset size y el parameter count. Su valor de ingeniería no está en trazar a posteriori una línea elegante, sino en usar runs más pequeños antes del entrenamiento más grande para estimar el beneficio, comparar recipes, configurar la mezcla data/model y precisar cuándo la nueva evidencia indica que el regime ha cambiado.
+
+\lecturefigure{02-scaling-hypothesis.png}{La scaling law convierte el field signal en una hypothesis, en pilot runs y en un frontier commitment predecible.}{Subtítulos locales 01:00--05:40; artículos de GPT-2/GPT-3 y de scaling laws.}
+
+\begin{knowledgebox}{Lectura de la figura: antes del run más grande debe existir una predicción}
+El field signal aporta la dirección; la hypothesis precisa «cómo cambia la loss al aumentar qué variables»; los pilot runs deben abarcar varias escalas y mantener una recipe comparable, y el frontier run, antes de que se apruebe el presupuesto, deja por escrito la expected curve, la confidence y la stop condition. Si el equipo solo tiene un run grande, sin holdout prediction, es difícil determinar si el éxito se debe al scaling, a la data cleanup, a un architecture change o a una interpretación selectiva.
+\end{knowledgebox}
+
+\teachervoice{Mann enfatiza que no siguió la trayectoria tradicional de un PhD y, aun así, participó en GPT-3 mediante data engineering, análisis y architecture experiments. Nota de clase: las contribuciones decisivas de la frontier research no provienen solo de proponer fórmulas nuevas, sino también de construir datos, experimentos y sistemas de medición confiables.}
+
+\subsection{Por qué en ese momento mucha gente no lo creía}
+
+El escepticismo no era absurdo: las tecnologías históricamente suelen seguir una sigmoide, los modelos existentes podían ser costosos y difíciles de desplegar, y la experiencia de la época de BERT/T5 privilegiaba el fine-tuning task-specific. El problema está en confundir «la economía bajo la recipe y el hardware actuales» con «el límite permanente de la capacidad». Una mejor forma de debatir es exigir predicciones entre escalas, residual analysis y límites de extrapolación, en lugar de rechazar toda la hipótesis con una demo costosa o con un único fracaso.
+
+\begin{warningbox}{La scaling law no significa «basta con agregar compute para tener éxito»}
+La architecture, el optimizer, la token mixture, la data contamination, la context length, la precision, el parallelism y el post-training pueden modificar la curva. Una power law solo describe la relación empírica dentro del intervalo observado; al extrapolar entre modalities, entre recipes o a lo largo de varios órdenes de magnitud, conviene ampliar la uncertainty y estar preparado para encontrar un nuevo bottleneck.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El carácter científico de la scaling hypothesis proviene de que es predecible y falsable. El field signal establece la dirección, los pilot runs a múltiples escalas aportan la curva y el frontier run pone a prueba la extrapolación; todo resultado debe contrastarse con la predicción preregistrada y con los residuals.
+\section{Cómo leer una scaling law: fit, residual y compute allocation}
+
+La sección anterior explicó la ruta de investigación; esta pasa a las fórmulas y a las decisiones. Las scaling laws habituales de los modelos de lenguaje expresan la cross-entropy loss como un decaimiento en ley de potencias respecto de los recursos más un término irreducible. Lo importante no es memorizar el exponent, sino entender cómo cada supuesto del fit, el rango de los datos y el error afectan una compute allocation que cuesta decenas de millones o más.
+
+\subsection{Power law y pérdida irreducible}
+
+La \term{cross-entropy loss} (pérdida de entropía cruzada) mide la probabilidad logarítmica negativa que el modelo asigna al siguiente token real. Una forma simplificada de compute scaling es
+\[
+L(C)=L_{\infty}+aC^{-\alpha},
+\]
+donde $C$ representa el compute de entrenamiento, $L(C)$ es la loss correspondiente, $L_{\infty}$ es el término irreducible bajo los supuestos actuales de datos y tarea, $a$ es el coeficiente de escala y $\alpha>0$ es la velocidad con la que decaen los rendimientos. En una gráfica log-log la curva puede parecer casi una recta, pero $L_{\infty}$, el ruido y los recipe changes afectan de manera considerable la extrapolación.
+
+\lecturefigure{03-scaling-law-fit.png}{Una scaling law es un fit con residual, confidence y límites de validez, no una recta eterna.}{Kaplan et al. 2020; subtítulos locales 06:20--11:50; redibujo conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: primero los residuos, luego la pendiente}
+Los axes deben indicar si se trata de FLOPs, tokens, parameters o wall-clock; el fit debe reportar el intervalo de entrenamiento y la confidence; el residual muestra si la architecture, los data o la optimization se desvían de forma sistemática; solo entonces la decision puede ajustar el budget, la model/data mix o detener la extrapolación. Si las runs más grandes caen una tras otra del mismo lado de la línea de predicción, la información más importante quizá no sea «el modelo va bastante bien», sino que la law actual ya no se ajusta.
+\end{knowledgebox}
+
+\begin{warningbox}{La mejora en benchmarks y el loss scaling no son la misma función}
+Un descenso suave de la average loss puede corresponder a efectos de umbral repentinos en algunas downstream tasks, o puede no mejorar la tarea objetivo. La evaluación de capacidades debe abarcar entornos reales, herramientas y elicitation; una sola curva de loss de preentrenamiento no sustituye la calidad de post-training, la seguridad ni la serving economics.
+\end{warningbox}
+
+\subsection{El compute multiplier es una combinación, no una constante secreta}
+
+En clase se agrupan las mejoras de architecture, data, optimizer y systems bajo el nombre de compute multiplier: obtener más effective capability con los mismos nominal FLOPs. Mantenerlas en secreto tiene razones competitivas, pero internamente deben poder reproducirse. Cada multiplier debe contar con evidencia de baseline, ablation, interaction y transfer, para evitar que en el portfolio varios cambios se anulen entre sí y aun así todos se declaren exitosos.
+
+\lecturefigure{04-compute-allocation.png}{La compute allocation invierte a la vez en cuatro tipos de multiplier: model, data, optimization y systems.}{Subtítulos locales 12:00--15:20; redibujo conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: las ganancias se atribuyen según el effective compute}
+La architecture puede mejorar la capacidad expresiva o la eficiencia por dispersión; los data mejoran la signal-to-noise; la optimization mejora la estabilidad y la convergencia; los systems mejoran la hardware utilization. Al final hay que comparar la quality con wall-clock fijo, dólares fijos, energy fija o FLOPs fijos, en lugar de reportar solo un microbenchmark. Además, un multiplier puede funcionar solo a cierta scale, por lo que es necesario verificar su transfer.
+\end{knowledgebox}
+
+\teachervoice{El ponente describe un frontier lab como una colaboración estrecha entre researchers e engineers, no como un lugar donde los investigadores proponen ideas y los ingenieros hacen el «trabajo menor». La scaling law les da a ambos un lenguaje experimental común: la investigación modifica la recipe y la ingeniería garantiza que cada run sea comparable, recuperable y medible.}
+
+\subsection{Resumen de la sección}
+
+La scaling law es una herramienta para decidir sobre recursos. Lo correcto es combinar el fit, el residual, la uncertainty y la ablation de los multipliers; lo incorrecto es tratar un exponente histórico como una constante natural o equiparar directamente una mejora en el throughput del sistema con una mejora en la capacidad del modelo.
+\section{Distributed Training: las Rare Failure se vuelven eventos cotidianos}
+
+Un Frontier run depende al mismo tiempo de gran cantidad de accelerators, host, collective network, dataset storage, checkpoint storage, scheduler y cloud quota. Aunque la tasa de fallas de cada componente sea muy baja, al aumentar la escala las interrupciones se vuelven frecuentes. El objetivo del sistema no es aspirar ilusoriamente a cero fallas, sino acotar el failure domain, detectar rápido, conservar el estado científico y recuperar el avance efectivo.
+
+\subsection{Workers, network, storage y scheduler}
+
+La \term{collective communication} (comunicación colectiva) abarca las primitive de coordinación entre múltiples dispositivos, como all-reduce, all-gather y reduce-scatter; un solo worker lento o una network partition basta para frenar el entrenamiento síncrono. El storage debe suministrar token de forma continua y además recibir checkpoint de gran tamaño; el scheduler, por su parte, mantiene la membership, la placement y el restart. Toda dependencia necesita health signal, timeout, backpressure y ownership.
+
+\lecturefigure{05-training-failure-domains.png}{El Frontier training acopla cuatro tipos de failure domain: workers, network, storage y scheduler.}{Subtítulos locales 15:00--17:20; redibujo conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: primero distinguir hard failure de silent corruption}
+Las hard failure incluyen la terminación de procesos, la desconexión de dispositivos y el storage timeout, y suelen activar un restart; la silent corruption puede manifestarse como datos erróneos, collective bit error, stale code o gradientes anómalos, y es más peligrosa. El monitoreo no solo debe responder «¿el job sigue en ejecución?», sino también «¿sigue ejecutando el mismo experimento válido?».
+\end{knowledgebox}
+
+\begin{importantbox}{Useful training rate}
+Sea $F_{peak}$ el compute pico teórico, $u$ la tasa de utilización efectiva y $d$ la proporción perdida por fallas, recuperación e inactividad; entonces la useful rate a largo plazo puede aproximarse como
+\[
+F_{useful}=F_{peak}\,u(1-d).
+\]
+Aumentar el kernel MFU solo mejora $u$; si el checkpoint es demasiado lento, la detección de fallas es tardía o la recuperación es inconsistente y por ello $d$ resulta muy grande, el hardware costoso sigue sin traducirse en avance efectivo del entrenamiento.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La escala vuelve habituales las rare failure. El Distributed training debe optimizar a la vez la steady-state utilization y el recovery tax, y usar la consistencia del experimento, y no el «job resumed», como criterio de recuperación exitosa.
+\section{Observabilidad del entrenamiento: el loss spike es solo un síntoma}
+
+Entrenar no consiste en enviar un job y esperar varias semanas. Las hipótesis de investigación pueden quedar invalidadas por data corruption, optimizer instability, precision overflow, code regression, network degradation o checkpoint mismatch. La global loss por sí sola no basta para diagnosticar, por eso se necesitan cuatro telemetry planes sincronizados: model, optimizer, data y system.
+
+\subsection{Cuatro tipos de telemetry y anomaly triage}
+
+Un \term{loss spike} es un aumento repentino y anómalo de la loss de entrenamiento; puede recuperarse en poco tiempo o puede anunciar que la run ya no es válida. El model plane registra la loss y las gradient/activation statistics; el optimizer plane registra el learning rate y la moment/update norm; el data plane registra el origen de cada lote, la token mixture y la corrupción; el system plane registra utilization, network, storage y hardware errors.
+
+\lecturefigure{06-training-observability.png}{El diagnóstico del entrenamiento requiere cuatro tipos de telemetry sincronizada: model, optimizer, data y system.}{Subtítulos locales 17:20--20:10; concepto redibujado.}
+
+\begin{knowledgebox}{Lectura de la figura: la correlación va antes que la root cause}
+Cuando aparece un loss spike, primero se alinea el momento de la anomalía con el lote de datos, la optimizer update, los collective retries y los device errors, y solo después se plantea una hipótesis. Si solo se mira la loss, el equipo podría reducir el learning rate por error; si solo se mira el hardware log, podría pasar por alto una inestabilidad numérica desencadenada por datos específicos. Toda la telemetry debe usar un mismo run/step ID y guardar la versión del código, los datos y la configuración.
+\end{knowledgebox}
+
+\begin{warningbox}{Un dashboard en verde no significa que el experimento sea válido}
+GPU utilization, throughput y job status pueden verse todos normales mientras el objetivo de entrenamiento ya está distorsionado por una mask errónea, datos contaminados, label shift o un optimizer state dañado. Un frontier program necesita scientific invariants: held-out loss, gradient range, distribución de los datos, checkpoint checksum y periodic evaluation.
+\end{warningbox}
+
+\subsection{Checkpoint, replay y resume}
+
+Un \term{checkpoint} guarda los parámetros, el optimizer state, el scheduler state, el random state y el data cursor necesarios para reanudar el entrenamiento; es distinto del activation checkpointing, que ahorra memoria de GPU recalculando dentro de un solo forward/backward. El \term{deterministic replay} reproduce la anomalía, en la medida de lo posible, con el mismo código, el mismo lote y el mismo estado, para determinar si se trata de una transient infrastructure fault o de un recipe defect.
+
+\lecturefigure{07-checkpoint-recovery.png}{La recuperación del entrenamiento debe conservar su significado científico: detect, checkpoint, replay, diagnose y, después, resume o corregir.}{Subtítulos locales 17:20--19:10; concepto redibujado.}
+
+\begin{knowledgebox}{Lectura de la figura: el punto de recuperación debe incluir el data cursor}
+Guardar solo los model weights pierde los optimizer moments, el LR schedule, la aleatoriedad y la posición en los datos, y al reanudar la curva puede cambiar sin que se note. Si en el replay el spike vuelve a aparecer en el mismo lote, conviene revisar primero data/recipe; si desaparece al cambiar de hardware, puede tratarse de una transient fault; si no se puede reproducir, hay que conservar la incertidumbre y reforzar el monitoreo, en lugar de declarar resuelto el problema.
+\end{knowledgebox}
+
+\teachervoice{Mann describe la mentalidad on-call como «vigilar el entrenamiento como se cuida a un paciente»: una anomalía en la loss curve puede hacerse visible solo horas después, y hacer rollback implica perder un avance costoso. Lo importante en clase no es dramatizar las guardias, sino que el entrenamiento mismo se ha convertido en un sistema de producción que requiere SRE discipline.}
+
+\subsection{Resumen de la sección}
+
+La observabilidad del entrenamiento conecta los experimentos con modelos y la operación del sistema. El loss spike es el punto de entrada; solo los cuatro tipos de telemetry, un checkpoint completo y un controlled replay permiten convertir una anomaly en conocimiento que sirve para corregirla.
+\section{Follow-the-Sun: la guardia global no equivale a tener responsabilidades claras de forma automática}
+
+Los entrenamientos largos abarcan varias zonas horarias. El esquema follow-the-sun puede reducir el tiempo en que nadie responde, pero solo el handoff packet, un owner claro y criterios de detención (stop criteria) evitan que se repitan operaciones. Lo difícil del frontier training es que las responsabilidades de sistemas y de investigación se entrelazan: una falla de red la atiende el infra owner, un loss drift requiere al research owner y una data corruption involucra tanto al owner del pipeline como al de privacy.
+
+\subsection{Handoff packet y escalation}
+
+Un handoff eficaz incluye, como mínimo, el checkpoint/step actual, la expected curve, las anomalías recientes, las hypothesis ya verificadas, las action que no deben repetirse, los pending experiment, el deadline de la siguiente decisión y los contacts. Quien recibe el turno debe dar acknowledge y revisar de nuevo el dashboard, en lugar de limitarse a leer el historial del chat. Las high-risk action, como modificar el optimizer u omitir un shard de datos, deben exigir una review por dos personas.
+
+\lecturefigure{08-follow-the-sun.png}{Follow-the-sun depende de un active owner, del handoff packet, de la confirmación de quien recibe el turno y de la escalation entre áreas.}{Subtítulos locales 19:00--21:20; concepto redibujado.}
+
+\begin{knowledgebox}{Lectura de la figura: coverage y ownership son dos cosas distintas}
+La coverage global garantiza que haya alguien en línea; la ownership determina quién tiene autoridad para hacer stop, rollback o change recipe. Si personas de varias regiones pueden «arreglar de paso», el run acumula cambios imposibles de rastrear; si todos se limitan a observar, se pierde la recovery window. El handoff debe congelar la hypothesis y la authority vigentes, y los cambios importantes deben registrarse en el run ledger.
+\end{knowledgebox}
+
+\teachervoice{El ponente reconoce que follow-the-sun tampoco elimina las dificultades: algunas failure son ambiguas, esporádicas y cruzan la frontera entre investigación y sistemas. La clase nos recuerda que ampliar la cobertura de zonas horarias no es magia organizacional; siguen haciendo falta un lenguaje compartido, runbooks y una escalation explícita.}
+
+\subsection{Resumen de la sección}
+
+Lo esencial en la operación global de entrenamientos es el evidence transfer y los decision rights. La calidad del handoff determina si la coverage se traduce en menos downtime y no en más errores de operación concurrentes.
+\section{Post-Training: RLHF y Constitutional AI}
+
+El preentrenamiento aporta un conocimiento amplio del lenguaje y del mundo, pero no produce por sí solo una conducta conversacional acorde con la intención del producto. El Post-training incorpora al modelo instruction, preference, principle y tool policy. La clase avanza de RLHF a Constitutional AI/RLAIF; lo importante no es sustituir por completo el human feedback, sino ampliar la escala de la supervisión y lograr que los objetivos de conducta sean más explícitos e iterables.
+
+\subsection{RLHF: convertir preferencias en una proxy reward mediante entrenamiento}
+
+El \term{reinforcement learning from human feedback} (RLHF) suele incluir supervised fine-tuning, human preference comparison, un \term{reward model} (modelo de recompensa) y policy optimization. El reward model aprende a predecir qué respuesta prefieren las personas; después, el RL optimiza el modelo para aumentar la predicted reward, con restricciones como la KL para evitar que la política se aleje demasiado.
+
+\lecturefigure{09-rlhf-pipeline.png}{RLHF encadena demonstrations, preference, reward model y policy optimization en un pipeline de entrenamiento.}{InstructGPT; subtítulos locales 21:00--26:20; reconstrucción conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: cada capa tiene su propio error}
+El SFT está limitado por la cobertura de las demonstrations; la preference depende del annotator y de la rubric; el reward model puede ser objeto de exploit ante un distribution shift; la RL policy puede elevar la proxy reward y, al mismo tiempo, perjudicar la helpfulness real. Al final, la human evaluation, la safety evaluation y las product metrics no pueden sustituirse por la reward curve.
+\end{knowledgebox}
+
+\begin{warningbox}{El reward hacking es un problema de proxy, no solo un bug del algoritmo}
+Ninguna rubric finita puede expresar por completo «útil, honesto, inofensivo y adecuado al contexto». El modelo puede aprender a complacer al judge, a negarse en exceso o a recurrir a un estilo superficial para obtener una puntuación alta. Conviene usar evaluation multidimensional, adversarial examples, holdout tasks y policy review, para evitar que una sola reward se convierta en la única verdad.
+\end{warningbox}
+
+\subsection{Constitutional AI y RLAIF}
+
+\term{Constitutional AI} usa un conjunto de principios para guiar al modelo en la critique y la revise de sus propias respuestas, y con ello genera AI preference data; el \term{reinforcement learning from AI feedback} (RLAIF) usa un evaluator model para producir preferencias o una reward signal. Las personas siguen encargándose de elegir los principles, auditar la conducta, resolver conflictos y decidir la deployment boundary; el AI feedback se encarga de reducir el costo de que cada muestra requiera anotación humana.
+
+\lecturefigure{10-constitutional-ai.png}{Constitutional AI amplía la supervisión mediante principles, critique/revision, AI preferences y RLAIF.}{Anthropic Constitutional AI; subtítulos locales 26:00--27:40; reconstrucción conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: la capacidad del base model es un requisito previo}
+CAI solo funciona si el modelo es capaz de entender los principios, detectar problemas y proponer una revision mejor; además, el evaluator model puede compartir los blind spots del target model. Los conflictos entre principios, el contexto cultural, la negativa excesiva y el hidden reasoning requieren human audit. RLAIF amplía el volumen de supervisión, pero eso no equivale a eliminar la human governance.
+\end{knowledgebox}
+
+\teachervoice{Mann describe Constitutional AI como un avance que llegó tras cruzar un umbral de capacidad: los primeros modelos no eran capaces de hacer una critique confiable de sí mismos, y solo cuando los modelos se volvieron más fuertes pudieron convertirse en herramientas de supervisión. Este ejemplo muestra que el capability growth también puede crear nuevas safety techniques, y no solo aumentar los riesgos.}
+
+\subsection{Resumen de la sección}
+
+El Post-training es una optimización de proxies en varias capas. Tanto RLHF como RLAIF requieren principios claros, evaluation independiente y human governance; modifican la conducta, pero no sustituyen la base capability, el system control ni la deployment safety.
+\section{Evaluation: la Measured Capability depende de la Elicitation}
+
+Aunque la evaluación de seguridad y de capacidades parece consistir en ponerle preguntas al modelo, en realidad también abarca el prompt, el scaffold, las tools, el time budget, el environment, el judge y la incertidumbre estadística. La \term{elicitation} (activación de capacidades) consiste en usar prompting adecuado, tool access, search o fine-tuning para que la evaluación se acerque lo más posible a la capacidad que el modelo puede alcanzar. Si la elicitation es demasiado débil, subestima el riesgo; si es demasiado fuerte, puede alejarse de las condiciones reales de un attacker o un user.
+
+\subsection{Task, elicitation, environment y judge}
+
+La evaluación define primero el construct: si mide knowledge, planning, tool use, cyber/CBRN uplift o harmful propensity. Después fija el elicitation budget y los permisos. El environment debe simular el feedback y los constraints reales. El judge puede estar formado por expertos, por un grupo de personas o por modelos, y requiere rubric, inter-rater agreement y calibration.
+
+\lecturefigure{11-evaluation-stack.png}{La puntuación de la evaluación de un modelo depende en conjunto de la task, la elicitation, el environment, el judge y la confidence.}{Anthropic evaluation research; subtítulos locales 27:30--30:40; reconstrucción conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: una puntuación baja puede indicar poca capacidad o que no se activó}
+El fracaso con un prompt fijo no demuestra que el model carezca de la capacidad; el éxito cuando se permiten tools ilimitadas y búsqueda humana tampoco significa que un usuario común pueda reproducirlo. El evaluation report debe indicar model/version, system prompt, tools, samples, search effort, judge, scoring y uncertainty, y distinguir entre observed performance y estimated upper bound.
+\end{knowledgebox}
+
+\begin{importantbox}{El intervalo de confianza es más honesto que una puntuación puntual}
+Si en $n$ muestras independientes hay $k$ éxitos, la tasa de éxito empírica es
+\[
+\hat p=\frac{k}{n}.
+\]
+Aquí $\hat p$ es una estimación con una muestra finita, y la capacidad real $p$ sigue teniendo un intervalo estadístico. Cuando un gate de alto riesgo depende de una failure rate muy baja, unas decenas de muestras son del todo insuficientes. También hay que atender las tareas no independientes, la prompt selection y el evaluator bias; no basta con reportar un porcentaje entero.
+\end{importantbox}
+
+\begin{warningbox}{Las evaluaciones de alto riesgo no deben divulgar detalles operativos}
+Los materiales públicos pueden describir las categorías de riesgo, el marco de evaluación, el access control, el red-team process y los aggregate findings, pero no deben publicar procedimientos, materiales o métodos de evasión concretos que reduzcan de forma significativa la barrera para conductas dañinas. El objetivo de la transparency es la rendición de cuentas, no convertir el evaluation set en un tutorial de capacidades.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La evaluation es un measurement system, no un banco de preguntas. La elicitation, el environment y el judge determinan qué significa la puntuación; las decisiones de alto riesgo requieren uncertainty, external review y evidencia versionada.
+\section{RSP: de la Historical ASL a las Capability-Triggered Safeguards}
+
+En la clase se usan los AI Safety Levels para describir la relación entre la capacidad de un modelo y su nivel de protección, y se enfatiza la defense in depth. La versión actual, Anthropic RSP v3.0, evolucionó hacia capability thresholds, required safeguards, risk reports y procesos de gobernanza. La durable idea que comparten ambas versiones es esta: a medida que la capability evidence se acerca a un threshold de alto impacto, el entrenamiento y el despliegue deben elevar primero los security/deployment controls, en lugar de corregir después.
+
+\subsection{Threshold, safeguard y gate}
+
+Primero, el equipo reúne capability evidence mediante evaluation, elicitation y forecast, y después determina qué tan lejos está del threshold. Si lo alcanza o se acerca a él, debe cumplir las required safeguards correspondientes, por ejemplo una model-weight security más sólida, access control, runtime guard, monitoring, red team, incident readiness y governance review. Solo al final decide si continúa el entrenamiento, amplía el despliegue o restringe el access.
+
+\lecturefigure{12-capability-safeguards.png}{La evidencia de capacidad activa la threshold review, las required safeguards y el deployment gate.}{ASL framing de la clase; Anthropic RSP v3.0; redibujo conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: el cambio de versión muestra que la governance debe poder revisarse}
+La ASL de la clase vinculaba de forma bastante estrecha los niveles del modelo y los de protección; las versiones posteriores de la RSP separan el capability threshold del safeguard package, para poder actualizarlos en función de riesgos específicos. Este cambio no es una simple sustitución del tipo «la versión anterior estaba mal, la nueva está bien», sino el reconocimiento de que la evaluation science, el threat model y la safeguard evidence cambian; por lo tanto, la policy misma también debe estar versioned, publicar sus cambios y someterse a review.
+\end{knowledgebox}
+
+\teachervoice{El ponente enfatiza que una de las mayores dificultades de la evaluación es el elicitation overhang: que hoy no se haya detectado una capacidad no significa que siga sin lograrse con un scaffold, una tool o un research effort más potentes. En la clase, la ASL no es una etiqueta permanente que se le pone al modelo, sino una exigencia de que la organización prepare las protecciones por adelantado en condiciones de incertidumbre.}
+
+\subsection{Defense in Depth}
+
+La \term{defense in depth} (defensa en profundidad) consiste en establecer varias capas de control independientes entre sí y con modos de falla distintos. Training reduce las conductas peligrosas mediante data/objective y post-training; la capa de access limita quién puede usar qué capacidad; el runtime classifier/tool policy supervisa las solicitudes y las action; la capa de response se encarga del red team, incident, patch, revoke y la customer communication.
+
+\lecturefigure{13-defense-in-depth.png}{La seguridad de un frontier model requiere defensa en profundidad en training, access, runtime y response.}{Subtítulos locales 37:00--39:10; redibujo conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: más capas no implica independencia}
+Si training, el classifier y el judge dependen todos del mismo modelo y de los mismos datos, pueden compartir un blind spot. Una defensa en profundidad eficaz requiere analizar la common-mode failure, la separación de permisos, la independencia de la supervisión y el human override. Cada capa debe producir evidence para que la siguiente capa juzgue, y contar con un fallback explícito, en lugar de reenviar el riesgo en círculo de una capa a otra.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El núcleo de la RSP es la capability-triggered governance. Los términos pueden cambiar; el durable contract es: primero evaluar, luego cumplir las required safeguards y por último entrenar/desplegar; toda excepción debe tener un owner, evidencia y una fecha de reevaluación.
+\section{Mechanistic Interpretability: la promesa y los límites de la evidencia interna}
+
+La behavioral evaluation solo puede observar entradas y salidas; la \term{mechanistic interpretability} (interpretabilidad mecanicista) intenta comprender el cómputo interno del modelo a partir de activations, features y circuits. El trabajo de dictionary-learning de Anthropic descompone la representación mixta de cada neuron en features más dispersas, lo que ofrece una herramienta de investigación para saber «cuándo se activa cierto concepto y cómo influye en las etapas posteriores».
+
+\subsection{Feature, circuit hypothesis e intervention}
+
+Una \term{feature} es un patrón interpretable extraído de activations de alta dimensión y no necesariamente corresponde a una sola neuron; un \term{circuit} es una ruta de cómputo formada por la interaction de varias features, attention y MLP. El proceso de investigación va de la activation collection y la feature discovery a la behavior correlation, y después verifica la causalidad mediante ablation, steering o counterfactual intervention.
+
+\lecturefigure{14-interpretability-loop.png}{La interpretabilidad mecanicista extrae features a partir de las activations, formula una circuit hypothesis y la valida mediante intervention.}{Anthropic monosemanticity research; subtítulos locales 38:17--39:03; concepto redibujado.}
+
+\begin{knowledgebox}{Lectura de la figura: una feature legible no equivale a «leer la mente» por completo}
+La feature label proviene de ejemplos de activación y de la interpretación humana, por lo que puede pasar por alto polysemy, distributed representation o context dependency; una circuit hypothesis requiere causal intervention, y una explicación local tampoco demuestra la seguridad global. La interpretabilidad funciona mejor como evidencia complementaria de la evaluation, del red team y de la anomaly investigation que como release gate por sí sola.
+\end{knowledgebox}
+
+\begin{warningbox}{No confundir una anthropomorphic label con la intención del modelo}
+Etiquetas como «engaño», «poder» o «autoprotección» ayudan a localizar patrones de conducta, pero la feature activation interna del modelo no implica automáticamente un objetivo persistente ni una intención subjetiva. El informe debe indicar la operational definition, el dataset, los false positives, el intervention result y las alternative explanations.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La mechanistic interpretability aporta evidence interna, pero todavía se encuentra en una etapa temprana de investigación. La feature discovery, la causal validation y la behavioral evaluation deben validarse entre sí; no se puede tomar una gráfica de activations como prueba de seguridad.
+\section{Compute Lifecycle: preentrenamiento, post-training e inference}
+
+La clase rechaza la narrativa binaria de que «el preentrenamiento ya terminó». El preentrenamiento absorbe con eficiencia datos amplios y establece la base capability; el post-training enfoca la conducta, las herramientas y los objetivos de seguridad; el inference compute resuelve tareas concretas mediante context, search, reasoning o muestreo múltiple. Los tres difieren en rendimiento marginal, latency, cost y controlabilidad.
+
+\subsection{Cada etapa resuelve un problema distinto}
+
+El preentrenamiento conviene para capacidades amplias cuyo costo se amortiza entre todas las solicitudes; el post-training conviene para la conducta de producto o de políticas; la inference conviene para invertir de forma dinámica según la tarea. Si al base model le faltan conocimientos o representation, aumentar los inference tokens puede equivaler solo a adivinar durante más tiempo; si el post-training es insuficiente, incluso un base model potente puede no respetar el contract de las herramientas; si el serving budget es demasiado bajo, el reasoning complejo tampoco puede llevarse a la práctica.
+
+\lecturefigure{15-compute-lifecycle.png}{El preentrenamiento, el post-training, el inference compute y el product feedback forman un ciclo de vida complementario.}{Subtítulos locales 34:40--36:50; rediseño conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: comparar el total cost, no solo los FLOPs de entrenamiento}
+La economía de un modelo incluye la amortización del entrenamiento, la post-training iteration, el accelerator/time por solicitud, el context storage, la cache, las tool calls y los failure retries. Un base model más pequeño con más inference search puede convenir para tareas de baja concurrencia y alto valor; un base model más potente puede reducir los pasos por solicitud. La elección debe basarse en la target workload y el SLO, no en qué etapa está de moda.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El frontier progress proviene de redistribuir el compute a lo largo del ciclo de vida, no de que una etapa sustituya de forma permanente a otra. El program debe elegir la combinación con base en la quality, el cost, la latency y el risk de extremo a extremo.
+\section{Chat Proving Ground y API Contract}
+
+La última sección conecta la investigación con el producto. En la Chat experience, el proveedor controla la UI, el system prompt, las tool, el rollback y la user education, por lo que puede experimentar con rapidez; en cambio, una vez que un cliente incorpora la API a production, schema, model behavior, latency, error, pricing y retirement se convierten en un contract externo. Como se dijo en clase, «APIs are forever» no significa literalmente que nunca cambie, sino que el costo de cada cambio recae en una gran cantidad de sistemas de clientes.
+
+\subsection{Del experimento a la versioned primitive}
+
+Después de validar en Chat la PDF upload, el long context o el tool behavior, el equipo necesita convertir las restricciones implícitas de UX en API schema, auth, quota, idempotency, error model, version y docs. La \term{API deprecation} (retiro de la recomendación de uso) consiste en anunciar que un modelo o un parámetro ya no se recomienda, y en ofrecer replacement, migration guidance y retirement date; después del retirement, las solicitudes fallan, por lo que los clientes deben probar y migrar dentro de ese plazo.
+
+\lecturefigure{16-chat-to-api.png}{Chat se encarga de la experimentación rápida; la API publica las capacidades maduras como un contract compatible a largo plazo.}{Subtítulos locales 39:00--41:56; Anthropic API lifecycle docs; redibujo conceptual.}
+
+\begin{knowledgebox}{Lectura de la figura: qué evidencia debe completarse antes del release}
+El Chat experiment observa primero la usefulness, la seguridad y las failure; la evidence da lugar a los acceptance criteria; el API release fija schema/version/SLO; el lifecycle ofrece los estados active, legacy, deprecated y retired, junto con la migration. La continuity del cliente puede importar más que el hecho de que «el modelo más reciente sea más inteligente»; por ello, el replacement debe someterse a pruebas de regresión con el workload real, y no basta con fijarse en el benchmark.
+\end{knowledgebox}
+
+\teachervoice{Mann pone como ejemplo que modelos antiguos de Claude siguen en algún entorno de producción para ilustrar la API inertia: es posible que el cliente no tenga recursos de ingeniería para migrar, o que haya incorporado el comportamiento anterior en sus procesos de cumplimiento normativo. La clase advierte a los frontier lab que publicar una API equivale a aceptar responsabilidades de support, compatibility y deprecation.}
+
+\begin{warningbox}{Actualizar el modelo no es un binary upgrade ordinario}
+Un modelo nuevo puede cambiar refusal, format, tool call, latency, token usage y la nondeterministic distribution. La migration requiere golden tasks, safety regression, cost/SLO test, shadow traffic, rollback y customer communication; cambiar en silencio un alias con el mismo nombre hace que sea difícil atribuir la causa de un incidente.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Es razonable que Chat y la API avancen a velocidades distintas. El proving ground ayuda a descubrir comportamientos; el API contract exige versionado, capacidad de prueba y capacidad de migración. La disciplina de producto es el último paso para que una frontier capability se convierta en infraestructura.
+\section{Síntesis y ampliación}
+
+Esta sección amplía el frontier scaling, que deja de ser «cuanto más grande el modelo, mejor» y se convierte en un operating system de research, systems, safety y product:
+
+\begin{enumerate}
+  \item \textbf{La scaling law es un contrato de predicción}: primero se hacen el fit y el residual con runs a varias escalas, y solo después se aprueba el frontier commitment;
+  \item \textbf{El compute multiplier requiere atribución}: los cambios de model, data, optimization y systems deben validarse con una misma base de costo;
+  \item \textbf{La rare failure debe incorporarse al diseño}: el failure domain, el checkpoint, el replay y el recovery tax determinan el useful progress;
+  \item \textbf{El entrenamiento requiere observabilidad en cuatro planos}: la telemetry de model, optimizer, data y system explica en conjunto cada anomaly;
+  \item \textbf{La guardia global requiere decision rights}: el handoff packet, el owner y los stop criteria importan más que «haya alguien conectado»;
+  \item \textbf{El post-training optimiza un proxy}: RLHF/CAI/RLAIF amplían la supervisión del comportamiento, pero todos requieren evaluation y gobernanza independientes;
+  \item \textbf{La evaluation depende de la elicitation}: task, tool, effort, environment, judge e uncertainty determinan qué significa una puntuación;
+  \item \textbf{Las safeguards escalan con la capability}: las versiones de la RSP evolucionan, pero el principio de evaluar primero, cumplir los required controls y después entrenar/desplegar no cambia;
+  \item \textbf{La interpretabilidad es evidencia complementaria}: una feature/circuit requiere causal validation y no puede demostrar la seguridad por sí sola;
+  \item \textbf{La API es un contract externo}: en el chat se puede experimentar con rapidez; la API debe tener version, migrate, deprecate y support.
+\end{enumerate}
+
+\begin{importantbox}{Tarea: Frontier Model Program}
+Diseña un plan de entrenamiento y lanzamiento de 8 semanas: presenta tres niveles de pilot scale, con su loss fit y su uncertainty; enumera el failure budget de workers/network/storage/scheduler; define el checkpoint/replay y el handoff follow-the-sun; diagrama el preentrenamiento, RLHF/RLAIF, la capability/safety evaluation, el safeguard gate, el chat canary y el API release; por último, presenta la model deprecation, el shadow traffic y el rollback. Cada gate debe tener owner, evidence y stop condition.
+\end{importantbox}
+
+\subsection{Lecturas adicionales}
+
+{\small
+\begin{itemize}[nosep,leftmargin=*]
+  \item \href{https://arxiv.org/abs/2001.08361}{\textbf{Scaling Laws for Neural Language Models}}: escalamiento empírico y métodos de predicción.
+  \item \href{https://arxiv.org/abs/2203.02155}{\textbf{InstructGPT}}: el pipeline de RLHF y sus limitaciones.
+  \item \href{https://www.anthropic.com/research/constitutional-ai-harmlessness-from-ai-feedback}{\textbf{Constitutional AI}}: principles, critique/revision y RLAIF.
+  \item \href{https://www.anthropic.com/research/evaluating-ai-systems}{\textbf{Challenges in evaluating AI systems}}: diseño de evaluaciones y su validez en el mundo real.
+  \item \href{https://www.anthropic.com/responsible-scaling-policy/rsp-v3-0}{\textbf{Anthropic RSP v3.0}}: el capability-threshold framework vigente en 2026.
+  \item \href{https://www.anthropic.com/research/towards-monosemanticity-decomposing-language-models-with-dictionary-learning}{\textbf{Towards Monosemanticity}}: dictionary learning y features.
+  \item \href{https://docs.anthropic.com/en/docs/about-claude/model-deprecations}{\textbf{Claude model lifecycle}}: active, legacy, deprecated y retired.
+\end{itemize}
+}
+
+\end{document}

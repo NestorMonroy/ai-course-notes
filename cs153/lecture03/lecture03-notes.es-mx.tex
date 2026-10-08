@@ -1,0 +1,544 @@
+\documentclass[a4paper]{article}
+
+\newcommand{\notetitle}{Lecture 03: Palantir at Scale --- Apollo, Rubix e infraestructura de decisiones a nivel de misión}
+\newcommand{\noteauthors}{Elaborado a partir de la entrevista con Shyam Sankar, los subtítulos con marcas de tiempo y los materiales oficiales de Palantir sobre Apollo/Rubix}
+\newcommand{\notedate}{Curso de invierno de 2025 · Versión reescrita en 2026}
+\newcommand{\videochannel}{Video histórico del curso Stanford CS153 (actualmente en private)}
+\newcommand{\videopublishdate}{2025-04-28}
+\newcommand{\videoduration}{44:03}
+\newcommand{\videourl}{https://www.youtube.com/watch?v=jB13kCmWT2k}
+\newcommand{\videocoverpath}{cover.jpg}
+
+\input{../cs153-preamble.es-mx.tex}
+\graphicspath{{./}{images/}}
+\setcounter{tocdepth}{1}
+
+\newcommand{\figurepair}[5]{%
+\begin{figure}[H]
+\centering
+\begin{minipage}[t]{0.485\textwidth}
+\centering
+\includegraphics[width=\linewidth]{#1}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.485\textwidth}
+\centering
+\includegraphics[width=\linewidth]{#2}
+\end{minipage}
+\caption{#3}
+\figsource{#4, #5.}
+\end{figure}
+}
+
+\begin{document}
+\makecscover
+
+\begin{warningbox}{Materiales fuente y postura}
+La publicación histórica de esta clase en YouTube se cambió a private el 2026-08-11. Estas notas usan los subtítulos con marcas de tiempo que se conservan en el repositorio, la miniatura oficial, el PDF oficial del Palantir 2022 Apollo Demo Day y la documentación oficial de Rubix accesible el 2026-08-11. Lo que dice el ponente sobre la competencia entre naciones, la política industrial y la misión de defensa corresponde a la postura de Shyam Sankar; los mecanismos técnicos se contrastan, en la medida de lo posible, con materiales oficiales de los productos. Los diagramas conceptuales numerados se redibujaron con `lecture03-diagrams.py` y no se presentan como si fueran las slides del video original.
+\end{warningbox}
+
+\section{Primero, auditar el origen de los puntos de vista: misión, historia y posición de intereses}
+
+Esta es una entrevista que abarca a la vez tecnología de infraestructura, métodos de producto empresarial, seguridad nacional y estrategia industrial. Si todo el contenido se comprime en «las mejores prácticas de Palantir», el lector pierde la capacidad de juzgar qué tan sólida es la evidencia. Shyam Sankar relata casi veinte años de experiencia como el empleado número 13 de Palantir y actual CTO y vicepresidente ejecutivo; sus juicios técnicos provienen de desplegar durante mucho tiempo sistemas de misión crítica, mientras que sus juicios políticos e industriales llevan consigo una misión empresarial explícita y su experiencia personal. Una lectura de calidad necesita conservar esta posición, en lugar de reescribirla con un tono impersonal como si fueran leyes universales.
+
+\subsection{Cómo la misión personal moldea la elección de problemas}
+
+Sankar repasó su trayectoria de Cornell a Stanford, su paso por Xoom y su llegada a Palantir. Vincula la experiencia de su familia, que dejó Nigeria a causa de hechos violentos y volvió a empezar en Estados Unidos, con su interés de largo plazo por la seguridad nacional. Para estas notas, el valor de este contexto no está en construir una narrativa heroica, sino en explicar por qué considera prioritaria la pregunta de «si el software puede hacer que las instituciones gubernamentales funcionen con eficacia». También recuerda al lector que los juicios posteriores sobre disuasión, capacidad de manufactura y legitimidad institucional no son neutrales en cuanto a valores.
+
+\begin{knowledgebox}{Nota de clase: primero distinguir tres tipos de afirmaciones}
+El primer tipo son hechos verificables sobre los sistemas; por ejemplo, desde una oficina común no es posible iniciar sesión de forma remota en un entorno air-gapped. El segundo tipo es la experiencia del ponente; por ejemplo, las dificultades para escalar las actualizaciones manuales y el modelo de forward-deployed SRE. El tercer tipo son juicios estratégicos; por ejemplo, cómo entender la competencia entre países o la industria de defensa. Los tres tipos de afirmaciones pueden ser valiosos al mismo tiempo, pero requieren evidencia distinta, y no debe permitirse que la credibilidad técnica respalde automáticamente las conclusiones políticas.
+\end{knowledgebox}
+
+\subsection{El cambio en la relación entre Silicon Valley y la tecnología de defensa}
+
+El ponente divide en dos etapas la resistencia que Palantir enfrentó en sus inicios: al principio, la indiferencia de que «el software para el gobierno no es un buen negocio»; después, una oposición política más explícita. Además, interpreta el resurgimiento actual de la defense tech como un regreso de Silicon Valley a sus raíces históricas, pues los primeros trabajos en semiconductores, aeroespacial e investigación en redes estuvieron desde el principio profundamente ligados a la inversión pública y a las necesidades de defensa. Esta narrativa ayuda a entender la cultura de la empresa, pero no demuestra que todos los proyectos gubernamentales valgan la pena; los objetivos del proyecto, la autorización legal, la capacidad de auditoría y los derechos civiles siguen requiriendo una evaluación caso por caso.
+
+\begin{importantbox}{La pregunta técnica central de esta clase}
+Cómo lograr que un mismo software se actualice de forma continua en nube pública, nube privada, centros de datos del cliente, entornos sin conexión de red y dispositivos de borde con recursos limitados, conservando al mismo tiempo las verificaciones de estado, la reversión, el aislamiento de seguridad y la auditoría de responsabilidades. Apollo responde principalmente a «qué versión debe ejecutarse en qué lugar y cómo cambiarla de forma segura»; Rubix responde principalmente a «sobre qué substrate de ejecución unificado y controlado corren estas cargas de trabajo».
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Esta clase es a la vez una clase de arquitectura y una entrevista sobre la industria con una postura de valores explícita. Más adelante se separarán los mecanismos técnicos de los juicios del ponente: Apollo/Rubix se verifican con documentación oficial, mientras que Project Maven, la competencia en manufactura y las opiniones institucionales conservan su fuente oral y sus límites éticos. Comprender esta separación por capas es el primer paso para discutir software de alto riesgo.
+\section{La heterogeneidad es la verdadera Scale aquí}
+
+La infraestructura de internet suele describir la scale mediante el número de solicitudes, de nodos o el volumen de datos. La dificultad que enfrenta Palantir tiene además otra dimensión: el mismo software debe abarcar redes, hardware, marcos regulatorios, ventanas de actualización y modos de falla completamente distintos. Un clúster grande en la nube puede tener un plano de control unificado, mientras que cientos o miles de entornos de clientes tienen cada uno sus propios límites. Por ello, la unidad de crecimiento del sistema no es un solo servidor, ni tampoco solo un Kubernetes cluster, sino el número de combinaciones de restricciones.
+
+\subsection{Del On-Prem Monolith a la entrega automatizada}
+
+En los primeros años de Palantir, AWS S3 todavía no era una infraestructura pública confiable, y gran parte de los sistemas de los clientes se ejecutaba en entornos on-premises. \term{On-prem} significa que el software se despliega en los centros de datos o equipos propios del cliente, y no en una nube pública controlada por el proveedor. Muchas redes gubernamentales son además \term{air-gapped}, es decir, están aisladas física o lógicamente de internet, y los paquetes de actualización y la información de diagnóstico deben transferirse de forma controlada. Aquí no puede suponerse que existan el acceso root remoto, la ampliación inmediata de capacidad ni las imágenes unificadas propias de la era de la nube.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{images/01-infrastructure-epochs.png}
+\caption{La evolución de la infraestructura descrita en la entrevista: on-prem manual, scale-out, microservices y, después, Apollo y Rubix.}
+\figsource{Redibujado a partir de los subtítulos 05:00--13:30, `images/01-infrastructure-epochs.png`.}
+\end{figure}
+
+\begin{knowledgebox}{Lectura de la figura: cada abstracción expone un nuevo problema de control}
+Un Monolith tiene pocos componentes, pero es difícil publicarlos de forma independiente; los microservices permiten que los equipos desarrollen en paralelo, pero aumentan las versiones, los schemas, las dependencias y el orden de despliegue. Kubernetes unifica la planificación de contenedores, pero no puede entender por sí mismo las condiciones previas de actualización de cada software ni definir las políticas de seguridad en nombre de la organización. Apollo/Rubix no consiste en «agregar otras dos capas», sino en codificar como capacidades de la plataforma la lógica de control que la etapa anterior dejaba a la memoria de las personas.
+\end{knowledgebox}
+
+\begin{importantbox}{Términos clave: Microservice y SRE}
+Un Microservice es una unidad de servicio que puede desarrollarse, publicarse y escalarse de forma independiente; los servicios colaboran entre sí mediante API o mensajes. SRE significa Site Reliability Engineer, ingeniero de confiabilidad de sitios, responsable de la disponibilidad, la capacidad, la respuesta a incidentes y la automatización. Al principio, enviar SRE directamente a las instalaciones de cada cliente resolvía los problemas, pero convertía el número de personas de la organización en el límite de crecimiento.
+\end{importantbox}
+
+\subsection{Cuatro tipos de diferencias entre entornos}
+
+El ponente describió la escala interna en el momento de la clase con órdenes de magnitud aproximados: alrededor de mil entornos de producción, de los cuales unos cien están desconectados de la red, miles de servicios y una gran cantidad de actualizaciones semanales. Estas cifras deben entenderse como una idea de la escala expresada de palabra, no como información financiera divulgada. La conclusión más sólida es la amplitud de entornos: algunos se ejecutan en grandes nubes multiinquilino, otros en clústeres de un solo inquilino del cliente, otros se actualizan mediante paquetes fuera de línea controlados y otros se ubican en el borde táctico o en dispositivos con recursos limitados. El código debe enfrentar distintas reglas de conectividad, capacidad y certificación.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{images/02-heterogeneous-fleet.png}
+\caption{Cuatro extremos representativos de una fleet heterogénea: sin conexión a la red, borde, un solo inquilino y nube multiinquilino.}
+\figsource{Redibujado a partir de los subtítulos 05:00--09:00, `images/02-heterogeneous-fleet.png`.}
+\end{figure}
+
+\begin{knowledgebox}{Lectura de la figura: la descripción de un entorno debe ser un vector multidimensional}
+Escribir solo «se ejecuta en la nube» no basta para decidir la estrategia de despliegue. Como mínimo hay que registrar el modo de conexión, el hardware y la arquitectura, la capacidad disponible, el nivel de cumplimiento normativo, la residencia de los datos, las ventanas de mantenimiento, los operadores autorizados y la forma de recuperación ante fallas. Cuanto más completa sea la metadata del entorno, más podrá planificar automáticamente el plano de control; cuando falta información, la automatización solo propaga los errores más rápido por la fleet.
+\end{knowledgebox}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{L{0.19\textwidth}L{0.31\textwidth}L{0.4\textwidth}}
+\toprule
+Dimensión & Diferencias típicas & Efecto en el sistema de entrega \\
+\midrule
+Conectividad & En línea, intermitente, unidireccional, totalmente desconectada & Sincronización de planes, transferencia de artifacts y latencia de la telemetría \\
+Cómputo & Nube grande, centro de datos fijo, dispositivos de borde & Resource request, escalamiento y recorte de funciones \\
+Seguridad & Línea base comercial, regulación, redes clasificadas & Identidad, aprobaciones, auditoría y operator access \\
+Topología & Un solo inquilino, multiinquilino, entre regiones & Aislamiento, conjuntos de capacidad y dominios de falla \\
+Ventana de cambios & Publicación continua, ventanas periódicas, acceso manual & Release channel, bundle y estrategia de reversión \\
+\bottomrule
+\end{tabular}
+\caption{Un entorno heterogéneo no es una etiqueta de despliegue, sino un conjunto de restricciones que modifican el algoritmo de control.}
+\end{table}
+
+\begin{warningbox}{Las cifras de escala deben ir ligadas a una fecha y a un criterio de conteo}
+El material oficial del Palantir 2022 Apollo Demo Day indica 250+ distinct customer environments, mientras que en la clase se mencionó de palabra un orden de magnitud aproximado mayor de production environments. Ambas cifras pueden provenir de años, alcances de producto o criterios de conteo distintos. Estas notas conservan las dos fuentes, no usan una cifra para demostrar que la otra es errónea ni presentan la aproximación oral como una estadística oficial vigente.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La scale de Palantir se manifiesta principalmente en la heterogeneidad de la fleet y en la frecuencia de los cambios. El air gap, los recursos limitados en el borde, las políticas de un solo inquilino y la nube multiinquilino exigen en conjunto que el software modele las restricciones del entorno, en lugar de suponer que todas las máquinas pertenecen al mismo dominio de control. Apollo surgió precisamente para que este modelo del entorno intervenga en cada decisión de actualización.
+\section{Apollo: convertir la entrega de software en un Desired-State Control Loop}
+
+Antes de Apollo, la entrega dependía de que una persona llevara medios físicos al entorno del cliente, iniciara sesión en las máquinas, recordara las dependencias entre servicios y luego intentara la actualización según su experiencia. Este proceso todavía era sostenible con unas decenas de servicios y pocos entornos; al pasar a microservices y a una fleet de gran escala, la memoria de trabajo humana ya no puede manejar de forma confiable la compatibilidad de versiones, la schema migration, el estado de salud y la reversión. El cambio central de Apollo consiste en colocar los objetivos, las restricciones y el estado observado dentro del mismo lazo de control, de modo que el sistema calcule de manera continua cómo hacer que el estado actual converja hacia el desired state.
+
+\subsection{Desired state, observed state y plan}
+
+El \term{Desired state} es la versión de software, la configuración y las políticas que se espera que ejecute un entorno; el \term{observed state} es la versión, la salud y el estado de los recursos que el sistema reporta en realidad. El Orchestrator compara ambos, genera un plan y lo entrega al deployment component dentro del entorno para que lo ejecute. El nuevo estado tras la ejecución se reporta de nuevo y así se cierra el lazo. La automatización aquí no es un pipeline fijo, porque cada entorno puede requerir rutas, tiempos de espera y condiciones de aprobación distintos.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{images/03-apollo-control-loop.png}
+\caption{Lazo de control de Apollo: declaración del desarrollador, agregación en el catalog, planeación del orchestrator, ejecución en el entorno y reporte de salud.}
+\figsource{Redibujado a partir de los subtítulos y de materiales oficiales de Palantir Apollo, `images/03-apollo-control-loop.png`.}
+\end{figure}
+
+\begin{importantbox}{Lectura de la figura: la automatización no elimina la responsabilidad del ingeniero de producto}
+El ponente enfatiza que el service owner sigue siendo responsable de la operación. La plataforma ofrece telemetría, publicación y remediation unificadas, mientras que los ingenieros deben declarar las dependencias, las condiciones de salud y los límites de compatibilidad. Si un equipo solo le entrega el binary a un «robot de operaciones» sin codificar lo que se espera del software, el plano de control no puede distinguir entre una actualización segura y una ruptura silenciosa.
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{images/official-apollo-fleet-overview.png}
+\caption{La interfaz oficial del producto Apollo muestra una vista general de environments, release map, alerts e installation.}
+\figsource{PDF oficial del Palantir Apollo Demo Day, página 8 de capturas del producto, `images/official-apollo-fleet-overview.png`.}
+\end{figure}
+
+\begin{knowledgebox}{Lectura de la figura: el fleet overview debe responder tres preguntas operativas}
+Primero, qué installation están en la versión objetivo y cuáles van atrasadas o fallaron; segundo, si los problemas se concentran en una categoría de entorno, un release channel o una versión de software; tercero, si el operator puede pasar del estado agregado a la health específica y al historial de cambios. El valor del tablero no es que «todas las celdas se pongan en verde», sino acortar el camino desde la anomalía hasta una remediation explicable.
+\end{knowledgebox}
+
+\subsection{Catalog: el contrato de despliegue del propio software}
+
+Los materiales oficiales de Apollo describen el catalog como un conjunto de metadata del software que incluye versiones, dependencias, resource requests, schema compatibility y los resultados de vulnerability scanner externos. El \term{Schema} es la estructura de los datos junto con sus reglas de compatibilidad; solo si un servicio de almacenamiento declara qué schema version puede leer y escribir, el plano de control puede planear la migration e impedir la operación cuando una reversión dañaría los datos. Por eso el catalog no es el catálogo de una tienda de software, sino el sistema de tipos y la biblioteca de restricciones de la entrega automatizada.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{images/official-apollo-software-catalog.png}
+\caption{El Apollo Software Catalog reúne las versiones y el estado de los servicios, así como la metadata utilizable para la orquestación.}
+\figsource{PDF oficial del Palantir Apollo Demo Day, página 11 de capturas del producto, `images/official-apollo-software-catalog.png`.}
+\end{figure}
+
+\begin{knowledgebox}{Lectura de la figura: el Catalog permite componer los cambios entre equipos}
+Cuando cada equipo publica de forma independiente, el CI dentro de un solo repository solo puede demostrar que el propio servicio se construyó correctamente. Un Fleet upgrade necesita conocer además las dependencias aguas abajo, el schema de los datos, las restricciones del entorno y los hallazgos de seguridad. El Catalog coloca esta información en un plano de control compartido, de modo que el orchestrator pueda determinar «si se puede actualizar», «a quién actualizar primero» y «si se puede revertir tras una falla», en lugar de que el operator tenga que consultar sobre la marcha a decenas de equipos en medio de un incidente.
+\end{knowledgebox}
+
+\subsection{Release channel: organizar el rollout según la confianza}
+
+El \term{Release channel} organiza los entornos por etapa de publicación o por tolerancia al riesgo, de modo que una misma versión de software pueda entrar primero en canary y luego extenderse gradualmente. El \term{Canary} es un despliegue anticipado de alcance reducido que usa poco tráfico real o pocos entornos para exponer problemas; solo se continúa cuando la salud es estable. Los entornos Air-gapped pueden recibir el bundle con retraso y los entornos regulados pueden exigir aprobaciones adicionales; por eso el rollout es un grafo de estados no lineal, no una única cadena de despliegue semanal compartida por todos los servicios.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{images/04-release-confidence.png}
+\caption{El Release channel organiza un rollout no lineal mediante la confianza en cada entorno y sus restricciones.}
+\figsource{Redibujado a partir de los conceptos oficiales de Apollo y de los subtítulos, `images/04-release-confidence.png`.}
+\end{figure}
+
+\figurepair{images/official-apollo-release-channels.png}{images/official-apollo-rollout-status.png}{Release channels, environment rollout y estado de versiones en la interfaz oficial de Apollo.}{PDF oficial del Palantir Apollo Demo Day}{`images/official-apollo-release-channels.png` y `images/official-apollo-rollout-status.png`}
+
+\begin{importantbox}{Lectura de la figura: cada etapa de publicación debe tener condiciones de entrada y de salida}
+Un Canary no se reduce a «desplegar primero algunas instancias». Cada channel debe definir el tiempo de espera, el health threshold, el failure budget permitido, la aprobación manual y las condiciones de rollback automático. Distintos entornos pueden quedarse en versiones distintas, siempre que el catalog y las políticas de seguridad gestionen esa diferencia de forma explícita. Buscar que toda la fleet esté sincronizada, en cambio, propagaría un mismo defecto a todos los entornos de misión al mismo tiempo.
+\end{importantbox}
+
+\subsection{Health, monitor y rollback}
+
+\term{Rollback} se refiere a devolver el software a una versión que se sabe buena. Solo es seguro cuando la versión anterior sigue siendo compatible con el schema de datos, la configuración y las dependencias actuales. El ejemplo oficial del Demo Day hace que el operator defina un monitor, observe el estado del deployment y revierta cuando la nueva versión activa una condición de falla. La parte realmente difícil no es hacer clic en un botón, sino declarar de antemano qué significa estar sano, cómo asociar las métricas con las versiones y cómo manejar, tras la reversión, los datos ya generados y las acciones externas ya realizadas.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{images/official-apollo-monitor-definition.png}
+\caption{Apollo monitor definition: conecta las condiciones de detección, el historial y la remediation con una versión específica del software.}
+\figsource{PDF oficial del Palantir Apollo Demo Day, página 9 de capturas del producto, `images/official-apollo-monitor-definition.png`.}
+\end{figure}
+
+\begin{knowledgebox}{Lectura de la figura: las condiciones de salud deben acercarse lo más posible al resultado para el usuario o la misión}
+El CPU, la memory y que el process siga vivo son señales necesarias, pero no demuestran que el software sea correcto. Un monitor más sólido verifica el API success, la integridad de los datos, los workflow críticos y las políticas de seguridad. En los sistemas de misión, además, hay que distinguir entre «el servicio es accesible» y «la salida de decisión es confiable». Cuanto más cerca esté la métrica del resultado real, mejor podrá el rollback evitar que se conserve una versión técnicamente en línea pero funcionalmente errónea.
+\end{knowledgebox}
+
+\subsection{Software supply chain y correcciones de emergencia}
+
+SolarWinds y Log4j convirtieron el riesgo de la software supply chain en un problema de nivel empresarial. Ante una vulnerabilidad, la organización necesita saber qué component se ejecutan en la fleet, qué versiones están afectadas, en qué entornos se encuentran, si pueden actualizarse de inmediato y cuándo recibirán la corrección los entornos sin conexión a la red. El catalog y el estado de los entornos de Apollo proporcionan el inventory, el orchestrator ejecuta la remediation y el historial de auditoría registra quién aprobó qué cambio.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{images/official-apollo-vulnerability.png}
+\caption{El ejemplo oficial de Apollo asocia un vulnerability finding con un component y una versión específicos.}
+\figsource{PDF oficial del Palantir Apollo Demo Day, página 12 de capturas del producto, `images/official-apollo-vulnerability.png`.}
+\end{figure}
+
+\begin{warningbox}{La respuesta a vulnerabilidades no puede depender solo de «actualizar todo»}
+Una actualización de emergencia todavía debe considerar el schema, las ventanas de misión, el air-gap bundle y la autorización del owner de cada entorno. Algunos sistemas no pueden detenerse de inmediato y algunas versiones antiguas pueden estar limitadas por otras dependencias. Un plano de control confiable debe ofrecer un inventory preciso, clasificación por niveles de riesgo, controles compensatorios y excepciones rastreables, en lugar de ocultar con velocidad un impacto desconocido.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Apollo coloca el software, los entornos y la metadata de seguridad dentro de un lazo de control desired-state. El Catalog aporta restricciones componibles, el release channel gestiona la confianza, el monitor conecta la salud con las versiones, y el rollback y la remediation permiten que la fleet se recupere ante anomalías. El siguiente paso requiere además un substrate de ejecución unificado, para evitar que cada equipo de aplicación tenga que volver a aprender distintos detalles de Kubernetes y de cumplimiento normativo.
+\section{Rubix: \textit{substrate} de ejecución unificado y Compliance-as-Code}
+
+Apollo decide cómo debe cambiar el software; Rubix proporciona la base de ejecución sobre la que ocurren esos cambios. Aquí, \term{substrate} designa la capa de ejecución unificada que está por debajo de las aplicaciones y por encima de cada nube o hardware concreto. La documentación oficial actual de Palantir describe Rubix como una Kubernetes implementation hardened, autoscaling y highly available, que aloja AIP, Foundry, Apollo y los workload de los clientes. Su valor no está en ocultar todas las diferencias, sino en fijar las políticas de seguridad, de ciclo de vida y de disponibilidad que tienen que ser uniformes.
+
+\subsection{Qué unifica Kubernetes y qué le sigue faltando}
+
+\term{Kubernetes} es un sistema de orquestación de contenedores que se encarga de declarar y mantener recursos de workload, service, network y storage. Sus objetos nativos pueden describir replicas, volume e ingress, pero no conocen el operator access de un entorno de seguridad nacional, la vida útil de los nodos, las aprobaciones de cumplimiento normativo ni la semántica de un despliegue que abarca toda la fleet. Rubix construye sobre Kubernetes una API opinionated que codifica esa experiencia organizacional como comportamiento predeterminado.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{images/05-rubix-layers.png}
+\caption{Rubix se sitúa entre las aplicaciones y la infraestructura heterogénea; Apollo expresa versiones y políticas por encima de él.}
+\figsource{Redibujado a partir de los subtítulos 15:00--20:00, `images/05-rubix-layers.png`.}
+\end{figure}
+
+\begin{knowledgebox}{Lectura de la figura: el límite de la abstracción es la «intención de la aplicación»}
+El equipo de producto declara cuántas replica necesita, qué persistencia, qué endpoint expone y cómo se determina el quorum; después, el substrate lo traduce a provider-specific resource, certificate, network policy y lifecycle. Si la aplicación todavía tiene que conocer el ingress de cada nube, la PKI de cada centro de datos y cada checklist de cumplimiento normativo, la abstracción no ha liberado realmente la velocidad de experimentación.
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{images/official-rubix-k8s.png}
+\caption{La figura oficial de Palantir presenta Rubix como una implementación de Kubernetes hardened, autoscaling y highly available.}
+\figsource{Documentación oficial de arquitectura de Palantir Rubix, consultada el 2026-08-11, `images/official-rubix-k8s.png`.}
+\end{figure}
+
+\begin{importantbox}{Términos clave: Multi-tenancy y aislamiento}
+Multi-tenancy significa que varios clientes, equipos o workload comparten la infraestructura subyacente y, al mismo tiempo, conservan sus límites de identidad, datos, red y recursos. El aislamiento no se reduce al namespace; incluye también privilegio mínimo, network segmentation, gestión de secret, resource quota, auditoría y control de noisy-neighbor. Compartir aumenta la utilización, pero también amplía el blast radius de un error de configuración.
+\end{importantbox}
+
+\subsection{Del cumplimiento normativo manual a la ejecución por software}
+
+Los controles regulatorios suelen tener objetivos razonables, por ejemplo restringir a los operator, registrar los cambios, cifrar las transmisiones y mantener una línea base de parches. Si dependen solo de documentos y de checklist manuales, los controles crecen linealmente con el número de entornos y tienden a producir drift. \term{Compliance-as-code} convierte los requisitos en policy, immutable configuration, automated evidence y gate que bloquean los despliegues que incumplen, de modo que «cumplir las reglas» sea un estado del sistema y no un conjunto de archivos reunidos a última hora para la auditoría trimestral.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{images/official-rubix-security.png}
+\caption{La figura oficial de seguridad de Rubix enumera controles geográficos, auditoría, zero-downtime upgrade, node cycling, encryption y service orchestration.}
+\figsource{Documentación oficial de arquitectura de Palantir Rubix, consultada el 2026-08-11, `images/official-rubix-security.png`.}
+\end{figure}
+
+\begin{knowledgebox}{Lectura de la figura: las propiedades de seguridad deben traducirse en evidencia observable}
+«Encryption at rest» exige poder demostrar la key y la storage policy; «network monitoring» exige registros consultables y alert; «geographic controls» exige restricciones en el scheduler y en la ubicación de los datos. El zero-downtime upgrade de la figura significa mantener el servicio durante una publicación; no es el ZeRO del entrenamiento distribuido, que es el Zero Redundancy Optimizer y ahorra memoria de cada GPU aplicando sharding al optimizer state, al gradient o a los parameter. La figura de seguridad es un catálogo de capacidades, no una prueba automática. Cada elemento debe vincularse con su configuración, su evidencia de ejecución, su manejo de anomalías y su owner.
+\end{knowledgebox}
+
+\subsection{Ephemeral node: eliminar el drift mediante reemplazo}
+
+\term{Immutable image} significa que la image en ejecución no se modifica en el lugar; los parches entran al sistema construyendo una image nueva y reemplazando la instance. \term{Ephemeral node} es un nodo con vida útil limitada, del que se espera que sea destruido y reconstruido. Así se reduce el drift a largo plazo y se obliga a que los service tengan capacidad de failover. El node cycling también acorta el tiempo durante el cual un atacante puede mantener un foothold persistente, pero no sustituye a la credential rotation, la network policy ni la application security.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{images/06-ephemeral-security.png}
+\caption{La ephemerality convierte el patching en un ciclo controlado de replacement.}
+\figsource{Redibujado a partir de los subtítulos y de la documentación actual de Rubix, `images/06-ephemeral-security.png`.}
+\end{figure}
+
+\begin{warningbox}{Diferencia de versiones: 72 horas en la exposición oral y 48 horas en la documentación actual}
+En los subtítulos de la clase, Sankar dice que las container image se destruyen al azar en algún momento entre unas 40 y 72 horas y se reconstruyen a partir de una image nueva; la documentación oficial de Rubix consultada el 2026-08-11 dice que nodes cannot live longer than 48 hours. Puede que la política del producto se haya actualizado entre ambas fechas, o que la diferencia se deba a que se habla de image, host o node. Estas notas no fusionan ambas cifras en un solo número; al implementarlo, debe tomarse como referencia la policy vigente del despliegue de destino.
+\end{warningbox}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{L{0.19\textwidth}L{0.32\textwidth}L{0.39\textwidth}}
+\toprule
+Mecanismo & Capacidad que se obtiene & Nuevos requisitos \\
+\midrule
+Immutable image & Línea base reproducible, menos drift en el lugar & Cadena de construcción y firma confiable \\
+Bounded lifetime & Limita la persistencia, obliga a actualizar & Workload reprogramable, estado externalizado \\
+Policy-driven drain & Menos inestabilidad por desalojos simultáneos & Visibilidad de topología, capacidad y prioridad de tareas \\
+Blue/green rollout & Validación en paralelo, cambio zero-downtime & Capacidad duplicada y criterio de salud \\
+Audit logging & Trazabilidad del comportamiento de operator y sistema & Integridad de los registros y control de acceso \\
+\bottomrule
+\end{tabular}
+\caption{La automatización de la seguridad convierte las dependencias manuales implícitas en nuevos requisitos de software y de capacidad.}
+\end{table}
+
+\subsection{Resumen de la sección}
+
+Rubix usa un substrate unificado de Kubernetes para encargarse de la seguridad, el aislamiento, el ciclo de vida y la uniformidad entre entornos; Apollo aprovecha ese substrate para ejecutar los cambios de versión y de configuración. Compliance-as-code y la ephemeral infrastructure reducen el toil manual, pero exigen que los workload admitan de verdad fallas, reconstrucción y estado externalizado. La abstracción no elimina la complejidad: la traslada a un equipo de plataforma que puede verificarla de forma centralizada.
+\section{De clientes extremos a una plataforma general: Inductive Productization}
+
+En el software empresarial ocurre con frecuencia una situación contraria a la intuición: que un solo cliente plantee cierto problema no significa que el problema carezca de importancia; ese cliente puede llegar a cierta restricción cinco años antes que el mercado. El ponente describe la enterprise demand como una power law, no como necesidades que se distribuyen alrededor de un promedio. Los equipos forward-deployed primero resuelven los casos extremos dentro del workflow real, después identifican las invariant a partir de los casos repetidos y, por último, construyen la interfaz del producto.
+
+\subsection{No es desarrollo a la medida ni planeación de producto alejada del terreno}
+
+El desarrollo puramente a la medida plasma cada diferencia entre clientes en una rama distinta, por lo que no permite acumular nada; la planeación de producto alejada del terreno, en cambio, tiende a promediar las restricciones extremas, que son las más valiosas. La Inductive productization se ubica entre ambas: la primera vez se registra el contexto completo, la segunda se buscan similitudes estructurales y solo a la tercera se empieza a formar una abstraction estable. El ponente atribuye la respuesta rápida en Operation Warp Speed a que antes ya se habían resuelto, en la optimización de la producción de petróleo y gas, problemas de coordinación de recursos con una estructura similar.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{images/07-inductive-productization.png}
+\caption{De un único cliente del futuro a un producto general: repetir, separar los detalles locales y codificar las invariant.}
+\figsource{Redibujada a partir de los subtítulos 19:00--21:30, `images/07-inductive-productization.png`.}
+\end{figure}
+
+\begin{knowledgebox}{Lectura de la figura: qué cuenta como ``structurally identical''}
+Dos industrias pueden usar sustantivos completamente distintos y, aun así, tener el mismo grafo de restricciones. Por ejemplo, si ambas tienen recursos escasos, prioridades de demanda, oferta dinámica, permisos de revisión y retroalimentación de resultados, pueden compartir primitive de optimization y de workflow. La similitud no puede basarse solo en analogías narrativas: hay que establecer de forma explícita la correspondencia entre entity, constraint, decision y outcome.
+\end{knowledgebox}
+
+\begin{warningbox}{La experiencia forward-deployed también puede sobreajustarse}
+Los equipos en terreno tienden a tomar el proceso del cliente que más se hace oír como si fuera un hecho del mercado. Para evitar el sobreajuste hay que registrar qué lógica corresponde a regulaciones, a costumbres de la organización o a workaround temporales, y cuál constituye una verdadera invariant común a varios clientes. Después de la conversión en producto, también hay que verificar si los nuevos clientes pueden adoptarlo sin replicar el personal del equipo original.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Los entornos de tareas extremos pueden revelar de antemano problemas de infraestructura futuros, pero solo se convierten en una plataforma mediante la repetición, la comparación y la abstracción. Apollo/Rubix es en sí mismo el resultado de este camino: primero resolvió la entrega y la operación de la fleet interna y después se externalizó gradualmente como una capacidad general. El siguiente capítulo aplica la misma idea a Project Maven, que pasa de la detección visual a la cadena de decisión completa.
+\section{Project Maven: el modelo de detección es solo la entrada de la Decision Chain}
+
+El caso de Project Maven visto en clase parte de la detección de objetivos en datos de sensores que cubren áreas extensas. Aquí no se desarrollan operaciones de ataque; el enfoque está en el problema de sistema: cuando el objeto de interés ocupa una fracción mínima de un campo de visión enorme, la búsqueda manual cuadro por cuadro no es lo bastante rápida; la computer vision puede acortar la fase de observe, pero no puede completar por sí misma la confirmación de identidad, la revisión legal, la asignación de recursos, la autorización de la acción ni el análisis posterior de resultados. Un detector de alta precisión que no se integra en un workflow controlado solo genera más alertas que nadie atiende.
+
+\subsection{OODA loop y latency budget}
+
+\term{OODA} significa Observe, Orient, Decide, Act. Observe recopila el estado de los sensores y del entorno; Orient sitúa las observaciones en el contexto de la misión, los antecedentes y las reglas; en Decide, un sujeto con autoridad elige la acción; Act la ejecuta y produce nuevos resultados. La velocidad del ciclo importa, pero cada fase requiere exactitud y control de permisos. El latency budget debe repartirse en todo el loop, no limitarse a optimizar los inference milliseconds.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{images/08-ooda-decision-chain.png}
+\caption{Perspectiva de sistema de Project Maven: la detección acelera Observe; el valor proviene de la OODA decision chain completa.}
+\figsource{Redibujado a partir de los subtítulos 21:27--27:00, `images/08-ooda-decision-chain.png`.}
+\end{figure}
+
+\begin{knowledgebox}{Lectura de la figura: cada flecha requiere provenance y authority}
+La salida del detector debe conservar el sensor, la hora, la versión del modelo y la confidence; la fase Orient necesita relacionar otra información de inteligencia y la incertidumbre; la fase Decide debe mostrar quién tiene la autoridad y qué reglas aplican; después de Act deben registrarse el resultado y los efectos secundarios. Sin estos vínculos, los falsos positivos del modelo no pueden rastrearse y el juicio humano tampoco puede aprovecharse para mejorar la siguiente iteración.
+\end{knowledgebox}
+
+\begin{importantbox}{Términos clave: Decision chain y Ontology}
+La decision chain es el proceso organizacional completo que va de la observación a la acción y de ahí a la retroalimentación. Ontology no es aquí un término filosófico, sino un modelo compartido del negocio o de la misión: qué entities existen, cómo se relacionan, qué actions pueden ejecutarse, qué estados y qué permisos tienen. La Ontology hace que sensores, modelos, personas y workflows usen la misma capa semántica, y evita que cada sistema describa el mismo objeto con sus propios ID y estructuras de tablas.
+\end{importantbox}
+
+\subsection{Del hallazgo de objetos a la acción controlada}
+
+El ponente describió cómo, a partir de «encontrar una gran cantidad de objetos candidatos», se siguieron planteando preguntas: cómo confirmar la identidad, cómo elegir los recursos, cuándo se necesita una revisión legal o de políticas, cómo se retroalimentan los resultados. Esta ampliación pone de manifiesto un patrón frecuente en el AI deployment: el primer modelo resuelve una tarea local y visible, pero lo que en realidad bloquea el valor suelen ser los procesos organizacionales posteriores y las rupturas en los datos.
+
+\begin{warningbox}{Límites de la automatización en escenarios de alto riesgo}
+La detección, la priorización y las recomendaciones pueden aumentar la capacidad de procesamiento de las personas, pero eso no equivale a autorizar al sistema a tomar por sí mismo decisiones irreversibles. Los permisos, la human review, la verificación por dos personas, los umbrales de confianza y los mecanismos de apelación o corrección deben diseñarse en función de las consecuencias. La accuracy del modelo no sustituye la legalidad ni elimina al sujeto responsable.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El valor didáctico de Maven no está en un modelo de visión concreto, sino en situar la inference dentro del OODA loop. La observación, la orientación, la decisión, la acción y la retroalimentación requieren una semántica, unos permisos y una auditoría unificados. Este esquema también puede aplicarse a empresas comerciales; solo cambian los objetivos, la autorización legal y las consecuencias de un fallo.
+\section{Kill Chain y Value Chain: comparten el esqueleto de software, no las conclusiones éticas}
+
+Sankar considera la kill chain gubernamental y la value chain comercial como decision chains de estructura similar: la organización fija objetivos, construye un operational picture, asigna recursos, ejecuta el workflow y luego observa los resultados. Una plataforma tecnológica puede reutilizar el entity model, el constraint engine, el workflow, el audit y el feedback; sin embargo, la base de autoridad con la que un gobierno emplea la fuerza y la de una empresa para asignar inventario o capital no son la misma, y la semejanza en la estructura del software no justifica borrar las diferencias éticas.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{images/09-common-decision-chain.png}
+\caption{Los sistemas gubernamentales y comerciales comparten el esqueleto de sensing, modeling, allocation y feedback, pero conservan authority distintas.}
+\figsource{Redibujado a partir de los subtítulos 25:00--30:00, `images/09-common-decision-chain.png`.}
+\end{figure}
+
+\begin{knowledgebox}{Lectura de la figura: lo reutilizable son los primitive, no los objetivos finales}
+El shared software puede proporcionar ontology, reglas versionadas, resource constraint, workflow y audit trail. Los objetivos gubernamentales están sujetos a la constitución, la ley y la autorización de mando; los objetivos comerciales están sujetos a contratos, regulación y los derechos de empleados y clientes. La plataforma debe hacer que estas reglas sean configurables y auditables, en lugar de trasladar de manera encubierta los objetivos predeterminados de una industria a otra.
+\end{knowledgebox}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{L{0.18\textwidth}L{0.34\textwidth}L{0.38\textwidth}}
+\toprule
+Primitive & Capacidad general & Lo que debe definirse externamente \\
+\midrule
+Ontology & Unificar entity, relation y action & Qué clasificaciones son legítimas y quién puede consultarlas \\
+Constraint engine & Verificar recursos, políticas y compatibilidad & Origen y prioridad de las reglas \\
+Workflow & Coordinar los pasos de personas y sistemas & Qué pasos requieren aprobación humana \\
+Optimization & Elegir una opción bajo restricciones & Objective y límites no negociables \\
+Audit trail & Registrar entradas, decisiones y ejecución & Plazo de conservación, supervisores y derecho de corrección \\
+Feedback & Actualizar la estrategia con los resultados & Qué outcome cuenta como éxito o como daño \\
+\bottomrule
+\end{tabular}
+\caption{La plataforma tecnológica proporciona decision primitive; los objetivos legítimos y los límites de los derechos deben definirlos la organización y las instituciones.}
+\end{table}
+
+\subsection{Resumen de la sección}
+
+El gobierno y el sector comercial pueden compartir infraestructura de decisión, pero no objective que no hayan pasado por revisión. Ontology, workflow, constraint y audit son primitive reutilizables; authority, rights y harm threshold deben provenir de las instituciones de cada ámbito. Esta distinción también se aplica a la IA: la oferta de modelos puede ser general, pero la generación de valor depende de un sistema de demanda concreto.
+\section{AI Demand, planeación inversa en manufactura y Warp Speed}
+
+El ponente considera que la discusión sobre la IA se concentra en exceso en la supply, es decir, en los modelos, el compute y los benchmarks. La electricidad por sí misma crea condiciones, pero lo que realmente genera productividad son las nuevas máquinas y los procesos diseñados en torno a ella; de manera análoga, la capacidad de los modelos necesita data integration, ontology, herramientas, workflow y outcome feedback para transformar las decisiones de una organización. Esta perspectiva demand-side coincide con la primera mitad de esta clase sobre Apollo/Rubix: un modelo base no obtiene por sí solo el despliegue, los permisos ni el ciclo cerrado.
+
+\subsection{La Machine Layer después de la AI supply}
+
+La machine layer conecta el modelo con entity reales, herramientas y sistemas de responsabilidad. Determina qué estados ve el modelo, qué action puede ejecutar, cuándo requiere aprobación y cómo maneja las fallas. Los problemas de la salud, la manufactura y los servicios públicos existían antes de ChatGPT; lo que la IA cambia es la capacidad disponible y su costo, pero no define por sí sola los problemas, los derechos sobre los datos ni los criterios de éxito.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{images/10-ai-supply-demand.png}
+\caption{Cadena de valor de la IA: la oferta de modelos necesita una machine/workflow layer para convertirse en un outcome verificable.}
+\figsource{Redibujada a partir de los subtítulos 30:00--33:30, `images/10-ai-supply-demand.png`.}
+\end{figure}
+
+\begin{knowledgebox}{Lectura de la figura: la Machine layer no es un simple envoltorio de RAG}
+Incluye, como mínimo, pipelines de datos confiables, entity resolution, permisos, ejecución de herramientas, restricciones de negocio, colaboración humana y evaluación de resultados. Un modelo con una tasa muy alta de respuestas correctas no constituye una capacidad de decisión industrial si no puede acceder al inventario en tiempo real, no respeta la prioridad de los pedidos ni puede escribir los resultados de la ejecución de vuelta en el sistema.
+\end{knowledgebox}
+
+\subsection{Por qué un choque de oferta exige planeación inversa}
+
+La manufacturing planning tradicional suele partir de las customer orders para desglosar el bill of materials y, a partir de ahí, generar los planes de compras y de producción. El ponente usa como ejemplo la fluctuación en el suministro de wiring harness de BMW: cuando un componente pequeño pero crítico no puede entregarse a tiempo y en cantidad suficiente, el sistema debe calcular en sentido inverso, a partir del inventory existente, qué configuraciones pueden producirse, qué pedidos tienen mayor valor y cómo ajustar las estaciones de trabajo y las entregas. Si el software anterior solo admite la dirección normal, los empleados terminan refugiándose en Excel para resolverlo manualmente.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{images/11-manufacturing-reverse-plan.png}
+\caption{Ante una interrupción del suministro, la dirección de la planeación cambia de pedidos→materiales a inventario→configuraciones factibles→selección de pedidos.}
+\figsource{Redibujada a partir de los subtítulos 33:30--38:00, `images/11-manufacturing-reverse-plan.png`.}
+\end{figure}
+
+\begin{importantbox}{Términos clave: Bill of Materials y feasible plan}
+El Bill of Materials, abreviado BOM, es la relación de componentes, cantidades y niveles jerárquicos necesarios para fabricar un producto. Un feasible plan es un plan que realmente puede ejecutarse bajo las restricciones de inventario, equipo, personal, plazos de entrega y políticas. El pedido más rentable no es factible si le falta un componente crítico; un plan con todos los componentes tampoco es factible si viola una certificación o la capacidad de la línea de producción.
+\end{importantbox}
+
+\subsection{Warp Speed y la crítica al software de manufactura}
+
+Sankar describe Warp Speed como una plataforma que convierte en producto la supply, la production y la workflow abstraction de los proyectos industriales de largo plazo. Critica que el legacy manufacturing stack, ante los choques de la COVID y de la guerra, dejó al descubierto una planeación estática y sistemas fragmentados, y subraya que los ingenieros deben observar el trabajo real en el factory floor. Aquí conviene separar la propuesta de producto de la empresa de los mecanismos generales: el constraint solving dinámico, la retroalimentación entre diseño, suministro y producción, y un workflow ejecutable son necesidades transferibles; el efecto concreto del producto debe verificarse con indicadores del lado del cliente.
+
+\begin{warningbox}{Postura del ponente: la competencia industrial no es un hecho técnico}
+La entrevista sitúa la capacidad de manufactura, la cadena de suministro de defensa y la competencia entre países dentro de una narrativa estratégica marcada. Estas afirmaciones deben verificarse por separado con materiales económicos, históricos y de políticas públicas. Estas notas conservan sus observaciones sistémicas sobre el stack de software y el feedback, pero no presentan las comparaciones concretas entre países, las cifras de capacidad productiva ni las recomendaciones de política como conclusiones que se deriven automáticamente de un diagrama de arquitectura.
+\end{warningbox}
+
+\begin{knowledgebox}{Nota de clase: por qué el Excel del factory-floor es una señal fuerte}
+Cuando el personal de primera línea traslada decisiones clave a una spreadsheet, por lo general indica que al sistema formal le faltan datos, velocidad, capacidad expresiva o confianza. Prohibir Excel solo oculta el problema. Es mejor observar las entity, las constraint y las fórmulas de la spreadsheet, e identificar cuáles deberían incorporarse a una ontology compartida y a un workflow con capacidad de auditoría.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El valor de la IA proviene de la machine layer demand-side, y el caso de manufactura muestra cómo las restricciones reales obligan a cambiar la dirección de la planeación. La enseñanza general de Warp Speed es conectar diseño, suministro, producción y retroalimentación; las propuestas de producto y los juicios de estrategia nacional siguen requiriendo evidencia independiente. Finalmente, se vuelve a la cuestión ética del software de alto riesgo: cómo obtener más capacidad entre la privacidad y la seguridad, en lugar de limitarse a un intercambio de suma cero.
+\section{Privacy–Security Frontier: ampliar con ingeniería el espacio de opciones}
+
+Palantir comenzó en el ámbito antiterrorista, por lo que desde su origen enfrenta controversias sobre la privacidad y las libertades civiles. Sankar describe la división de tareas entre la política y la ingeniería de la siguiente manera: la política decide en qué punto del privacy/security trade-off está dispuesta a situarse la sociedad, mientras que la ingeniería debe empujar la efficient frontier hacia afuera, de modo que con la misma protección de la privacidad se obtenga más seguridad, o que con la misma capacidad de seguridad se reduzca la intrusión en los datos. Este marco es útil, pero «empujar hacia afuera» debe sustentarse en mecanismos medibles y no convertirse en retórica para ampliar la vigilancia.
+
+\subsection{El significado de la efficient frontier}
+
+La \term{Efficient frontier} es la frontera en la que ya no es posible mejorar un objetivo sin sacrificar otro. Sea $P$ la protección de la privacidad y $S$ la capacidad de seguridad; la mejora de ingeniería busca que el conjunto factible se amplíe de $\mathcal{F}_0$ a $\mathcal{F}_1$, de modo que algunos puntos logren un $S$ mayor con el mismo $P$. Aquí cada símbolo requiere indicadores reales, como la minimización de datos, la tasa de falsos positivos, el tiempo de atención de casos y los accesos no autorizados, y no una abstracta «más seguridad».
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{images/12-privacy-security-frontier.png}
+\caption{Las mejoras de ingeniería pueden empujar la privacy–security capability frontier, pero la sociedad aún debe elegir un punto aceptable.}
+\figsource{Redibujado a partir de los subtítulos 39:30--42:00, `images/12-privacy-security-frontier.png`.}
+\end{figure}
+
+\begin{knowledgebox}{Lectura de la figura: qué mecanismos pueden empujar realmente la frontier}
+El fine-grained access control reduce el número de personas ajenas que ven los datos; la purpose limitation restringe su uso; el immutable audit permite exigir responsabilidades por los abusos; la privacy-preserving linkage realiza el cruce de registros sin copiar todos los datos originales; la retention policy elimina automáticamente los datos vencidos. Cada mecanismo debe someterse a red-team, a pruebas de uso indebido y a supervisión independiente.
+\end{knowledgebox}
+
+\begin{warningbox}{La capability no sustituye el debido proceso}
+Aunque el sistema sea técnicamente capaz de seleccionar a las personas con mayor precisión, sigue siendo necesario responder quién lo autoriza, quién puede apelar, cómo se corrigen los errores, cuánto tiempo se conservan los datos y qué pueden ver los supervisores. Mejorar la frontier amplía el espacio de opciones institucionales, pero no elige por sí sola una forma de uso legítima o justa.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Privacy y security no son un único control deslizante que solo pueda disputarse con consignas. El access control, la minimización de datos, la auditoría y la computación que preserva la privacidad pueden reducir parte del conflicto, pero los objetivos finales y la autorización siguen correspondiendo a la política y al derecho. La responsabilidad del equipo técnico es lograr que el trade-off sea medible, acotable y revisable.
+
+\section{Las instituciones necesitan un Steering Wheel real}
+
+Al final de la entrevista, las fallas de gobiernos y empresas se explican como una ruptura del feedback: los líderes tienen strategy y dashboard, pero no ven a tiempo lo que ocurre donde se ejecuta el trabajo; el personal de primera línea considera que los niveles superiores desconocen la realidad y traslada el trabajo real a Excel; los reportes agregados aparecen meses después y los errores se acumulan entre niveles jerárquicos. Sankar compara este estado con el volante falso del Jungle Cruise de Disneyland. Si el software quiere restituir la capacidad de las instituciones, debe conectar intent, execution, outcome y learning en un loop en tiempo real que pueda auditarse.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{images/13-institutional-feedback.png}
+\caption{Un steering wheel real requiere que objetivo, ejecución, resultado y aprendizaje formen un ciclo cerrado.}
+\figsource{Redibujado a partir de los subtítulos 42:00--44:03, `images/13-institutional-feedback.png`.}
+\end{figure}
+
+\begin{importantbox}{Lectura de la figura: cuatro preguntas para verificar que el ciclo cerrado funciona}
+Si el objetivo se convierte en restricciones ejecutables; si el estado de la ejecución es visible dentro del mismo sistema; si el outcome puede vincularse con una decision concreta; si el aprendizaje modifica de verdad la policy o el workflow de la siguiente ronda. Basta con que uno de estos pasos dependa de una spreadsheet fuera de línea, de reuniones verbales o de traslados manuales sin trazabilidad para que el volante se desconecte poco a poco de lo que ocurre en la operación.
+\end{importantbox}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{L{0.19\textwidth}L{0.34\textwidth}L{0.37\textwidth}}
+\toprule
+Punto de ruptura & Síntoma visible & Capacidad que debe construirse \\
+\midrule
+Intent→ejecución & Los empleados no saben por qué cambian las prioridades & Policy, constraint y owner versionados \\
+Ejecución→resultado & El dashboard solo muestra volumen de actividad, no resultados & Entity-level lineage y outcome metric \\
+Resultado→aprendizaje & La revisión posterior no logra identificar qué decisión causó las consecuencias & Decision log, counterfactual y audit \\
+Aprendizaje→Intent & Los incidentes del mismo tipo se repiten & Rule update, workflow test y rollout \\
+Sistema formal→Excel & Las decisiones críticas salen de la plataforma & Modelado más rápido, interfaces explicables y cocreación con la primera línea \\
+\bottomrule
+\end{tabular}
+\caption{Los puntos de ruptura del feedback institucional deben convertirse en capacidades de software y de organización observables.}
+\end{table}
+
+\begin{knowledgebox}{Nota de clase: no hay que pasar directamente de «falla institucional» a «demoler todo y empezar de cero»}
+El ponente se opone a abandonar las instituciones solo porque la organización actual sea ineficiente. La tarea de la ingeniería de sistemas es restituir el sensing, la decision y el feedback, para que la policy pueda aprender de los resultados. Este juicio también necesita límites: reparar las instituciones no puede servir de justificación para ampliar un poder opaco, y el proceso de transformación debe conservar la supervisión, la división de poderes y la corrección de errores.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El valor último de la decision infrastructure no es un dashboard vistoso, sino que la organización cuente con un steering wheel real. Intent, execution, outcome y learning deben compartir entity, permisos y cadena de auditoría. El Excel escape, los reportes tardíos y los indicadores agregados que no pueden explicarse son señales de que el ciclo cerrado está distorsionado.
+\section{Síntesis y ampliación}
+
+Esta clase parte del despliegue heterogéneo y avanza capa por capa por la delivery de software, el runtime substrate, la decision chain, el workflow de manufactura y la retroalimentación institucional. Apollo somete el estado del software y del entorno a un control continuo; Rubix integra la seguridad y el ciclo de vida en un substrate unificado; el caso de Maven muestra que el modelo debe entrar en un OODA loop con permisos y retroalimentación; el caso de manufactura muestra que el workflow debe recalcularse cuando cambian las restricciones; y la privacy-security frontier exige que el aumento de capacidades y el debido proceso existan al mismo tiempo.
+
+\begin{importantbox}{Nueve conclusiones transferibles}
+\begin{enumerate}
+  \item Al describir la scale, cuantifica al mismo tiempo la heterogeneidad de los entornos, la frecuencia de cambios y el tiempo sin conexión, no solo el número de nodos.
+  \item Escribe el despliegue de software como un desired-state control loop, no como una serie de shell scripts no observables.
+  \item Que el service owner declare health, dependency y schema compatibility; solo así la automatización puede ser segura.
+  \item Usa release channel y canary para expresar el grado de confianza, en lugar de buscar que todos los entornos cambien de forma sincronizada.
+  \item Compliance-as-code debe impedir estados que incumplen las normas y generar evidencia, no solo llenar automáticamente los formularios de auditoría.
+  \item La Ephemeral infrastructure acorta la ventana de drift y de persistencia, pero exige que la aplicación admita failover.
+  \item La inference del modelo es solo un eslabón de la decision chain; los permisos, el workflow y el outcome son los que determinan el valor del despliegue.
+  \item Las spreadsheets en campo son evidencia de requisitos de producto y de cortes en la retroalimentación; no deben simplemente prohibirse.
+  \item La tecnología puede ampliar el conjunto factible de privacy/security, pero los objetivos legítimos siguen requiriendo decisiones institucionales y supervisión.
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Ejercicio práctico: diseñar una actualización de seguridad para una Fleet heterogénea}
+
+Supón que mantienes un producto de 30 servicios que abarca nube pública, centros de datos de clientes y sitios de borde sin conexión a la red, y que necesitas corregir una vulnerabilidad de alta gravedad en una library. Diseña la catalog metadata, los release channels, los health monitors, el rollback y el proceso de excepciones. El ejercicio no puede limitarse a escribir «usar Kubernetes» y «despliegue automático»; debe especificar las environment constraints y la compatibilidad de los datos.
+
+\begin{enumerate}
+  \item Enumera al menos cuatro tipos de entorno y define su conectividad, ventana de mantenimiento, nivel de seguridad y capacidad disponible.
+  \item Para cada component afectado, crea registros de dependency, schema, vulnerability y owner.
+  \item Diseña un rollout canary→connected→regulated→air-gapped y escribe las condiciones de entrada y salida de cada etapa.
+  \item Elige un entorno que no pueda actualizarse de inmediato y especifica el compensating control, el owner del riesgo y la fecha de vencimiento.
+  \item Simula una falla de la nueva versión y explica cómo determinar si el rollback es seguro y cómo manejar los datos que ya se escribieron.
+\end{enumerate}
+
+\begin{knowledgebox}{Criterios de aceptación}
+Una propuesta de alta calidad debe poder responder «qué ejecuta ahora cada entorno», «por qué puede actualizarse», «a quién se notifica cuando algo falla», «quién aprueba las excepciones» y «qué evidencia demuestra que el riesgo disminuyó». Si las respuestas dependen de que un ingeniero con experiencia recuerde todo el orden de los pasos, el plano de control todavía no se ha formado realmente.
+\end{knowledgebox}
+
+\subsection{Lecturas adicionales}
+
+Se recomienda leer directamente `source-materials/apollo-demo-day-transcript.pdf` en el directorio de esta clase y contrastarlo con los ejemplos de Apollo Catalog, release channel, monitor y vulnerability; después, leer la documentación oficial vigente de Palantir Rubix y comparar las 40--72 horas que se mencionaron oralmente en clase con la formulación actual de 48 horas de node-lifetime. Por último, elige un workflow de alto riesgo fuera del ámbito de la defensa, por ejemplo, las camas de un hospital, el despacho de energía o el mantenimiento industrial, y revisa sus permisos y su retroalimentación con OODA y la privacy-security frontier.
+
+\end{document}
