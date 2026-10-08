@@ -20,8 +20,16 @@
 # =============================================================================
 set -uo pipefail
 
-from=26
-[[ "${1:-}" == "--from" ]] && from="$2"
+# El carril de esta VM (ES-A): los lotes 27–33 son de ES-B y ES-C
+# (es-mx-n-vm-analysis-20261008T015000), así que el lazo no pasa del 26.
+from=26 to=26
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --from) from="$2"; shift 2 ;;
+        --to) to="$2"; shift 2 ;;
+        *) echo "llama_direct_ensure: opción desconocida: $1" >&2; exit 2 ;;
+    esac
+done
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONSUMER="$(cd "$HERE/../.." && pwd)"
@@ -69,7 +77,7 @@ else
     log="$CONSUMER/.claude/cache/ola/llama-direct-$(date -u +%Y%m%dT%H%M%SZ).log"
     # setsid: el lazo no pertenece al grupo de procesos de quien llama, así que
     # sobrevive a que el cliente detenga ese comando.
-    (cd "$CONSUMER" && setsid -f nohup uv run --locked bash "$HERE/llama_direct_loop.sh" --from "$from" \
+    (cd "$CONSUMER" && setsid -f nohup uv run --locked bash "$HERE/llama_direct_loop.sh" --from "$from" --to "$to" \
         > "$log" 2>&1 < /dev/null &)
     echo "llama_direct_ensure: lazo lanzado desde el lote $from; log: $log"
 fi

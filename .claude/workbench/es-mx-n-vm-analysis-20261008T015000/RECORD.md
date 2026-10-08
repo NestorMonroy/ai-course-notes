@@ -89,3 +89,18 @@ rama de otro.
 
 - No se midió una VM nueva de esta sesión: la tabla de bloqueos es la de VM C.
 - No se midió el rendimiento real de dos VMs traduciendo a la vez.
+
+## Imágenes y modelo en Docker Hub (verificado 01:44Z, `outputs/manifest-head.tsv`)
+
+HEAD de manifiesto por digest con `probes/manifest-head.sh` (copiado de VM C): las seis
+piezas que un trabajador necesita responden **200 anónimo con el digest pedido**
+(REMOTE_VERIFIED): espejos `th3rox/cache-pgvector--pgvector`, `cache-library--redis`,
+`cache-ollama--ollama` (`sha256:2a6e883b…`, el mismo digest que la imagen de Ollama de
+este nodo), `cache-library--ubuntu`, la imagen `th3rox/thyrox-task-runner@sha256:1cced65c…`
+y el artefacto del 9B (manifiesto `sha256:54a969a7…` y blob `sha256:03b74727…`). No hay
+nada que publicar antes de crear ES-B y ES-C.
+
+## Carriles al crear ES-B y ES-C
+
+ES-A limita sus lazos: llama-direct sólo el lote 26 (`llama_direct_ensure.sh --to`),
+Opus por el pool sólo el 34. Lotes 27–30 → ES-B, 31–33 → ES-C.
