@@ -1,0 +1,96 @@
+\section{Guía libre de clasificador (CFG): Guía sin clasificador}
+
+\subsection{Motivación: eliminar la dependencia de un clasificador externo}
+
+Aunque la Classifier Guidance es elegante, en una implementación práctica requiere entrenar y mantener adicionalmente una red clasificadora de ruido, lo que incrementa la complejidad del sistema y el costo computacional. El objetivo de la Guía libre de clasificador (CFG) es: \textbf{alcanzar efectos de guía condicional equivalentes a los de Classifier Guidance sin utilizar ningún clasificador externo}.
+
+\begin{importantbox}{El enfoque central de CFG}
+En lugar de entrenar por separado el modelo incondicional y el clasificador, se entrena un solo \textbf{único} modelo difusor que posea simultáneamente la capacidad de predicción condicional e incondicional. Durante la inferencia, se refuerza el efecto condicional mediante una \textbf{extrapolación} basada en dos propagaciones hacia adelante (condicionada + incondicional).
+\end{importantbox}
+
+\subsection{Estrategia de entrenamiento: Null Label y Conditional Dropout}
+
+El entrenamiento de CFG es muy sencillo: durante el entrenamiento estándar de un modelo difusor condicional, se reemplaza la información condicional $y$ con una probabilidad determinada (generalmente 10\%--20\%) por una etiqueta especial null label $\varnothing$:
+
+$$
+\epsilon_\theta(x_t, t, y) = \begin{cases}
+\text{predicción condicional} & \text{probabilidad } 1-p_{\text{uncond}} \\
+\epsilon_\theta(x_t, t, \varnothing) & \text{probabilidad } p_{\text{uncond}}
+\end{cases}
+$$
+
+\begin{itemize}
+    \item Para etiquetas de categoría: el null label puede ser un índice especial 0.
+    \item Para condiciones de texto: el null label es el embedding de una cadena vacía "".
+    \item Para condiciones de imagen: el null label puede ser un tensor lleno de ceros.
+\end{itemize}
+
+De este modo, una sola red puede aprender simultáneamente:
+\begin{itemize}
+    \item Al ingresar la condición $y$: $\epsilon_\theta(x_t, t, y) \;\longleftrightarrow\;$ score condicional $\nabla_{x_t}\log p(x_t|y)$
+    \item Al ingresar $\varnothing$: $\epsilon_\theta(x_t, t, \varnothing) \;\longleftrightarrow\;$ score incondicional $\nabla_{x_t}\log p(x_t)$
+\end{itemize}
+
+\subsection{Fórmula de inferencia: extrapolación condicional e incondicional}
+
+Durante la inferencia, CFG refuerza el efecto condicional realizando una \textbf{extrapolación} sobre las predicciones condicionales e incondicionales:
+
+$$
+\tilde{\epsilon}(x_t, t, y) = \epsilon_\theta(x_t, t, \varnothing) + w \cdot \bigl[\epsilon_\theta(x_t, t, y) - \epsilon_\theta(x_t, t, \varnothing)\bigr]
+$$
+
+Forma equivalente:
+
+$$
+\tilde{\epsilon}(x_t, t, y) = (1-w)\,\epsilon_\theta(x_t, t, \varnothing) + w\,\epsilon_\theta(x_t, t, y)
+$$
+
+\begin{importantbox}{Significado del parámetro de intensidad de guía $w$ en CFG}
+\begin{itemize}
+    \item $w = 0$: generación totalmente incondicional (ignorando la condición $y$).
+    \item $w = 1$: generación condicional estándar (sin refuerzo por extrapolación).
+    \item $w > 1$: refuerzo condicional — extrapolación más allá de la dirección condicional.
+    \item $0 < w < 1$: interpolación — atenuación del efecto condicional.
+\end{itemize}
+En aplicaciones prácticas, $w$ suele establecerse entre 5 y 15; el valor específico depende de la tarea y el modelo.
+\end{importantbox}
+
+\subsection{Equivalencia entre CFG y Classifier Guidance}
+
+La fórmula de extrapolación de CFG se puede reescribir como:
+
+$$
+\tilde{\epsilon}(x_t, t, y) = \epsilon_\theta(x_t, t, y) + (w-1)\bigl[\epsilon_\theta(x_t, t, y) - \epsilon_\theta(x_t, t, \varnothing)\bigr]
+$$
+
+Comparada con la fórmula de Classifier Guidance:
+
+$$
+\tilde{\epsilon}(x_t, t) = \epsilon_\theta(x_t, t) - w'\cdot\sqrt{1-\bar\alpha_t}\;\nabla_{x_t}\log p_\phi(y|x_t)
+$$
+
+Se puede demostrar que ambos son matemáticamente equivalentes cuando $\lambda = w - 1$. La diferencia $\epsilon_\theta(x_t, t, y) - \epsilon_\theta(x_t, t, \varnothing)$ codifica implícitamente la información del gradiente del clasificador $\nabla_{x_t}\log p(y|x_t)$.
+
+\begin{warningbox}{Costo computacional de CFG}
+CFG requiere ejecutar dos propagaciones hacia adelante en cada paso de desruido (una condicionada y otra incondicional); por tanto, el tiempo de inferencia es aproximadamente el doble del caso sin guía. En una implementación práctica, se puede mitigar este problema agrupando ambas predicciones en un solo batch mediante batched inference. Algunos trabajos recientes (como métodos de destilación) intentan distilar el efecto de CFG dentro de una única propagación hacia adelante.
+\end{warningbox}
+
+\subsection{Negative Prompt: aplicación creativa de CFG}
+
+El marco de CFG también soporta una extensión interesante: las \textbf{palabras clave negativas} (Negative Prompt). En CFG estándar, la predicción incondicional utiliza el null label $\varnothing$. Si se reemplaza $\varnothing$ por una condición específica "no deseada" $y_{\text{neg}}$, la fórmula se convierte en:
+
+$$
+\tilde{\epsilon} = \epsilon_\theta(x_t, t, y_{\text{neg}}) + w\bigl[\epsilon_\theta(x_t, t, y) - \epsilon_\theta(x_t, t, y_{\text{neg}})\bigr]
+$$
+
+Esto significa que la imagen generada se alejará del concepto descrito por $y_{\text{neg}}$. Por ejemplo, si $y_{\text{neg}} =$ ``male'', las imágenes de retrato generadas tenderán a mostrar características femeninas.
+
+\begin{knowledgebox}{Amplia aplicabilidad de CFG}
+La condición en CFG no se limita a etiquetas de categoría; puede ser: descripción de texto (text-to-image), señales de audio (audio-to-image), información de perspectiva (novel view synthesis), otras imágenes (image-to-image) y cualquier otra modalidad. Esto hace que CFG sea el mecanismo de guía condicional más universal entre los modelos difusores modernos, siendo adoptado por casi todos los modelos principales (Stable Diffusion, DALL-E, Imagen, etc.).
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La Guía libre de clasificador es una de las técnicas prácticas más importantes en el campo de los modelos difusores. Su innovación central radica en la estrategia de entrenamiento mediante conditional dropout, que permite a un solo modelo aprender simultáneamente las distribuciones condicionales e incondicionales, y luego lograr un refuerzo condicional controlado mediante extrapolación durante la inferencia. En comparación con Classifier Guidance, CFG no requiere un clasificador adicional, soporta cualquier tipo de condición e es fácil de implementar, por lo que se ha convertido en una configuración estándar en la industria.
+
+\newpage
