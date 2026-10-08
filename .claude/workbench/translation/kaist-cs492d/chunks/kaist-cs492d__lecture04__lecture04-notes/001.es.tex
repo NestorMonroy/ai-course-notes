@@ -1,0 +1,66 @@
+\section{Revisión de DDPM}
+
+El tema de esta clase son los Modelos Basados en Puntuaciones (Score-Based Models), pero antes de desarrollar el nuevo contenido, el ponente primero revisó las ideas centrales de DDPM (Modelos Probabilísticos de Difusión Descontaminación) presentadas en la clase anterior, sentando las bases para comprender posteriormente la conexión profunda entre la función score y los modelos de difusión.
+
+\subsection{Marco básico de los modelos de difusión}
+
+La idea básica de los modelos de difusión es definir el proceso de generación de datos como un \textbf{proceso secuencial}. A diferencia de modelos tradicionales como VAE que tienen una única variable latente, los modelos de difusión mapean gradualmente los puntos de datos $x_0$ a una serie de variables latentes $x_1, x_2, \ldots, x_T$, de tal manera que la variable latente final $x_T$ sigue una distribución conocida (generalmente una distribución gaussiana estándar). El proceso de generación es el proceso inverso del anterior: partiendo de una muestra gaussiana estándar $x_T$, se reconstruye gradualmente hasta el punto de datos $x_0$.
+
+\begin{importantbox}{Dos características clave de los modelos de difusión}
+\begin{enumerate}
+    \item \textbf{Propiedad de Markov}: en el proceso hacia adelante, la muestreo de $x_t$ depende únicamente de $x_{t-1}$; en el proceso inverso, el muestreo de $x_{t-1}$ depende únicamente de $x_t$.
+    \item \textbf{Transición hacia adelante Gaussiana}: la distribución de transición hacia adelante se define como una distribución gaussiana de forma específica, controlada por los parámetros $\beta_t$:
+    $$q(x_t \mid x_{t-1}) = \mathcal{N}(x_t; \sqrt{1-\beta_t}\, x_{t-1},\; \beta_t I)$$
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Distribución de salto hacia adelante y entrenamiento}
+
+Dado que la distribución de transición hacia adelante es una distribución gaussiana con media lineal, podemos deducir la forma analítica de la \textbf{distribución de salto hacia adelante} (forward jump distribution), es decir, la distribución para muestrear directamente cualquier instante intermedio $x_t$ desde $x_0$:
+
+$$q(x_t \mid x_0) = \mathcal{N}(x_t;\; \sqrt{\bar{\alpha}_t}\, x_0,\; (1-\bar{\alpha}_t) I)$$
+
+donde $\bar{\alpha}_t = \prod_{s=1}^{t}(1-\beta_s)$. Esto significa que durante el entrenamiento no es necesario ejecutar el proceso hacia adelante paso a paso; se puede ``saltar'' directamente al muestreo de $x_t$.
+
+\begin{knowledgebox}{Salto hacia adelante vs. salto hacia atrás}
+En el proceso hacia adelante, dado que la media de la distribución de transición es una función lineal de la variable condicional, la composición de distribuciones gaussianas multietapa sigue siendo una distribución gaussiana; por lo tanto, se puede obtener una distribución de salto en forma cerrada. Sin embargo, en el proceso inverso, dado que la media de la distribución de transición inversa es una función \textbf{no lineal} del output de la red neuronal, la distribución compuesta de iteración multietapa \textbf{ya no es gaussiana}; por lo tanto, el proceso inverso no puede omitir los pasos intermedios y debe iterarse paso a paso mediante muestreo.
+\end{knowledgebox}
+
+\subsection{Tres objetivos de predicción}
+
+En el marco DDPM, hay tres objetivos de predicción equivalentes para entrenar la red neuronal:
+
+\begin{enumerate}
+    \item \textbf{Predictor de media} (Mean Predictor): predecir directamente la media $\mu_\theta(x_t, t)$ de la distribución de transición inversa.
+    \item \textbf{Predictor de muestra limpia} (Clean Sample Predictor / $x_0$-prediction): predecir el valor esperado del punto de datos original $x_0$ dado $x_t$, es decir $\hat{x}_\theta(x_t, t) \approx \mathbb{E}[x_0 \mid x_t]$.
+    \item \textbf{Predictor de ruido} (Noise Predictor / $\epsilon$-prediction): predecir el ruido gaussiano estándar $\epsilon_\theta(x_t, t) \approx \mathbb{E}[\epsilon_t \mid x_t]$ utilizado al muestrear $x_t$ desde $x_0$.
+\end{enumerate}
+
+\begin{knowledgebox}{Relaciones de equivalencia entre los tres predictores}
+Dado que $x_t = \sqrt{\bar{\alpha}_t}\, x_0 + \sqrt{1-\bar{\alpha}_t}\, \epsilon_t$, donde $\epsilon_t \sim \mathcal{N}(0, I)$, se pueden calcular los valores de los otros dos a partir del output de cualquier predictor; la diferencia entre los tres radica únicamente en su forma de parametrización. La función de pérdida final de entrenamiento puede simplificarse a una simple pérdida L2 de la forma $\|f_\theta(x_t, t) - f_{\text{target}}\|^2$ después de eliminar los pesos del paso temporal.
+\end{knowledgebox}
+
+Independientemente del objetivo de predicción elegido, el proceso de entrenamiento de DDPM consiste en: muestrear $x_0 \sim p_{\text{data}}$, muestrear $t \sim \text{Uniform}(1,T)$, muestrear $\epsilon \sim \mathcal{N}(0,I)$, calcular $x_t = \sqrt{\bar{\alpha}_t}\, x_0 + \sqrt{1-\bar{\alpha}_t}\, \epsilon$, y luego minimizar la función de pérdida L2 correspondiente.
+
+\subsection{Necesidad de modelos generativos}
+
+El ponente planteó una pregunta reflexiva: si ya disponemos de un conjunto de datos con 5 mil millones de imágenes, ¿por qué necesitamos modelos generativos? ¿Por qué no muestrear directamente una imagen de ellos?
+
+\begin{importantbox}{Ventajas de los modelos generativos frente a la búsqueda directa}
+\begin{enumerate}
+    \item \textbf{Compresión}: un modelo de difusión preentrenado puede tener solo unos cientos de MB, pero codifica información distribucional de miles de millones de imágenes, con una relación de compresión extremadamente alta.
+    \item \textbf{Novedad y diversidad}: los modelos generativos pueden producir imágenes completamente nuevas que no existen en el conjunto de datos, en lugar de copiarlas simplemente.
+    \item \textbf{Protección de privacidad}: los modelos generativos tienen la posibilidad (aunque no se puede garantizar completamente) de no outputear directamente las imágenes originales del conjunto de entrenamiento, protegiendo en cierta medida la privacidad de los datos.
+    \item \textbf{Generación condicional}: los modelos generativos pueden generar nuevos datos alineados con condiciones de entrada (como descripciones de texto), algo que la búsqueda simple no puede lograr fácilmente.
+\end{enumerate}
+\end{importantbox}
+
+\begin{warningbox}{La protección de privacidad no es absoluta}
+El ponente señaló claramente que los modelos de difusión \textbf{no pueden garantizar} no generar imágenes originales del conjunto de entrenamiento. De hecho, investigaciones previas demuestran que ciertos modelos preentrenados efectivamente generan imágenes que se pueden encontrar casi exactamente en internet. Por lo tanto, la protección de privacidad es solo una ``potencialidad'', no una ``garantía''.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+DDPM transforma el problema complejo de modelado de distribuciones de datos en una tarea simple de descontaminación al definir un proceso hacia adelante de Markov gaussiano y un proceso inverso aprendible. La solución en forma cerrada de la distribución de salto hacia adelante hace que el entrenamiento sea eficiente, y los tres objetivos de predicción equivalentes ofrecen flexibilidad para la implementación. Pero ¿cuál es el \textbf{significado físico} del predictor de ruido ($\epsilon$-prediction)? Esta es exactamente la pregunta central que los Modelos Basados en Puntuaciones (Score-Based Models) de esta clase buscan responder.
+
+
