@@ -1,0 +1,260 @@
+\section{目标检测}
+
+\subsection{从语义分割到目标检测}
+
+语义分割的局限在于：它只能为每个像素分配类别标签，但无法区分同类的不同实例。如果图像中有两只狗，语义分割只会标记所有``狗像素''为同一类，无法区分哪些像素属于哪只狗。要解决这个问题，我们首先需要\textbf{目标检测}——找到每个物体的位置（边界框）和类别。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-030.jpg}
+\caption{从语义分割到实例分割：需要先检测独立物体，再为每个物体生成像素级掩码\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第31页。}
+
+\subsection{单物体检测：多任务学习}
+
+对于只含单个物体的图像，目标检测可以简化为一个\textbf{多任务学习}问题：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-032.jpg}
+\caption{单物体检测：CNN 同时输出类别概率（softmax loss）和边界框坐标（L2 loss）\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第33页。}
+
+$$L_{\text{total}} = L_{\text{cls}}(\hat{y}, y) + \lambda \cdot L_{\text{box}}(\hat{b}, b)$$
+
+\begin{itemize}
+    \item $L_{\text{cls}}$：softmax 交叉熵损失，用于分类
+    \item $L_{\text{box}}$：L2 回归损失，用于预测边界框坐标 $(x, y, h, w)$
+    \item $\lambda$：平衡两个损失的权重超参数
+\end{itemize}
+
+\begin{knowledgebox}{多任务学习中的损失平衡}
+分类损失和回归损失的量纲完全不同（交叉熵 vs L2），因此需要通过 $\lambda$ 来平衡。实践中 $\lambda$ 通常通过验证集调优。另一个常见问题是两个损失的梯度量级差异过大，现代方法会使用 uncertainty weighting 或 gradient normalization 来自动平衡。
+\end{knowledgebox}
+
+\subsection{多物体检测的挑战}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-070.jpg}
+\caption{多物体检测的问题：不同图像中物体数量不同，网络输出维度无法固定\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第71页。}
+
+\begin{warningbox}{直接回归法不可扩展}
+当图像中有多个物体时，网络需要同时输出所有物体的边界框和类别。对于 $N$ 个物体，需要输出 $N \times (4 + C)$ 个数值（4 个坐标 + $C$ 类概率）。但 $N$ 事先未知，且可以很大——这使得直接回归方法不可扩展。解决此问题有两条主要路线：(1) 先提议候选区域，再逐个分类（两阶段方法）；(2) 将图像网格化，每个网格独立预测（单阶段方法）。
+\end{warningbox}
+
+\subsection{R-CNN：开创区域提议方法}
+
+面对多物体场景，经典方法是先生成\textbf{候选区域（Region Proposals）}，再对每个区域进行分类。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-080.jpg}
+\caption{R-CNN 区域提议：使用 Selective Search 生成约 2000 个候选区域（RoI），每个裁剪缩放到 $224 \times 224$\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第81页。}
+
+\textbf{R-CNN}（Regions with CNN, CVPR 2014）的流程：
+\begin{enumerate}
+    \item 使用选择性搜索（Selective Search）等算法生成约 2000 个候选区域
+    \item 将每个区域裁剪并缩放到 $224 \times 224$ 的固定大小
+    \item 用 CNN（如 AlexNet）提取特征向量
+    \item 用 SVM 分类器判断类别 + 线性回归器精调边界框
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-035.jpg}
+\caption{R-CNN 完整流程：区域提议 $\rightarrow$ 裁剪 $\rightarrow$ CNN 特征提取 $\rightarrow$ 分类 + 边界框回归\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第36页。}
+
+\begin{warningbox}{R-CNN 的严重效率问题}
+R-CNN 对每个候选区域独立运行完整 CNN——2000 个区域就要跑 2000 次前向传播。在 VGG-16 上处理一张图像需要约 47 秒，完全无法满足实时需求。更严重的是，相邻区域之间存在大量重叠，对应的 CNN 计算也完全重复，极其浪费。
+\end{warningbox}
+
+\subsection{Fast R-CNN：共享特征图}
+
+\textbf{Fast R-CNN} 的核心改进：不再对每个区域独立运行 CNN，而是先对\textbf{整张图像运行一次 CNN 得到特征图}，然后在特征图上裁剪对应区域（RoI Pooling），大幅减少重复计算。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-090.jpg}
+\caption{Fast R-CNN vs ``Slow'' R-CNN：Fast R-CNN 先在整图上运行一次 backbone CNN，再在特征图上提取每个区域的特征\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第91页。}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-037.jpg}
+\caption{Fast R-CNN 的 RoI Pooling：将不同大小的区域特征池化为固定大小\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第38页。}
+
+\begin{importantbox}{RoI Pooling 的工作原理}
+RoI Pooling 将特征图上不同大小的区域映射到固定大小的输出（如 $7 \times 7$）：
+\begin{enumerate}
+    \item 将区域均匀划分为 $7 \times 7$ 的子网格
+    \item 每个子网格内做 max pooling
+    \item 输出固定为 $D \times 7 \times 7$（$D$ 为特征通道数）
+\end{enumerate}
+这样无论原始区域大小如何，后续的全连接层都能正常工作。改进版本 \textbf{RoI Align} 使用双线性插值替代硬量化，避免坐标对齐误差。
+\end{importantbox}
+
+\subsection{Faster R-CNN：端到端训练}
+
+\textbf{Faster R-CNN} 进一步引入\textbf{区域提议网络（Region Proposal Network, RPN）}，用神经网络替代手工区域提议算法，实现全流程端到端训练：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-095.jpg}
+\caption{RPN 详解：在特征图的每个位置放置锚框，预测物体概率（$1 \times 20 \times 15$）和边界框修正（$4 \times 20 \times 15$）\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第96页。}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-039.jpg}
+\caption{RPN 的锚框设计：在 CNN 特征图上滑动多种尺度和长宽比的锚框\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第40页。}
+
+\begin{knowledgebox}{锚框（Anchor Boxes）的设计}
+RPN 在特征图的每个空间位置预设 $K$ 种锚框（不同尺度和长宽比的组合）。例如使用 3 种尺度 $\times$ 3 种长宽比 = 9 种锚框。对于 $20 \times 15$ 的特征图，总共有 $20 \times 15 \times 9 = 2{,}700$ 个候选锚框。RPN 为每个锚框预测：
+\begin{itemize}
+    \item \textbf{物体/背景概率}：该锚框是否包含物体
+    \item \textbf{边界框修正量}：$(dx, dy, dw, dh)$ 四个偏移值
+\end{itemize}
+\end{knowledgebox}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{2.5cm}p{3cm}p{3cm}p{2.5cm}p{2cm}}
+\toprule
+\textbf{方法} & \textbf{区域提议} & \textbf{特征提取} & \textbf{训练方式} & \textbf{速度} \\
+\midrule
+R-CNN & Selective Search & 每区域独立CNN & 多阶段 & $\sim$47s/图 \\
+Fast R-CNN & Selective Search & 共享特征图 & 端到端 & $\sim$2s/图 \\
+Faster R-CNN & RPN (学习) & 共享特征图 & 端到端 & $\sim$0.2s/图 \\
+\bottomrule
+\end{tabular}
+\caption{R-CNN 系列演进：从多阶段到端到端，速度提升超过200倍}
+\end{table}
+
+\subsection{YOLO：单阶段目标检测}
+
+\textbf{YOLO（You Only Look Once）}是最具代表性的单阶段检测器，通过一次前向传播同时完成候选框生成和分类。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-100.jpg}
+\caption{YOLO 的 $S \times S$ 网格：将整张图像划分为网格，每个网格负责检测中心落在该网格内的物体\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第101页。}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-043.jpg}
+\caption{YOLO 的设计思想：将图像划分为 $S \times S$ 网格，每个网格预测 $B$ 个边界框及其置信度和类别概率\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第44页。}
+
+YOLO 的核心设计：
+\begin{enumerate}
+    \item 将图像划分为 $S \times S$ 的网格（如 $7 \times 7$）
+    \item 每个网格单元预测 $B$ 个边界框（含位置、大小、置信度）和 $C$ 个类别概率
+    \item 输出张量大小为 $S \times S \times (5B + C)$
+    \item 通过阈值化和\textbf{非极大值抑制（Non-Maximum Suppression, NMS）}去除冗余框
+\end{enumerate}
+
+\begin{importantbox}{NMS（非极大值抑制）的具体步骤}
+当多个网格/锚框都预测到同一物体时，需要 NMS 去重：
+\begin{enumerate}
+    \item 按置信度排序所有候选框
+    \item 选择置信度最高的框，加入最终结果
+    \item 删除所有与该框 IoU $>$ 阈值（如 0.5）的其他框
+    \item 重复步骤 2--3 直到没有剩余候选框
+\end{enumerate}
+IoU（Intersection over Union）= 两个框交集面积 / 两个框并集面积。
+\end{importantbox}
+
+\begin{knowledgebox}{YOLO 的实际影响与版本演进}
+YOLO 至今仍是工业界最常用的目标检测框架。版本演进：
+\begin{itemize}
+    \item \textbf{YOLOv1 (2016)}：提出基本框架，$7 \times 7$ 网格
+    \item \textbf{YOLOv2/v3}：引入锚框、多尺度预测、Darknet backbone
+    \item \textbf{YOLOv4/v5}：大量工程优化（CSPNet、Mosaic 增强等）
+    \item \textbf{YOLOv8+ (Ultralytics)}：现代化设计，anchor-free，高精度实时检测
+\end{itemize}
+从 v1 到 v8，检测精度（mAP）提升了 30+ 个百分点，但核心的单阶段设计理念始终不变。
+\end{knowledgebox}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{3.5cm}p{3cm}p{3cm}p{3cm}}
+\toprule
+\textbf{特性} & \textbf{Faster R-CNN} & \textbf{YOLO} & \textbf{DETR} \\
+\midrule
+阶段数 & 两阶段 & 单阶段 & 单阶段 \\
+区域提议 & RPN & 网格化 & Object Queries \\
+锚框 & 需要 & 需要（v1-v5） & 不需要 \\
+NMS 后处理 & 需要 & 需要 & 不需要 \\
+速度 & 中等 & 快 & 中等 \\
+小物体检测 & 强 & 弱（v1-v3） & 弱 \\
+\bottomrule
+\end{tabular}
+\caption{三种代表性检测方法对比}
+\end{table}
+
+\subsection{DETR：基于 Transformer 的目标检测}
+
+\textbf{DETR（DEtection TRansformer）}（ECCV 2020）是将 Transformer 应用于目标检测的里程碑工作，完全去除了锚框和 NMS 后处理。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-110.jpg}
+\caption{DETR 完整架构：CNN backbone 提取特征 $\rightarrow$ Transformer Encoder 编码 $\rightarrow$ Transformer Decoder（带 Object Queries）$\rightarrow$ FFN 预测类别和边界框。训练使用二部图匹配损失\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第111页。}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-047.jpg}
+\caption{DETR 的 Object Queries 和输出：每个 Query 经过 Decoder 后预测一个（类别, 边界框）或``无物体''\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第48页。}
+
+DETR 的关键创新在于引入\textbf{Object Queries}和\textbf{二部图匹配（Bipartite Matching）}：
+
+\begin{enumerate}
+    \item 用 CNN 将图像转换为 patch token，加上位置编码
+    \item Transformer Encoder 对 token 进行自注意力编码
+    \item Transformer Decoder 接收一组\textbf{可学习的 Object Queries}（如 100 个）
+    \item 每个 Query 通过自注意力和交叉注意力生成输出
+    \item 每个输出经 FFN 映射为（类别, 边界框）或``无物体''（$\varnothing$）
+    \item 训练时用\textbf{匈牙利算法}在预测和真实框之间做一对一最优匹配
+\end{enumerate}
+
+\begin{importantbox}{二部图匹配为什么能替代 NMS}
+传统方法中，多个锚框可能预测到同一物体，需要 NMS 去重。DETR 用匈牙利算法强制每个真实物体只匹配一个预测——这从损失函数层面就保证了一对一关系，训练完成后自然不会产生重复预测，因此完全不需要 NMS。这也是 DETR ``End-to-End'' 的核心含义。
+\end{importantbox}
+
+\begin{warningbox}{DETR 的已知局限}
+\begin{itemize}
+    \item \textbf{收敛慢}：原始 DETR 需要 500 个 epoch 才能收敛，是 Faster R-CNN 的 10 倍以上
+    \item \textbf{小物体检测弱}：Transformer 对低分辨率特征的处理能力有限
+    \item \textbf{Query 数量限制}：如果 Query 数量少于实际物体数量，只会检测出置信度最高的物体
+    \item 后续改进（Deformable DETR, DINO-DETR 等）已大幅缓解这些问题
+\end{itemize}
+\end{warningbox}
+
+\subsection{本章小结}
+
+目标检测经历了从两阶段（R-CNN 系列）到单阶段（YOLO）再到基于 Transformer（DETR）的演进。核心挑战在于：如何在保持高精度的同时高效处理数量未知的多个物体。R-CNN 通过区域提议解决了多物体问题但速度较慢（47s $\rightarrow$ 0.2s）；YOLO 通过网格化预测实现了实时检测；DETR 用 Object Queries 和二部图匹配优雅地回避了锚框设计和 NMS 后处理。
+
+%% ========== Part 4: 实例分割 ==========
+

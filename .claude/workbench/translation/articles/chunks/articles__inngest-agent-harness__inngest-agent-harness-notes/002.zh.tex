@@ -1,0 +1,74 @@
+\section{Utah：一个参考实现}
+
+为了验证 harness 理念，Inngest 团队构建了 \textbf{Utah}（Universally Triggered Agent Harness）——一个具备 Tool 调用、Memory、Sub-agent 委派和完整持久化能力的对话式 Agent。它使用 Telegram 或 Slack 作为前端，后端是最小化的 TypeScript 代码，没有使用任何 Agent 框架，仅依赖 Inngest 的 function、step 和 event 机制。
+
+\begin{knowledgebox}{Utah 命名含义}
+Utah 的全称是 \textbf{U}niversally \textbf{T}riggered \textbf{A}gent \textbf{H}arness。``Universally Triggered'' 强调 Agent 不关心自己是如何被激活的——可以是 Telegram webhook、Slack webhook、cron 定时任务、Sub-agent 调用或跨函数事件。触发方式与工作逻辑完全解耦。
+\end{knowledgebox}
+
+\subsection{整体架构}
+
+Utah 的架构有三个关键特征：
+
+\begin{enumerate}
+    \item \textbf{事件驱动}：所有触发都通过 Inngest event 系统路由
+    \item \textbf{编排与 Agent 循环解耦}：编排层（Inngest Cloud）和执行层（本地 worker）分离
+    \item \textbf{本地 worker 无需公网端点}：通过 \texttt{connect()} API 建立 WebSocket 长连接
+\end{enumerate}
+
+数据流如下：
+
+\begin{table}[H]
+\centering
+\caption{Utah 数据流}
+\begin{tabular}{cp{10cm}}
+\toprule
+\textbf{步骤} & \textbf{描述} \\
+\midrule
+1 & Telegram/Slack webhook 命中 Inngest Cloud \\
+2 & Webhook transform 将原始 HTTP payload 转换为类型化的 Inngest event \\
+3 & 本地 worker 通过 WebSocket 接收 event，运行 Agent 函数 \\
+4 & Agent 函数完成后，发出 reply event \\
+5 & 独立的 reply 函数被触发，通过 Telegram/Slack API 发送回复 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{importantbox}{架构的关键洞见：触发解耦}
+Agent 循环不知道也不关心自己是被谁触发的。添加一个新的 Slack bot？只需配置一个新的 webhook transform 和一个对应的 reply 函数。Agent 循环本身\textbf{不需要任何改动}。这就是 ``universally triggered'' 的含义。
+\end{importantbox}
+
+\subsection{六个函数，而非一个单体}
+
+Utah 并非一个做所有事情的大函数，而是由\textbf{六个函数}通过事件通信组成：
+
+\begin{table}[H]
+\centering
+\caption{Utah 的六个函数}
+\begin{tabular}{ll}
+\toprule
+\textbf{函数} & \textbf{职责} \\
+\midrule
+\texttt{handleMessage} & 主 Agent 循环 \\
+\texttt{sendReply} & 向渠道发送回复（处理格式化和降级） \\
+\texttt{acknowledgeMessage} & 收到消息后立即发送 typing indicator \\
+\texttt{failureHandler} & 跨所有函数的全局错误处理 \\
+\texttt{heartbeat} & 定期健康检查（cron 调度） \\
+\texttt{subAgent} & 通过 \texttt{step.invoke()} 隔离运行的 Sub-agent \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+这种分离的好处很明显：
+\begin{itemize}
+    \item typing indicator 在收到消息时\textbf{立即}触发，不需要等待 Agent 循环完成
+    \item reply 函数独立处理 Telegram/Slack 特有的格式转换和错误恢复（例如 LLM 输出了格式错误的 HTML 时降级为纯文本）
+    \item failure handler 捕获所有函数的未处理错误，统一通知用户
+    \item 每个函数有自己的重试策略、并发控制和触发条件
+\end{itemize}
+
+\subsection{本章小结}
+
+Utah 作为 harness 理念的参考实现，展示了如何用事件驱动架构将 Agent 逻辑拆分为多个小型、专注的函数。触发解耦使得 Agent 可以支持任意通信渠道而无需修改核心逻辑，六函数设计使得每个关注点（循环、回复、错误处理、心跳、子任务）都可以独立配置和演进。
+
+

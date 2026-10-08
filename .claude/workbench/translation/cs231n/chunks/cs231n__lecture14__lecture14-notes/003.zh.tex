@@ -1,0 +1,142 @@
+\section{Diffusion：把生成变成逐步去噪}
+
+\subsection{为什么 diffusion 会赢到今天}
+
+GAN 给了我们很锐利的图，但训练太难。diffusion 的思路正好相反：别指望一次把噪声变成图，而是把生成拆成很多个小修正。每一步只做一点点“去噪”或“transport”，这样训练就更像回归问题，稳定得多。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-035.jpg}
+\caption{Diffusion 章节起点：从 GAN 转向逐步去噪的生成思路\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第36页。}
+
+\begin{warningbox}{这一领域的术语非常乱}
+Diffusion、score-based model、SDE、DDPM、rectified flow、flow matching，很多时候都在描述近亲算法。名字不同，数学形式也可能不同，但核心都绕不开两件事：\textbf{往数据里加噪}，以及\textbf{学会把噪声再拿回来}。
+\end{warningbox}
+
+\subsection{最朴素的直觉}
+
+最简单的理解方式是：先选一个容易采样的噪声分布 $p_{\text{noise}}$，通常是标准高斯。训练时，把真实样本 $x$ 按不同噪声强度扰动成 $x_t$，然后让网络 $f_\theta(x_t,t)$ 学会在每个噪声水平上“往干净方向推一点点”。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-037.jpg}
+\caption{Diffusion 模型的基本提醒：名字很多，但我们只讲一个清晰版本，rectified flow\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第37页。}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-040.jpg}
+\caption{Diffusion 的直觉：训练一个网络来“去掉一点噪声”，而不是一次性生成整张图\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第40页。}
+
+在这个视角里，生成并不是“凭空画图”，而是一个从噪声空间沿着学习到的方向场逐步回到数据流形的过程。采样的时候，只要从纯噪声开始，不断重复这个修正步骤，就能得到最后的样本。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-041.jpg}
+\caption{Diffusion 推理过程：从纯噪声开始，反复调用同一个网络，逐步回到无噪声样本\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第41页。}
+
+\begin{importantbox}{Diffusion 和判别式任务的关系}
+diffusion 的核心训练形式不是分类，而是连续值回归：网络要学的是去噪方向、速度场或 score。它和判别式任务的交集主要体现在条件模型里，比如 CFG 早期的 classifier guidance 会借助一个额外分类器来提供梯度，但 CFG 本身已经把这一步收进生成模型里了。
+\end{importantbox}
+
+\subsection{Rectified flow：最清楚的版本}
+
+这一讲选 rectified flow 作为“现代 clean implementation”的代表，是因为它足够简单，足够接近工程实践，也足够容易把核心思想讲透。
+
+训练时每次采样：
+
+\[
+z \sim p_{\text{noise}}, \qquad x \sim p_{\text{data}}, \qquad t \sim \mathrm{Uniform}(0,1)
+\]
+
+然后定义中间点和目标速度：
+
+\[
+x_t = (1-t)x + tz, \qquad v = z - x.
+\]
+
+最后让网络回归这个速度场：
+
+\[
+\mathcal{L}(\theta)=\mathbb{E}\left[\|f_\theta(x_t,t)-v\|_2^2\right].
+\]
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-043.jpg}
+\caption{Rectified flow 训练：先采样数据、噪声和时间，再构造中间点和目标速度\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第44页。}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-044.jpg}
+\caption{Rectified flow 的损失就是一个回归损失：让网络预测从 $x$ 指向 $z$ 的向量场\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第45页。}
+
+\begin{importantbox}{为什么 rectified flow 适合教学}
+\begin{itemize}
+    \item 训练像普通回归，损失函数直观。
+    \item 采样像数值积分，步骤清楚。
+    \item 既能保留 diffusion 的逐步生成优势，也能把数学和工程解释都压到很低的理解门槛。
+\end{itemize}
+\end{importantbox}
+
+\subsection{采样：从噪声一路积分回数据}
+
+采样阶段从噪声 $x_1 \sim p_{\text{noise}}$ 出发。若把区间 $[0,1]$ 切成 $T$ 份，就可以做一个简单的 Euler 更新：
+
+\[
+x \leftarrow x - \frac{1}{T} f_\theta(x,t)
+\]
+
+从 $t=1$ 一直走到 $t=0$。直觉上，这就是沿着学到的速度场把点从噪声流形搬回数据流形。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-047.jpg}
+\caption{Rectified flow 采样：先选定步数 $T$，然后从噪声样本开始沿速度场逐步前进\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第48页。}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-050.jpg}
+\caption{采样过程中的中间更新：每一步只修正一小段，避免一步走太猛\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第51页。}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-054.jpg}
+\caption{采样收敛到最终结果：把多步局部修正累积成一个完整样本\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第55页。}
+
+\subsection{为什么中间噪声最难}
+
+rectified flow 里一个很重要的训练观察是：极高噪声和极低噪声相对容易，真正难的是中间噪声。原因很简单：在中间区域，同一个 $x_t$ 可能对应很多不同的 $(x,z)$ 对，网络必须学会对这些可能性做平均；这比“几乎没噪声”或“几乎全噪声”都更模糊。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-057.jpg}
+\caption{Rectified flow 小结：训练就是拟合速度场，采样就是把速度场积分回来\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第58页。}
+
+\begin{warningbox}{噪声调度不是装饰品}
+如果总是均匀采样 $t$，训练会把太多精力浪费在“容易的极端噪声”上。真正影响模型效果的，往往是中间区间的样本。因此噪声 schedule 是模型设计的一部分，不是可有可无的调参细节。
+\end{warningbox}
+
+\subsection{什么是“现代 clean implementation”}
+
+这一讲把 diffusion 的教学目标压缩成三个词：\textbf{训练简单}、\textbf{采样稳定}、\textbf{可以规模化}。这也是为什么 diffusion 最后成为主流：它没有 GAN 那么刺激，但训练过程更像一个可控的工程系统。
+

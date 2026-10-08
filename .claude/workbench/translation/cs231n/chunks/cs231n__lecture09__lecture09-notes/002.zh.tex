@@ -1,0 +1,165 @@
+\section{语义分割}
+
+\subsection{任务定义}
+
+语义分割（Semantic Segmentation）的目标是为图像中的\textbf{每个像素}分配一个类别标签。与图像分类（为整张图输出一个标签）不同，语义分割输出与输入图像等尺寸的标签图。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-014.jpg}
+\caption{计算机视觉核心任务对比：分类、语义分割、目标检测、实例分割\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第15页。}
+
+\begin{importantbox}{四种核心视觉任务的输出对比}
+\begin{itemize}
+    \item \textbf{图像分类}：输入一张图，输出一个类别标签（如``猫''）
+    \item \textbf{语义分割}：输入一张图，输出每个像素的类别标签（$H \times W$ 的标签图）
+    \item \textbf{目标检测}：输入一张图，输出若干边界框 + 类别（$(x,y,w,h,c)$ 列表）
+    \item \textbf{实例分割}：目标检测 + 每个实例的像素级掩码
+\end{itemize}
+\end{importantbox}
+
+\begin{warningbox}{语义分割不区分实例}
+语义分割只关心每个像素属于哪个类别（如``狗''、``草地''），\textbf{不区分同类的不同个体}。如果图像中有两只狗，语义分割会把所有``狗像素''标为同一类别，无法区分``狗1''和``狗2''。要区分个体，需要实例分割。
+\end{warningbox}
+
+\subsection{朴素方法：滑动窗口}
+
+最朴素的做法是对每个像素取一个局部 patch，用分类网络判断中心像素的类别。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-034.jpg}
+\caption{滑动窗口方法：对每个像素提取局部 patch，独立运行分类器\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第35页。}
+
+这种方法的问题非常明显：假设图像大小为 $640 \times 480$，共有 $307{,}200$ 个像素，每个像素都要跑一遍完整网络——计算代价极高，且相邻像素的 patch 高度重叠，存在大量冗余计算。
+
+\subsection{全卷积网络（FCN）}
+
+更高效的方案是使用\textbf{全卷积网络（Fully Convolutional Network, FCN）}：训练一个端到端的网络，输入完整图像，直接输出像素级标签图。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-040.jpg}
+\caption{全卷积语义分割：不使用下采样，用纯卷积层直接在原分辨率上预测。输出张量为 $C \times H \times W$，取 argmax 得到标签图\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第41页。}
+
+\begin{knowledgebox}{为什么不能在原分辨率上做所有卷积}
+如果所有卷积都在原分辨率（如 $640 \times 480$）上操作，计算量和内存占用会非常大。一个 $3 \times 3$ 的卷积核在 $D$ 个通道上的 FLOPs 为 $O(9 \cdot D^2 \cdot H \cdot W)$——当 $H, W$ 很大时，这是不可接受的。因此实际中需要\textbf{先下采样减少空间分辨率}，再上采样恢复。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-019.jpg}
+\caption{编码器-解码器架构：先下采样减少空间分辨率（降低计算量），再上采样恢复到原始尺寸\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第20页。}
+
+\begin{importantbox}{FCN 的损失函数}
+语义分割的训练目标非常直观：对图像中每个像素独立计算 softmax 交叉熵损失，然后对所有像素取平均：
+$$L = \frac{1}{HW}\sum_{i=1}^{H}\sum_{j=1}^{W} \text{CrossEntropy}(\hat{y}_{ij}, y_{ij})$$
+其中 $y_{ij}$ 是像素 $(i,j)$ 的真实标签，$\hat{y}_{ij}$ 是预测的类别概率分布。注意：类别不平衡（如大面积背景 vs 小面积物体）会影响训练效果，实际中常使用加权交叉熵或 focal loss。
+\end{importantbox}
+
+\subsection{上采样方法}
+
+FCN 的编码部分（下采样）可以使用标准的池化和步长卷积，但解码部分（上采样）需要专门设计。讲者详细介绍了四种上采样方法：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-021.jpg}
+\caption{上采样方法对比：最近邻插值、Bed of Nails、Max Unpooling\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第22页。}
+
+\textbf{1. 最近邻插值}：将低分辨率的值复制到对应的高分辨率区域。简单但产生块状伪影。
+
+\textbf{2. Bed of Nails}：将值放在角落位置，其余填零。
+
+\textbf{3. Max Unpooling}：在编码阶段记录 max pooling 的位置索引，解码时将值放回对应位置。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-045.jpg}
+\caption{Max Unpooling 数值示例：$4 \times 4$ 输入经 Max Pooling 变为 $2 \times 2$，记录最大值位置；解码时将值放回原始位置，其余填零\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第46页。}
+
+\textbf{4. 转置卷积（Transpose Convolution）}：\textbf{可学习}的上采样方法。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-050.jpg}
+\caption{正常卷积回顾：$3 \times 3$ 卷积核，stride 2，padding 1，将 $4 \times 4$ 输入变为 $2 \times 2$ 输出\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第51页。}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-056.jpg}
+\caption{转置卷积：$3 \times 3$ 核，stride 2，将 $2 \times 2$ 输入变为 $4 \times 4$ 输出。每个输入值作为滤波器的权重，重叠区域求和\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第57页。}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-024.jpg}
+\caption{转置卷积的 1D 示例：每个输入值乘以滤波器权重生成输出，重叠区域求和\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第25页。}
+
+\begin{warningbox}{转置卷积 $\neq$ 反卷积}
+转置卷积（Transpose Convolution）有时被误称为``反卷积''（Deconvolution），但它\textbf{并不是}卷积的数学逆运算。它只是在矩阵运算层面使用了卷积矩阵的转置。滤波器权重是通过训练学习的，而非由下采样过程决定。此外，如果 stride 和 kernel size 选择不当，转置卷积会产生\textbf{棋盘格伪影}（checkerboard artifacts），这在生成模型中是常见问题。
+\end{warningbox}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{3cm}p{2cm}p{2.5cm}p{4.5cm}}
+\toprule
+\textbf{方法} & \textbf{可学习} & \textbf{计算开销} & \textbf{特点} \\
+\midrule
+最近邻插值 & 否 & 极低 & 简单但有块状伪影 \\
+Bed of Nails & 否 & 极低 & 大量零值，信息利用率低 \\
+Max Unpooling & 否 & 低 & 保留空间位置信息 \\
+转置卷积 & 是 & 中等 & 权重可学习，表达力最强 \\
+双线性插值 & 否 & 低 & 平滑，可与卷积配合使用 \\
+\bottomrule
+\end{tabular}
+\caption{五种上采样方法对比}
+\end{table}
+
+\subsection{U-Net 架构}
+
+U-Net 是语义分割领域最具影响力的架构之一。其结构呈 U 形：左侧为编码器（下采样），右侧为解码器（上采样），关键创新在于\textbf{跳跃连接（skip connections）}——将编码器各层的特征图直接复制并拼接到解码器对应层。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-026.jpg}
+\caption{U-Net 架构：对称的编码器-解码器结构，通过跳跃连接保留高分辨率的空间细节信息\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第27页。}
+
+\begin{importantbox}{U-Net 跳跃连接的作用}
+下采样过程中空间信息不可避免地丢失。跳跃连接将编码器的高分辨率特征图直接传递给解码器，使得上采样过程能够恢复精细的边界信息。具体来说：
+\begin{itemize}
+    \item 编码器浅层特征：包含丰富的空间/边缘信息，但语义信息较弱
+    \item 编码器深层特征：包含强语义信息，但空间分辨率低
+    \item 跳跃连接让解码器同时获得两者，实现``语义 + 空间''的融合
+\end{itemize}
+U-Net 至今仍是医学图像分割的主流架构，也是 Stable Diffusion 等扩散模型的核心组件。
+\end{importantbox}
+
+\begin{knowledgebox}{U-Net 的历史影响}
+U-Net 最初由 Ronneberger 等人于 2015 年发表在 MICCAI，目标是解决医学图像分割中标注稀缺的问题。它的成功不仅限于医学领域：在卫星图像分割、材料缺陷检测、扩散生成模型（如 DDPM、Stable Diffusion）中都作为核心架构出现。截至 2025 年，原论文引用量超过 80,000 次。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+语义分割是像素级分类任务。滑动窗口方法虽然概念直观但计算不可行。全卷积网络（FCN）通过编码器-解码器结构实现端到端训练。上采样方法从简单的插值到可学习的转置卷积，逐步提升了重建质量。U-Net 的跳跃连接设计有效解决了下采样导致的空间信息丢失问题，至今仍被广泛使用。
+
+%% ========== Part 3: 目标检测 ==========
+

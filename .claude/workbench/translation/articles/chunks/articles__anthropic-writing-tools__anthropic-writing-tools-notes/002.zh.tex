@@ -1,0 +1,121 @@
+\section{工具开发的迭代流程}
+
+Anthropic 提出了一套三步迭代流程：\textbf{原型搭建 → 评估测量 → 协同优化}。这一流程的核心理念是：工具质量无法靠一次性设计达到最优，必须通过系统化的评估和反复迭代来持续改进。
+
+\subsection{第一步：快速搭建原型}
+
+预测哪些工具对 Agent 来说是"好用的"、哪些不好用，往往需要实际动手测试。Anthropic 建议从快速原型开始：
+
+\begin{enumerate}[leftmargin=1.5em]
+    \item \textbf{编写工具}：可以用 Claude Code 一次性（one-shot）生成工具代码。给 Claude 提供相关库、API、SDK 的文档会很有帮助，特别是 \texttt{llms.txt} 格式的文档。
+    \item \textbf{包装与连接}：将工具包装为本地 MCP Server 或 Desktop Extension (DXT)，这样可以直接在 Claude Code 或 Claude Desktop 中测试。
+    \item \textbf{手动测试}：亲自使用工具，识别粗糙之处（rough edges），收集用户反馈。
+\end{enumerate}
+
+连接本地 MCP Server 到 Claude Code 的命令：
+
+\begin{lstlisting}[language=bash, caption={连接本地 MCP Server}]
+claude mcp add <name> <command> [args...]
+\end{lstlisting}
+
+工具也可以直接通过 Anthropic API 调用进行程序化测试，适用于自动化场景。
+
+\subsection{第二步：构建评估体系}
+
+原型搭好后，需要\textbf{系统化地衡量} Claude 使用工具的效果。这是整个流程中最关键的环节。
+
+\subsubsection{生成评估任务}
+
+评估任务应该\textbf{基于真实世界场景}，使用真实的数据源和服务（如内部知识库、微服务），避免过于简单的"沙盒"环境。强有力的评估任务通常需要多个工具调用——甚至可能数十个。
+
+\begin{table}[H]
+\centering
+\caption{强评估任务 vs 弱评估任务对比}
+\begin{tabular}{p{0.47\textwidth}p{0.47\textwidth}}
+\toprule
+\textbf{强任务（推荐）} & \textbf{弱任务（不推荐）} \\
+\midrule
+安排下周与 Jane 开会讨论 Acme 项目，附上上次项目规划会议的笔记，并预定会议室 & 安排下周与 jane@acme.corp 开会 \\
+\midrule
+客户 9182 反馈同一笔购买被扣款三次，查找所有相关日志，确定是否有其他客户受同一问题影响 & 在支付日志中搜索 purchase\_complete 和 customer\_id=9182 \\
+\midrule
+客户 Sarah Chen 提交了取消请求，准备挽留方案：(1) 离开原因 (2) 最有说服力的挽留方案 (3) 风险因素 & 查找客户 45892 的取消请求 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{warningbox}{避免过度严格的验证器}
+验证器（verifier）不应因格式、标点或有效的替代表述等差异而拒绝正确答案。可以使用精确字符串匹配，也可以使用 LLM-as-Judge 方式让 Claude 来判断回答的正确性。但不要对 Agent 的求解策略做过多限定——同一任务可能存在多条正确路径。
+\end{warningbox}
+
+\subsubsection{运行评估}
+
+Anthropic 推荐用\textbf{程序化方式}（直接调用 LLM API）运行评估，每个评估任务使用一个简单的 agentic loop（while 循环交替执行 LLM API 调用和 Tool 调用）。
+
+\begin{importantbox}{评估 Agent 的 System Prompt 设计}
+在评估 Agent 的 system prompt 中，建议指导 Agent 在工具调用和最终回答之前输出 \textbf{reasoning（推理过程）} 和 \textbf{feedback（反馈）} 块。这样做有两个好处：
+\begin{itemize}[leftmargin=1.5em]
+    \item 触发 Chain-of-Thought (CoT) 行为，提升 LLM 的有效智能
+    \item 帮助开发者理解 Agent 为什么调用或不调用某些工具
+\end{itemize}
+如果使用 Claude，可以直接开启 interleaved thinking 来获得类似效果。
+\end{importantbox}
+
+除了顶层准确率，还应收集以下指标：
+
+\begin{itemize}[leftmargin=1.5em]
+    \item 单个 Tool 调用和任务的总运行时间
+    \item 总 Tool 调用次数
+    \item 总 Token 消耗量
+    \item Tool 错误率和错误类型
+\end{itemize}
+
+跟踪 Tool 调用可以揭示 Agent 常用的工作流，并发现工具整合优化的机会。
+
+\subsubsection{分析评估结果}
+
+\begin{knowledgebox}{如何从评估结果中提取洞察}
+Agent 是发现问题和提供反馈的好帮手，但要注意：\textbf{Agent 没有说出的内容，往往比它说出的更重要}。LLM 并不总是准确表达它的真实意图。分析评估结果时应：
+\begin{itemize}[leftmargin=1.5em]
+    \item 观察 Agent 在哪些地方卡住或困惑
+    \item 仔细阅读 reasoning/feedback 和 CoT 输出
+    \item 审查原始 transcript（包括 Tool 调用和响应），捕捉 CoT 中未明确描述的行为
+    \item "读懂弦外之音"——评估 Agent 自己并不知道正确答案和最优策略
+\end{itemize}
+\end{knowledgebox}
+
+分析 Tool 调用指标可以发现具体问题：
+
+\begin{table}[H]
+\centering
+\caption{从指标异常定位工具问题}
+\begin{tabular}{p{0.35\textwidth}p{0.55\textwidth}}
+\toprule
+\textbf{指标异常} & \textbf{可能的原因与改进方向} \\
+\midrule
+大量冗余 Tool 调用 & 分页或 Token 限制参数需要调整 \\
+\midrule
+大量无效参数导致的 Tool 错误 & 工具描述不够清晰，需要更好的示例 \\
+\midrule
+不必要的参数附加（如年份） & 工具描述需要改进以引导正确行为 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+文章举了一个具体案例：在推出 Claude 的 Web Search 工具时，团队发现 Claude 会不必要地在查询参数后面追加"2025"，导致搜索结果偏差、性能下降。解决方法是改进工具描述（tool description）来引导 Claude 走向正确行为。
+
+\subsection{第三步：与 Agent 协同优化}
+
+这是本文最具创新性的部分：\textbf{让 Agent 自己分析评估结果并改进工具}。
+
+具体做法是将评估 Agent 的 transcript 拼接在一起，粘贴到 Claude Code 中。Claude 擅长分析 transcript 并一次性重构大量工具——例如确保在引入新变更时，工具的实现与描述保持一致。
+
+\begin{importantbox}{Agent 自我优化的关键发现}
+Anthropic 团队发现，通过 held-out test set（留出测试集）验证，Agent 驱动的优化能够带来超越"专家级"实现的性能提升——无论这些工具是由研究人员手写还是由 Claude 自身生成的。这表明评估驱动的迭代优化是系统性提升工具质量的有效方法。
+\end{importantbox}
+
+\subsection{本章小结}
+
+工具开发的最佳实践遵循"原型 → 评估 → 优化"的迭代循环。核心要点包括：(1) 评估任务必须贴近真实场景且有足够复杂度；(2) 收集多维度指标而非仅关注准确率；(3) Agent 本身就是强大的分析和优化工具，可以通过分析 transcript 来自动改进工具质量；(4) 使用 held-out test set 防止过拟合。
+
+

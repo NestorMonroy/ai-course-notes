@@ -1,0 +1,77 @@
+\section{案例拆解：一次退换货请求如何被 Agent 完成}
+
+为了把前面讨论的概念落到执行层，这一节构造一个最常见场景：用户通过 chat 发起鞋码不合适的退换货请求。这个案例对应讲者在前半段反复提到的“return shoes”问题，适合检验 agent 是否具备真实动作能力。
+
+\subsection{场景定义与目标状态}
+
+输入条件如下：用户已下单、商品可退换、订单处于配送后 7 天内；系统支持换码并自动生成新物流单。
+期望输出不是“一段安慰文字”，而是三项可验证动作：退货工单创建成功、换货订单创建成功、通知消息发送成功。
+
+\begin{knowledgebox}{把任务写成状态机而不是聊天脚本}
+在生产系统中，建议把任务建模为状态机：
+\begin{itemize}[leftmargin=1.5em]
+    \item $S_0$：身份未校验；
+    \item $S_1$：身份已校验，待确认诉求；
+    \item $S_2$：退换资格已判定，待选择方案；
+    \item $S_3$：动作执行中（退货+换货）；
+    \item $S_4$：动作完成并回传结果。
+\end{itemize}
+Agent 对话的职责是驱动状态跃迁，而不是无限生成自然语言。
+\end{knowledgebox}
+
+\subsection{工具调用链设计}
+
+该案例至少需要四类工具：身份校验、订单查询、退货创建、换货下单。一个可操作的编排顺序如下：
+\begin{enumerate}[leftmargin=1.8em]
+    \item 调用 \texttt{verify\_customer()} 完成双因子核验；
+    \item 调用 \texttt{get\_order\_detail()} 获取 SKU、尺码、时效；
+    \item 调用 \texttt{check\_policy()} 校验退换资格；
+    \item 调用 \texttt{create\_return()} 生成退货号；
+    \item 调用 \texttt{create\_exchange\_order()} 生成新订单；
+    \item 调用 \texttt{send\_confirmation()} 发通知并回写 CRM。
+\end{enumerate}
+
+\begin{importantbox}{工具调用的关键约束}
+每一步都应返回结构化结果和错误码，避免“模型自我理解状态”。只要动作会改写系统状态，就必须由 deterministic service 执行并生成审计日志。
+\end{importantbox}
+
+\subsection{失败分支与恢复策略}
+
+真实会话中失败是常态，重点是失败能否快速收敛。以该案例为例：
+\begin{itemize}[leftmargin=1.5em]
+    \item 身份校验失败：触发有限重试并降级到人工；
+    \item 资格校验失败：输出明确政策解释并给替代方案；
+    \item 换货库存不足：自动推荐可替换 SKU 并二次确认；
+    \item 下游接口超时：触发幂等重试与 provider failover；
+    \item 动作部分成功：执行补偿逻辑并明确告知用户当前状态。
+\end{itemize}
+
+\begin{warningbox}{最危险的失败模式：语言成功、动作失败}
+如果 Agent 在工具调用失败后仍给出“已帮你处理完成”的自然语言，短期可能提升会话满意度，长期会造成信任断崖与大规模投诉。这是客服 Agent 最不可接受的错误类型之一。
+\end{warningbox}
+
+\subsection{可验证交付与度量}
+
+前面的状态机、工具调用和失败补偿只有落到可审计证据，才算真正完成任务。本节把一次会话拆成身份、任务、动作、质量和安全字段，使产品团队能够回放“系统做了什么”，评测团队能够判断“结果是否成立”，运营团队能够追踪“问题是否需要补偿”。
+
+建议将每轮会话沉淀为结构化记录，便于回放与评测：
+\begin{table}[H]
+\centering
+\caption{退换货场景的最小可验证字段}
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{3.3cm} >{\raggedright\arraybackslash}X}
+\toprule
+字段类别 & 示例 \\
+\midrule
+身份信息 & 用户 ID、验证方式、验证结果、重试次数 \\
+任务上下文 & 订单号、SKU、资格策略版本、会话渠道 \\
+动作证据 & 退货单号、换货订单号、通知发送 ID、写库结果 \\
+质量指标 & 首次解决率、总时长、升级标记、人工接管原因 \\
+安全标记 & 注入检测命中、高风险请求分类、输出过滤命中 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{本章小结}
+
+案例拆解表明：customer-facing agent 的主体并不是“对话文案”，而是“状态机 + 工具链 + 守卫层 + 审计层”。把这四层建立起来，Agent 才具备可规模化复制能力。
+

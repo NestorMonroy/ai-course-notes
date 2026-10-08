@@ -1,0 +1,137 @@
+\section{GPU 硬件剖析}
+
+\subsection{GPU 的起源与演进}
+
+GPU（Graphics Processing Unit）最初是为计算机图形学开发的专用协处理器——渲染屏幕上大量像素的过程天然适合大规模并行。在 2000 年代初期，研究者发现这种硬件可以用于通用并行计算。NVIDIA 在 2010 年代初期敏锐地抓住了深度学习的机遇，将 GPU 打造为深度学习训练的主力硬件。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-003.jpg}
+\caption{GPU 硬件介绍：从图形处理到通用并行计算\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第3页。}
+
+\subsection{H100 GPU 的内部结构}
+
+以当前主力训练硬件 NVIDIA H100 为例，其内部结构呈现出层次分明的设计：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-004.jpg}
+\caption{H100 GPU 内部结构：中心是计算核心，周围是 80 GB HBM 内存，二者以约 3 TB/s 带宽连接\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第4页。}
+
+\begin{itemize}
+    \item \textbf{HBM 内存}：80 GB 高带宽内存，位于芯片外部，与计算核心以 $\sim$3 TB/s 带宽连接
+    \item \textbf{L2 Cache}：约 50 MB，位于芯片上，比 HBM 更接近计算单元
+    \item \textbf{132 个 SM}（Streaming Multiprocessor）：GPU 的核心计算单元
+\end{itemize}
+
+\begin{knowledgebox}{GPU ``binning'' 工艺}
+H100 芯片设计有 144 个 SM，但由于制造过程中不可能每个晶体管都完美，NVIDIA 只保证 132 个 SM 正常工作。这种``binning''策略让 NVIDIA 能将更多芯片作为合格产品出售，是半导体行业的通用做法。
+\end{knowledgebox}
+
+\subsection{SM 的内部结构：FP32 核心与 Tensor Core}
+
+每个 SM 内部包含两种关键计算单元：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-005.jpg}
+\caption{H100 单个 SM 的内部结构：128 个 FP32 核心（绿色）和 4 个 Tensor Core（红色）\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第5页。}
+
+\begin{importantbox}{FP32 核心 vs Tensor Core}
+\begin{itemize}
+    \item \textbf{128 个 FP32 核心}：每个可在一个时钟周期内计算 $ax + b$（标量），整个 SM 每周期可执行 256 FLOP
+    \item \textbf{4 个 Tensor Core}：专为矩阵乘法设计的硬件电路。每个可在一个时钟周期内计算 $16 \times 4 \cdot 4 \times 8 + 16 \times 8$ 的矩阵乘加运算，整个 SM 每周期可执行 \textbf{4,096 FLOP}
+\end{itemize}
+Tensor Core 的吞吐量是 FP32 核心的 \textbf{16 倍}。这就是为什么在 PyTorch 中忘记将模型转换为 16-bit 精度会导致运行速度慢 20 倍——因为它会使用 FP32 核心而非 Tensor Core。
+\end{importantbox}
+
+\subsection{GPU 计算能力的指数级增长}
+
+从 2013 年的 K40 到 2024 年的 B200，GPU 的计算吞吐量在过去十余年间增长了约 \textbf{1000 倍}：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-006.jpg}
+\caption{GPU 计算吞吐量演进：从 K40（5 TFLOP/s FP32）到 B200（5,000 TFLOP/s 混合精度），增长 1000 倍\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第6页。}
+
+\begin{knowledgebox}{Tensor Core 与混合精度}
+Tensor Core 使用混合精度计算：输入为 16-bit（FP16/BF16），乘法在低精度下执行，累加在 32-bit 精度下完成。V100（2017年）是第一个引入 Tensor Core 的 GPU，此后每一代 GPU 的 Tensor Core 都更多、更大、更快。
+\end{knowledgebox}
+
+\begin{warningbox}{1000 倍增长还不够}
+单设备 1000 倍的计算能力增长已经很惊人，但更疯狂的是：我们现在不是在一块 GPU 上训练，而是在\textbf{数万块 GPU 上并行训练}。单设备增长叠加多设备并行，这就是过去十年 AI 能力爆发式增长的硬件基础。
+\end{warningbox}
+
+\subsection{GPU 集群的层次结构}
+
+从单个 GPU 扩展到完整的训练集群，内存层次结构不断延伸：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-008.jpg}
+\caption{GPU 集群的层次结构：GPU $\rightarrow$ Server（8 GPU） $\rightarrow$ Rack $\rightarrow$ Pod $\rightarrow$ Cluster\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第8页。}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{层级} & \textbf{GPU 数量} & \textbf{带宽} & \textbf{带宽衰减} \\
+\midrule
+GPU 内部（HBM $\leftrightarrow$ 计算核心） & 1 & 3 TB/s & 基准 \\
+Server 内部（GPU $\leftrightarrow$ GPU） & 8 & 900 GB/s & $\sim$3x \\
+Pod 内部（GPU $\leftrightarrow$ GPU） & 3,072 & 50 GB/s & $\sim$60x \\
+Cluster（Pod $\leftrightarrow$ Pod） & 24,576 & $<$50 GB/s & $>$60x \\
+\bottomrule
+\end{tabular}
+\caption{Llama 3 训练集群的内存层次与带宽（H100）}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-009.jpg}
+\caption{Llama 3 训练集群详细规格：8 个 GPU Pod 组成完整集群，共 24,576 块 GPU\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第9页。}
+
+\begin{importantbox}{将整个数据中心视为一台巨型计算机}
+Llama 3 的训练集群拥有：24,000 块 GPU、1.8 PB HBM 内存、4.15 亿个 FP32 核心、1,300 万个 Tensor Core，总计算能力达 24 ExaFLOP/s（$24 \times 10^{18}$）。我们的目标是将这个巨大的集群当作\textbf{一台超级计算机}来使用，在上面训练一个巨型神经网络长达数月。
+\end{importantbox}
+
+\subsection{其他训练硬件}
+
+虽然 NVIDIA GPU 目前占据主导地位，但还有其他竞争者：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-010.jpg}
+\caption{其他训练硬件：Google TPU v5p、AMD MI325X、AWS Trainium\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第10页。}
+
+\begin{itemize}
+    \item \textbf{Google TPU}：已迭代六代，V5P 性能与 H100 同一量级。Google 的 Gemini 模型几乎可以肯定在 TPU 上训练。但 TPU 只能通过 Google Cloud 租用或在 Google 工作才能使用
+    \item \textbf{AMD MI325X}：纸面规格与 H100 相当，但实际影响力远不及
+    \item \textbf{AWS Trainium}：Anthropic 用于部分训练
+\end{itemize}
+
+\subsection{本章小结}
+
+\begin{itemize}
+    \item GPU 通过大量并行计算单元（SM/Tensor Core）实现超高吞吐量
+    \item Tensor Core 是 GPU 的``魔力所在''，其矩阵乘法吞吐量是 FP32 核心的 16 倍
+    \item GPU 集群呈层次结构，带宽随距离快速衰减——从 3 TB/s（GPU 内部）到 50 GB/s（跨 Pod）
+    \item 算法设计必须\textbf{尊重这种层次结构}，将高通信需求放在高带宽连接上
+\end{itemize}
+
+%% ========== Part 2: 分布式训练 ==========
+

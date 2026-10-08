@@ -1,0 +1,69 @@
+\subsection{跨图推导：把 71 个安全状态压缩成一套工程方法}
+
+前面的图覆盖了定义、攻击、评测与防御，但真正落地时不能按论文名称逐个部署组件。团队需要从一个具体任务出发，把用户目标、受保护资产、可执行能力和外部依赖画到同一张 trust map 上，再用攻击路径检验每条边。下面给出一套可以直接用于 design review、red team 和事故复盘的推导方法。
+
+\paragraph{第一步：从任务结果反推资产。}
+假设 Agent 的任务是“读取客户邮件、查询订单并发起退款”。资产不仅是数据库中的订单与付款信息，还包括邮箱 OAuth token、用户身份验证状态、退款 policy、审批记录、模型 memory、工具返回和最终对用户的承诺。若只把信用卡号列为敏感数据，就会漏掉能够间接触发资金动作的状态与凭证。每项资产应记录 owner、读写主体、保留期限、允许用途和恢复方式；无法恢复的资产要使用更严格的默认拒绝策略。
+
+\paragraph{第二步：标出所有 trust boundary。}
+用户输入、网页、邮件、检索文档和第三方 API 都属于不同信任域。即使内容来自公司内部知识库，也可能因同步错误、账号失陷或历史污染而不可信。模型调用与工具调用之间同样是边界：自然语言计划必须转换成 typed action，参数要经过 policy 验证，执行结果要带来源和完整性信息返回。安全审查不应只问“输入是否恶意”，还要问“哪一步把低信任内容提升为高权限控制”。
+
+\paragraph{第三步：把攻击链写成前置条件序列。}
+一个有效攻击通常不是“prompt injection 成功”这么简单，而是满足一组条件：Agent 读取到 payload；模型把 payload 当指令；计划选择了高风险工具；policy 没有拦截；凭证允许访问目标资源；业务系统接受了写入；用户或监控没有及时发现。把链条拆开后，团队就能选择成本最低、确定性最高的断点。模型拒答可能减少第二步概率，parameterized query 可以直接消除 SQL 拼接条件，least privilege 则限制即使前面失守也无法访问敏感表。
+
+\paragraph{第四步：区分 capability 与 authority。}
+模型“知道如何退款”属于 capability，系统“允许它退款 10,000 美元”属于 authority。两者混在同一个 prompt 中会让语言理解同时决定权限。更稳妥的架构是模型提出意图与证据，policy engine 根据用户身份、金额、订单状态和风险等级发放一次性 capability token，工具再验证 token 与参数。权限应具有资源范围、动作范围、金额/频率上限、有效期和可撤销性，而不是一个长期万能 API key。
+
+\paragraph{第五步：为不可逆行动设计两阶段执行。}
+发送公开消息、删除数据、转账、修改访问控制等操作应先生成 plan 或 preview，再由独立策略、人类或确定性规则 commit。Preview 必须显示将修改的资源、参数、依据和预期后果；commit 使用与 preview 绑定的摘要，防止模型在批准后偷偷替换参数。对可逆动作也要提供 idempotency key、transaction log 和补偿操作，避免重试造成重复退款或重复消息。
+
+\begin{knowledgebox}{一个高风险动作的最小检查表}
+\begin{enumerate}
+    \item 用户是否明确请求或授权该目标？
+    \item 当前身份是否有权操作目标资源？
+    \item 参数是否来自可信来源，是否经过 schema 和业务规则校验？
+    \item 外部内容是否影响了计划，来源标签是否保留？
+    \item 动作是否可逆；若不可逆，谁完成二次批准？
+    \item 执行后用什么独立证据确认结果，而不是听模型自报？
+\end{enumerate}
+\end{knowledgebox}
+
+\paragraph{第六步：让 evaluation 覆盖组合状态。}
+单独测试模型拒绝恶意 prompt、工具 API 权限和 memory 写入都通过，并不证明组合系统安全。评测矩阵至少要交叉用户类型、外部内容、memory 状态、工具权限、任务阶段和恢复路径。例如同一 payload 可以放在用户消息、网页评论、PDF、邮件签名或历史 memory 中；同一攻击还要在只读、有限写入和高权限工具下重放。结果按完整 trajectory 记录，才能知道防线在哪一层生效、是否产生旁路以及 utility 受到多少影响。
+
+\paragraph{第七步：把 attack success 拆成条件概率。}
+设攻击链包含发现 payload、模型服从、policy 放行和工具执行四步，则粗略成功率可写为
+\[
+P(\mathrm{success})
+=P(R)\,P(M\mid R)\,P(P\mid M,R)\,P(T\mid P,M,R),
+\]
+其中 $R$ 表示 payload 被读取，$M$ 表示模型接受恶意目标，$P$ 表示 policy 放行，$T$ 表示工具完成危险动作。每层防御的价值是降低某个条件概率或限制最终后果。该乘积不是假设各事件独立，而是提醒团队不要用单一 jailbreak rate 代替端到端风险；同样的模型脆弱性在只读工具下与管理员权限下有完全不同的 expected loss。
+
+\paragraph{第八步：同时报告风险与效用。}
+安全控制可能增加拒绝、延迟和人工审批。Progent 类结果必须与正常任务成功率一起读：ASR 降低多少，utility 保留多少，误拦截集中在哪些用户群体，额外审批花费多少时间。对低风险查询可采用宽松权限和自动执行，对高金额或不可逆动作采用严格 policy 与 human sign-off。风险分级让系统不必在“完全自动”和“全部人工”之间二选一。
+
+\paragraph{第九步：监控应观察行为偏离而非关键词。}
+Prompt injection 可以换语言、编码或语义包装，关键词规则只能捕获已知表面。更有价值的运行时信号包括：Agent 突然访问与用户目标无关的资源；工具调用序列偏离正常模板；从低信任网页读取 secret-like 数据后尝试外发；memory 在无用户确认时写入高影响事实；同一会话短时间触发大量拒绝与权限请求。监控器应生成可解释事件，并能暂停、降权或转人工，而不是只给安全团队一个晚到的 dashboard。
+
+\paragraph{第十步：provenance 必须贯穿数据生命周期。}
+对每个影响决策的事实，系统应保存原始来源、抓取时间、处理版本、可信度和允许用途。摘要和 embedding 不能抹掉 provenance；否则 memory poisoning 被发现后无法定位哪些派生状态需要删除。输出中的关键结论也应能反向追踪到来源与工具结果。Provenance 不只是合规元数据，它直接决定污染检测、撤销、用户申诉和模型改进是否可行。
+
+\paragraph{第十一步：按爆炸半径设计恢复。}
+安全设计不是假设永不失守，而是限制失守范围。每个 Agent 使用独立身份和最小权限；不同客户、项目和环境隔离 memory 与 credentials；写操作有审计和补偿；高风险工具设置速率、金额和对象上限；异常时可立即吊销 token、冻结 workflow、回滚状态并通知受影响用户。事故演练要验证这些恢复动作真的可用，而不是只在文档中存在。
+
+\paragraph{第十二步：把修复变成持续学习资产。}
+每次攻击或近失事件都应产生四类产物：可重放的最小攻击场景、根因对应的 trust-boundary 缺口、确定性修复或 policy 变更、以及防止回归的指标。若只在 prompt 末尾追加一句禁令，攻击会换一种表述回来；若修复落到 schema、权限、隔离和业务 invariant，整个攻击家族都可能被消除。课程中的 AgentXploit、Progent、Privtrans 和 DataSentinel 应被理解为这个持续闭环中的不同工具，而不是互相替代的银弹。
+
+\begin{importantbox}{从 Design Review 到持续审计的闭环}
+\textbf{建模}：任务、资产、主体、权限和 trust boundary；
+\textbf{攻击}：按前置条件生成 direct、indirect、poisoning 与 tool-chain 场景；
+\textbf{评测}：重放完整 trajectory，同时测 ASR、utility 与 consequence；
+\textbf{防御}：优先确定性 policy、least privilege、separation 与 reversible action；
+\textbf{运行}：监控行为偏离，保存 provenance，准备暂停与补偿；
+\textbf{学习}：把事故转成回归集、policy 版本和架构改进。
+\end{importantbox}
+
+\begin{warningbox}{最常见的错误收口}
+“模型已经对齐”“加了输入过滤”“通过一次 red team”“工具只在内网”都不是完成标准。只要模型能影响有权限的组件，且外部数据能进入上下文，就仍需端到端 threat model、可重放评测、动作级 policy、监控和恢复。安全完成度应由可验证控制与剩余风险说明，而不是由组件名称判断。
+\end{warningbox}
+

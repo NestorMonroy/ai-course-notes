@@ -1,0 +1,130 @@
+\section{五种 Workflow 模式详解}
+
+本节是文章的核心内容，详细介绍了五种在生产环境中常见的 Workflow 设计模式。
+
+\subsection{模式一：Prompt Chaining（提示链）}
+
+\textbf{核心思想}：将任务分解为一系列\textbf{顺序执行}的步骤，每个 LLM 调用处理前一个调用的输出。可以在中间步骤加入程序化检查（Gate）以确保流程正确。
+
+\textbf{适用场景}：任务可以清晰地分解为固定的子任务，通过将每个 LLM 调用变为更简单的任务来\textbf{用延迟换取更高准确率}。
+
+\textbf{典型案例}：
+\begin{itemize}
+    \item 先生成营销文案，再翻译成其他语言。
+    \item 先写文档大纲，检查大纲是否满足标准，再基于大纲撰写全文。
+\end{itemize}
+
+\begin{importantbox}{Prompt Chaining 的设计哲学}
+Prompt Chaining 的核心权衡是：\textbf{用更多的 LLM 调用次数和更高的延迟，换取每个步骤更高的准确性}。它之所以有效，是因为将一个复杂任务拆分为多个简单任务后，每个子任务对 LLM 来说更容易完成。中间的 Gate 检查机制是保障质量的关键——如果中间步骤出错，可以提前中止而非让错误传播下去。
+\end{importantbox}
+
+\subsection{模式二：Routing（路由）}
+
+\textbf{核心思想}：对输入进行\textbf{分类}，然后将其导向专门的后续处理流程。这一模式实现了关注点分离，使得每个分支可以使用更专门的 prompt。
+
+\textbf{适用场景}：复杂任务存在多个不同类别，每个类别需要不同的处理方式，且分类可以被准确执行。
+
+\textbf{典型案例}：
+\begin{itemize}
+    \item 将客服查询按类型（一般咨询、退款请求、技术支持）路由到不同的处理流程。
+    \item 将简单问题路由到小型高效模型（如 Claude Haiku 4.5），将复杂问题路由到能力更强的模型（如 Claude Sonnet 4.5）。
+\end{itemize}
+
+\begin{knowledgebox}{Routing 的深层价值}
+Routing 的价值不仅在于效率优化，更在于避免「一个 prompt 打天下」的困境。在实践中，为一种输入优化 prompt 往往会\textbf{损害}对其他类型输入的表现。通过 Routing 将不同类型的输入分流到各自专门的处理路径，可以实现整体性能的帕累托改进。
+\end{knowledgebox}
+
+\subsection{模式三：Parallelization（并行化）}
+
+\textbf{核心思想}：多个 LLM 同时处理任务，结果通过程序化方式聚合。有两种变体：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{>{\bfseries}l p{10cm}}
+\toprule
+变体 & 说明 \\
+\midrule
+Sectioning（分段） & 将任务拆分为\textbf{相互独立}的子任务，并行执行以提高速度 \\
+Voting（投票） & 对\textbf{同一任务}运行多次，获取多样化的输出以提高置信度 \\
+\bottomrule
+\end{tabular}
+\caption{Parallelization 的两种变体}
+\end{table}
+
+\textbf{Sectioning 案例}：
+\begin{itemize}
+    \item 一个 LLM 实例处理用户查询，另一个实例并行进行内容安全审查（Guardrails）。将安全检查与核心任务分离，通常比让同一个 LLM 同时处理两者效果更好。
+    \item 自动化评估中，每个 LLM 调用评估模型表现的不同方面。
+\end{itemize}
+
+\textbf{Voting 案例}：
+\begin{itemize}
+    \item 多个不同 prompt 并行审查代码漏洞，只要有一个发现问题就标记。
+    \item 多个 prompt 从不同角度评估内容是否合规，通过投票阈值平衡误报和漏报。
+\end{itemize}
+
+\begin{warningbox}{Parallelization 的适用前提}
+并行化要求子任务之间\textbf{相互独立}（Sectioning）或任务本身具有随机性（Voting）。如果子任务之间存在依赖关系，强行并行化会导致信息丢失和结果质量下降。此外，并行化会线性增加 API 调用成本，需要在速度/质量和成本之间做好权衡。
+\end{warningbox}
+
+\subsection{模式四：Orchestrator-Workers（编排者-工作者）}
+
+\textbf{核心思想}：一个中央 LLM（Orchestrator）\textbf{动态地}分解任务，将子任务委派给 Worker LLM，最后综合各 Worker 的结果。
+
+\textbf{与 Parallelization 的区别}：虽然拓扑结构相似，关键区别在于\textbf{灵活性}——Parallelization 的子任务是预定义的，而 Orchestrator-Workers 的子任务由 Orchestrator 根据具体输入动态决定。
+
+\textbf{适用场景}：无法预先确定需要哪些子任务的复杂任务。
+
+\textbf{典型案例}：
+\begin{itemize}
+    \item 编程产品中，每次需要对多个文件进行复杂修改（文件数量和修改内容取决于任务）。
+    \item 需要从多个来源搜集和分析信息的搜索任务。
+\end{itemize}
+
+\begin{importantbox}{Orchestrator-Workers 的核心价值}
+这一模式的核心价值在于处理「\textbf{事先不知道要做什么}」的场景。与预定义分支的 Parallelization 不同，Orchestrator 可以根据输入的具体内容灵活决定需要哪些 Worker、分配什么任务。这使其特别适合像代码重构这样子任务数量和内容都不确定的场景。
+\end{importantbox}
+
+\subsection{模式五：Evaluator-Optimizer（评估者-优化者）}
+
+\textbf{核心思想}：一个 LLM 生成响应，另一个 LLM 提供评估和反馈，形成\textbf{迭代优化循环}。这类似于人类作家反复修改打磨文章的过程。
+
+\textbf{适用前提}（两个信号）：
+\begin{enumerate}
+    \item 人类给出反馈时，LLM 的输出可以\textbf{明显改善}。
+    \item LLM 本身能够\textbf{提供}这样的反馈。
+\end{enumerate}
+
+\textbf{典型案例}：
+\begin{itemize}
+    \item 文学翻译：翻译 LLM 可能遗漏某些细微差别，但评估 LLM 可以给出有价值的批评。
+    \item 复杂搜索任务：需要多轮搜索和分析才能收集全面信息，由评估者决定是否需要继续搜索。
+\end{itemize}
+
+\begin{knowledgebox}{Evaluator-Optimizer 与强化学习的类比}
+这一模式在概念上与强化学习中的 Actor-Critic 架构有相似之处：Generator 类似 Actor（执行动作），Evaluator 类似 Critic（评估价值）。迭代循环使得系统能够逐步逼近最优输出，而无需一次性生成完美结果。判断是否适合使用此模式的关键是：评估输出的质量是否比生成高质量输出更容易。
+\end{knowledgebox}
+
+\subsection{五种模式对比总览}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{>{\bfseries}p{2.8cm} p{3.2cm} p{3cm} p{3.5cm}}
+\toprule
+模式 & 控制流特征 & 适用场景 & 核心权衡 \\
+\midrule
+Prompt Chaining & 串行，固定步骤 & 可清晰分解的任务 & 延迟换准确率 \\
+Routing & 分类后分流 & 多类别输入 & 分类准确性要求 \\
+Parallelization & 并行，预定义分支 & 独立子任务/多视角 & 成本换速度/置信度 \\
+Orchestrator- Workers & 动态分解委派 & 子任务不可预知 & 灵活性换可控性 \\
+Evaluator- Optimizer & 迭代反馈循环 & 有明确评估标准 & 延迟换质量 \\
+\bottomrule
+\end{tabular}
+\caption{五种 Workflow 模式对比}
+\end{table}
+
+\subsection{本章小结}
+五种 Workflow 模式覆盖了从简单串行到复杂迭代的多种场景。选择哪种模式取决于任务的结构特征：子任务是否固定、是否独立、是否可预知、是否有明确的评估标准。在实践中，这些模式可以自由组合和定制。
+
+

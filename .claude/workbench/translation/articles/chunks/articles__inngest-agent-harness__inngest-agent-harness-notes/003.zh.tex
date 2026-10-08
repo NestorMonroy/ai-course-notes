@@ -1,0 +1,110 @@
+\section{Agent 循环的 Step 化}
+
+\subsection{Think $\to$ Act $\to$ Observe 循环}
+
+Utah 的核心是一个标准的 \textbf{think $\to$ act $\to$ observe} 循环。每次迭代调用 LLM，检查是否需要使用 Tool，执行 Tool，并将结果反馈回来。关键洞见是：\textbf{每次 LLM 调用和每次 Tool 执行都是一个 Inngest step}。
+
+\begin{lstlisting}[caption={Utah Agent 循环核心逻辑（简化版）},language=Java]
+while (!done && iterations < config.loop.maxIterations) {
+  iterations++;
+
+  // Prune old tool results to keep context focused
+  pruneOldToolResults(messages);
+
+  // Budget warnings when running low on iterations
+  const messagesForLLM = addBudgetWarning(messages, iterations);
+
+  // Think: call the LLM
+  const llmResponse = await step.run("think", async () => {
+    return await callLLM(systemPrompt, messagesForLLM, tools);
+  });
+
+  const toolCalls = llmResponse.toolCalls;
+
+  if (toolCalls.length > 0) {
+    messages.push(llmResponse.message);
+
+    // Act: execute each tool as a separate step
+    for (const tc of toolCalls) {
+      const result = await step.run(`tool-${tc.name}`, async () => {
+        validateToolArguments(tool, tc);
+        return await executeTool(tc.id, tc.name, tc.arguments);
+      });
+
+      // Observe: feed results back into messages
+      messages.push(toolResultMessage(tc, result));
+    }
+  } else if (llmResponse.text) {
+    // No tools - the text response IS the reply
+    finalResponse = llmResponse.text;
+    done = true;
+  }
+}
+\end{lstlisting}
+
+\begin{importantbox}{Step 的三大关键特性}
+\begin{enumerate}
+    \item \textbf{自动索引}：当 \texttt{step.run("think")} 在循环中被调用十次时，Inngest 内部自动追踪为 \texttt{think:0}, \texttt{think:1}, ... 无需手动管理唯一 step ID。
+    \item \textbf{独立可重试}：如果 LLM API 在第 3 次迭代返回 500 错误，Inngest 只重试\textbf{那一个} step。第 1、2 次迭代的结果已经持久化，不会重新执行。
+    \item \textbf{文本即结束}：当 LLM 返回文本而没有 tool call 时，这轮对话就结束了。无需显式的 ``done'' 信号。
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Durable Execution 的直观理解}
+
+Durable execution（持久化执行）这个概念听起来抽象，但在 Agent 场景下非常直观：
+
+\begin{warningbox}{没有 Durable Execution 时的典型故障}
+假设你的 Agent 正在执行一个 10 步的任务。在第 7 步时，LLM API 超时了。在传统架构下：
+\begin{itemize}
+    \item 整个 Agent 循环崩溃
+    \item 前 6 步的工作全部丢失
+    \item 要么从头重跑（浪费时间和 token），要么自己实现 checkpoint 逻辑
+\end{itemize}
+而在 Inngest 的 step 模型下，前 6 步的结果已经持久化。重试只需要从第 7 步开始。这就是 durable execution 应用于 Agent 循环的价值。
+\end{warningbox}
+
+这并不是什么新概念——durable execution 最初是为电商结账流程、支付处理等场景设计的。Inngest 的洞见是：Agent 循环本质上也是一个\textbf{需要可靠执行的多步骤工作流}。
+
+\subsection{Tool 复用：不需要自己造轮子}
+
+Utah 没有手写文件 I/O 和 shell 执行。它直接引入了 \texttt{pi-coding-agent}——来自 OpenClaw/Pi 生态系统的、经过实战检验的 Tool 实现：
+
+\begin{table}[H]
+\centering
+\caption{Utah 使用的 Tool}
+\begin{tabular}{ll}
+\toprule
+\textbf{Tool} & \textbf{功能} \\
+\midrule
+\texttt{read}, \texttt{write}, \texttt{edit} & 文件操作（支持图片、二进制检测、智能截断） \\
+\texttt{bash} & Shell 执行（可配置超时和输出截断） \\
+\texttt{grep}, \texttt{find}, \texttt{ls} & 搜索与导航（尊重 \texttt{.gitignore}） \\
+\texttt{remember} & 将笔记持久化到每日日志 \\
+\texttt{web\_fetch} & 网页内容抓取 \\
+\texttt{delegate\_task} & Sub-agent 委派（详见下节） \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+引入方式非常简洁：
+
+\begin{lstlisting}[caption={Tool 引入示例},language=Java]
+import { createReadTool, createWriteTool, createBashTool }
+  from "@mariozechner/pi-coding-agent";
+
+const tools = [
+  createReadTool(config.workspace.root),
+  createWriteTool(config.workspace.root),
+  createBashTool(config.workspace.root),
+  // ...custom tools
+];
+\end{lstlisting}
+
+文章强调的观点是：AI Agent 的 Tool 与任何其他软件的依赖管理没有区别——使用现有的库，用 Inngest step 包装它们即可。
+
+\subsection{本章小结}
+
+将 Agent 循环中的每个操作建模为 Inngest step 是整篇文章最核心的技术设计。这种设计带来了自动重试、故障恢复和完整可观测性，且代码改动极小——只需将普通函数调用包装在 \texttt{step.run()} 中。Tool 层面，复用已有的开源实现而非重复造轮子，也是 harness 思维的体现。
+
+

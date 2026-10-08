@@ -1,0 +1,25 @@
+\subsection{跨 GPU 扩展：分片对象决定显存与通信的交换}
+
+slides 68--73 从单卡进入多卡。训练一个 $P$ 参数模型时，权重、Adam optimizer state、梯度和 activation 共同占用显存；课程用约 $16P$ bytes 给出不含 activation 的粗略账本。naive data parallel 在每卡复制完整模型与 optimizer，只切数据，因此提高吞吐却不节省模型状态。ZeRO 让不同 data-parallel rank 只存一部分状态。模型并行则切 layer、矩阵或其他参数路径；Mixture of Experts（MoE）通过路由只激活部分专家，使总参数增长快于每 token 计算。
+
+\lecturefigure{slides-images/slide-068.png}{官方 slide 68：权重、optimizer state 与梯度的显存账本}
+\lecturefigure{slides-images/slide-069.png}{官方 slide 69：naive data parallel 复制模型并归约梯度}
+\lecturefigure{slides-images/slide-070.png}{官方 slide 70：ZeRO 通过状态 sharding 获得显存收益}
+\lecturefigure{slides-images/slide-071.png}{官方 slide 71：pipeline parallel 按层切分模型}
+\lecturefigure{slides-images/slide-072.png}{官方 slide 72：tensor parallel 切分单个矩阵并组合部分结果}
+\lecturefigure{slides-images/slide-073.png}{官方 slide 73：MoE 以稀疏激活扩大总参数量}
+
+\begin{knowledgebox}{术语消化：optimizer state、sharding、collectives 与 ZeRO}
+Adam/AdamW 的 \textbf{optimizer state} 包括一阶动量 $m$ 和二阶动量 $v$，通常各与参数同规模，因此仅这两项就可能是参数存储的两倍。\textbf{sharding（分片）}指把参数、梯度或 optimizer state 按设备切分，使每张 GPU 不再保存完整副本。\textbf{collectives（集合通信）}是多 GPU 协作原语，例如 all-reduce、reduce-scatter、all-gather 和 broadcast。\textbf{ZeRO} 在 data-parallel ranks 间分片状态：ZeRO-1 切 optimizer state，ZeRO-2 再切 gradients，ZeRO-3 进一步切 parameters；stage 越高越省显存，也通常需要更频繁地收集状态。
+\end{knowledgebox}
+
+\begin{knowledgebox}{读图：并行策略不是互斥菜单}
+data parallel 主要切 batch，pipeline parallel 切 layer，tensor parallel 切单层矩阵，expert parallel 切 MoE 专家。大型训练常把它们组合，并让通信模式匹配硬件拓扑：高频 tensor collectives 更适合节点内高速互联，pipeline 可跨较慢链路，data parallel 再覆盖更大范围。slide 71--72 只画出基本机制，没有展示 bubble、microbatch、通信重叠和容错成本，不能仅凭示意图判断哪种策略更快。
+\end{knowledgebox}
+
+\begin{warningbox}{显存公式的边界}
+slide 68 的 $16P$ bytes 假设参数、梯度和两份 optimizer state 使用约 4 bytes/element 的简化账本，没有完整计入 activation、临时 buffer、通信 bucket、碎片和混合精度副本。7B 模型的 112GB 例子用于说明单卡困难，不是精确峰值。实际规划应从框架 dtype、optimizer、checkpointing、序列长度和 batch 形状逐项计算。
+\end{warningbox}
+
+这组系统图与 Agent 训练的连接在于，Agent rollout 往往限制可用 batch，slide 71 所说“data parallel 需要足够 batch”会更突出；环境服务和长上下文还增加 activation 与 KV 数据。团队不能照搬预训练的并行配置，而应根据 rollout 长度分布、环境等待和模型状态大小重新选择 sharding 与并行维度。
+

@@ -1,0 +1,144 @@
+\section{Harness 的迭代简化}
+
+第一版 harness 效果显著，但也笨重（bulky）、缓慢（slow）、昂贵（expensive）。作者的下一步目标是在\textbf{不降低产出质量}的前提下简化 harness。
+
+\subsection{简化的核心原则}
+
+\begin{importantbox}{Harness 组件即模型能力假设}
+\textit{``Every component in a harness encodes an assumption about what the model can't do on its own, and those assumptions are worth stress testing, both because they may be incorrect, and because they can quickly go stale as models improve.''}
+
+Harness 中的每个组件都编码了一个假设：``模型不能独立完成 X''。这些假设需要持续验证，原因有二：
+\begin{enumerate}[leftmargin=1.5em]
+    \item 假设本身可能\textbf{从一开始就不正确}
+    \item 随着模型迭代，假设可能\textbf{迅速过时}
+\end{enumerate}
+
+来自 Anthropic ``Building Effective Agents'' 博客的指导原则：\textit{``Find the simplest solution possible, and only increase complexity when needed.''}
+\end{importantbox}
+
+作者在简化方面的经验教训也很有价值。他首先尝试了\textbf{激进的简化}（radical cutback）并加入了一些创新想法，但未能复现原有 harness 的性能。更糟的是，激进简化使得\textbf{难以判断哪些组件真正承载了性能}（load-bearing）。
+
+基于这一经验，作者转向了更\textbf{系统性}的方法：\textbf{每次只移除一个组件}，观察其对最终结果的影响。这本质上是一种控制变量的消融实验（ablation study）方法。
+
+\subsection{Opus 4.6 带来的范式转变}
+
+在迭代过程中，Opus 4.6 发布。其关键能力改进直接对应了 harness 之前需要补偿的缺陷：
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{p{5cm}p{7.5cm}}
+\toprule
+\textbf{Opus 4.6 的改进} & \textbf{对 Harness 的影响} \\
+\midrule
+更细致的规划能力 & Planner 的部分职责可由模型原生承担 \\
+\midrule
+更持久的 agentic task 执行 & Sprint 分解可能不再必要 \\
+\midrule
+更可靠的大型代码库操作 & Context reset 的必要性降低 \\
+\midrule
+更好的代码审查和调试能力 & 自我纠错能力增强，Evaluator 的边际价值变化 \\
+\midrule
+显著改善的 long-context retrieval & Compaction 和 context reset 的必要性降低 \\
+\bottomrule
+\end{tabular}
+\caption{Opus 4.6 能力改进与 Harness 组件的对应关系}
+\end{table}
+
+关键变化：\textbf{Opus 4.5 上严重的 context anxiety 在 Opus 4.6 上基本消失}。这意味着之前为了应对 context anxiety 而引入的 context reset 机制不再必要——agent 可以在一个连续会话中通过自动 compaction 处理上下文增长。
+
+\subsection{结构性简化：移除 Sprint 构造}
+
+作者首先移除了\textbf{sprint 构造}。Sprint 结构的原始目的是将复杂工作分解为模型可以连贯处理的小块。Opus 4.6 的能力提升使得模型可能\textbf{无需这种分解}就能原生处理整个任务。
+
+移除 sprint 后的关键决策：
+
+\textbf{Planner 保留}。理由很实际：没有 planner，generator 会欠缺范围界定（under-scoped），直接从原始 prompt 开始构建，最终产出功能较少的应用。Planner 在将一句话 prompt 扩展为完整产品规格方面持续提供明确价值。
+
+\textbf{Evaluator 调整为末尾单次评估}。从每个 sprint 评分改为整体运行结束后的单次（或少数几次）QA 通过。
+
+\begin{warningbox}{Evaluator 的价值是任务依赖的，不是固定开关}
+\textit{``The practical implication is that the evaluator is not a fixed yes-or-no decision. It is worth the cost when the task sits beyond what the current model does reliably solo.''}
+
+在 Opus 4.5 上，构建任务处于 generator 能力的\textbf{边缘}，evaluator 在几乎所有 sprint 上都能发现有意义的问题。在 Opus 4.6 上，模型能力边界\textbf{外移}，许多之前需要 evaluator 把关的任务现在 generator 已能独立处理好。
+
+但对于那些\textbf{仍处于 generator 能力边缘}的任务部分，evaluator 依然提供显著提升。这意味着：evaluator 的投入产出比随着模型改进而\textbf{动态变化}，harness 设计者需要持续重新评估。
+\end{warningbox}
+
+此外，作者还改进了 harness 中 AI 功能构建的 prompting——具体来说，引导 generator 为每个应用构建一个\textbf{proper agent}，能通过 tools 驱动应用本身的功能。这需要大量调优，因为相关知识足够新，Claude 的训练数据中覆盖较薄。
+
+\subsection{DAW 构建实验：简化后的 Harness 实战}
+
+使用更新后的 harness（Opus 4.6 + 无 sprint + 末尾 QA），作者测试了一个更具挑战性的 prompt：
+
+\begin{quote}
+\textit{``Build a fully featured DAW in the browser using the Web Audio API.''}
+\end{quote}
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Agent / 阶段} & \textbf{时长} & \textbf{成本} \\
+\midrule
+Planner & 4.7 min & \$0.46 \\
+Build (Round 1) & 2 hr 7 min & \$71.08 \\
+QA (Round 1) & 8.8 min & \$3.24 \\
+Build (Round 2) & 1 hr 2 min & \$36.89 \\
+QA (Round 2) & 6.8 min & \$3.09 \\
+Build (Round 3) & 10.9 min & \$5.88 \\
+QA (Round 3) & 9.6 min & \$4.06 \\
+\midrule
+\textbf{Total} & \textbf{3 hr 50 min} & \textbf{\$124.70} \\
+\bottomrule
+\end{tabular}
+\caption{DAW 构建各阶段时长与成本（Updated Harness + Opus 4.6）}
+\end{table}
+
+关键观察：
+
+\textbf{1. 连贯运行超过 2 小时。} Builder 在\textbf{没有 sprint 分解}的情况下连贯运行超过 2 小时——这在 Opus 4.5 上是不可能的。这直接验证了移除 sprint 构造的决策。
+
+\textbf{2. QA 仍然发现真实缺陷。} 即使模型能力大幅提升，evaluator 在末尾 QA 中仍然抓到了有意义的问题：
+
+第一轮 QA 反馈指出：
+\begin{quote}
+\textit{``Several core DAW features are display-only without interactive depth: clips can't be dragged/moved on the timeline, there are no instrument UI panels (synth knobs, drum pads), and no visual effect editors (EQ curves, compressor meters). These aren't edge cases---they're the core interactions that make a DAW usable.''}
+\end{quote}
+
+第二轮 QA 继续发现：
+\begin{itemize}[leftmargin=1.5em]
+    \item 音频录制仍为 stub（按钮可以切换但无实际麦克风捕获）
+    \item Clip 的边缘拖拽缩放和分割未实现
+    \item 效果可视化仅为数字滑块，而非图形化（无 EQ 曲线）
+\end{itemize}
+
+\textbf{3. 最终产出可用。} 最终的浏览器 DAW 拥有完整的核心组件：arrangement view、mixer 和 transport。用户可以\textbf{完全通过 prompt} 与内置 AI agent 交互来创作歌曲——agent 能设置 tempo 和 key、铺设旋律、构建鼓轨、调整混音电平、添加混响效果。
+
+\textbf{4. 局限性清晰可见。} 作者坦诚指出：这远非专业的音乐制作程序，AI agent 的歌曲创作能力还有很大提升空间。此外，\textbf{Claude 实际上无法``听到''音频}，这使得 QA 反馈循环在音乐品味方面的有效性受限。
+
+\subsection{三个版本的综合对比}
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{p{3.5cm}rrp{5cm}}
+\toprule
+\textbf{Harness 版本} & \textbf{时长} & \textbf{成本} & \textbf{特点} \\
+\midrule
+Solo agent (4.5) & 20 min & \$9 & Retro Game Maker 核心功能不可用 \\
+Full harness V1 (4.5) & 6 hr & \$200 & 核心功能可用，有粗糙之处 \\
+Updated harness V2 (4.6) & 3 hr 50 min & \$125 & 更简洁架构，同等或更高质量 \\
+\bottomrule
+\end{tabular}
+\caption{三个 Harness 版本的综合对比}
+\end{table}
+
+从 V1 到 V2 的演进路径清晰：模型能力提升使得架构可以\textbf{同时降低复杂度和成本}，而不牺牲产出质量。这不是``用更多钱买更好的结果''，而是``用更少的脚手架获得同等或更好的结果''。
+
+\subsection{本章小结}
+
+Harness 简化的核心方法论是：系统性地逐个移除组件并观察影响，而非激进地一次性简化。从 Opus 4.5 到 4.6 的模型升级使得 sprint 结构可以被安全移除，evaluator 从每 sprint 评估改为末尾少次评估。成本从 \$200/6hr 降至 \$125/4hr，同时保持或提升了产出质量。关键洞察是 evaluator 的价值不是固定的——它随任务与模型能力边界的关系而动态变化。
+
+

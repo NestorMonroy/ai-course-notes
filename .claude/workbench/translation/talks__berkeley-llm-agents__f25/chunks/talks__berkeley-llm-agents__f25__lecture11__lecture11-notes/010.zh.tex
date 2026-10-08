@@ -1,0 +1,93 @@
+\section{Deep Dive I：Slack --- 低保真模拟驱动的真实机器人 RL}
+
+\subsection{问题设定}
+Slack 论文针对的是一个现实痛点：真实机器人 RL 成本高、试错慢、风险大。高保真模拟器难构建，而纯真实世界随机探索几乎不可接受。
+
+\begin{warningbox}{真实机器人 RL 的三重约束}
+\begin{itemize}
+    \item \textbf{Sample efficiency}：电池、硬件寿命和实验时间都有限；
+    \item \textbf{Safety}：随机动作可能造成碰撞与损坏；
+    \item \textbf{Task diversity}：复杂任务需要 base + arm + camera 联动。
+\end{itemize}
+\end{warningbox}
+
+\subsection{方法主干}
+Slack 的主思路不是先学完整策略，而是先在低保真模拟器里学一个 \textbf{structured latent action space}，再把这个空间用于真实世界任务学习。
+
+\begin{knowledgebox}{方法拆解}
+\begin{enumerate}
+    \item 用 unsupervised RL 在低保真模拟器中发现 task-agnostic skills；
+    \item 通过 disentanglement 学到更结构化的 latent action factor；
+    \item 加入 hand-coded safety reward 约束危险动作；
+    \item 在真实环境中用 factorized SAC 在 latent 空间做高效策略学习。
+\end{enumerate}
+\end{knowledgebox}
+
+这条路线的工程含义是：把最贵的探索压缩到一个更可控、更低维的动作空间里，从而把真实世界在线学习时间降到可用区间。
+
+\subsection{关键帧证据与结果}
+
+方法主干说明了“先学 latent action、再学真实任务”，本节用设置图与结果图检查这条路线是否真的落到机器人行为。先看任务中的障碍、接触和运动范围，再看成功轨迹究竟展示了哪些可迁移技能，并明确单次演示不能覆盖的鲁棒性问题。
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{frame-02-slack-setup.jpg}
+\caption{Slack 场景：移动底盘 + 机械臂 + 视觉联动任务\protect\footnotemark}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slack 的关键是先学习动作结构}
+第一张图展示机器人面对擦拭任务与障碍物，真实控制需要连续接触、避障和力度协调。低保真阶段先学习可组合的 latent action，再在真实任务上调优；它降低样本成本，但 latent space 若遗漏关键动作，真实阶段仍会受限。
+\end{knowledgebox}
+\footnotetext{视频时间区间：00:31:00--00:33:30。}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{frame-03-slack-result.jpg}
+\caption{在任务奖励驱动下，策略从随机行为收敛到稳定执行\protect\footnotemark}
+\end{figure}
+
+\begin{knowledgebox}{读图：成功轨迹支持可迁移技能，不等于全场景鲁棒}
+结果帧显示机器人能够绕过障碍完成擦拭，支持“模拟预训练可帮助真实学习”。但单次成功不能说明对不同材质、物体位置或传感噪声都稳定，因此需要重复试验、失败分类和真实阶段的安全回退。
+\end{knowledgebox}
+\footnotetext{视频时间区间：00:41:30--00:43:20。}
+
+课程报告的结果重点有两条：一是多任务（擦白板、扫物入盘、避障等）在 1 小时内可达高成功率；二是安全违规更少。这两条恰好对应真实部署最关心的效率与风险。
+
+\begin{importantbox}{Slack 的方法论启发}
+它不是在说 ``模拟器足够真实就能一键迁移''，而是在说 ``模拟器可以先学行为结构，再把结构迁移到真实世界做任务学习''。这是一个更现实、更稳健的 sim-to-real middle path。
+\end{importantbox}
+
+\subsection{训练流程拆解：从随机探索到可用技能}
+字幕里有一段很关键：\textit{``if you just use standard state-of-the-art RL, you're going to just flail''}（约 00:32:21--00:32:27）。
+这句话解释了 Slack 为什么不直接在全动作空间做端到端 RL。对一个移动底盘 + 机械臂系统，随机动作几乎必然导致无效探索和高风险行为。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{2.2cm}p{4.8cm}p{4.8cm}}
+\toprule
+\textbf{阶段} & \textbf{目标} & \textbf{主要手段} \\
+\midrule
+阶段 A & 获得可迁移行为结构 & 低保真模拟中无监督技能发现 \\
+阶段 B & 降低动作维度与耦合复杂度 & latent action disentanglement \\
+阶段 C & 控制真实探索风险 & hand-coded safety reward + action constraints \\
+阶段 D & 在真实任务中快速收敛 & factorized SAC 在 latent 空间优化 \\
+\bottomrule
+\end{tabular}
+\caption{Slack 训练流水线（课程内容重构）}
+\end{table}
+
+\begin{knowledgebox}{为什么 ``低保真'' 也能有用}
+课程给出的核心并不是高保真替代真实世界，而是结构迁移：
+\begin{itemize}
+    \item 迁移的是动作组织方式，而非逐像素物理精确性；
+    \item 低保真阶段先学 ``怎么动''，真实阶段再学 ``为任务而动''；
+    \item 这样做把最昂贵的随机探索从真实机器人上转移出去。
+\end{itemize}
+\end{knowledgebox}
+
+\begin{warningbox}{落地风险：latent space 也会失配}
+如果 latent action 空间覆盖不到真实任务关键操作，后续真实学习会出现 ``看似稳定但达不到目标''。因此需要在真实阶段保留重构或扩容机制，而不是把 latent space 视为固定真理。
+\end{warningbox}
+
+\subsection{本章小结}
+Slack 给了 embodied agent 一个可操作范式：低保真模拟用于学结构，真实世界用于学任务，从而兼顾效率与安全。
+

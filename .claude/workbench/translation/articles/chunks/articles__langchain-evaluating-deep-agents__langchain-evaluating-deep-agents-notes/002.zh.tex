@@ -1,0 +1,82 @@
+\section{模式一：定制化测试逻辑}
+
+\subsection{传统评测的局限性}
+
+传统 LLM 评测遵循一个简洁的三步流程：
+
+\begin{enumerate}
+  \item 构建测试数据集
+  \item 编写评测器（evaluator）
+  \item 将应用在数据集上运行，用评测器对输出打分
+\end{enumerate}
+
+在这个范式下，所有数据点被``一视同仁''——通过相同的应用逻辑处理，由相同的评测器打分。这对于分类、摘要、翻译等任务是足够的，但对 Deep Agent 来说远远不够。
+
+\subsection{为什么 Deep Agent 需要定制化？}
+
+Deep Agent 的``成功标准''因任务而异，而且往往涉及对 Agent 轨迹和状态的具体断言。文章给出了一个生动的例子：
+
+\begin{quote}
+\textit{假设有一个日历调度 Deep Agent，用户说``记住永远不要在早上 9 点之前安排会议''。我们需要验证的不仅仅是 Agent 的回复，还有：}
+\begin{enumerate}
+  \item Agent 是否调用了 \texttt{edit\_file} 工具修改了 \texttt{memories.md} 文件？
+  \item Agent 是否在最终回复中确认了偏好已记录？
+  \item \texttt{memories.md} 文件中是否确实包含了关于``不安排 9 点前会议''的信息？
+\end{enumerate}
+\end{quote}
+
+\begin{warningbox}{常见误区：只检查最终回复}
+很多开发者在评测 Agent 时只关注最终输出的文本质量，忽略了 Agent 是否真正完成了任务。一个 Agent 可能回复``好的，已经帮你记住了''但实际上并没有调用任何工具来更新记忆文件。\textbf{对 Deep Agent 而言，回复内容和实际行为必须同时验证。}
+\end{warningbox}
+
+\subsection{Pytest/Vitest 集成实践}
+
+LangSmith 提供了 Pytest 和 Vitest 集成，允许开发者为每个测试用例编写不同的断言逻辑。下面是文章给出的核心代码示例：
+
+\begin{lstlisting}[caption={LangSmith Pytest 集成 --- 定制化 Agent 测试}, label={lst:bespoke-test}]
+@pytest.mark.langsmith
+def test_remember_no_early_meetings() -> None:
+    user_input = "I don't want any meetings scheduled before 9 AM ET"
+    t.log_inputs({"question": user_input})
+    response = run_agent(user_input)
+    t.log_outputs({"outputs": response})
+    agent_tool_calls = get_agent_tool_calls(response)
+    # 验证 Agent 调用了 edit_file 工具更新 memories.md
+    assert any(
+        [tc["name"] == "edit_file"
+         and tc["args"]["path"] == "memories.md"
+         for tc in agent_tool_calls]
+    )
+    # LLM-as-judge 验证最终回复是否确认了偏好记录
+    communicated_to_user = llm_as_judge_A(response)
+    t.log_feedback(key="communicated_to_user",
+                   score=communicated_to_user)
+    # LLM-as-judge 验证记忆文件是否包含正确信息
+    memory_updated = llm_as_judge_B(response)
+    t.log_feedback(key="memory_updated",
+                   score=memory_updated)
+\end{lstlisting}
+
+代码中有几个关键设计值得注意：
+
+\begin{itemize}
+  \item \texttt{t.log\_inputs / t.log\_outputs}：将输入输出记录到 LangSmith，便于后续调试和追踪
+  \item \texttt{get\_agent\_tool\_calls}：提取 Agent 的工具调用轨迹，用于轨迹断言
+  \item \texttt{llm\_as\_judge}：对于难以用规则匹配的检查项（如``回复是否确认了偏好''），使用 LLM 作为裁判来打分
+  \item \texttt{t.log\_feedback}：将评分结果记录为结构化反馈，而非简单的 pass/fail
+\end{itemize}
+
+\begin{importantbox}{定制化测试的三层验证模型}
+对 Deep Agent 的每个测试用例，建议从三层进行验证：
+\begin{enumerate}
+  \item \textbf{行为层}：Agent 是否调用了正确的工具、传入了正确的参数？（轨迹断言）
+  \item \textbf{沟通层}：Agent 是否在回复中准确传达了执行结果？（LLM-as-judge）
+  \item \textbf{效果层}：Agent 的操作是否真正产生了预期的副作用？（状态检查）
+\end{enumerate}
+\end{importantbox}
+
+\subsection{本章小结}
+
+定制化测试逻辑是 Deep Agent 评测的基石。传统的``统一评测器''模式无法覆盖 Agent 的多维度行为。通过 Pytest/Vitest 集成，开发者可以为每个测试用例编写独立的断言逻辑，结合轨迹检查、LLM-as-judge 和状态验证，实现全面的质量保障。
+
+

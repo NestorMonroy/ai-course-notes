@@ -1,0 +1,141 @@
+\section{可视化与理解}
+
+理解神经网络的内部工作机制对于模型调试、安全评估和科学发现至关重要。讲者介绍了几种核心的可视化方法，从低层（滤波器权重）到高层（类激活图）逐步深入。
+
+\subsection{滤波器可视化}
+
+最直接的方法是可视化卷积层的滤波器权重。对于第一层（输入为 3 通道 RGB），可以直接将滤波器显示为小图片：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-060.jpg}
+\caption{CNN 第一层滤波器可视化：学到的低层特征包括边缘、颜色、纹理等基本模式\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第61页。}
+
+第一层滤波器的学习结果具有高度一致性——无论在 ImageNet、COCO 还是其他数据集上训练，第一层滤波器几乎总是学到类似的边缘检测器和颜色检测器。这暗示了视觉系统底层特征的``普遍性''。
+
+\begin{warningbox}{深层滤波器难以直接可视化}
+只有第一层滤波器（输入通道为 3，可映射为 RGB）能被直观可视化。深层滤波器通常有 64、128 甚至 512 个输入通道，无法直接显示为人眼可理解的图像。对于深层特征的理解，需要借助下面介绍的间接方法。常见的替代策略是可视化每个通道的\textbf{最大激活 patch}——找到训练集中使某个神经元激活值最大的图像区域。
+\end{warningbox}
+
+\subsection{显著性图（Saliency Maps）}
+
+显著性图回答一个核心问题：\textbf{哪些像素对分类决策影响最大？}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-130.jpg}
+\caption{显著性图的计算流程：先前向传播得到类别得分，再反向传播计算梯度对输入像素的绝对值\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第131页。}
+
+具体方法：计算目标类别得分 $S_c$ 对输入像素 $x_{ij}$ 的梯度：
+
+$$\text{Saliency}_{ij} = \left|\frac{\partial S_c}{\partial x_{ij}}\right|$$
+
+对于 RGB 图像，取三个通道梯度绝对值的最大值（max over RGB channels）。梯度绝对值大的像素意味着：微小改变该像素的值就会显著影响分类得分。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-062.jpg}
+\caption{显著性图效果展示：高亮区域精确对应了图像中的目标物体轮廓\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第63页。}
+
+\begin{importantbox}{显著性图的医学应用}
+在医学影像分析中，显著性图尤其重要。例如，当网络判断一张 CT 图像``有肿瘤''时，医生需要知道网络关注的是图像的哪个区域。如果网络关注的不是肿瘤区域而是图像伪影或标注信息，就意味着模型学到了\textbf{虚假相关}（spurious correlation）。这种检查在模型部署到临床之前是必须的。
+\end{importantbox}
+
+\begin{knowledgebox}{显著性图 vs 梯度方法的改进}
+原始显著性图使用原始梯度，容易产生噪声。后续改进包括：
+\begin{itemize}
+    \item \textbf{SmoothGrad}：多次加噪采样后取梯度平均，降低噪声
+    \item \textbf{Integrated Gradients}：沿从基线到输入的路径积分梯度，满足公理性质
+    \item \textbf{Guided Backpropagation}：只回传正梯度，得到更清晰的可视化
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{类激活图（CAM）与 Grad-CAM}
+
+\textbf{CAM（Class Activation Mapping）}利用全局平均池化层的结构特性，将分类得分追溯到最后一个卷积层的空间位置：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-064.jpg}
+\caption{CAM 原理：通过最后一层卷积特征图的加权求和，生成类别特定的空间注意力图\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第65页。}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-065.jpg}
+\caption{CAM 效果展示：同一张图像对不同类别（宫殿、穹顶、教堂、祭坛）产生不同的类激活图\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第66页。}
+
+CAM 的局限在于\textbf{只能应用于最后一个卷积层之后紧接全局平均池化的架构}。\textbf{Grad-CAM} 通过使用梯度来计算权重，突破了这一限制，可以应用于任意卷积层：
+
+$$\alpha_k^c = \frac{1}{Z}\sum_i\sum_j \frac{\partial S_c}{\partial A^k_{ij}}$$
+
+$$\text{Grad-CAM}^c = \text{ReLU}\left(\sum_k \alpha_k^c \cdot A^k\right)$$
+
+\begin{itemize}
+    \item $A^k$：第 $k$ 个特征图（$H' \times W'$ 的空间分辨率）
+    \item $\alpha_k^c$：类别 $c$ 对特征图 $k$ 的重要性权重（梯度的全局平均池化）
+    \item $Z = H' \times W'$：空间维度的像素总数
+    \item ReLU 确保只保留正向激活（对分类有正贡献的区域）
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-067.jpg}
+\caption{Grad-CAM 效果：可以应用于任意卷积层，生成不同粒度的类激活热力图\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第68页。}
+
+\begin{warningbox}{Grad-CAM 的解读陷阱}
+Grad-CAM 显示的是``哪些区域对分类有贡献''，但不等于``模型理解了这个物体''。模型可能只依赖背景上下文（如看到草地就预测``牛''）而非物体本身的特征。此外，Grad-CAM 的分辨率受限于特征图大小（通常是 $7 \times 7$ 或 $14 \times 14$），无法提供像素级精确的解释。
+\end{warningbox}
+
+\subsection{Transformer 的注意力可视化}
+
+对于 Vision Transformer，可视化注意力权重矩阵本身就是天然的``激活图''。自注意力机制计算每对 token 之间的注意力分数，这些分数可以直接映射回图像空间。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-068.jpg}
+\caption{ViT 的注意力可视化：自注意力权重天然反映了网络对图像各区域的关注分布\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第69页。}
+
+\begin{importantbox}{CNN vs Transformer 可解释性对比}
+\begin{itemize}
+    \item \textbf{CNN}：需要 Grad-CAM 等后处理方法来``反向追踪''模型的关注区域；可视化结果受限于特征图分辨率
+    \item \textbf{Transformer}：注意力权重本身就是可解释的——直接反映了哪些 token 对当前决策最重要；不同层、不同注意力头可以分别可视化
+\end{itemize}
+但要注意：注意力权重高并不严格等于``模型依赖这个区域做决策''。有研究表明，梯度加权的注意力（attention $\times$ gradient）比原始注意力更能反映真实的特征重要性。
+\end{importantbox}
+
+\subsection{卷积作为矩阵乘法：理解转置卷积}
+
+讲者还从矩阵运算的角度深入解释了为什么``转置卷积''叫这个名字：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-150.jpg}
+\caption{卷积可以表示为矩阵乘法 $\vec{x} * \vec{a} = X\vec{a}$。转置卷积就是使用 $X^T$，将小向量映射回大向量\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第151页。}
+
+以 1D 为例，kernel size=3, stride=2, padding=1 的卷积可以表示为：
+$$\begin{bmatrix} x & y & z & 0 & 0 & 0 \\ 0 & 0 & x & y & z & 0 \end{bmatrix} \begin{bmatrix} 0 \\ a \\ b \\ c \\ d \\ 0 \end{bmatrix} = \begin{bmatrix} ay + bz \\ bx + cy + dz \end{bmatrix}$$
+
+转置卷积就是使用这个矩阵的\textbf{转置} $X^T$，将 2 维输出映射回 6 维输入空间。
+
+\subsection{本章小结}
+
+神经网络可视化方法从低层（滤波器可视化）到高层（显著性图、CAM/Grad-CAM、注意力图），层层深入地揭示了模型的决策依据。显著性图通过梯度直接反映像素对分类的影响；Grad-CAM 将类别得分追溯到卷积特征图的空间位置；Transformer 的注意力机制天然具备可解释性。这些工具在模型调试、安全验证和医学应用中至关重要。
+
+%% ========== 总结与延伸 ==========
+

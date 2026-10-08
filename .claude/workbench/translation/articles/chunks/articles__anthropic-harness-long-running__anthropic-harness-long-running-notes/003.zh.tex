@@ -1,0 +1,102 @@
+\section{前端设计：将主观审美转化为可评分标准}
+
+作者选择从前端设计任务入手来开发和验证 generator-evaluator 架构，因为自我评估偏差在这里表现得最为突出。在没有任何干预的情况下，Claude 倾向于产出安全、可预测但视觉上毫无特色的布局——作者将之描述为``technically functional but visually unremarkable''。
+
+两个关键洞察驱动了 harness 设计：
+
+\begin{enumerate}[leftmargin=1.5em]
+    \item 虽然审美不能完全量化（individual tastes will always vary），但可以通过编码设计原则和偏好来使其\textbf{可评分}。``Is this design beautiful?'' 难以一致回答，但 ``does this follow our principles for good design?'' 给了 Claude 具体的评分依据。
+    \item 通过将前端\textbf{生成}和前端\textbf{评分}分离，可以创造驱动 generator 持续改进的反馈闭环。
+\end{enumerate}
+
+\subsection{四维评分标准的设计}
+
+作者定义了四个评分维度，同时写入 generator 和 evaluator 的 prompt 中。这些维度的设计体现了对模型能力分布的深刻理解：
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{>{\bfseries}p{2.8cm}p{7.5cm}p{1.5cm}}
+\toprule
+维度 & 定义 & 权重 \\
+\midrule
+Design Quality（设计质量） & 设计是否感觉像一个连贯的整体（coherent whole）而非零件的拼凑？颜色、排版、布局、图像和其他细节是否共同创造了独特的情绪（mood）和身份感（identity）？ & \textbf{高} \\
+\midrule
+Originality（原创性） & 是否有定制化的设计决策？还是模板布局（template layouts）、库默认值（library defaults）和 AI 生成模式（AI-generated patterns）的堆砌？人类设计师应该能识别出刻意的创意选择。 & \textbf{高} \\
+\midrule
+Craft（工艺） & 技术执行层面的检查：排版层次（typography hierarchy）、间距一致性（spacing consistency）、色彩和谐（color harmony）、对比度（contrast ratios）。这是能力检查（competence check）而非创意检查。 & 低 \\
+\midrule
+Functionality（功能性） & 独立于审美的可用性评估。用户能否理解界面功能、找到主要操作入口、完成任务而无需猜测？ & 低 \\
+\bottomrule
+\end{tabular}
+\caption{四维前端设计评分标准}
+\end{table}
+
+\begin{importantbox}{权重分配的策略性考量}
+作者\textbf{有意}加大 Design Quality 和 Originality 的权重，降低 Craft 和 Functionality 的权重。理由是 Claude 在技术执行（Craft）和功能实现（Functionality）方面已经表现不错——``required technical competence tended to come naturally to the model''。真正需要突破的是设计感和原创性，在这两个维度上 Claude 常常产出高度通用的``AI slop''。
+
+评分标准明确惩罚了典型的 AI 生成模式（如``purple gradients over white cards''——紫色渐变覆盖白色卡片），并通过更高权重\textbf{推动模型承担更多审美风险}（aesthetic risk-taking）。
+\end{importantbox}
+
+这一设计选择背后有一个更深层的洞察：评分标准不仅是评估工具，\textbf{它们本身就是强 prompt 信号}。即使在第一轮迭代（尚无 evaluator 反馈）中，仅仅因为 prompt 中包含了这些评分标准，generator 的产出就已经显著优于无任何 prompt 工程的 baseline。
+
+\subsection{Generator-Evaluator 迭代闭环的实现}
+
+整个系统基于 \textbf{Claude Agent SDK} 构建，架构清晰：
+
+\begin{enumerate}[leftmargin=1.5em]
+    \item \textbf{Generator} 根据用户 prompt 生成 HTML/CSS/JS 前端页面
+    \item \textbf{Evaluator} 通过 \textbf{Playwright MCP} 与\textbf{活页面}（live page）直接交互——自主导航页面、截取屏幕截图、仔细研究实现细节——然后为每个维度打分并撰写详细评论（detailed critique）
+    \item 评论反馈回 generator 作为下一轮迭代的输入
+    \item Generator 做出\textbf{策略性决策}：
+    \begin{itemize}[leftmargin=1em]
+        \item 分数趋势良好 $\to$ \textbf{Refine}：在当前方向上深化优化
+        \item 当前方向无前途 $\to$ \textbf{Pivot}：转向完全不同的审美方向
+    \end{itemize}
+    \item 重复 \textbf{5--15 轮}迭代
+\end{enumerate}
+
+Evaluator 使用了 \textbf{few-shot examples}（包含详细的分数拆解）进行校准，确保其判断与作者的偏好对齐，并减少跨迭代的分数漂移（score drift）。
+
+由于 evaluator 每轮都在实际操作页面（而非评估静态截图），每个迭代周期耗时较长。完整运行可达 \textbf{4 小时}。
+
+\begin{knowledgebox}{Playwright MCP 的关键角色}
+Playwright MCP 使得 evaluator 能够像真实用户一样\textbf{与页面交互}，而不仅仅是看一张截图。这意味着 evaluator 可以：
+\begin{itemize}[leftmargin=1.5em]
+    \item 测试导航流程和交互响应
+    \item 发现只有在实际操作中才能暴露的 bug
+    \item 评估动态效果（动画、过渡、响应式行为）
+    \item 从多个角度截图来全面评估视觉质量
+\end{itemize}
+这种``交互式评估''比``截图评估''提供了更丰富的反馈信号，但也显著增加了每轮迭代的时间成本。
+\end{knowledgebox}
+
+\subsection{迭代过程中的关键发现}
+
+通过大量实验运行，作者总结了几个重要观察：
+
+\textbf{1. 分数提升非线性。} 虽然 evaluator 的评分通常随迭代改善然后趋于平台期（plateau），但改善并非单调递增。作者``经常发现中间轮次的产出优于最终轮次''——这意味着 iteration 不等于 monotonic improvement。
+
+\textbf{2. 实现复杂度逐轮攀升。} Generator 在 evaluator 的反馈推动下倾向于追求越来越 ambitious 的方案。这有利有弊——更 ambitious 意味着更多创意可能性，但也意味着更多潜在的实现缺陷。
+
+\textbf{3. 评分标准的措辞直接塑造产出。} 作者发现评分标准中的隐喻和形容词本身就是强信号。例如，包含 ``the best designs are museum quality'' 这样的短语会推动设计向特定视觉风格收敛。这揭示了一个重要的工程启示：\textbf{评分标准不仅是评估工具，它们同时是 prompt engineering 的一部分}。
+
+\begin{warningbox}{Prompt 措辞的非预期效应}
+评分标准中使用的隐喻（如``museum quality''）会以作者未完全预期的方式引导 generator 的输出风格。这意味着在设计评分标准时，需要意识到每一个措辞选择都可能成为隐性的 style prompt。这既是一个工具（可以有意利用），也是一个风险（可能导致非预期的风格收敛）。
+\end{warningbox}
+
+\textbf{4. 创意跃迁的可能性。} 在一个令人瞩目的案例中，作者用``为一家荷兰艺术博物馆创建网站''作为 prompt。前 9 轮产出了一个干净的深色主题着陆页——视觉上精致但基本在预期之内。到\textbf{第 10 轮}，generator 彻底放弃了当前方向，将网站重新构想为一个\textbf{空间体验}（spatial experience）：
+
+\begin{itemize}[leftmargin=1.5em]
+    \item 用 CSS perspective 渲染的棋盘格地板 3D 房间
+    \item 艺术品以自由位置悬挂在墙上
+    \item 通过门廊（doorway）导航切换画廊，而非传统的滚动或点击
+\end{itemize}
+
+这种从``精致的传统网页''到``3D 空间体验''的创意跃迁，是作者此前从未在单次生成中看到的。它展示了 evaluator-driven 迭代不仅能提升质量，还能在足够多的迭代中\textbf{催化质变}。
+
+\subsection{本章小结}
+
+前端设计实验验证了三个核心假设：（1）主观审美可以通过编码设计原则转化为可评分维度；（2）generator-evaluator 分离能有效打破自我评估偏差，形成持续改进的闭环；（3）评分标准本身就是强大的 prompt engineering 工具。将 Design Quality 和 Originality 的权重提高是关键设计决策——它将模型推向了其能力边缘，而这正是 evaluator 反馈最有价值的区域。
+
+
