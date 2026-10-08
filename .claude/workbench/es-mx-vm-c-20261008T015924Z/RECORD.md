@@ -64,3 +64,56 @@ pasada la ventana; con 11 GB libres puede no caber el resto de la cadena.
 
 - No se midió nada de thyrox ni de Docker Hub desde esta VM.
 - No se verificó la prosa contra `vocabulario_prohibido.txt` (vive en thyrox).
+
+## Auditoría y entrega (17:52Z, orden de ES-A)
+
+### Qué modelo escribió cada cosa
+
+**Ningún modelo, ni local ni remoto, escribió nada en esta VM.** Todo lo producido es
+preparación determinista (`translation_loop.py prepare`) y prosa de este banco.
+
+Evidencia, medida a las 17:52Z:
+
+| Comprobación | Resultado |
+|---|---|
+| resultados `<n>.json` en los bancos de los lotes 31–33 | 0 |
+| archivos bajo `translate/` en esos bancos | 0 (el directorio no existe) |
+| `*.es-mx.tex` / `*.es.tex` nuevos en `cs224n/`, `cs336/`, `cs336-2026/` | 0. El único que existe, `cs336-2026/cs336-preamble.es-mx.tex`, es de `601603ae` (2026-10-05), anterior a esta VM |
+| `local-models-ensure` | `failed`, `downloaded false`, `installed false` (429 de Docker Hub) |
+| `llama_direct_ensure.sh`, `translate_wave.sh`, `advance` | nunca ejecutados |
+
+`VM_ES-C_LOCAL_WORKER = NOT_PROVEN docker-hub-429-pull-rate`: no hay GGUF ni unidad
+`model-runtime`, así que no hay cadena de procedencia que medir.
+
+Escrito por un modelo no local: nada.
+
+Lo que sí se trajo antes del 429, todo por digest, que explica la bajada de disco a 11 GB:
+`th3rox/thyrox-task-runner@sha256:1cced65c…` (386 MB), `ollama/ollama@sha256:2a6e883b…`
+(5,51 GB), `th3rox/cache-library--ubuntu@sha256:a853f94d…` (80,7 MB). Viven en el Podman de
+esta VM; no se publican y desaparecen con ella.
+
+### Lo que entrego (rama `feature/es-mx-vm-c-local-worker`)
+
+| Ruta | Contenido |
+|---|---|
+| `.claude/workbench/translation/cs224n/` | `notes.tsv`, `units.tsv`, `chunks/` (17 notas, 165 fragmentos) |
+| `.claude/workbench/translation/cs336/` | ídem (17 notas, 250 fragmentos) |
+| `.claude/workbench/translation/cs336-2026/` | ídem (19 notas con `cs336-preamble`, 210 fragmentos) |
+| `.claude/workbench/es-mx-vm-c-20261008T015924Z/RECORD.md` | este banco |
+| thyrox `feature/es-mx-vm-c-local-worker` @ `2156f9cc2` | merge de `feature/fresh-clone-bootstrap` (1032, 0944) |
+
+Los `head.tex` preparados no contienen `ctex`.
+
+### Lo que NO entrego, y por qué
+
+- Ninguna traducción (`*.es-mx.tex`, fragmentos traducidos, olas): el 9B no se materializó.
+- `translation_memory.jsonl`, `batches.tsv`, `.last-bank`: no se tocaron (un solo escritor, ES-A).
+- Cualificación en `.thyrox/models/qualifications.json`: sin modelo, no hay qué calificar.
+- `.env` de thyrox (identidad y rutas de esta VM): ignorado por git, local al nodo.
+
+### Pendiente para ES-A
+
+- Los commits `0580f5a1` y `372c547a` salieron con la identidad por defecto del contenedor
+  (author `Kim`), no la de `.claude/rules/git.md`: faltaba cargar el `.env` de thyrox antes de
+  `commit_identity env`. Reescribirlos exige *force-push*, que el clasificador de permisos
+  rehusó; se deja a ES-A o al ejecutor. Los commits posteriores tienen la identidad correcta.
