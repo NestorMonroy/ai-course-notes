@@ -1,0 +1,75 @@
+\section{Algoritmo de entrenamiento de DDPM}
+
+\subsection{Flujo completo de entrenamiento}
+
+Combinando las deducciones anteriores, el algoritmo de entrenamiento de DDPM puede escribirse en una forma extremadamente concisa:
+
+\begin{enumerate}
+    \item \textbf{Repetir} los siguientes pasos hasta la convergencia:
+    \begin{enumerate}
+        \item Muestrear un punto de datos limpio del conjunto de entrenamiento: $x_0 \sim q(x_0)$
+        \item Muestrear uniformemente y aleatoriamente un paso temporal: $t \sim \text{Uniform}(\{1, 2, \dots, T\})$
+        \item Muestrear ruido gaussiano estándar: $\epsilon \sim \mathcal{N}(0, I)$
+        \item Calcular los datos con ruido: $x_t = \sqrt{\bar{\alpha}_t}\, x_0 + \sqrt{1 - \bar{\alpha}_t}\, \epsilon$
+        \item Calcular la pérdida y actualizar los parámetros: $\nabla_\theta \left\| \epsilon - \epsilon_\theta(x_t, t) \right\|^2$
+    \end{enumerate}
+\end{enumerate}
+
+\begin{knowledgebox}{Concisión del entrenamiento}
+El proceso completo de entrenamiento se puede implementar con solo unas líneas de código en PyTorch. No existe la inestabilidad del entrenamiento adversarial (como en los GAN), ni la complejidad de la inferencia variacional (como el reparametrizado y el equilibrio del término KL en los VAE); es simplemente un problema de regresión L2. Esta concisión es una de las razones principales por las que los modelos de difusión son ampliamente adoptados.
+\end{knowledgebox}
+
+\subsection{Implementación pseudocódigo del entrenamiento}
+
+A continuación, se presenta una implementación simplificada con estilo PyTorch:
+
+\begin{lstlisting}[caption={Bucle central del entrenamiento de DDPM}, label=lst:train]
+# alpha_bar: producto acumulado precalculado, forma [T]
+# model: red neuronal de predicción de ruido epsilon_theta(x_t, t)
+
+for x0 in dataloader:
+    t = torch.randint(1, T+1, (batch_size,))
+    epsilon = torch.randn_like(x0)
+
+    # Salto hacia adelante: muestrear x_t directamente desde x_0
+    sqrt_alpha_bar = alpha_bar[t].sqrt()
+    sqrt_one_minus = (1 - alpha_bar[t]).sqrt()
+    x_t = sqrt_alpha_bar * x0 + sqrt_one_minus * epsilon
+
+    # Predecir el ruido y calcular la pérdida
+    epsilon_pred = model(x_t, t)
+    loss = F.mse_loss(epsilon_pred, epsilon)
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+\end{lstlisting}
+
+\begin{warningbox}{Precálculo de $\bar{\alpha}_t$}
+En la implementación, $\bar{\alpha}_t = \prod_{s=1}^{t}(1-\beta_s)$ debe \textbf{precalcularse} y almacenarse como un vector de longitud $T$ antes del inicio del entrenamiento. En cada paso de entrenamiento, se utiliza el valor de $\bar{\alpha}_t$ correspondiente al índice $t$ muestreado aleatoriamente. Tenga en cuenta manejar correctamente la situación donde diferentes muestras en la dimensión batch corresponden a diferentes pasos temporales.
+\end{warningbox}
+
+\subsection{Discusión sobre los términos de peso}
+
+Según la deducción estricta del ELBO, el término de coincidencia de desruido $L_{t-1}$ tiene un coeficiente dependiente de $t$, $\frac{1}{2\sigma_t^2}$. Si conservamos este peso, las pérdidas de diferentes pasos temporales se asignarían diferentes importancias.
+
+Ho et al. (2020) descubrieron que en la práctica \textbf{omitir los pesos} (ponderar uniformemente para todos los $t$) produce mejores resultados. Intuitivamente, esto se debe a:
+
+\begin{itemize}
+    \item Cuando el entrenamiento es lo suficientemente prolongado y $t$ se muestrea uniformemente, cada paso temporal se entrena adecuadamente
+    \item Los pesos uniformes evitan que algunos pasos temporales sean sobreemphasizados mientras otros son ignorados
+    \item Experimentalmente, los puntajes FID con pesos uniformes suelen ser mejores
+\end{itemize}
+
+\begin{knowledgebox}{Teoría y práctica de los términos de peso}
+Aunque teóricamente los términos de peso corresponden a la optimización correcta del ELBO, el objetivo sin pesos puede considerarse una estrategia de \textbf{reponderación}; en realidad, tiende más a mejorar el rendimiento a niveles altos de ruido. Investigaciones posteriores (como P2 weighting, Min-SNR weighting, etc.) exploraron diversas estrategias de peso adaptativas, intentando encontrar un mejor equilibrio entre la corrección teórica y los resultados prácticos.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El algoritmo de entrenamiento de DDPM es extremadamente conciso: muestrear datos, muestrear paso temporal, muestrear ruido, calcular datos con ruido, predecir ruido y minimizar la pérdida L2. El proceso completo se puede implementar con menos de 10 líneas de código en PyTorch. Los términos de peso generalmente se omiten en la práctica.
+
+%% ========== Sección siete: Algoritmo de muestreo ==========
+
+
+````
