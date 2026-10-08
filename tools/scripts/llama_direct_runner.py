@@ -34,8 +34,11 @@ DEFAULT_URL = "http://127.0.0.1:11500"
 DEFAULT_MODEL = "qwen35-9b-es-mx"
 CONTEXT_TOKENS = 32768
 MAX_OUTPUT_TOKENS = 12288
-# Perfil sin razonamiento de la guía de Qwen3.5 para texto general.
-SAMPLING = {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5}
+# «Instruct (or non-thinking) mode for general tasks» de la guía Qwen3.5-9B-GGUF —
+# Llama.cpp Guides: enable_thinking=false (`think: false`) y su muestreo completo.
+SAMPLING_PROFILE = "instruct-non-thinking-general"
+SAMPLING = {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5,
+            "repeat_penalty": 1.0}
 
 DIRECT_NOTE = (
     "\n\n## Modo directo\n\n"
@@ -139,7 +142,7 @@ def main(argv: list[str]) -> int:
                 reply = chat(url, model, build_message(template, zh), timeout)
                 record = {
                     "result": reply.get("message", {}).get("content", ""),
-                    "model": model, "runtime": "llama-direct",
+                    "model": model, "runtime": "llama-direct", "sampling_profile": SAMPLING_PROFILE,
                     "usage": {"input_tokens": reply.get("prompt_eval_count", 0),
                               "output_tokens": reply.get("eval_count", 0)},
                     "done_reason": reply.get("done_reason"),

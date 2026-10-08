@@ -3,14 +3,14 @@
 
     translation_loop.py prepare  --bench B <nota.tex>...
     translation_loop.py prompt   [--memory M] --out P.md
-    translation_loop.py translate --bench B [--model-policy P] [--task-class C] [--width N] [--memfree TAM] [--timeout S]
+    translation_loop.py translate --bench B [--model-policy P] [--reasoning-effort E] [--width N] [--memfree TAM] [--timeout S]
     translation_loop.py usage    --bench B
     translation_loop.py plan     --out P.tsv
-    translation_loop.py advance  --batch L [--model-policy P] [--task-class C] [--compile] [--max-iterations N]
+    translation_loop.py advance  --batch L [--model-policy P] [--reasoning-effort E] [--compile] [--max-iterations N]
     translation_loop.py triage   [--memory M]
     translation_loop.py measure  --decision D [--compile] [--jobs N]
     translation_loop.py retranslate --batch L
-    translation_loop.py cycle    --batch L [--model-policy P] [--task-class C] [--compile] <nota.tex>...
+    translation_loop.py cycle    --batch L [--model-policy P] [--reasoning-effort E] [--compile] <nota.tex>...
     translation_loop.py assemble --bench B
     translation_loop.py verify   --out S.jsonl [--compile] [--jobs N] <nota.es-mx.tex>...
     translation_loop.py sweep    --bench B --iteration N [--memory M] [--jobs N]
@@ -63,13 +63,13 @@ PARENTHESIZED = re.compile(r"[(（][^()（）\n]*[)）]")
 # con que THYROX cita cada ítem. Ninguna nombra un modelo.
 DEFAULT_MODEL_POLICY = Path(__file__).resolve().parents[2] / "tools" / "lang" / "es-mx" / "model-policy.json"
 # La traducción normal es una transformación acotada source → target que aceptan los
-# validadores deterministas V0–V6: capability translation-to-es-MX, clase mechanical,
-# y de la clase sale el esfuerzo (TASK_REQUIREMENTS de thyrox: mechanical → low). Una
+# validadores deterministas V0–V6: capability translation-to-es-MX, esfuerzo `low` (la
+# escala de --reasoning-effort de llama-server y de thyrox desde e5b4affaf). Una
 # unidad con ambigüedad, terminología en conflicto o contenido incompleto se escala a
-# analysis de forma explícita; nunca porque un modelo haya fallado. La clase no se
+# `high` de forma explícita; nunca porque un modelo haya fallado. El nivel no se
 # deduce del modelo que tradujo antes (H-THYROX-547).
 CAPABILITY = "translation-to-es-MX"
-DEFAULT_TASK_CLASS = "mechanical"
+DEFAULT_TASK_CLASS = "low"
 CONSUMER = "ai-course-notes"
 VERIFIERS = ["check_translation_parity.py", "check_prose_vocabulary.py", "check_note_coverage.py",
              "note_language.py", "translation_loop.py"]
@@ -401,7 +401,7 @@ def cmd_translate(args) -> int:
     out_dir = args.bench / "translate" / stamp
     runner = os.environ.get("TRANSLATION_RUNNER", str(REPO_ROOT / "tools" / "thyrox" / "run"))
     cmd = [runner, "headless-pool", "--prompt", str(prompt), "--out", str(out_dir),
-           "--task-class", args.task_class, "--model-policy", str(args.model_policy),
+           "--reasoning-effort", args.task_class, "--model-policy", str(args.model_policy),
            "--context-tokens", str(CONTEXT_TOKENS),
            "--execution", "unit", "--work-reference", f"{CONSUMER}:es-mx/{Path(args.bench).name}/translate/{stamp}",
            "--tools", "Read,Grep", "--width", str(args.width), "--memfree", args.memfree,
@@ -1279,7 +1279,7 @@ def main(argv=None) -> int:
     p.add_argument("--out", type=Path, required=True); p.set_defaults(func=cmd_prompt)
     p = sub.add_parser("translate"); p.add_argument("--bench", type=Path, required=True)
     p.add_argument("--model-policy", type=Path, default=DEFAULT_MODEL_POLICY)
-    p.add_argument("--task-class", default=DEFAULT_TASK_CLASS); p.add_argument("--width", type=int, default=DEFAULT_WIDTH)
+    p.add_argument("--reasoning-effort", dest="task_class", default=DEFAULT_TASK_CLASS); p.add_argument("--width", type=int, default=DEFAULT_WIDTH)
     p.add_argument("--memfree", default=DEFAULT_MEMFREE)
     p.add_argument("--timeout", type=int, default=900); p.add_argument("--memory", type=Path, default=DEFAULT_MEMORY)
     p.set_defaults(func=cmd_translate)
@@ -1289,7 +1289,7 @@ def main(argv=None) -> int:
     p = sub.add_parser("advance"); p.add_argument("--batch", required=True)
     p.add_argument("--plan", type=Path, default=Path(".claude/workbench/translation/plan.tsv"))
     p.add_argument("--model-policy", type=Path, default=DEFAULT_MODEL_POLICY)
-    p.add_argument("--task-class", default=DEFAULT_TASK_CLASS); p.add_argument("--width", type=int, default=DEFAULT_WIDTH)
+    p.add_argument("--reasoning-effort", dest="task_class", default=DEFAULT_TASK_CLASS); p.add_argument("--width", type=int, default=DEFAULT_WIDTH)
     p.add_argument("--memfree", default=DEFAULT_MEMFREE); p.add_argument("--timeout", type=int, default=900)
     p.add_argument("--memory", type=Path, default=DEFAULT_MEMORY); p.add_argument("--compile", action="store_true")
     p.add_argument("--jobs", type=int, default=os.cpu_count() or 2)
@@ -1306,7 +1306,7 @@ def main(argv=None) -> int:
     p = sub.add_parser("cycle"); p.add_argument("--batch", default=None)
     p.add_argument("--bench", type=Path, default=None, help="por defecto .claude/workbench/translation/<lote>")
     p.add_argument("--model-policy", type=Path, default=DEFAULT_MODEL_POLICY)
-    p.add_argument("--task-class", default=DEFAULT_TASK_CLASS); p.add_argument("--width", type=int, default=DEFAULT_WIDTH)
+    p.add_argument("--reasoning-effort", dest="task_class", default=DEFAULT_TASK_CLASS); p.add_argument("--width", type=int, default=DEFAULT_WIDTH)
     p.add_argument("--memfree", default=DEFAULT_MEMFREE); p.add_argument("--timeout", type=int, default=900)
     p.add_argument("--memory", type=Path, default=DEFAULT_MEMORY); p.add_argument("--compile", action="store_true")
     p.add_argument("--jobs", type=int, default=os.cpu_count() or 2)
