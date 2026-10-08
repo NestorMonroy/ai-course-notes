@@ -12,22 +12,33 @@
 | `nproc` | 4 |
 | `free -g` | 15 GB total, sin swap |
 | `df -h /` | 252 GB, 21 GB disponibles (asignación de la sesión) |
-| motor de contenedores | `docker` 29.8.2; **no hay `podman`** |
+| motor de contenedores | `docker` 29.8.2; Podman 4.9.3 instalado por el toolchain de thyrox |
 
-## Bootstrap
+## Bootstrap (07:50Z, tras «Intentar nuevamente» del ejecutor)
 
-`VM_ES-C_BOOTSTRAP_PRISTINE = NOT RUN`. ai-course-notes está en su rama, limpio. thyrox
-no se pudo adjuntar: `add_repo NestorMonroy/thyrox` (push y lectura) lo rechaza el
-clasificador de permisos de la sesión (`[Permission Grant]`), dos veces. Sin clon de
-thyrox no hay checklist del README, ni `bin/…`, ni Search Existing en
-`origin/feature/vm-c-clean-room`.
+`VM_ES-C_BOOTSTRAP_PRISTINE = YES`. thyrox se adjuntó al reintentar (`add_repo` push) y se clonó
+en `/home/user/thyrox`; estado inicial medido: sin `~/.thyrox`, sin `.thyrox/runtime`, sin
+`.env`, sin Podman, 0 imágenes.
+
+Checklist del README, como VM C: `write-env.sh` → identidad del commit en `.env`
+(`.claude/rules/git.md`) → `uv sync` y `bun install` (587 paquetes, exit 0) →
+`check_env_contract_keys --strict` (0 sin declarar) → `scripts/install-hooks.sh`
+(`core.hooksPath=.githooks`) → toolchain con `THYROX_INSTALL_{PARALLEL,GNU_TIME,PODMAN,GAWK}=1`
+(exit 0 los cuatro; Podman 4.9.3, overlay, sqlite).
+
+`bin/declarations` y `check_githooks_activos` rehúsan: `THYROX_REACH_ROOTS` no declarada y no
+derivable (los hermanos `thyrox` y `ai-course-notes` no comparten prefijo). No bloquea la
+materialización.
+
+Rama de thyrox: `feature/es-mx-vm-c-local-worker` con `origin/feature/fresh-clone-bootstrap`
+integrada (`2156f9cc2`): trae las correcciones de TASK-THYROX-1032 (`7dd5fc784`, `5fa19322d`) y
+0944 (`95e2c5ae5`, `0ff814b94`). Publicada.
 
 ## Materialización del 9B
 
-`VM_ES-C_LOCAL_WORKER = BLOCKED thyrox-no-adjuntable`: sin `bin/local-models-ensure` ni
-`bin/local_control_plane_ready` no hay ruta productiva. No se intentó ninguna vía fuera
-de las autoridades (ni `pull` por etiqueta ni copia de GGUF). Aun con thyrox, siguen
-pendientes de comprobar TASK-THYROX-1032 y 0944, y la falta de `podman` en esta VM.
+`bin/local-models-ensure thyrox-unsloth--qwen3.5-9b-gguf:q4_k_m-hf-3885219b6810` lanzado a las
+07:58Z sobre `2156f9cc2`. Disco libre al lanzar: 17 571 332 096 B. VM C estimó la cadena
+completa en ≈20,8 GB (con copia en el almacén de Ollama, supuesta): puede no caber.
 
 ## Avance por lote (trabajo determinista, sin modelo)
 
