@@ -1,0 +1,108 @@
+\section{Deep Dive II：GT Sophy --- 实时竞争场景下的分布式 RL 系统}
+
+Slack 展示低成本 embodied learning，本节转向高吞吐竞争环境。GT Sophy 的教学重点不是赛车游戏本身，而是 actor、replay、learner、场景配比、对手分布和规则约束如何共同塑造策略；只有把这套系统看完整，才能理解“会赢”和“可部署”之间的差距。
+
+\subsection{为什么 GT Sophy 有代表性}
+
+GT Sophy 同时要求高速连续控制、对手建模和规则礼仪，因此比单车计时更接近真实多体部署。评估时要分开看圈速、战术和可接受行为：任何一项单独最优，都可能产生不适合与人类共同比赛的策略。
+Stone 将 GT Sophy 定位为 ``实时连续控制 + 多体博弈 + 人类规则约束'' 的综合 benchmark。它比很多 turn-based 游戏更接近真实世界策略系统，因为动作频率高、状态连续、战术与礼仪同时存在。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{frame-04-gtsophy-race.jpg}
+\caption{GT Sophy 在多人竞速中的防守与超车策略\protect\footnotemark}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slipstream pass 是由多阶段条件组成的技能}
+车辆先保持合适跟车距离利用尾流，再选择时机离开气流、完成超车并避免碰撞。画面支持模型学到战术组合，而不只是单点转向；但是否遵守礼仪、能否对不同车手稳定执行，还要看规则奖励和跨对手评测。
+\end{knowledgebox}
+\footnotetext{视频时间区间：00:54:00--00:56:30。}
+
+\begin{knowledgebox}{任务难点}
+\begin{itemize}
+    \item \textbf{Real-time control}：10Hz 动作更新，容错窗口极窄；
+    \item \textbf{Tactics}：不仅要快，还要会防守线和 slipstream/crossover；
+    \item \textbf{Etiquette}：不能靠违规碰撞取胜，需通过 steward 规则。
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{系统架构与算法点}
+
+明确任务难点后，接下来要解释性能从哪里来。课程证据指向一套分布式系统而非单个损失函数：actors 决定探索吞吐，replay mixture 决定训练分布，learner 更新策略，evaluation 与部署反馈负责发现行为边界。
+
+GT Sophy 的成功并非单一算法突破，而是 ``计算架构 + 数据策划 + RL 目标'' 的组合。课程里强调了 actor-replay-learner 式大规模 rollout，以及 QRSAC（基于 SAC 的分布式价值估计改进）。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{diagrams/gtsophy-system.png}
+\caption{讲义整理图：GT Sophy 的 distributed actors、数据配比、learner、league 与部署反馈}
+\label{fig:gtsophy-system}
+\end{figure}
+
+\begin{knowledgebox}{读图：数据配比连接训练系统与行为风格}
+actors 产生不同赛道、密度和对手下的轨迹，replay mixture 决定 learner 经常看到什么，evaluation league 检查版本与边界案例，部署反馈再暴露礼仪和体验问题。若 replay 只追最快圈速，策略会忽视互动；若只采安全轨迹，又可能学成过度保守。
+\end{knowledgebox}
+\begin{importantbox}{可迁移的工程经验}
+\begin{itemize}
+    \item \textbf{Distributional value estimation}：学回报分布而非仅均值；
+    \item \textbf{Replay mixture engineering}：经验池里不同场景数据配比要精心设计；
+    \item \textbf{Curriculum-like traffic scenarios}：通过 1v1、1v3、多车网格等情形促成战术涌现。
+\end{itemize}
+\end{importantbox}
+
+\subsection{课程中被反复强调的 ``数据配比工程''}
+Stone 在 00:53--00:55 段反复解释，系统并非只靠随机 rollout。团队构造了多种起跑与追车场景：
+\begin{itemize}
+    \item 单车跟车、1v2、1v3、1v7 的交通密度梯度；
+    \item 直道跟车学习 slipstream pass；
+    \item 弯道起步学习 crossover 与 double-crossover；
+    \item 特定赛道难点片段的强化采样。
+\end{itemize}
+
+\begin{knowledgebox}{Replay buffer 的核心不是 ``大''，而是 ``对''}
+课程中提到，Nature 论文阶段很多配比是人工精调，后续才逐步自动化。这说明在复杂策略学习里，\textbf{采样分布设计本身就是算法的一部分}，而不是数据工程附属工作。
+\end{knowledgebox}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{2.8cm}p{4.6cm}p{4.2cm}}
+\toprule
+\textbf{经验来源} & \textbf{主要学习目标} & \textbf{风险} \\
+\midrule
+空旷赛道高速圈 & 速度与线路效率 & 忽略交互策略，比赛不稳 \\
+跟车直道片段 & slipstream timing & 过度依赖单一超车模板 \\
+弯道拥挤片段 & defensive/crossover 决策 & 碰撞风险上升 \\
+发车网格片段 & 多车起步博弈 & 学到激进行为倾向 \\
+\bottomrule
+\end{tabular}
+\caption{GT Sophy 经验池构成与学习作用}
+\end{table}
+
+\textbf{实践经验：}Stone 明确提到，初版系统并非一上来就赢。通过复盘失败、调整奖励和数据配比，才在后续 rematch 中稳定超过顶级人类车手。这说明高水平 Agent 的迭代方式是 ``系统级闭环调参''，而非单步神奇优化。
+
+\begin{warningbox}{速度最优不等于比赛最优}
+如果只优化 lap time，策略会忽略规则与交互；如果过度惩罚碰撞，又会变得过于 timid。真正可用策略必须在速度、战术和规则之间平衡。
+\end{warningbox}
+
+\subsection{Etiquette 约束：从 ``能赢'' 到 ``应当这样赢''}
+在 00:55:39--00:56:18 附近，Stone 讨论了比赛礼仪（etiquette）：避免可避免碰撞、不能恶意挤出赛道、但也不能保守到不会竞争。
+这部分非常像真实世界 Agent 的 ``policy + governance'' 联合优化。
+
+\begin{importantbox}{规则约束设计原则}
+\begin{itemize}
+    \item 仅靠结果奖励会催生漏洞利用（rule exploitation）；
+    \item 仅靠硬惩罚会让策略过度保守（timid policy）；
+    \item 需要把行为规则、对抗目标与长期胜率放在同一目标函数里联合权衡。
+\end{itemize}
+\end{importantbox}
+
+\begin{warningbox}{部署层面的误区}
+把 etiquette 放到后处理（例如只在推理后做规则过滤）通常不够。课程案例显示，更稳妥的方法是训练期就把规则信号注入策略学习，减少 ``先学坏再纠正'' 的代价。
+\end{warningbox}
+
+\subsection{部署反馈}
+GT Sophy 后续被纳入游戏产品线，说明其价值不仅是论文成绩，还包括玩家体验维度：可调难度、可解释行为风格、可持续内容更新。这与今天 LLM Agent 需要 ``可产品化'' 的诉求一致。
+
+\subsection{本章小结}
+GT Sophy 展示了竞争型 Agent 的真实难点：你需要一个完整训练系统去学策略分布、场景配比、战术行为和规则边界，而不是只追一个分数。
+

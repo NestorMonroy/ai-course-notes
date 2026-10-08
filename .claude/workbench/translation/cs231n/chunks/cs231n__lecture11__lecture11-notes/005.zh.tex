@@ -1,0 +1,76 @@
+\section{全分片数据并行（FSDP）}
+
+\subsection{核心思想：分片存储}
+
+为突破数据并行的内存瓶颈，FSDP 将模型权重\textbf{分片存储}在不同 GPU 上：每个权重矩阵只有一个``所有者'' GPU 负责存储其权重、梯度和优化器状态。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-018.jpg}
+\caption{FSDP 的权重分片策略：四层网络的权重被分配给两块 GPU\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第18页。}
+
+\subsection{FSDP 的执行流程}
+
+FSDP 在前向和反向传播中需要额外的通信步骤：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-019.jpg}
+\caption{FSDP 前向传播：在计算每层前，权重所有者广播权重给所有 GPU；计算完后，非所有者删除权重副本以节省内存\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第19页。}
+
+\textbf{前向传播}：
+\begin{enumerate}
+    \item 权重所有者广播第 $i$ 层的权重给所有 GPU
+    \item 所有 GPU 执行第 $i$ 层的前向传播
+    \item 非所有者 GPU 删除第 $i$ 层权重的本地副本
+    \item 同时预取第 $i+1$ 层的权重（计算-通信重叠）
+\end{enumerate}
+
+\textbf{反向传播}（每层需要三件事同时进行）：
+\begin{enumerate}
+    \item 权重所有者广播权重（用于计算梯度）
+    \item 各 GPU 执行反向传播
+    \item 各 GPU 将局部梯度发送回权重所有者，由所有者聚合并更新权重
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-021.jpg}
+\caption{FSDP 反向传播的三件事流水线化：计算 layer $L$ 的反向 + 聚合 layer $L+1$ 的梯度 + 预取 layer $L-1$ 的权重\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第21页。}
+
+\begin{importantbox}{FSDP 的通信开销}
+在一次完整的前向+反向传播中，FSDP 需要通信 \textbf{3 倍}模型权重的数据量：前向传播广播一次权重，反向传播广播一次权重 + 回传一次梯度。相比之下，普通数据并行只需通信 1 倍（All-Reduce 梯度）。
+\end{importantbox}
+
+\subsection{混合分片数据并行（HSDP）}
+
+HSDP 将 GPU 组织为二维网格，结合 FSDP 和 DP 的优势：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-022.jpg}
+\caption{HSDP 二维并行：组内使用 FSDP（高通信），组间使用 DP（低通信）\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第22页。}
+
+\begin{itemize}
+    \item \textbf{组内}（同一服务器内的 GPU，高带宽连接）：使用 FSDP，需要 3 倍权重通信
+    \item \textbf{组间}（跨服务器的 GPU，低带宽连接）：使用普通 DP，只需 1 倍梯度通信
+\end{itemize}
+
+\begin{knowledgebox}{网络拓扑感知的算法设计}
+HSDP 是第一个将并行策略与\textbf{物理网络拓扑}对齐的例子。高通信需求（FSDP）放在高带宽连接（服务器内部）上，低通信需求（DP）放在低带宽连接（跨服务器）上。这种``拓扑感知''的设计思想贯穿整个大规模训练系统。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+FSDP 通过分片存储突破了数据并行的内存瓶颈，代价是更多的通信。HSDP 进一步将 FSDP 与 DP 组合为二维并行，根据网络拓扑分配不同的并行策略，平衡了通信开销与内存需求。
+
+%% ========== 激活检查点 ==========
+

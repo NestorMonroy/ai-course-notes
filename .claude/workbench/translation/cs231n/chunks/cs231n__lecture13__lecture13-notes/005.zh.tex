@@ -1,0 +1,138 @@
+\section{变分自编码器（VAE）}
+
+\subsection{从自编码器到 VAE 的动机}
+
+传统自编码器（Autoencoder）通过 encoder-decoder 架构学习数据的压缩表示：encoder 将输入 $X$ 映射到低维 latent code $Z$，decoder 从 $Z$ 重构 $X$。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-035.jpg}
+\caption{传统自编码器：通过瓶颈层 $Z$ 重构输入数据，学习压缩表示\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第36页。}
+
+\begin{knowledgebox}{传统自编码器的局限}
+传统自编码器可以学习到数据的压缩表示，但存在两个核心问题：
+\begin{enumerate}
+    \item 无法从 latent space 中采样生成新数据——因为 latent space 没有已知的概率结构
+    \item latent space 可能不连续、不平滑——相邻的 $Z$ 值不一定对应相似的 $X$
+\end{enumerate}
+VAE 正是为了解决这两个问题而提出的。
+\end{knowledgebox}
+
+如果想用自编码器生成新数据，需要能在 latent space 中采样 $Z$，然后通过 decoder 生成 $X$。但问题是：latent space 没有已知的分布结构，无法进行有意义的采样。
+
+\subsection{VAE 的概率框架}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-037.jpg}
+\caption{VAE 的概率图模型：假设每个数据 $x^{(i)}$ 由某个隐变量 $z^{(i)}$ 生成\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第38页。}
+
+VAE 的核心假设是：每个数据点 $x^{(i)}$ 是由某个不可观测的隐变量 $z^{(i)}$ 生成的。数据的生成过程为：
+
+\begin{enumerate}
+    \item 从先验分布 $p(Z)$（通常是标准高斯分布 $\mathcal{N}(0, I)$）中采样 $Z$
+    \item 从条件分布 $p_\theta(X|Z)$（decoder）中生成 $X$
+\end{enumerate}
+
+数据的边际似然为：
+
+$$p_\theta(X) = \int p_\theta(X|Z) \cdot p(Z) \, dZ$$
+
+\begin{warningbox}{积分不可解（Intractable）}
+$p_\theta(X) = \int p_\theta(X|Z) p(Z) dZ$ 这个积分在高维空间中无法直接计算。同样，后验分布 $p_\theta(Z|X) = \frac{p_\theta(X|Z) p(Z)}{p_\theta(X)}$ 也因为分母不可解而无法直接计算。这正是 VAE 需要引入\textbf{变分推断}的根本原因。
+\end{warningbox}
+
+\subsection{变分下界（ELBO）}
+
+为了绕过不可解的积分，VAE 引入一个\textbf{编码器网络} $q_\phi(Z|X)$（也叫推断网络），用它来近似真实的后验分布 $p_\theta(Z|X)$。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-040.jpg}
+\caption{VAE 的数学推导：通过引入变分分布 $q_\phi(Z|X)$，推导出 ELBO\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第41页。}
+
+通过数学推导，可以将对数似然分解为：
+
+$$\log p_\theta(X) = \underbrace{\mathbb{E}_{Z \sim q_\phi(Z|X)}\left[\log p_\theta(X|Z)\right]}_{\text{重构项}} - \underbrace{D_{KL}(q_\phi(Z|X) \| p(Z))}_{\text{先验匹配项}} + \underbrace{D_{KL}(q_\phi(Z|X) \| p_\theta(Z|X))}_{\geq 0, \text{不可计算}}$$
+
+由于 KL 散度 $\geq 0$，丢弃最后一项得到下界：
+
+$$\log p_\theta(X) \geq \underbrace{\mathbb{E}_{Z \sim q_\phi(Z|X)}\left[\log p_\theta(X|Z)\right]}_{\text{重构项}} - \underbrace{D_{KL}(q_\phi(Z|X) \| p(Z))}_{\text{先验匹配项}}$$
+
+这就是\textbf{变分下界}（Variational Lower Bound），也叫\textbf{证据下界}（Evidence Lower Bound, ELBO）。
+
+\begin{importantbox}{ELBO 的两个组成部分}
+\begin{enumerate}
+    \item \textbf{重构项}（Reconstruction）：$\mathbb{E}_{q_\phi(Z|X)}[\log p_\theta(X|Z)]$——encoder 编码的 $Z$ 应该能让 decoder 重构出原始数据 $X$。等价于最小化重构误差（固定方差时等价于 L2 loss）。
+    \item \textbf{先验匹配项}（Prior Matching）：$D_{KL}(q_\phi(Z|X) \| p(Z))$——encoder 输出的 $Z$ 分布应该接近先验 $p(Z) = \mathcal{N}(0, I)$。这保证了 latent space 的结构化。
+\end{enumerate}
+\end{importantbox}
+
+\subsection{训练过程}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-043.jpg}
+\caption{VAE 的训练流程：encoder 输出 $(\mu, \sigma)$，通过 reparameterization trick 采样 $Z$，decoder 重构 $X$\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第44页。}
+
+训练 VAE 的具体步骤：
+
+\begin{enumerate}
+    \item \textbf{Encoder}：输入数据 $X$，输出高斯分布的参数 $(\mu, \sigma)$
+    \item \textbf{KL 项}：计算 $D_{KL}(q_\phi(Z|X) \| \mathcal{N}(0,I))$，鼓励 $\mu \to 0$，$\sigma \to 1$
+    \item \textbf{采样}：使用 reparameterization trick $Z = \mu + \sigma \odot \epsilon$（$\epsilon \sim \mathcal{N}(0,I)$），使梯度可以回传
+    \item \textbf{Decoder}：输入 $Z$，输出重构的 $\hat{X}$
+    \item \textbf{重构项}：计算重构误差 $\|X - \hat{X}\|^2$
+\end{enumerate}
+
+\begin{knowledgebox}{重参数化技巧（Reparameterization Trick）}
+直接从分布 $q_\phi(Z|X)$ 采样是不可微的，无法进行反向传播。解决方法是将采样操作改写为确定性变换加外部噪声：$Z = \mu + \sigma \odot \epsilon$，其中 $\epsilon \sim \mathcal{N}(0, I)$。这样梯度可以通过 $\mu$ 和 $\sigma$ 回传到 encoder。
+\end{knowledgebox}
+
+\subsection{重构损失 vs 先验损失的博弈}
+
+VAE 训练中两个损失项存在有趣的对抗关系：
+
+\begin{itemize}
+    \item \textbf{重构损失}希望：$\sigma \to 0$（减少噪声），$\mu$ 对每个数据点都不同（编码更多信息）
+    \item \textbf{先验损失}希望：$\sigma \to 1$，$\mu \to 0$（都变成标准高斯）
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-044.jpg}
+\caption{VAE 中重构损失和先验损失的对抗：两个损失对 latent space 的结构有不同的要求\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第45页。}
+
+这种博弈迫使模型在\textbf{保留足够信息以重构数据}和\textbf{保持 latent space 结构化}之间找到平衡。
+
+\subsection{采样与 Latent Space 操作}
+
+训练完成后，可以直接从先验 $p(Z) = \mathcal{N}(0, I)$ 采样 $Z$，然后通过 decoder 生成新数据。此外，由于 latent space 是连续且结构化的，可以在 latent space 中进行插值。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-046.jpg}
+\caption{VAE latent space 的 2D 可视化：在 MNIST 上训练的 VAE，不同维度平滑地编码了数字的不同属性\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第47页。}
+
+\begin{warningbox}{VAE 生成的样本通常偏模糊}
+VAE 使用对角高斯分布建模 $p(X|Z)$，假设像素间独立。这意味着 VAE 倾向于预测像素值的\textbf{均值}，导致生成的图像看起来偏模糊。此外，L2 重构损失也会惩罚高频细节。要获得清晰的生成结果，通常需要结合其他技术（如对抗训练或更强的 decoder）。
+\end{warningbox}
+
+\subsection{本章小结}
+
+VAE 在传统自编码器基础上引入概率框架：encoder 输出 latent 分布的参数，通过 KL 散度强制 latent space 接近标准高斯。ELBO 是由重构项和先验匹配项组成的变分下界，两者在训练中相互博弈。VAE 的主要贡献是提供了结构化的 latent space，但生成的样本通常较模糊。
+
+%% ========== Part 6: 生成对抗网络 ==========
+

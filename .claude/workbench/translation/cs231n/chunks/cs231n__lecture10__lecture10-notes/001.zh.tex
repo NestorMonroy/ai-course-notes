@@ -1,0 +1,147 @@
+\section{导言：视频理解不是图像理解的简单加一维}
+
+Ruohan Gao 这一讲的目标很清楚：把我们已经熟悉的 2D 视觉问题扩展到真正的视频世界。视频看起来只是“图像序列”，但只要加入时间维，任务性质就会改变。动作、节奏、持续时间、上下文变化、声音和交互，都会进入模型视野。因此，视频理解不是把 CNN 原样复制到时间轴，而是重新思考什么信息值得保留、如何建模、以及怎样控制计算成本。
+
+\begin{importantbox}{本讲主线}
+\begin{enumerate}
+    \item 视频是什么，以及为什么它比图像更难。
+    \item 短 clip、3D CNN、two-stream 是怎样建模时序的。
+    \item 长视频为什么需要 RNN、attention 和更高效的结构。
+    \item 视频理解如何走向多模态、具身和 foundation model。
+\end{enumerate}
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-000.jpg}
+\caption{标题页：Lecture 10 聚焦 Video Understanding，讲者是 Ruohan Gao\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第1页。}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-002.jpg}
+\caption{课程开场先回顾图像任务，再把问题自然过渡到视频理解\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第3页。}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-003.jpg}
+\caption{图像任务回顾：分类、检测和分割是视频理解的前置基础\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第4页。}
+
+\subsection{视频到底是什么}
+
+最基本的定义是：视频就是带时间维度的图像序列。对单张图像而言，输入通常是 $3 \times H \times W$；对视频而言，输入可以写成
+
+\[
+T \times 3 \times H \times W \qquad \text{或} \qquad 3 \times T \times H \times W.
+\]
+
+这里的 $T$ 不是装饰性的维度，而是承载“动作如何展开”的核心变量。视频中的信息可以粗略分为两类：
+
+\begin{itemize}
+    \item \textbf{外观}：场景里有什么，人的姿态是什么，物体长什么样。
+    \item \textbf{运动}：东西怎么动，动作如何持续，事件如何演化。
+\end{itemize}
+
+\begin{knowledgebox}{为什么视频会改变问题本质}
+\begin{itemize}
+    \item 图像问题回答的是“这是什么”。
+    \item 视频问题往往回答的是“这在做什么、何时发生、接下来会怎样”。
+    \item 也就是说，视频不只是增加了帧数，而是增加了事件和时间结构。
+\end{itemize}
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-006.jpg}
+\caption{视频可以看成 2D 图像加上时间维度，也可以理解为一个四维张量\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第7页。}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-007.jpg}
+\caption{视频分类任务：输入是 $T \times 3 \times H \times W$ 的 clip，输出是动作类别\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第8页。}
+
+\subsection{视频理解的典型任务}
+
+视频任务的语义重心偏向动作、时间和事件边界。常见任务包括：
+
+\begin{enumerate}
+    \item \textbf{Video classification}：判断整个 clip 在做什么。
+    \item \textbf{Temporal action localization}：找出动作在时间轴上的起止位置。
+    \item \textbf{Spatio-temporal detection}：同时找时间和空间中的人、物与动作。
+    \item \textbf{Audio-visual understanding}：把声音和画面一起用于理解或分离。
+\end{enumerate}
+
+\begin{importantbox}{视频任务为什么更难}
+\begin{enumerate}
+    \item \textbf{数据更大}：存储、解码和训练都更贵。
+    \item \textbf{信息更稀疏}：关键动作可能只出现在少量帧里。
+    \item \textbf{依赖更长}：很多标签对应的是时序上下文，而不是某一帧。
+    \item \textbf{噪声更多}：镜头切换、运动模糊、遮挡和背景变化都更常见。
+\end{enumerate}
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-008.jpg}
+\caption{视频任务关注动作类别，而不只是静态对象类别\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第9页。}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-009.jpg}
+\caption{图像识别看对象，视频识别看动作和事件\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第10页。}
+
+\subsection{视频太大了}
+
+视频理解的第一道工程门槛不是模型，而是数据体积。课程里给出的粗略估算很直接：视频通常以 30 fps 左右采样，未压缩视频会迅速增长到 GB 级别。按课上给出的量级，标准清晰度视频每分钟约 1.5 GB，高清甚至可到 10 GB 级别。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-010.jpg}
+\caption{视频数据很大：时长、分辨率和帧率乘起来会把存储和训练成本迅速推高\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第11页。}
+
+这意味着一个现实结论：\textbf{长视频不能整段直接喂给模型。} 最常见的应对方式，是把长视频切成短 clip，降低空间分辨率与帧率，让训练和推理都落到可控区间。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-011.jpg}
+\caption{一个实用折中：把长视频压缩成短 clip，降低 fps 和分辨率后再训练\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第12页。}
+
+\begin{knowledgebox}{短 clip 训练的直觉}
+很多动作不需要完整看完才能判断。对“跑步”“游泳”“举重”这类动作来说，几秒钟内的局部运动模式通常就已经足够，因此训练时可以随机采样多个短片段，再把它们的预测聚合起来。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-013.jpg}
+\caption{训练时常把长视频拆成短 clip，让模型先学局部动作模式\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第14页。}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-014.jpg}
+\caption{测试时可以对多个 clip 做预测，再把结果平均成视频级判断\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第15页。}
+
+\begin{warningbox}{视频数据工程不是附属问题}
+视频任务里的很多失败，不是模型不够强，而是采样、解码、压缩、链接失效和帧率设置出了问题。视频理解比图像理解更像一个完整系统工程。
+\end{warningbox}
+

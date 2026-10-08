@@ -1,0 +1,79 @@
+\section{Sub-Agents：上下文隔离的利器}
+
+\subsection{Sub-Agents 的正确用法}
+
+Sub-agents 是一个流行但常被误解的 harness 配置点。HumanLayer 尝试过``前端工程师''sub-agent、``后端工程师''sub-agent、``数据分析师''sub-agent 的模式。\textbf{这不管用。}
+
+\begin{importantbox}{Sub-Agents 的核心价值：Context 隔离}
+Sub-agents 真正有效的用法是 \textbf{context control}（上下文控制）。它们提供了一种封装整个 coding agent 会话工作的方式：调度 agent 只看到它写给 sub-agent 的 prompt 和 sub-agent 的最终结果。所有中间的工具调用、工具返回结果或其他消息都不会进入父 agent 的 context window。
+
+将工作拆解为离散任务并委派给 sub-agents，是保持主 agent 线程处于``聪明区''的关键方法。
+\end{importantbox}
+
+\subsection{Context Rot：经验证据}
+
+Chroma 的 context rot 研究为 HumanLayer 的实践经验提供了实证支持：\textbf{模型在更长的 context length 下表现更差}。
+
+关键研究发现：
+\begin{itemize}[leftmargin=1.5em]
+    \item 测试了 18 个模型的 needle-in-a-haystack 任务
+    \item 随着 context 长度增加，性能下降---即使在简单任务上
+    \item 当问题与上下文中相关信息的语义相似度低时，性能下降更陡峭
+    \item 干扰效应在更长的 context window 中会复合叠加
+\end{itemize}
+
+在实践中，HumanLayer 观察到：父会话中每一个不相关的中间工具调用、每一个 grep 结果、每一次文件读取，都是潜在的干扰源。
+
+\subsection{为什么``更大的 Context Window''不是答案}
+
+\begin{warningbox}{对``扩大 Context Window''方案的质疑}
+当一个实验室提供某模型的 extended-context 版本时，你通常得到的不是一个具有更大``instruction budget''的更大模型，而是\textbf{同一个模型加上一些巧妙的数学技巧}（如 YaRN）来延长模型能处理的序列长度。
+
+回到 needle-in-a-haystack 问题：更大的 context window 并不能让模型更擅长找针---\textbf{它只是让干草堆更大了}。如果你认为需要更长的 context，你可能只是需要\textbf{更好的 context window 隔离}。
+\end{warningbox}
+
+Sub-agents 从结构上解决这个问题：每个 sub-agent 获得一个全新的、小型的、高相关性的 context window 和全新的 instruction budget，只有压缩后的结果流回父 agent。这让你可以将多个 context window 串联起来解决一个大问题。
+
+\subsection{Sub-Agent 的典型用例}
+
+\begin{table}[H]
+\centering
+\caption{Sub-Agent 适用场景}
+\begin{tabular}{@{}p{4.5cm}p{8.5cm}@{}}
+\toprule
+\textbf{用例} & \textbf{说明} \\
+\midrule
+定位代码定义/实现 & 问题简单但需要大量中间工具调用来搜索 \\
+分析代码库模式 & 识别特定类型工作的代码模式 \\
+跟踪信息流 & 例如跨服务边界追踪一个请求的流转 \\
+代码/文档/Web 研究 & 通用研究任务，结果简洁但过程繁重 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Sub-agents 应返回高度压缩的响应，同样遵循渐进式披露原则。例如，HumanLayer 的 sub-agents 在回答问题的同时引用源（文件路径:行号 或 URL），这样父 agent 不会暴露于 sub-agent 使用的所有源，但如果需要更多细节，它有足够的信息去找到相关上下文。
+
+\subsection{Sub-Agents 与成本控制}
+
+Sub-agents 还能帮助控制成本。HumanLayer 对父会话使用昂贵模型（Opus），因为计划和编排等任务需要深度思考；对每个 sub-agent 使用更便宜、更快的模型（如 Sonnet 或 Haiku）。Sub-agents 接收的是更小、更离散的任务，低阶模型即可胜任---不需要在一次代码搜索上消耗 Opus 的 token。
+
+\subsection{自制 Sub-Agent 方案}
+
+\begin{knowledgebox}{当 Harness 不原生支持 Sub-Agents 时}
+有些 harness 完全不支持 sub-agents（甚至 Codex 直到最近才添加，且支持仍是实验性的）。
+
+替代方案：编写一个 MCP server，提供一个工具来启动新的 agent 会话。该工具接收父 agent 的 prompt，启动一个新的 coding agent 会话，然后返回 sub-agent 的最终响应给父 agent。
+
+需要注意的陷阱：
+\begin{itemize}[leftmargin=1.5em]
+    \item 如果 harness 原生支持 sub-agents，这种模式会允许 sub-agents 通过 MCP 再分派 sub-agents，可能导致不可预测的``电话游戏''
+    \item 必须非常仔细地编写 sub-agent 的 system prompt，明确指定其角色范围：做什么、不做什么、返回什么信息、如何返回、有哪些工具
+    \item 许多 harness 有 MCP 工具调用超时限制，可能需要调高
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+Sub-agents 的核心价值不是角色分工，而是 context 隔离。它们通过为每个离散任务创建独立的 context window，防止中间噪声在父线程中累积。同时，sub-agents 还提供了成本控制的手段，对不同复杂度的任务使用不同级别的模型。
+
+

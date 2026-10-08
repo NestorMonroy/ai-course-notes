@@ -1,0 +1,25 @@
+\subsection{低精度、融合、tiling 与 FlashAttention：减少昂贵的数据搬运}
+
+slides 64--67 给出单卡优化的四个常用杠杆。低精度减少内存占用与通信量，并让矩阵核心获得更高吞吐；Automatic Mixed Precision（AMP）在计算与更新之间保留不同精度。operator fusion 把多个操作合并进一个 kernel，避免每行框架代码都把中间张量写回 HBM。tiling 把矩阵切成能放进片上存储的块，从而复用数据。FlashAttention 则把 fusion、tiling 和 recomputation 组合到 attention 中。
+
+\lecturefigure{slides-images/slide-064.png}{官方 slide 64：Automatic Mixed Precision 的权重、activation、gradient 与更新精度}
+\lecturefigure{slides-images/slide-065.png}{官方 slide 65：operator fusion 减少 DRAM 往返}
+\lecturefigure{slides-images/slide-066.png}{官方 slide 66：tiling 通过片上复用降低全局内存读取}
+\lecturefigure{slides-images/slide-067.png}{官方 slide 67：FlashAttention 组合融合、分块与重计算}
+
+\begin{knowledgebox}{背景概念：什么是 fused kernel}
+\textbf{fused kernel（融合内核）}把原本多个 GPU 操作合并为一次 kernel 执行，使中间结果尽量保留在寄存器或片上 SRAM，而不是每一步都写回 HBM，再由下一 kernel 读出。收益来自减少 HBM 读写和 kernel launch overhead，不是减少数学上必需的所有计算。融合过度也会增加寄存器压力、降低 occupancy，或让编译和调试更困难，因此应以 profiler 的实际瓶颈为依据。
+\end{knowledgebox}
+
+\begin{importantbox}{Arithmetic intensity 的判断框架}
+算术强度可写为
+\[
+I=\frac{\text{FLOPs}}{\text{bytes moved from slow memory}}.
+\]
+其中分子是执行的浮点运算量，分母是从 HBM 等慢层级搬运的字节数。$I$ 低时算子倾向 memory-bound，应优先减少读写、做 fusion/tiling；$I$ 高时更可能 compute-bound，应关注矩阵形状、Tensor Core 和并行度。recomputation 有时增加 FLOPs 却减少内存流量，因此可能反而更快。
+\end{importantbox}
+
+\begin{knowledgebox}{读图：FlashAttention 的 1.7x 不是普适常数}
+slide 67 的 end-to-end speedup 来自特定模型、序列长度、硬件和实现。它支持的机制性结论是：标准 attention 若物化巨大中间矩阵，会受 HBM 流量限制；按块计算并在线归一化可显著减少读写。它不证明所有短序列、小 batch 或新硬件上都恰好提升 1.7 倍。工程验收应分别测 kernel latency、显存峰值和端到端训练吞吐。
+\end{knowledgebox}
+

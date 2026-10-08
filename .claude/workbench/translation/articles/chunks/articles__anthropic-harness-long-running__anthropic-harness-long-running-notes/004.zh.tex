@@ -1,0 +1,147 @@
+\section{全栈编码的三 Agent 架构}
+
+有了前端设计实验的经验，作者将 GAN 启发的 generator-evaluator 模式扩展到全栈开发。代码审查（code review）和 QA 在软件开发生命周期中扮演着与 design evaluator 完全相同的结构性角色。
+
+\subsection{架构概览}
+
+在早期的 long-running harness 中，作者已经通过 initializer agent + coding agent + context reset 实现了连贯的多会话编码。但那个版本使用 Sonnet 4.5，context anxiety 严重到 context reset 必不可少。本次实验使用 \textbf{Opus 4.5}，其 context anxiety 问题显著减弱，因此作者选择\textbf{完全不使用 context reset}——所有 agent 在一个连续会话中运行，由 Claude Agent SDK 的自动 compaction 处理上下文增长。
+
+\begin{importantbox}{Planner -- Generator -- Evaluator 三 Agent 架构}
+三个 agent 各自针对先前观察到的特定失败模式：
+
+\textbf{Planner}（规划器）：将用户的 1--4 句简短 prompt 扩展为完整的产品规格（product spec）。关键设计决策：
+\begin{itemize}[leftmargin=1.5em]
+    \item 被指示保持\textbf{高层次}的产品上下文和技术设计，而非详细的技术实现细节
+    \item 如果 planner 在技术细节上犯错，错误会\textbf{级联}到下游实现
+    \item 被要求\textbf{在规格中融入 AI 功能}的机会
+    \item 被要求对\textbf{范围保持雄心}（be ambitious about scope）
+\end{itemize}
+
+\textbf{Generator}（生成器）：以 sprint 为单位工作，每次从规格中取一个 feature 实现。技术栈：
+\begin{itemize}[leftmargin=1.5em]
+    \item 前端：React + Vite
+    \item 后端：FastAPI + SQLite（后迁移至 PostgreSQL）
+    \item 版本控制：git
+    \item 每个 sprint 结束时进行自我评估，然后交给 QA
+\end{itemize}
+
+\textbf{Evaluator}（评估器 / QA）：通过 Playwright MCP 像真实用户一样操作运行中的应用，测试 UI 功能、API 端点和数据库状态。按维度打分（product depth, functionality, visual design, code quality），任一维度低于硬阈值则 sprint \textbf{失败}，generator 收到详细反馈。
+\end{importantbox}
+
+\subsection{Sprint Contract：弥合规格与实现的间隙}
+
+产品规格被有意保持在高层次（避免 planner 的细节错误级联到实现中）。但这引入了一个新问题：高层次的用户故事与具体的可测试实现之间存在间隙。为此，作者引入了 \textbf{sprint contract}（冲刺合同）机制。
+
+\begin{knowledgebox}{Sprint Contract 的工作流程}
+在每个 sprint 开始前，generator 和 evaluator 进行一轮\textbf{谈判}：
+
+\begin{enumerate}[leftmargin=1.5em]
+    \item \textbf{Generator 提案}：描述本 sprint 将构建什么，以及如何验证成功
+    \item \textbf{Evaluator 审查}：确认 generator 构建的是``正确的东西''（the right thing）
+    \item \textbf{双方迭代}：直到就``完成''的定义达成一致
+    \item \textbf{Generator 实现}：按合同编码
+    \item \textbf{Evaluator 验收}：按合同测试
+\end{enumerate}
+
+Agent 之间的所有通信\textbf{完全通过文件}进行：一个 agent 写文件，另一个读文件并通过修改原文件或创建新文件来回应。这种设计简单且可追溯。
+\end{knowledgebox}
+
+Sprint contract 的粒度可以非常细——例如在 Retro Game Maker 实验中，仅 Sprint 3（关卡编辑器）就有 \textbf{27 条}验收标准。
+
+\subsection{Evaluator 的调优：一个多轮人工过程}
+
+\begin{warningbox}{开箱即用的 Claude 是一个糟糕的 QA Agent}
+\textit{``Out of the box, Claude is a poor QA agent.''}
+
+在早期运行中，作者观察到 evaluator 的两个典型问题：
+
+\textbf{1. 宽容偏差}：evaluator 会识别出合法问题，然后说服自己这些问题``不是大问题''，最终批准工作。它在发现 bug 和判断 bug 严重性之间存在断裂。
+
+\textbf{2. 表面测试}：evaluator 倾向于只测试``happy path''（正常路径），而非深入探查边缘情况（edge cases），导致更微妙的 bug 逃逸。
+
+这两个问题意味着 evaluator 的校准不是一次性配置，而是需要\textbf{多轮人工审查}的调优过程。
+\end{warningbox}
+
+作者的调优方法论是一个人工反馈闭环：
+
+\begin{enumerate}[leftmargin=1.5em]
+    \item 阅读 evaluator 的日志
+    \item 找到 evaluator 的判断与作者自身判断分歧的案例
+    \item 更新 QA prompt 以解决这些分歧
+    \item 重新运行并重复上述步骤
+\end{enumerate}
+
+经过多轮调优后，evaluator 能够发现相当具体和深入的问题。
+
+\subsection{Retro Game Maker：Solo vs. Full Harness 对比}
+
+作者使用相同的 prompt 分别在单 agent（solo）和完整 harness 上运行：
+
+\begin{quote}
+\textit{``Create a 2D retro game maker with features including a level editor, sprite editor, entity behaviors, and a playable test mode.''}
+\end{quote}
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lrrl}
+\toprule
+\textbf{模式} & \textbf{时长} & \textbf{成本} & \textbf{核心结论} \\
+\midrule
+Solo agent & 20 min & \$9 & 核心功能（游戏运行）不可用 \\
+Full harness & 6 hr & \$200 & 核心功能可用，有粗糙之处 \\
+\bottomrule
+\end{tabular}
+\caption{Solo agent vs. Full harness 对比（Opus 4.5）}
+\end{table}
+
+Harness 的成本是 solo 的 \textbf{20 倍以上}，但产出质量存在质的差异。
+
+\textbf{Solo agent 的问题}：
+\begin{itemize}[leftmargin=1.5em]
+    \item 初看界面似乎符合预期，但深入使用后问题大量涌现
+    \item 布局浪费空间：固定高度的面板让大部分视口空白
+    \item 工作流程僵硬：试图构建关卡时需要先创建精灵和实体，但 UI 没有任何引导
+    \item \textbf{最致命的问题}：游戏本身\textbf{无法运行}——实体出现在屏幕上但不响应输入，entity 定义和 game runtime 之间的接线断裂（broken wiring），且没有任何表面指示告诉用户问题出在哪里
+\end{itemize}
+
+\textbf{Full harness 的产出}：
+\begin{itemize}[leftmargin=1.5em]
+    \item Planner 从一句 prompt 扩展为 \textbf{16 个 feature、10 个 sprint} 的完整规格
+    \item 远超 solo 的尝试范围：精灵动画系统、行为模板、音效音乐、AI 辅助精灵生成、关卡设计师、游戏导出与分享
+    \item Planner 甚至读取了 Anthropic 内部的 frontend design skill 并据此创建了视觉设计语言
+    \item Canvas 充分利用视口、面板尺寸合理、界面有一致的视觉身份
+    \item 精灵编辑器更丰富：更干净的工具调色板、更好的颜色选择器、更可用的缩放控件
+    \item 内置 Claude 集成，可以通过 prompt 生成游戏的不同部分
+    \item \textbf{最关键}：游戏\textbf{可以玩}——玩家能移动角色，虽然物理引擎有粗糙之处（跳上平台后与之重叠），但核心循环运转
+\end{itemize}
+
+以下是 evaluator 在验收过程中发现的具体 bug 示例：
+
+\begin{table}[H]
+\centering
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{p{4cm}p{9cm}}
+\toprule
+\textbf{合同标准} & \textbf{Evaluator 发现} \\
+\midrule
+矩形填充工具允许拖拽填充区域 & FAIL --- 工具仅在拖拽起止点放置 tile，而非填充整个区域。\texttt{fillRectangle} 函数存在但在 \texttt{mouseUp} 时未正确触发。 \\
+\midrule
+用户可选择并删除实体生成点 & FAIL --- \texttt{LevelEditor.tsx:892} 的 Delete 键处理要求 \texttt{selection} 和 \texttt{selectedEntityId} 同时设置，但点击实体只设置后者。 \\
+\midrule
+用户可通过 API 重排动画帧 & FAIL --- \texttt{PUT /frames/reorder} 路由定义在 \texttt{/\{frame\_id\}} 之后，FastAPI 将 ``reorder'' 匹配为整数 frame\_id 并返回 422 错误。 \\
+\bottomrule
+\end{tabular}
+\caption{Evaluator 发现的具体 bug 示例（Retro Game Maker）}
+\end{table}
+
+\begin{knowledgebox}{Evaluator 的 Bug 报告质量}
+注意上表中 evaluator 的发现不仅指出了\textbf{什么失败了}，还精确定位了\textbf{为什么失败}——包括具体的文件名、行号、函数名和修复建议。这种水平的 bug 报告是经过多轮人工校准后才达到的。开箱即用的 LLM 会倾向于给出模糊的``seems to not work properly''式反馈。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+三 agent 架构通过角色分离系统性地解决了不同层面的问题：Planner 将简短 prompt 扩展为完整规格，解决了范围不足的问题；Generator 以 sprint 为单位聚焦实现；Evaluator 通过 Playwright MCP 进行真实用户视角的端到端测试，确保质量。Sprint contract 是连接高层规格与可测试实现的关键桥梁。虽然成本增加了 20 倍以上，但在``核心功能是否可用''这一最基本的维度上实现了质的飞跃——从``游戏无法运行''到``可以实际游玩''。
+
+

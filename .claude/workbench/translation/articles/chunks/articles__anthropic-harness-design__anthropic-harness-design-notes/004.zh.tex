@@ -1,0 +1,91 @@
+\section{扩展到全栈编码}
+
+将 GAN 启发的 generator-evaluator 模式从前端设计扩展到全栈开发是自然的——代码审查和 QA 在软件开发生命周期中扮演着与 design evaluator 完全相同的结构性角色。
+
+\subsection{三 Agent 架构}
+
+\begin{importantbox}{Planner -- Generator -- Evaluator 流水线}
+作者设计了三个 agent persona，每个 agent 针对先前观察到的特定失败模式：
+
+\textbf{Planner}：将用户的 1--4 句简短 prompt 扩展为完整的产品规格。被指示保持高层次的产品上下文和技术设计，而非详细的技术实现——因为如果 planner 在技术细节上犯错，错误会级联到下游实现。同时被要求在规格中融入 AI 功能。
+
+\textbf{Generator}：以 sprint 为单位工作，每次从规格中取一个 feature 实现。技术栈：React + Vite + FastAPI + SQLite/PostgreSQL。每个 sprint 结束时进行自我评估，然后交给 QA。拥有 git 进行版本控制。
+
+\textbf{Evaluator}：通过 Playwright MCP 像真实用户一样点击运行中的应用，测试 UI 功能、API 端点和数据库状态。按维度打分，任一维度低于阈值则 sprint 失败，generator 收到详细反馈。
+\end{importantbox}
+
+\subsection{Sprint 合同机制}
+
+\begin{knowledgebox}{从高层规格到可测试实现的桥梁}
+产品规格是有意保持高层次的（避免 planner 在细节上犯错导致级联失败）。为了弥合用户故事与可测试实现之间的间隙，作者引入了 \textbf{sprint contract} 机制：
+
+\begin{enumerate}
+    \item Generator 提出本 sprint 要构建的内容及成功验证标准
+    \item Evaluator 审查提案，确保 generator 构建的是正确的东西
+    \item 双方迭代直到达成一致
+    \item Generator 按合同实现
+    \item Evaluator 按合同验收
+\end{enumerate}
+
+Agent 之间的通信完全通过\textbf{文件}进行：一个 agent 写文件，另一个读文件并通过修改或新建文件来回应。
+\end{knowledgebox}
+
+\subsection{Evaluator 的调优挑战}
+
+\begin{warningbox}{Claude 天生不是好 QA}
+开箱即用的 Claude 是一个很差的 QA agent。在早期运行中，作者观察到 evaluator 会识别出合法问题，然后说服自己这些问题``不是大问题''并批准工作。它还倾向于表面测试，而非探查边缘情况，导致更微妙的 bug 逃逸。
+
+调优方法：阅读 evaluator 日志 → 找到其判断与作者判断分歧的案例 → 更新 QA prompt 以解决这些问题 → 重复多轮。
+\end{warningbox}
+
+经过调优后，evaluator 能够发现相当具体的问题。以下是 Retro Game Maker 项目中 evaluator 发现的部分示例：
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{4.5cm}p{8.5cm}}
+\toprule
+\textbf{合同标准} & \textbf{Evaluator 发现} \\
+\midrule
+矩形填充工具允许拖拽填充区域 & FAIL——工具仅在拖拽起止点放置 tile，而非填充整个区域。\texttt{fillRectangle} 函数存在但在 \texttt{mouseUp} 时未正确触发。 \\
+\midrule
+用户可以选择并删除已放置的实体生成点 & FAIL——\texttt{LevelEditor.tsx:892} 的 Delete 键处理要求 \texttt{selection} 和 \texttt{selectedEntityId} 同时设置，但点击实体只设置后者。条件应为 \texttt{selection || (selectedEntityId \&\& activeLayer === `entity')}。 \\
+\midrule
+用户可以通过 API 重排动画帧 & FAIL——\texttt{PUT /frames/reorder} 路由定义在 \texttt{/\{frame\_id\}} 之后，FastAPI 将 ``reorder'' 匹配为整数 frame\_id 并返回 422 错误。 \\
+\bottomrule
+\end{tabular}
+\caption{Evaluator 发现的具体 bug 示例（来源：原文）}
+\end{table}
+
+\subsection{Retro Game Maker 对比实验}
+
+作者使用相同的 prompt 分别运行单 agent 和完整 harness：
+
+\begin{quote}
+\textit{``Create a 2D retro game maker with features including a level editor, sprite editor, entity behaviors, and a playable test mode.''}
+\end{quote}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lrr}
+\toprule
+\textbf{Harness 类型} & \textbf{时长} & \textbf{成本} \\
+\midrule
+Solo agent & 20 min & \$9 \\
+Full harness & 6 hr & \$200 \\
+\bottomrule
+\end{tabular}
+\caption{Solo vs. Full Harness 的时长和成本对比}
+\end{table}
+
+Harness 的成本是 solo 的 20 倍以上，但产出质量差异立竿见影：
+
+\begin{itemize}
+    \item \textbf{Solo agent}：初看似乎符合预期，但深入使用后问题大量涌现——布局浪费空间，工作流程僵硬且缺乏引导，最关键的是\textbf{游戏本身无法运行}（实体出现在屏幕上但不响应输入，entity 定义和 game runtime 之间的接线断裂）
+    \item \textbf{Full harness}：Planner 从一句 prompt 扩展为 16 个 feature、10 个 sprint 的完整规格（包括精灵动画系统、行为模板、音效音乐、AI 辅助的精灵生成器和关卡设计师、游戏导出等）。产出的应用\textbf{核心功能可用}——玩家可以移动角色、进行游戏，虽然物理引擎有粗糙之处（角色跳上平台后会与之重叠）
+\end{itemize}
+
+\subsection{本章小结}
+
+三 agent 架构通过角色分离解决了不同层面的问题：Planner 解决规格不足，Generator 聚焦实现，Evaluator 确保质量。Sprint contract 机制弥合了高层规格与可测试实现之间的间隙。虽然成本显著增加（20x），但在核心功能的可用性上实现了质的飞跃。
+

@@ -1,0 +1,74 @@
+\section{Context 管理：最难的问题}
+
+\subsection{为什么 Context 管理如此困难？}
+
+文章作者坦言：\textbf{最难的问题不是调用 LLM，而是管理送入 LLM 的内容}。
+
+Utah 使用的 Tool 可能每次调用返回数千字符。经过几轮迭代后，对话上下文急剧膨胀，模型开始"迷失"——作者观察到 Agent 陷入无限循环地调用 Tool 却永远不产出最终回复。
+
+\begin{warningbox}{Context 膨胀的恶性循环}
+Tool 返回大量内容 $\to$ context window 被填满 $\to$ 模型无法关注关键信息 $\to$ 模型反复调用 Tool 试图"理解"情况 $\to$ 更多内容涌入 $\to$ 恶性循环。这不是 LLM 的 bug，而是 context window 有限容量下的必然结果。\textbf{任何使用 Tool 的 Agent 都必须面对这个问题}。
+\end{warningbox}
+
+\subsection{两层 Context 剪枝}
+
+Utah 的解决方案是\textbf{两层 context pruning}：
+
+\begin{lstlisting}[caption={Context 剪枝配置},language=Java]
+const PRUNING = {
+  keepLastAssistantTurns: 3,
+  softTrim: {
+    maxChars: 4000,
+    headChars: 1500,
+    tailChars: 1500
+  },
+  hardClear: {
+    threshold: 50000,
+    placeholder: "[Tool result cleared]"
+  },
+};
+\end{lstlisting}
+
+具体策略如下：
+
+\begin{table}[H]
+\centering
+\caption{Context 管理策略}
+\begin{tabular}{lp{9cm}}
+\toprule
+\textbf{策略} & \textbf{描述} \\
+\midrule
+Soft Trim & 旧的 Tool 结果保留头部 1500 字符 + 尾部 1500 字符，中间截断 \\
+Hard Clear & 当总 context 超过 50,000 字符时，旧的 Tool 结果完全替换为占位符 \\
+最近保留 & 最近 3 轮 assistant 的输出始终完整保留 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{跨运行的 Session Compaction}
+
+Pruning 处理的是\textbf{单次运行内}的 context 管理。但 Agent 可能跨多次运行与用户持续对话。Session compaction 处理的是\textbf{跨运行}的上下文积累：当估算的 token 数超过阈值时，对话历史会被\textbf{总结压缩}后再送入下一次运行。
+
+此外，Utah 还实现了两个辅助机制：
+
+\begin{itemize}
+    \item \textbf{Budget Warning}：当 Agent 接近最大迭代次数时，注入系统消息告诉它"请尽快收尾"
+    \item \textbf{Overflow Recovery}：如果 LLM 在运行中返回 context-too-large 错误，强制执行 compaction 并重试，不浪费迭代次数
+\end{itemize}
+
+\begin{knowledgebox}{Context 管理的四重防线}
+Utah 的 context 管理可以总结为四重防线：
+\begin{enumerate}
+    \item \textbf{Pruning}（单次运行内）：裁剪旧的 Tool 结果
+    \item \textbf{Compaction}（跨运行）：总结压缩对话历史
+    \item \textbf{Budget Pressure}（预防性）：提前警告 Agent 收尾
+    \item \textbf{Overflow Recovery}（应急性）：context 超限时强制压缩并重试
+\end{enumerate}
+这四重防线共同确保 Agent 不会因 context 膨胀而"迷失"。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+Context 管理是 Agent 工程中最被低估的挑战。它不是一个可以一次性解决的问题，而是需要多层防线协同工作的系统性方案。Utah 的实践表明，pruning、compaction、budget warning 和 overflow recovery 四管齐下，才能让 Agent 在长时间运行中保持稳定。
+
+

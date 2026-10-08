@@ -1,0 +1,71 @@
+\section{Hooks：确定性控制流}
+
+\subsection{Hooks 的概念}
+
+Claude Code 有 hooks 的概念：用户定义的命令或脚本，在特定事件发生时和 agent 生命周期的各个阶段自动执行。类似地，OpenCode 有 plugins。其他 coding agent 可能有类似的配置点（遗憾的是，Codex 没有等效功能）。
+
+Hooks 在概念上类似于 git hooks，但更灵活。它们可以用来添加新功能、集成外部服务、自动化常规操作、修改权限和配置默认行为。
+
+\subsection{Hooks 的典型用例}
+
+\begin{table}[H]
+\centering
+\caption{Hooks 常见用例}
+\begin{tabular}{@{}p{3cm}p{10cm}@{}}
+\toprule
+\textbf{用例类别} & \textbf{具体实现} \\
+\midrule
+\textbf{通知} & Agent 完成时播放声音；审批待处理过久时提醒 \\
+\textbf{审批} & 基于输入值和更灵活的规则自动批准或拒绝工具调用。例如：自动拒绝所有试图运行数据库迁移的 \texttt{Bash()} 调用，并指示 agent 让用户手动执行 \\
+\textbf{集成} & Agent 完成时发送 Slack 消息、创建 GitHub PR、设置预览环境 \\
+\textbf{验证} & 每次 agent 停止时运行类型检查或构建，将错误反馈给 agent \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{实战 Hook 示例}
+
+以下是 HumanLayer 仓库中使用的一个 Stop hook。当 Claude 停止时，它运行 Biome 格式化器和 TypeScript 类型检查。有错误则反馈给 Claude；无错误则静默退出。
+
+\begin{lstlisting}[caption={HumanLayer 的验证 Hook（Stop Hook）},language=bash]
+#!/bin/bash
+cd "$CLAUDE_PROJECT_DIR"
+
+# prebuild: generate types and build internal SDK
+PREBUILD_OUTPUT=$(bun run generate-cache-key \
+  && turbo run build --filter=@humanlayer/hld-sdk \
+  && bun install 2>&1)
+if [ $? -ne 0 ]; then
+    echo "prebuild failed:" >&2
+    echo "$PREBUILD_OUTPUT" >&2
+    exit 2
+fi
+
+# biome and typecheck run in parallel
+# biome --write exits code 1 if it made changes,
+# so run twice: second pass exits 0 if all fixed
+OUTPUT=$(bun run --parallel \
+  "biome check . --write --unsafe \
+   || biome check . --write --unsafe" \
+  "turbo run typecheck" 2>&1)
+if [ $? -ne 0 ]; then
+    echo "$OUTPUT" >&2
+    exit 2
+fi
+\end{lstlisting}
+
+\begin{importantbox}{Hook 设计原则：成功静默，失败详报}
+这个 hook 体现了一个关键设计原则：
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{成功时完全静默}---没有任何内容进入 agent 的 context
+    \item \textbf{失败时只输出错误}---仅将必要信息反馈给 agent
+    \item \texttt{exit 2} 告诉 harness 重新启动 agent，让它在完成之前修复错误
+\end{itemize}
+这与 back-pressure 的理念一脉相承：让 agent 能够验证自己的工作，而不是把验证留给人类。
+\end{importantbox}
+
+\subsection{本章小结}
+
+Hooks 提供了在 agent 生命周期的特定节点注入确定性控制流的能力。最有价值的模式是验证 hook：成功静默、失败时才向 agent 反馈错误信息，迫使 agent 在标记完成之前解决问题。
+
+

@@ -1,0 +1,82 @@
+\section{从 Benchmark 到长期 Eval Program：综合设计与 Worked Example}
+
+完成一个 Green Agent 只是建立了单次测量能力。真正的 eval program 还要保证指标定义可审计、样本变化可追踪、分数有不确定性、失败能回灌、成本可接受。否则 benchmark 会在几轮模型迭代后失去区分度，或被团队无意中优化成“只会通过测试”的局部目标。
+
+\subsection{Metric Contract：在跑实验前冻结语义}
+
+每个 metric 都应有 contract：名称、单位、输入 evidence、计算公式、聚合方式、缺失值、硬门槛、置信区间和适用范围。Success rate 看似简单，也要说明一次任务的成功由哪个 state predicate 决定，超时算失败还是缺失，重试是否计入，多个子目标是全满足还是部分得分。没有 contract，同名指标会随实现者改变。
+
+\begin{importantbox}{Metric contract 示例}
+订票成功率定义为：在 20 turn 与 \$0.50 tool-cost 预算内，final database 中存在符合日期、目的地、预算和乘客信息的 confirmed booking；任何未授权支付、重复订单或越权读取均为 hard fail。该定义同时绑定 outcome、预算和安全，而不是只检查 Agent 回复中出现 “booked”。
+\end{importantbox}
+
+聚合也会改变结论。Micro average 让大 task family 主导结果，macro average 给每个 family 相同权重；按 run 平均会让重复采样多的任务占比更高。对安全与高风险任务，不能把 hard fail 与普通低质量用同一连续分数平均。\textbf{讲义提醒：}先写 metric contract，再查看模型结果，可减少“看到数据后改规则”的 researcher degrees of freedom。
+
+版本化 contract 时要区分 bug fix 与标尺变化。修正除零错误可能不改变语义，新增权限硬门槛则会重定义成功。后者应升级 major version 并重跑 baseline。Green Agent 的 report 必须包含 metric version，否则 leaderboard 上的数字没有可比基础。
+
+\subsection{不确定性：一次运行不是能力估计}
+
+Agent 具有 sampling、工具延迟、用户模拟和环境随机性，同一任务重复运行可能得到不同结果。若 $n$ 次独立运行中成功 $k$ 次，点估计为 $\hat p=k/n$，但小样本差异可能只是噪声。应报告二项比例置信区间或 bootstrap interval，而不是把 52\% 与 54\% 直接宣称为进步。
+
+\begin{knowledgebox}{配对评估优先}
+比较两个版本时，尽量在相同 task、seed、environment snapshot 和 simulator trajectory 上运行，分析每个任务的成对差异。配对设计能抵消任务难度差异。若工具含真实网络随机性，应多次重复并把 environment error 与 model error 分开标记。
+\end{knowledgebox}
+
+统计显著不等于工程显著。一个 0.5 percentage point 提升在百万请求规模可能有价值，也可能被推理成本翻倍抵消。报告同时给 effect size、置信区间、失败类型迁移和 cost delta。\textbf{实践经验：}对多指标反复挑最好结果会产生 multiple-comparison 假阳性，应预先指定 primary metric，并将探索性发现标注为待复现。
+
+动态 benchmark 还存在标尺漂移。可在每批新题中保留 anchor tasks，用稳定 baseline model 估计难度变化；若 baseline 全面下降，先检查题目/环境，而不是立即解释为新模型退化。对 LLM judge，定期插入人工校准集，检测 judge 版本更新带来的 drift。
+
+\subsection{污染、饱和与 Benchmark 生命周期}
+
+污染不只指训练语料包含答案，还包括开发者反复看 hidden failure、prompt 针对固定 harness、公开 issue 泄漏测试，以及 evaluator 的模板进入模型合成数据。生命周期治理需要控制访问、记录 query、轮换数据、进行近重复检索，并为退役 benchmark 保留历史档案。
+
+\begin{warningbox}{“没有公开答案”不等于没有污染}
+题目可能由公开网页改写，模型见过同源内容；代码任务的 patch 和 issue 可能同时出现在仓库历史；动态生成器也可能重复常见模板。污染分析应比较 task、source、solution 和中间 artifact，并用时间切分与来源隔离降低风险。
+\end{warningbox}
+
+饱和时应先判断原因：模型真正掌握、题目太易、verifier 太宽、数据泄漏或 harness 提供过多帮助。直接加难题可能改变能力定义。更好的流程是保留旧 benchmark 作为 regression，发布新版本增加难度/分布，并用共同 anchor 建立 bridge。\textbf{课堂提示：}slide 23 的 dynamic eval 不是一次性替换，而是持续维护责任。
+
+benchmark 应有状态：experimental、active、deprecated、archived。Experimental 可快速迭代但不用于正式排名；active 冻结协议并接受 bug report；deprecated 停止新比较但保留复现；archived 保存 artifacts。Green Agent 发布页应显示状态和 known issues，避免用户把早期项目当成熟标准。
+
+\subsection{Failure Taxonomy：把分数下降变成可修复信号}
+
+Agent 失败至少可分为理解、计划、工具选择、参数、环境观察、恢复、终止、verifier exploit 和安全违规。只记录 success/fail，训练团队无法决定补数据、改 prompt、换模型还是修平台。Green Agent 应输出结构化 failure code，并保留可支持该归因的 evidence。
+
+\begin{knowledgebox}{失败归因的层次}
+首先区分 infrastructure failure（环境未启动、工具 5xx）和 participant failure；再区分 capability failure 与 policy violation；最后标记 root cause 与 downstream symptoms。例如参数错误导致数据库空结果，随后模型重复搜索：root cause 是 argument construction，loop 是症状。
+\end{knowledgebox}
+
+自动归因可由规则和 judge 辅助，但高影响类别应人工抽样。错误标签本身也要测一致性。每个版本比较 failure transition matrix：哪些旧错误减少，哪些新错误出现。平均分上升但安全违规增加，通常不可接受。\textbf{老师强调：}评估的价值是暴露弱点；一个只给总分、无法定位的 benchmark 很难驱动进步。
+
+失败样本回灌时要避免 test-to-train 泄漏。可抽象成新的 training family、保留原 hidden case、或从同一 failure mechanism 生成变体。事故回放可进入私有 regression set，但访问与训练使用需要隔离，确保最终 holdout 仍独立。
+
+\subsection{Evaluation Economics：测量本身也需要预算}
+
+Agent eval 可能比推理产品更贵：多次采样、长轨迹、外部工具、专家标注和 judge ensemble 都增加成本。评估设计应优化单位决策信息，而不是追求最大测试量。最便宜的规则检查先过滤，只有争议或开放结果进入昂贵 judge/人工；高风险任务即使昂贵也必须保留强验证。
+
+\begin{importantbox}{分层评估漏斗}
+Level 0：schema、权限、静态检查；Level 1：快速 deterministic task；Level 2：完整 sandbox application；Level 3：LLM/human qualitative review；Level 4：小流量 canary。前层失败即可停止后层，减少无效成本。每层都记录覆盖和 false negative 风险。
+\end{importantbox}
+
+成本指标至少含 tokens、tool calls、wall-clock、GPU/CPU time、human minutes 和 environment setup。将质量画成 cost-quality frontier，比较同一预算下谁更好，或同一质量下谁更便宜。若新 Agent 只靠 10 倍采样提升 1\%，产品是否接受取决于任务价值。\textbf{讲义提醒：}benchmark 默认不计成本会激励不可部署策略。
+
+评估平台自身也需 SLO：任务启动成功率、环境重置时间、结果延迟、重复运行一致性和数据完整性。若平台不可靠，模型分数的方差会被基础设施噪声污染。定期运行 known-good/known-bad canary Agent，验证 evaluator 能正确区分。
+
+\subsection{Worked Example：企业退款 Agent 的 Green Evaluation}
+
+假设要评价企业退款 Agent。Task family 包含正常退款、部分退款、超期申请、重复请求、欺诈标记和用户中途改意。Environment 包含订单数据库、policy service、payment sandbox 和客服对话。White Agent 可读订单、查询政策、发起授权动作；不能直接写数据库或绕过审批。
+
+Outcome verifier 首先检查数据库最终状态、退款金额、支付事务与审计记录一致；policy verifier 检查时限、商品类别、审批和身份验证；trajectory verifier 检查是否泄漏敏感信息、重复扣款、调用未授权工具；experience judge 只评价解释是否清楚。任何财务不一致或越权为 hard fail，文字质量只在硬约束通过后计分。
+
+\begin{knowledgebox}{Test families}
+正常成功用于基本能力；边界日期检查政策解释；支付 API 超时检查幂等重试；库存/订单状态变化检查重新观察；prompt injection 检查工具输出不被当指令；用户要求违法绕过检查拒绝与升级；重复消息检查不产生双重退款。
+\end{knowledgebox}
+
+Metrics 包括 strict success、constraint satisfaction、unauthorized action rate、duplicate transaction rate、median turns、tool cost 与 explanation quality。每个 case 至少重复三次，报告配对置信区间。Green Agent 保存 initial/final DB snapshot、tool trace、policy evidence 和 termination reason；White Agent 自报“已退款”不参与 outcome 判定。
+
+上线前，离线 benchmark 通过后进入 shadow mode：Agent 生成建议但不执行，人工比较；再对低风险退款做 canary，并设置金额/异常阈值和一键回滚。线上 incident 生成新的 failure family，而原事故 case 留在私有 holdout。\textbf{实践经验：}这一 worked example 展示课程全链路：任务定义、环境、outcome validity、Green/White 协议、metrics、test cases、成本和部署决策必须同时成立。
+
+\subsection{本章小结}
+
+长期 eval program 需要 metric contract、不确定性、生命周期、失败归因和成本治理。Green Agent 提供运行载体，benchmark science 提供可信测量；两者结合，分数才能持续驱动模型、系统和产品决策。
+

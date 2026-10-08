@@ -1,0 +1,79 @@
+\section{数据并行（Data Parallelism）}
+
+\subsection{基本原理}
+
+数据并行是最简单也是最基础的分布式训练方法。其核心思想：每块 GPU 持有模型的完整副本，但处理不同的数据子集。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-013.jpg}
+\caption{数据并行的数学基础：梯度的线性性使得可以先在每个 GPU 上独立计算局部梯度，再进行全局平均\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第13页。}
+
+数学上，设总损失为各样本损失的平均：
+
+$$L = \frac{1}{M \cdot N} \sum_{j=1}^{M} \sum_{i=1}^{N} \ell(x_{ij}, W)$$
+
+由于梯度是线性算子，可以重新排列为：
+
+$$\nabla_W L = \frac{1}{M} \sum_{j=1}^{M} \underbrace{\left[\frac{1}{N} \sum_{i=1}^{N} \nabla_W \ell(x_{ij}, W)\right]}_{\text{GPU } j \text{ 独立计算}}$$
+
+\begin{itemize}
+    \item $M$：GPU 数量
+    \item $N$：每块 GPU 上的 mini-batch 大小
+    \item 蓝色括号内的部分可以在每块 GPU 上\textbf{完全独立}计算
+    \item 外层求和需要\textbf{跨 GPU 通信}（All-Reduce）
+\end{itemize}
+
+\subsection{数据并行的执行流程}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-014.jpg}
+\caption{数据并行的六步执行流程\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第14页。}
+
+\begin{enumerate}
+    \item 每块 GPU 持有模型权重的\textbf{独立但相同}的副本
+    \item 每块 GPU 加载\textbf{不同的} mini-batch 数据
+    \item 每块 GPU 独立执行前向传播，计算局部损失
+    \item 每块 GPU 独立执行反向传播，计算局部梯度
+    \item \textbf{All-Reduce}：所有 GPU 交换并平均梯度
+    \item 每块 GPU 独立更新权重（因为起点相同、梯度相同，更新后的权重仍然相同）
+\end{enumerate}
+
+\begin{warningbox}{不同 GPU 必须加载不同的数据}
+这是数据并行中最容易犯的 bug：所有 GPU 意外加载了相同的 mini-batch。这不会导致程序报错，但会使训练完全无效——你相当于在浪费 $(M-1)$ 块 GPU 的计算资源。
+\end{warningbox}
+
+\begin{knowledgebox}{计算与通信的重叠}
+反向传播和 All-Reduce 可以\textbf{流水线化执行}：当 GPU 在计算第 $L-1$ 层的梯度时，第 $L$ 层的梯度已经可以开始 All-Reduce。这种重叠隐藏了大部分通信开销。PyTorch 的 \texttt{DistributedDataParallel}（DDP）类自动实现了这一优化。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-016.jpg}
+\caption{计算与通信的流水线化：反向传播（黑色）与 All-Reduce（红色）同时进行\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第16页。}
+
+\subsection{数据并行的瓶颈：内存限制}
+
+数据并行要求每块 GPU 存储模型的完整副本。对于每个模型参数，需要存储：
+
+\begin{itemize}
+    \item 权重本身（2 bytes，16-bit）
+    \item 梯度（2 bytes）
+    \item 优化器状态——Adam 的 $\beta_1$ 和 $\beta_2$（各 2 bytes）
+\end{itemize}
+
+即每个参数需要 $\sim$8 bytes。H100 有 80 GB 内存，因此数据并行最多支持约 \textbf{10B 参数}的模型——远远不够。
+
+\subsection{本章小结}
+
+数据并行是分布式训练的基础，数学上完全等价于单 GPU 大 batch 训练。它简单有效，但受限于 GPU 内存——每块 GPU 必须能容纳完整的模型参数、梯度和优化器状态。
+
+%% ========== FSDP ==========
+

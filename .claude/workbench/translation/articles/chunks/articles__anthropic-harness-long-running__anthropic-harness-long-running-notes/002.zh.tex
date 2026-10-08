@@ -1,0 +1,53 @@
+\section{朴素实现的两个结构性困境}
+
+在深入 harness 设计之前，作者首先剖析了``单 agent 直接执行''模式在长时间任务上遇到的两个系统性失败模式。这些失败模式并非偶发——它们是模型架构和训练方式的结构性后果。
+
+\subsection{上下文窗口：连贯性退化与 Context Anxiety}
+
+模型在执行长时间任务时，随着 context window 逐渐填满，输出的连贯性会显著下降。这并不意外——更多的上下文意味着更多的注意力分散，更难保持对当前任务的聚焦。
+
+但作者观察到一个更微妙的现象：\textbf{context anxiety}（上下文焦虑）。当模型``感知到''自己接近上下文长度限制时，会开始\textbf{提前草草收尾}——不是因为任务完成了，而是因为它``觉得''快没空间了。
+
+\begin{knowledgebox}{Context Reset vs. Compaction：两种应对策略}
+针对上下文膨胀，作者对比了两种策略：
+
+\textbf{Compaction（原地压缩）}：
+\begin{itemize}[leftmargin=1.5em]
+    \item 做法：对对话历史早期部分进行摘要压缩，同一个 agent 在缩短后的历史上继续工作
+    \item 优点：保持了 agent 的连续性，不需要额外的编排逻辑
+    \item 缺点：agent 仍然``记得''自己已经工作了很久，context anxiety 依然存在
+\end{itemize}
+
+\textbf{Context Reset（完全重置）}：
+\begin{itemize}[leftmargin=1.5em]
+    \item 做法：彻底清空上下文，启动全新 agent，通过结构化的 handoff artifact 传递前一个 agent 的状态和下一步任务
+    \item 优点：提供``干净的开始''，彻底消除 context anxiety
+    \item 缺点：增加编排复杂度、token 开销和延迟；handoff artifact 必须足够完整
+\end{itemize}
+
+在早期测试中，\textbf{Claude Sonnet 4.5} 的 context anxiety 严重到 compaction 不足以应对，因此 context reset 成为 harness 设计的必要组件。
+\end{knowledgebox}
+
+值得注意的是，context reset 引入了一个新的工程挑战：如何设计 handoff artifact 使得新 agent 能够无缝衔接前序工作。这个问题在后续的三 agent 架构中通过文件通信机制得到了系统性解决。
+
+\subsection{自我评估偏差：Agent 的``自我感觉良好''}
+
+第二个失败模式更加隐蔽且更难对付。当要求 agent 评估自己产出的工作时，它们表现出\textbf{系统性的正向偏差}。
+
+\begin{warningbox}{Agent 自我评估的结构性缺陷}
+\textit{``When asked to evaluate work they've produced, agents tend to respond by confidently praising the work---even when, to a human observer, the quality is obviously mediocre.''}
+
+这个问题在\textbf{主观任务}（如前端设计）上尤为突出，因为不存在像单元测试那样的二值化验证手段。``一个布局是否感觉精致还是通用''是一个判断调用（judgment call），而 agent 在评判自己的工作时会可靠地偏向正面。
+
+但即使在\textbf{有可验证结果的任务}上，agent 在执行过程中仍然会表现出不良判断——例如忽略明显的 bug 或对``差不多能用''的实现放行。
+\end{warningbox}
+
+作者的关键洞察：\textbf{将生成和评估分离到不同的 agent}。分离本身并不能立刻消除评估的宽容倾向——evaluator 仍然是一个``倾向于对 LLM 产出宽容''的 LLM。但是，调优一个独立的 evaluator 使其保持怀疑态度，远比让 generator 对自身工作保持批判性更加\textbf{可行}（tractable）。一旦外部的严格反馈存在，generator 就有了具体的迭代目标。
+
+这种``生成-评估分离''的思路直接来自 GAN 的核心思想，但在 LLM 系统中有其独特之处：GAN 中 discriminator 的训练是自动的，而 LLM evaluator 的校准需要大量人工介入。
+
+\subsection{本章小结}
+
+单 agent 的朴素实现面临两个结构性困境：（1）context window 膨胀导致的连贯性退化和 context anxiety，使得长时间任务的后半段质量急剧下降；（2）自我评估偏差导致 agent 对自身产出过度乐观，无法自驱迭代改进。这两个问题共同构成了引入 multi-agent harness 的基础动机，也解释了为什么仅靠 prompt engineering 无法解决长时间自主编码的核心挑战。
+
+

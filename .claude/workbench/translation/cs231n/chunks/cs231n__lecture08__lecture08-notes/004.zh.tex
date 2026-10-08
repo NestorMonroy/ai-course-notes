@@ -1,0 +1,120 @@
+\section{从 RNN 注意力到通用注意力算子}
+
+\subsection{抽象出注意力的本质}
+
+注意力机制的核心操作可以从 RNN 中剥离出来，形成一个独立的计算原语。从抽象角度看，注意力机制做了以下事情：
+
+\begin{enumerate}
+    \item 存在一组\textbf{数据向量}（data vectors）——编码器的隐藏状态
+    \item 存在\textbf{查询向量}（query vectors）——解码器的隐藏状态
+    \item 对每个查询向量，计算它与所有数据向量的\textbf{相似度}
+    \item 使用相似度权重对数据向量进行\textbf{加权求和}，产生输出向量
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-017.jpg}
+\caption{注意力算子的抽象：query 向量与 data 向量的交互——计算相似度、softmax 归一化、加权求和得到输出\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第18页。}
+
+\subsection{第一步泛化：缩放点积相似度}
+
+最初的注意力使用一个可学习的线性层来计算相似度。但最简单的相似度度量是\textbf{点积}。然而，纯点积存在一个与维度相关的问题：
+
+\begin{warningbox}{点积与 softmax 的不良交互}
+假设查询向量和数据向量的维度为 $d$，且各分量独立同分布（均值 0，方差 1）。那么点积的期望方差为 $d$。当 $d$ 很大时：
+\begin{itemize}
+    \item 点积值的绝对值会很大
+    \item softmax 会变得非常``尖锐''——几乎所有权重集中在一个位置
+    \item 导致\textbf{梯度消失}，阻碍学习
+\end{itemize}
+\end{warningbox}
+
+\textbf{解决方案}：使用\textbf{缩放点积}（Scaled Dot Product）作为相似度函数：
+
+$$\text{similarity}(q, x) = \frac{q \cdot x}{\sqrt{d_q}}$$
+
+除以 $\sqrt{d_q}$ 使得无论维度如何变化，点积值的方差始终为 1，从而保证 softmax 的梯度行为稳定。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-019.jpg}
+\caption{缩放点积注意力：除以 $\sqrt{d_q}$ 防止高维度下 softmax 的梯度消失\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第20页。}
+
+\subsection{第二步泛化：多查询并行}
+
+不再逐个处理查询向量，而是一次处理\textbf{所有查询向量}。将查询向量堆叠为矩阵 $Q$（$n_q \times d_q$），数据向量堆叠为矩阵 $X$（$n_x \times d_q$）。
+
+所有查询与所有数据向量的相似度可以通过一个\textbf{矩阵乘法}高效计算：
+
+$$E = \frac{Q X^T}{\sqrt{d_q}}$$
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-022.jpg}
+\caption{多查询注意力的矩阵形式：所有相似度通过一次矩阵乘法计算\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第23页。}
+
+注意力权重矩阵：$A = \text{softmax}(E, \text{dim}=\text{columns})$
+
+输出：$Y = A \cdot X$
+
+\begin{importantbox}{注意力 = 矩阵乘法}
+整个注意力操作可以表示为：
+$$\text{Attention}(Q, X) = \text{softmax}\left(\frac{QX^T}{\sqrt{d_q}}\right) X$$
+核心计算只有\textbf{两次矩阵乘法}（相似度计算 + 加权求和）加一次 softmax。矩阵乘法是 GPU 上最高效的操作——这正是注意力机制能够大规模扩展的关键。
+\end{importantbox}
+
+\subsection{第三步泛化：Key-Value 分离}
+
+在上述公式中，数据向量 $X$ 被使用了两次：
+\begin{enumerate}
+    \item 与查询向量计算相似度（``你与我有多匹配？''）
+    \item 作为加权求和的对象（``匹配后我能获得什么信息？''）
+\end{enumerate}
+
+这两种用途本质上不同。因此，我们引入两个可学习的线性投影，将数据向量分别投影为：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-026.jpg}
+\caption{Key-Value 分离：数据向量通过两个不同的线性投影分别生成 Key（用于匹配）和 Value（用于信息检索）\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第27页。}
+
+\begin{itemize}
+    \item \textbf{Key 向量} $K = X W_K$：用于与 Query 计算相似度
+    \item \textbf{Value 向量} $V = X W_V$：用于在加权求和中提供信息
+\end{itemize}
+
+\begin{knowledgebox}{Key-Query-Value 的搜索引擎类比}
+Justin Johnson 用搜索引擎来类比 KQV：
+\begin{itemize}
+    \item \textbf{Query}（查询）：你在搜索框中输入的问题——``世界上最好的学校是哪个？''
+    \item \textbf{Key}（键）：后端数据库中每条记录的索引标签——用于匹配查询
+    \item \textbf{Value}（值）：匹配成功后返回的实际内容——``Stanford''
+\end{itemize}
+Query 需要与 Key 匹配来找到相关数据，但返回的信息（Value）与 Key 不同。这种分离让网络能够灵活地学习``如何查找''和``返回什么''。
+\end{knowledgebox}
+
+最终的注意力公式：
+
+$$\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_q}}\right) V$$
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-028.jpg}
+\caption{完整的 Key-Query-Value 注意力操作流程：Query 与 Key 计算相似度 $\rightarrow$ softmax $\rightarrow$ 对 Value 加权求和 $\rightarrow$ 输出\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第29页。}
+
+\subsection{本章小结}
+
+通过三步泛化——缩放点积、多查询并行、Key-Value 分离——我们将 RNN 中的注意力机制提升为一个独立的、通用的神经网络算子。整个操作本质上就是几次矩阵乘法加一次 softmax，高度适合 GPU 并行计算。
+
+%% ========== Cross Attention 与 Self Attention ==========
+
