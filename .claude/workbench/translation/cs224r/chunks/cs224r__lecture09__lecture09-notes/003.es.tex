@@ -1,0 +1,77 @@
+\section{RLHF: aprendizaje por refuerzo a partir de preferencias humanas}
+
+\subsection{Marco central}
+
+\begin{enumerate}
+    \item \textbf{Instruction Finetuning}: sirve como inicialización.
+    \item \textbf{Entrenamiento del modelo de recompensa}: se aprende $R_\phi(x, y)$ a partir de comparaciones de preferencias humanas.
+    \item \textbf{Optimización con RL}: se maximiza la salida del modelo de recompensa con algoritmos como PPO.
+\end{enumerate}
+
+\subsection{Entrenamiento del modelo de recompensa}
+
+Una persona compara dos respuestas y elige la mejor. Se usa el modelo de Bradley-Terry:
+$$p(y_w \succ y_l \mid x) = \sigma(R_\phi(x, y_w) - R_\phi(x, y_l))$$
+
+Función de pérdida:
+$$\mathcal{L}(\phi) = -\mathbb{E}_{(x, y_w, y_l)}\left[\log \sigma(R_\phi(x, y_w) - R_\phi(x, y_l))\right]$$
+
+\begin{knowledgebox}{Por qué comparar en lugar de calificar}
+Cuando las personas asignan calificaciones absolutas, el ruido es alto y la calibración es inconsistente. La comparación por pares es más sencilla y más confiable: solo hay que juzgar «A es mejor que B», no «A vale 7.3 puntos».
+\end{knowledgebox}
+
+\subsection{Policy Gradient aplicado a LLM}
+
+La generación de un LLM se plantea como un problema de RL:
+$$\max_\theta \; \mathbb{E}_{y \sim p_\theta(y|x)} \left[R_\phi(x, y)\right]$$
+
+Se usa REINFORCE / policy gradient:
+$$\theta_{t+1} := \theta_t + \alpha \frac{1}{m}\sum_{i=1}^{m} R(s_i) \nabla_{\theta_t} \log p_{\theta_t}(s_i)$$
+
+Intuición: las generaciones con recompensa alta aumentan su probabilidad y las de recompensa baja la reducen.
+
+\begin{warningbox}{Por qué es necesaria la regularización KL}
+Si se optimiza el modelo de recompensa sin restricciones, la política aprovecha (exploit) las debilidades del modelo de recompensa (reward hacking). La práctica estándar es añadir una penalización KL:
+$$\max_\theta \; \mathbb{E}_{y \sim p_\theta}\left[R_\phi(x, y)\right] - \beta \, D_{\mathrm{KL}}(p_\theta \| p_{\mathrm{ref}})$$
+donde $p_{\mathrm{ref}}$ es el modelo SFT. $\beta$ controla cuánto se aleja la política del modelo inicial.
+\end{warningbox}
+
+\subsection{Control de calidad de los datos de recompensa}
+
+La calidad de los datos de preferencias determina directamente la capacidad de generalización del reward model. Las dimensiones de calidad habituales son: consistencia de las comparaciones, experiencia de los anotadores, context diversity y proporción de hard negatives.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.25\textwidth} p{0.62\textwidth}}
+\toprule
+Dimensión & Práctica de implementación \\
+\midrule
+Consistencia & Varias rondas de revisión a ciegas y cálculo del Cohen's kappa; las entradas inconsistentes se envían a revisión de nivel superior \\
+Diversidad & Se agregan deliberadamente prompts de tipo creative, factual y multi-turn, para evitar que la reward solo aumente con cierto tipo de instrucciones \\
+Negativos difíciles & Se recolectan respuestas near-miss para que el reward model distinga subtle flaws \\
+Metadatos & Se registran intent, topic y difficulty para poder hacer muestreo estratificado por intención humana durante el entrenamiento \\
+\bottomrule
+\end{tabular}
+\caption{Elementos del control de calidad de los datos de preferencias}
+\end{table}
+
+\begin{knowledgebox}{La calidad importa más que el tamaño del modelo}
+En la cadena de atribución del reward model, el eslabón más débil suele ser la label quality, no el tamaño en parámetros. Construir un audit trail y devolver las inconsistencias (inconsistency) al labeler es un atajo para mejorar la estabilidad de la alineación.
+\end{knowledgebox}
+
+\subsection{Regularización de la política y estrategias de muestreo}
+
+La KL no es solo un regularizer; también es un medio para mantener la diversidad durante el sampling:
+\begin{itemize}
+    \item En PPO se usa una KL constraint para vigilar el drift de la política; si la KL de algún rollout supera el umbral, se regresa de inmediato a la reference.
+    \item Se añade un entropy bonus para que la política no haga collapse hacia una solución deterministic.
+    \item Con temperature sweep y rejection sampling se evalúa la risk surface del reward model, y el resultado se registra en el rollout ledger.
+\end{itemize}
+
+\begin{importantbox}{La KL como mecanismo de revisión}
+Archit enfatiza: \textit{«La KL hace que el modelo escuche la autocrítica de la política de referencia antes de alejarse demasiado»}; esto mantiene un diálogo sano entre el reward model y la reference policy.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+El pipeline completo de RLHF: instruction finetuning $\to$ entrenamiento del modelo de recompensa $\to$ optimización con PPO. El control de calidad de los datos, la regularización KL y las estrategias de muestreo garantizan en conjunto que el reward model no se desvíe; solo así el LM se convierte en un asistente confiable.

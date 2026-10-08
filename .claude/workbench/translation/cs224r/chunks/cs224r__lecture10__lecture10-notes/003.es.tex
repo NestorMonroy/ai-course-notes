@@ -1,0 +1,169 @@
+\section{Parte 1: técnicas clásicas de RL aplicadas al razonamiento de LLM}
+
+\subsection{Modelar el razonamiento como un problema de RL}
+
+\begin{importantbox}{Modelado como MDP}
+Un problema de razonamiento matemático se modela como un MDP:
+\begin{itemize}
+    \item \textbf{Estado} $s_t$: enunciado del problema + prefijo de la solución generado hasta el momento (secuencia de tokens)
+    \item \textbf{Acción} $a_t$: el siguiente paso de razonamiento (puede ser un token o un paso/oración de razonamiento)
+    \item \textbf{Recompensa} $r$: por lo general, una recompensa terminal dispersa; solo cuando se ha generado la solución completa se verifica si la respuesta es correcta (outcome-based reward)
+    \item \textbf{Política} $\pi_\theta(a_t | s_t)$: el propio modelo de lenguaje
+\end{itemize}
+\end{importantbox}
+
+\subsection{Ampliación de datos: aumentar el número de problemas y de soluciones}
+
+En el escenario más sencillo, se recopilan más pares (problema, solución) para hacer ajuste fino supervisado (SFT). Los experimentos de Setlur et al. (NeurIPS 2024) muestran lo siguiente:
+
+\begin{itemize}
+    \item En GSM8K, el error de prueba de SFT converge, conforme aumenta el número de problemas, a una tasa aproximada de $|\mathcal{D}|^{-0.15}$
+    \item En MATH es más lento, aproximadamente $|\mathcal{D}|^{-0.05}$
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-10.jpg}
+\caption{Warmup: comportamiento de scaling al aumentar el número de problemas y de soluciones Oracle\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 10.}
+
+\begin{knowledgebox}{RFT (Rejection Fine-Tuning)}
+RFT es un método sencillo que aprovecha la señal de RL para mejorar el SFT: se muestrean varias soluciones con el modelo actual y solo se conservan las que tienen la respuesta correcta para el ajuste fino. Esto equivale a una forma simplificada de offline RL, porque filtra los datos de entrenamiento mediante la señal de recompensa.
+\end{knowledgebox}
+
+\subsection{Por qué RFT deja de funcionar al seguir acumulando datos}
+
+El ponente subraya que RFT no es una estrategia que mejore indefinidamente con solo «muestrear más y entrenar más tiempo». El problema es que estas muestras positivas on-policy provienen de la distribución de comportamiento del propio modelo y arrastran los sesgos que la política actual ya ha formado. A corto plazo, el modelo puede aprender a «corregirse a sí mismo» en los prompts de entrenamiento, pero esa corrección suele no ser un dominio real de las regularidades del razonamiento, sino la memorización de patrones de trayectoria específicos.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-11.jpg}
+\caption{Punto de inflexión del scaling de RFT: seguir ajustándose a muestras positivas on-policy perjudica la generalización\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 11.}
+
+\begin{warningbox}{El riesgo central de RFT es que se refuercen pasos espurios}
+Si en cierto tipo de problemas el modelo genera por casualidad pasos intermedios que conducen a la respuesta correcta pero que no son lógicamente sólidos, RFT también tratará esos pasos como «muestras aprendibles» y los amplificará. Que el error de entrenamiento baje no significa que el razonamiento sea más estable; puede indicar únicamente que el modelo repite mejor sus propios hábitos previos.
+\end{warningbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-12.jpg}
+\caption{Los pasos espurios hacen que el modelo se desvíe de la trayectoria de resolución correcta en la prueba\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 12.}
+
+\subsection{RL fuera de línea: aprovechar la ventaja de las muestras negativas}
+
+Idea central: no solo hay que usar las soluciones correctas (muestras positivas), sino también aprovechar las \textbf{soluciones incorrectas} (muestras negativas) para obtener una señal de contraste.
+
+\begin{importantbox}{El concepto de Per-Step Advantage}
+Para cada paso de razonamiento de una solución incorrecta, puede estimarse la «ventaja» (advantage) de ese paso haciendo varios rollouts a partir de él. Si los rollouts que parten de cierto paso intermedio fallan siempre, ese paso es un «paso erróneo»; si a veces tienen éxito y a veces fallan, el paso es un «paso aceptable». En esencia, esto equivale a estimar la función de valor de la política de rollout.
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-15.jpg}
+\caption{Señal de ventaja que aportan los datos on-policy de muestras negativas\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 15.}
+
+El RL fuera de línea usa estas estimaciones de ventaja de dos maneras:
+
+\begin{enumerate}
+    \item \textbf{Option 1}: usar solo la ventaja estimada para un SFT ponderado (aumentar el peso de los pasos correctos y reducir el de los pasos erróneos)
+    \item \textbf{Option 2}: usar DPO (Direct Preference Optimization), conservando parte de los rollouts provenientes de $\tilde{\pi}$ para un entrenamiento por contraste de preferencias
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-20.jpg}
+\caption{Offline RL (DPO) con Advantage\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 20.}
+
+\subsection{Qué describe realmente la advantage}
+
+Este es el punto técnico de toda la clase que más conviene repasar. Aviral Kumar convierte de forma explícita la pregunta de «si vale la pena conservar cada paso» en un problema de estimación de valor: se fija un paso intermedio, se continúan los rollouts desde ahí y se observa varias veces la tasa de éxito final. Si después de cierto paso casi siempre se fracasa, ese paso debe recibir una advantage negativa; si la tasa de éxito posterior es claramente mayor, ese paso llevó el proceso de búsqueda hacia una región mejor.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-17.jpg}
+\caption{Intuición de la advantage: comparar el cambio de valor antes y después de dar un paso\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 17.}
+
+\begin{knowledgebox}{De step filtering al aprendizaje de preferencias}
+Una vez que se obtiene la step-level advantage, hay dos usos muy naturales para el entrenamiento:
+\begin{enumerate}
+    \item Filtrado directo: conservar solo los pasos con advantage alta para formar datos de imitation más limpios.
+    \item Formar pares de preferencia: combinar pasos buenos con pasos malos, y fragmentos de trayectoria buenos con fragmentos malos, en preference pairs, y luego optimizar con objetivos como DPO.
+\end{enumerate}
+Esta es también la línea principal que la clase subraya una y otra vez: \textbf{el valor del RL no está solo en la reward final, sino en convertir una señal de resultado dispersa en una supervisión de entrenamiento más densa.}
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-19.jpg}
+\caption{En los experimentos, el advantage filtering mitiga de forma notable el problema de los pasos espurios\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 19.}
+
+\begin{warningbox}{Limitaciones del RL fuera de línea}
+El problema central de Offline RL es que existe un desplazamiento de distribución (distribution shift) entre la política de rollout $\tilde{\pi}$ que se usa para estimar la advantage y la política $\pi_\theta$ que se está entrenando. A medida que avanza el entrenamiento y $\pi_\theta$ se actualiza, la estimación de la advantage se vuelve imprecisa.
+\end{warningbox}
+
+\subsection{RL en línea: REINFORCE y PPO}
+
+Para resolver el problema de desplazamiento de distribución del RL fuera de línea, el RL en línea muestrea continuamente datos nuevos con la política actual durante el entrenamiento.
+
+Flujo básico del RL en línea:
+\begin{enumerate}
+    \item Muestrear varias soluciones para cada problema con la política actual $\pi_\theta$
+    \item Evaluar esas soluciones con un modelo de recompensa o un verificador
+    \item Estimar la ventaja (advantage) de cada paso
+    \item Actualizar la política con métodos de gradiente de política (como REINFORCE o PPO)
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-25.jpg}
+\caption{Per-Step Advantages in Online RL\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 25.}
+
+Una pregunta central es: \textbf{¿conviene hacer rollouts en línea, en tiempo real, para estimar la advantage?} El ponente menciona que puede entrenarse un modelo de recompensa de proceso parametrizado (Process Reward Model, PRM) que prediga la advantage de cada paso, con lo que se evitan los costosos rollouts en línea.
+
+\subsection{PAV: convertir la outcome reward en dense reward}
+
+Si lo central del offline RL es convertir también las trayectorias erróneas en supervisión valiosa, lo central del online RL es hacer todavía más densa la señal de recompensa. El Process Advantage Verifier (PAV) que proponen Setlur et al. en «Rewarding Progress» sirve justamente para eso: aprende a predecir la mejora marginal que un paso de razonamiento aporta a la tasa de éxito posterior y, de este modo, reescribe la recompensa 0/1, que antes solo aparecía cuando la respuesta era correcta, como un dense bonus que recorre toda la cadena de la solución.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-26.jpg}
+\caption{PAV usa un verificador de ventaja parametrizado para dar a cada paso una señal de entrenamiento más fina\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 26.}
+
+\begin{importantbox}{Por qué la dense reward es especialmente adecuada para tareas de razonamiento}
+El espacio de búsqueda del razonamiento matemático y de código es enorme, y las trayectorias correctas son muy escasas. Depender solo de la reward de la respuesta final equivale a pedirle al modelo que busque a ciegas casi sin retroalimentación intermedia; en cambio, el step-level bonus que aporta PAV le indica de forma continua al modelo si el paso actual lo acerca a un espacio de soluciones con más probabilidad de éxito.
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-27.jpg}
+\caption{El online RL con dense reward ofrece mejor eficiencia de muestreo y mejor desempeño\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 27.}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-28.jpg}
+\caption{El valor de exploración de PAV: ayuda al modelo a encontrar soluciones que antes le resultaban difíciles de alcanzar\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 28.}
+
+\subsection{Resumen de la sección}
+
+Las técnicas clásicas de RL (SFT $\to$ RFT $\to$ Offline RL $\to$ Online RL) forman una cadena de herramientas que se refuerza paso a paso. El takeaway central es que el entrenamiento con RL puede mejorar de forma notable la eficiencia de datos del razonamiento de los LLM: frente al SFT puro, la mejora es de unas 8 veces.
