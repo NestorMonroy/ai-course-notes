@@ -1,0 +1,679 @@
+\documentclass[a4paper]{article}
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+% FandolSong no cubre algunos caracteres de nombres (U+73FA); WenQuanYi Zen Hei sí.
+\usepackage[AutoFallBack=true]{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+\setCJKfallbackfamilyfont{\CJKrmdefault}{WenQuanYi Zen Hei}
+% polyglossia no traduce los nombres de listings.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{subcaption}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{float}
+\newtcolorbox{knowledgebox}[1]{enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black, coltitle=white, fonttitle=\bfseries, title={#1}, boxrule=1pt, sharp corners}
+\newtcolorbox{importantbox}[1]{enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black, coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners}
+\newtcolorbox{warningbox}[1]{enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black, coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners}
+\lstset{basicstyle=\ttfamily\small, keywordstyle=\color{blue}, stringstyle=\color{red!60!black}, commentstyle=\color{green!60!black}, breaklines=true, frame=single, numbers=left, numberstyle=\tiny\color{gray}, captionpos=b, extendedchars=true}
+\newcommand{\notetitle}{CS224R Lecture 7: Offline RL}
+\newcommand{\noteauthors}{Elaboradas a partir de materiales públicos del curso}
+\newcommand{\notedate}{Primavera de 2025}
+\newcommand{\videochannel}{Stanford Online}
+\newcommand{\videopublishdate}{2025-05}
+\newcommand{\videoduration}{aproximadamente 80 minutos}
+\newcommand{\videourl}{https://cs224r.stanford.edu/spring\_2025/}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+% Footer with repo info
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\thepage}
+\fancyfoot[R]{\footnotesize\color{gray}\href{\repourl}{AI Course Notes}}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\begin{document}
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}\vspace{0.8cm}
+{\large \noteauthors\par}\vspace{0.3cm}
+{\large \notedate\par}\vspace{1.1cm}
+\ifdefempty{\videocoverpath}{{\small Portada no disponible.\par}}{\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par}
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\textbf{Docente}: Chelsea Finn\par
+\textbf{Página del curso}: \href{https://cs224r.stanford.edu/spring_2025/}{cs224r.stanford.edu}\par
+\textbf{Página del proyecto}: \href{\repourl}{\nolinkurl{\repourl}}\par
+\end{tcolorbox}
+\end{titlepage}
+\tableofcontents
+\newpage
+
+\section{Por qué se necesita Offline RL}
+
+\begin{importantbox}{Definición de Offline RL}
+Dado un \textbf{conjunto de datos estático} $\mathcal{D}$ recolectado por una política de comportamiento desconocida $\pi_\beta$, entrenar, \textbf{sin recolectar datos nuevos}, una política $\pi_\theta$ que maximice la recompensa.
+\end{importantbox}
+
+El valor de Offline RL:
+\begin{itemize}
+    \item Aprovechar los datos ya recolectados por humanos o por sistemas existentes.
+    \item La recolección de datos en línea puede ser peligrosa o costosa.
+    \item Reutilizar los datos de experimentos, proyectos o robots anteriores.
+\end{itemize}
+
+\begin{knowledgebox}{Online vs. Offline RL}
+Online RL alterna entre «recolectar datos» y «actualizar la política». Offline RL solo cuenta con un conjunto de datos estático, y el despliegue ocurre hasta que termina el entrenamiento. También es posible entrenar primero offline y después online (modo híbrido).
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Offline RL resuelve el problema de «cómo aprender una buena política a partir de datos ya existentes, sin interactuar con el entorno».
+
+\section{¿Usar directamente un algoritmo off-policy?}
+
+¿Es posible usar directamente en un conjunto de datos estático un algoritmo off-policy como SAC?
+
+\begin{warningbox}{Problema de sobreestimación de la función Q}
+Cuando se consulta la función Q en \textbf{acciones no vistas} en el conjunto de datos, los valores Q inicializados aleatoriamente pueden ser arbitrariamente altos o bajos. La política buscará las acciones en las que la función Q sea \textbf{demasiado optimista}, que son precisamente aquellas en las que la función Q es menos confiable.
+\\[6pt]
+Tras la actualización de la política, los valores Q terminan muy sobreestimados, lo que provoca un colapso del desempeño. La causa raíz es el \textbf{desplazamiento de distribución} entre la política aprendida $\pi_\theta$ y la política de comportamiento $\pi_\beta$.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Usar directamente un algoritmo off-policy en un entorno offline falla porque la función Q sobreestima en acciones fuera de distribución. El reto central del RL offline es mitigar esta sobreestimación.
+\section{Offline RL supera al aprendizaje por imitación}
+
+\begin{importantbox}{Empalme de trayectorias (Trajectory Stitching)}
+Los datos offline pueden no contener trayectorias buenas completas, pero pueden contener \textbf{fragmentos de buen comportamiento}. Por ejemplo, la primera mitad de la trayectoria A es buena y la segunda mitad de la trayectoria B es buena. Un buen método de RL offline puede empalmar estos fragmentos y aprender una política mejor que cualquier trayectoria individual. El aprendizaje por imitación no puede lograr esto.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Al aprovechar la información de la recompensa y el empalme de trayectorias, el RL offline puede superar el desempeño de la política de comportamiento, algo que el aprendizaje por imitación puro no puede lograr.
+
+\section{Métodos implícitos de restricción de política}
+
+\subsection{Filtered/Weighted Imitation Learning}
+
+El baseline más simple: solo imitar las trayectorias o transiciones de \textbf{alta recompensa} en los datos, o ponderar por recompensa.
+
+\subsection{IQL: Implicit Q-Learning}
+
+La idea central de IQL: evitar consultar la función Q en acciones fuera del conjunto de datos.
+
+\textbf{Ajuste de la función V}: usa la pérdida expectile para que $V$ tienda a aprender la parte de comportamiento en los datos con valores Q más altos:
+$$\hat{V}(s) \leftarrow \arg\min_{V} \mathbb{E}_{(s,a) \sim \mathcal{D}} \left[\ell_\lambda^2\left(V(s) - \hat{Q}(s, a)\right)\right]$$
+
+donde la pérdida expectile asigna un peso mayor al error positivo ($\lambda > 0.5$), lo que hace que $V$ se incline hacia las mejores acciones de los datos.
+
+\textbf{Ajuste de la función Q}: usa $V$ en lugar de $\max$ para evitar consultas OOD:
+$$\hat{Q}(s, a) \leftarrow \arg\min_{Q} \mathbb{E}_{(s,a,s') \sim \mathcal{D}} \left[\left(Q(s,a) - (r + \gamma \hat{V}(s'))\right)^2\right]$$
+
+\subsection{Resumen de la sección}
+
+IQL resuelve el problema de la sobreestimación evitando por completo consultar la función Q en acciones fuera de los datos, y es un método de RL fuera de línea sencillo y elegante.
+
+\section{Métodos conservadores}
+
+\subsection{CQL: Conservative Q-Learning}
+
+La idea de CQL es más directa: agregar un \textbf{término de penalización} en la actualización de la función Q, para reducir activamente los valores Q.
+
+$$\hat{Q} = \arg\min_{Q} \max_\mu \; \mathbb{E}_{(s,a,s') \sim \mathcal{D}}\left[(Q(s,a) - (r + \gamma \mathbb{E}_\pi\left[Q(s', a')\right]))^2\right] + \alpha \mathbb{E}_{s \sim \mathcal{D}, a \sim \mu(\cdot|s)}\left[Q(s,a)\right] - \alpha \mathbb{E}_{(s,a) \sim \mathcal{D}}\left[Q(s,a)\right]$$
+
+\begin{itemize}
+    \item Primer término: actualización TD estándar.
+    \item Segundo término: reduce el valor Q de todas las acciones ($\mu$ cubre todo el espacio de acciones).
+    \item Tercer término: restablece el valor Q de las acciones presentes en los datos (para no reducirlo en exceso).
+\end{itemize}
+
+Puede demostrarse que, para un $\alpha$ suficientemente grande, el valor Q aprendido es \textbf{conservador} (subestimado en vez de sobreestimado) bajo la distribución de la política.
+
+\subsection{Implementación de CQL}
+
+Cuando se usa regularización de máxima entropía, el $\mu(a|s) \propto \exp(Q(s,a))$ óptimo hace que el término de penalización se convierta en $\log \sum_a \exp(Q(s,a))$, sin necesidad de construir $\mu$ de manera explícita.
+
+\subsection{Resumen de la sección}
+
+CQL reduce activamente los valores Q para evitar la sobreestimación, y es otro método eficaz de RL fuera de línea. A diferencia de la restricción implícita de IQL, CQL construye una estimación conservadora de manera explícita.
+
+\section{Conjuntos de datos y problemas de distribución}
+
+\subsection{Observación tridimensional de la calidad de los datos}
+
+Los conjuntos de datos de Offline RL no son una caja negra; el docente enfatiza: entender el origen de los datos, su cobertura y la distribución de las recompensas es lo que permite guiar de manera efectiva la elección del algoritmo.
+
+\begin{itemize}
+    \item \textbf{Cobertura}: si las combinaciones estado-acción son uniformes, si existen regiones dispersas
+    \item \textbf{Estructura de la recompensa}: si la recompensa es densa, si tiene ruido, si tiene valores atípicos
+    \item \textbf{Diversidad conductual}: si los datos contienen una sola política de comportamiento o una mezcla de varias
+\end{itemize}
+
+\begin{importantbox}{Elegir el algoritmo a partir de la calidad de los datos}
+Cuando la cobertura de los datos es amplia y la recompensa es limpia, pueden aprovecharse métodos más agresivos de bootstrapping (como IQL); cuando los datos presentan muestras de baja calidad o la recompensa se desvía, conviene priorizar métodos Conservative o el filtrado de muestras basado en la recompensa.
+\end{importantbox}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.2\textwidth} p{0.25\textwidth} p{0.25\textwidth} p{0.2\textwidth}}
+\toprule
+Característica de los datos & Descripción esquemática & Riesgo & Estrategia recomendada \\
+\midrule
+Alta recompensa, baja cobertura & La misma trayectoria se repite & Sobreajuste, falta de generalización & Reforzar la regularization, incorporar aumento de datos \\
+Baja recompensa pero diversa & Varias políticas suboptimal & Q overestimation on rare good actions & Filtrar muestras de baja recompensa, usar expectile distortion \\
+Comportamiento mixto & Mezcla de varias políticas sin etiquetar & Difícil definir la política de comportamiento & Entrenamiento por segmentos que da mayor peso a behavior cloning \\
+\bottomrule
+\end{tabular}
+\caption{Elegir la estrategia de offline RL según la distribución de los datos}
+\end{table}
+
+\subsection{Resumen de la sección}
+
+El éxito de Offline RL depende de una comprensión precisa de la cobertura de los datos, la calidad de la recompensa y la diversidad conductual. Ajustar la estrategia según las características de los datos (filter/IQL/CQL) es más seguro que fijar un algoritmo.
+
+\subsection{Caso: construcción de un pipeline de datos mixtos}
+
+Los equipos de proyecto suelen mezclar simulator logs, human logs y expert trajectories, y vuelven a ponderar las muestras según la recompensa y el importance sampling:
+
+\begin{enumerate}
+    \item Primero se calcula el effective sample size de cada trayectoria.
+    \item Los datos se dividen en bins según el reward percentile y se les asigna un sampling weight distinto.
+    \item Se usa el expectile de IQL para evaluar la distribución de Q en cada bin, y se vuelve a muestrear en ambos extremos para mantener la estabilidad.
+    \item Si el expectile se sale del intervalo previsto, se regresa al modo conservative o se filtra el bin anómalo.
+\end{enumerate}
+
+\begin{knowledgebox}{Ventajas del pipeline de datos mixtos}
+El sesgo de las distintas fuentes de datos difiere: el simulator es más preciso pero carece de diversidad, mientras que los human data tienen ruido pero son más naturales. El pipeline mixto, mediante re-weighting, permite que el algoritmo sea a la vez robusto y capaz de generalizar.
+\end{knowledgebox}
+\section{Desplazamiento de distribución y diagnóstico}
+
+\subsection{Shift Detection Checklist}
+
+Los entornos offline suelen enfrentar desplazamientos en dos dimensiones: la dinámica del entorno (transition shift) y la descripción de la reward (reward shift). Es necesario monitorearlos de manera periódica.
+
+\begin{enumerate}
+    \item Calcular el cambio en los state-action marginals entre la policy actual y la política de comportamiento (KL or JS divergence).
+    \item Monitorear el reward distribution drift; si la reward cambia por factores externos, es necesario volver a etiquetar o normalizar.
+    \item Evaluar la sensibilidad al desplazamiento con el error de behavior cloning; un error alto sugiere que el modelo está en una región «desconocida».
+\end{enumerate}
+
+\begin{knowledgebox}{Señales tempranas de distribution shift}
+Si al ejecutar la policy objetivo únicamente sobre los datos de registro la reward fluctúa de manera intensa y la action entropy aumenta con rapidez, esto indica que la policy está explorando regiones alejadas del conjunto de entrenamiento y es necesario introducir cuanto antes una conservative regularization.
+\end{knowledgebox}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.22\textwidth} p{0.26\textwidth} p{0.26\textwidth}}
+\toprule
+Método de diagnóstico & Métrica de salida & Umbral típico \\
+\midrule
+KL divergence(s\|s_\beta) & inferior a 0.2 & la distribución de estados no se ha desplazado de manera significativa \\
+Reward overlap & diferencia de medianas < 5\% & el reward shift está bajo control \\
+BC loss ratio & entrenamiento vs. actual > 1.5 & posible ingreso a una región OOD \\
+\bottomrule
+\end{tabular}
+\caption{Métricas comunes para monitorear el desplazamiento de distribución}
+\end{table}
+
+\subsection{Resumen de la sección}
+
+Detectar el distribution shift requiere combinar métricas de varias dimensiones: la divergence del action space, el reward drift y el BC loss ratio. Activar con anticipación una estrategia conservative o ajustar el reward scaling permite prevenir una catastrophic failure.
+\section{Evaluación y comparativas}
+
+\subsection{Marco de evaluación en varias capas}
+
+El presentador divide la evaluación en tres capas: comparativas fuera de línea (benchmarks), despliegue simulado (sandbox), repetición real (replay evaluation).
+
+\begin{itemize}
+    \item \textbf{Benchmark fuera de línea}: tareas del tipo D4RL, centradas en el normalized score.
+    \item \textbf{Despliegue simulado}: usar un simulator para ejecutar la policy with hold-out reward to detect inflated Q-values.
+    \item \textbf{Evaluación por repetición}: reescribir en el registro la trajectory producida por la policy y verificar si se cumplen reward/constraint.
+\end{itemize}
+
+\begin{importantbox}{Mientras más evaluación, mejor, pero debe dejarse espacio para human-in-the-loop}
+El benchmark automático solo puede verificar capacity; para entender los failure modes también se necesita enlazar un human audit: observar el comportamiento de la policy en situaciones clave (edge case) y complementar con qualitative assessment.
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[page=3,width=0.9\textwidth]{07_cs224r_offline_rl_2025.pdf}
+\caption{Pipeline de evaluación en tres capas descrito en las Lecture slides\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides página 3, resalta la escalera de evaluación de offline RL.}
+
+\subsection{Tabla comparativa de la evaluación}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.2\textwidth} p{0.26\textwidth} p{0.26\textwidth}}
+\toprule
+Capa de evaluación & Propósito principal & Herramientas comunes \\
+\midrule
+Benchmark fuera de línea & Alinear rápidamente la capacidad global & D4RL, offline suites de OpenAI \\
+Replay evaluation & Observar el reward de la policy dentro del replay buffer & replay simulator, human audit \\
+Sandbox deployment & Usar un simulator para acercarse a un entorno cuasi productivo & simulator por dominio + twin models \\
+\bottomrule
+\end{tabular}
+\caption{Tabla comparativa de los niveles de evaluación}
+\end{table}
+
+\subsection{Resumen de la sección}
+
+La evaluación debe incluir tres capas: benchmark, intento en sandbox y verificación por repetición; cada capa puede capturar un modo de failure distinto. La revisión humana sigue siendo indispensable.
+
+\section{Despliegue y monitoreo}
+
+\subsection{Infraestructura de Log + Replay}
+
+Antes de desplegar una offline policy es necesario preparar el logging pipeline:
+
+\begin{itemize}
+    \item Sincronizar la salida de la policy con el reward del entorno, para asegurar que el reward trace esté vinculado con el comportamiento de salida.
+    \item Registrar la action entropy y la Q variance de la policy, para poder reproducir las fallas.
+    \item Definir un alert threshold para los high-risk state (por ejemplo, Q variance > 0.5).
+\end{itemize}
+
+\begin{warningbox}{Deployment: el error más común}
+Sustituir la robust evaluation por «Offline policy + online fine-tuning»: el reward drift solo se descubre después de salir a producción. Lo correcto es validar primero con un replay simulator y después ir abriendo gradualmente el umbral de online interaction.
+\end{warningbox}
+
+\subsection{Panel de monitoreo}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.22\textwidth} p{0.26\textwidth} p{0.26\textwidth}}
+\toprule
+Componente de Dashboard & Métrica & Condición de activación \\
+\midrule
+Policy behavior & Action distribution shift & KL > 0.3 \\
+Reward & Mean reward vs reference & diferencia > 5\% \\
+Q stability & Q variance & > 0.4 \\
+\bottomrule
+\end{tabular}
+\caption{Métricas clave a monitorear después del despliegue}
+\end{table}
+
+\subsection{Resumen de la sección}
+
+Un despliegue confiable depende del registro de logs, la réplica mediante replay y el panel de monitoreo. Configurar de antemano el alert y el control de entropy permite que la offline policy sea más estable después de salir a producción.
+
+\subsection{Ejemplo de visualización del panel de monitoreo}
+
+\begin{figure}[H]
+\centering
+\includegraphics[page=4,width=0.9\textwidth]{07_cs224r_offline_rl_2025.pdf}
+\caption{El dashboard de monitoreo y los alert thresholds mostrados en las Lecture slides\protect\footnotemark}
+\end{figure}
+\footnotetext{Página 4 de las Slides, muestra un dashboard típico; la columna central muestra el control de reward drift.}
+
+\section{Gobernanza y seguridad}
+
+\subsection{Policy Governance Checklist}
+
+\begin{itemize}
+    \item Revisión de seguridad: si cubre los scenarios relacionados con CBRN
+    \item Revisión de costos: si se registra el presupuesto de compute/trajectory
+    \item Auditoría de conducta: si alguien observa las anotaciones de la policy y firma
+\end{itemize}
+
+\begin{knowledgebox}{Governance no es un corte abrupto, es un aviso previo}
+La gobernanza consiste en convertir el pipeline de deployment en un proceso interpretable, no en «pararlo de golpe». Cada policy change debe dejar un trace, y desde el dataset hasta el training y la evaluation, todo debe permitir atribuir responsabilidades.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Lo esencial de la gobernanza es la traceability, la revisión de alineación y la formación de un proceso claro de sign-off. Solo así el Offline RL puede implementarse en escenarios de alto riesgo.
+
+\section{Herramientas y automatización}
+
+\subsection{Pipeline de automatización}
+
+Offline RL necesita encadenar data -> training -> eval -> deploy en un pipeline. Componentes típicos:
+
+\begin{itemize}
+    \item Data versioning: cada entrenamiento apunta a los datos, el reward log y el ID de la behavior policy.
+    \item Training orchestration: Pipeline.com, Kubeflow pipeline disparan el training job.
+    \item Evaluation orchestration: toma de manera automatizada key states del replay buffer y corre el benchmark.
+    \item Deployment gate: si las metrics son anómalas, revierte automáticamente y notifica al owner.
+\end{itemize}
+
+\begin{warningbox}{Una interrupción del pipeline provoca drift}
+En cuanto falta cualquier eslabón del pipeline (data/eval/deploy), los cambios posteriores dejan de poder rastrearse. Es necesario exigir que todo code change pase por un artifact generado por el pipeline, para evitar «correrlo manualmente».
+\end{warningbox}
+
+\subsection{Herramientas de apoyo e integración}
+
+El docente enumeró varias herramientas que se integran bien con offline RL:
+
+\begin{itemize}
+    \item \textbf{Data-versioned storage} (Feathr, Deep Lake) almacena el metadata del dataset.
+    \item \textbf{Experiment tracking} (Weights \& Biases) registra la Q variance y el KL drift.
+    \item \textbf{Policy registry}: registra el policy hash, el deploy timestamp, el sign-off y el enlace al governance doc.
+    \item \textbf{Replay simulator}: hace un replay de las trayectorias de entrenamiento con deterministic seeds y registra las divergences.
+\end{itemize}
+
+\subsection{Resumen de la sección}
+
+El automation pipeline no es solo un pipeline: convierte cada artifact de offline RL en un producto rastreable. El logging en tiempo real más la integración de herramientas facilitan la gobernanza.
+\section{Caso de estudio: Offline RL en el mundo real}
+
+\subsection{Ingeniería compleja de reward}
+
+En los sistemas de interacción humano-máquina, el reward suele incluir múltiples objetivos (accuracy, fairness, latency). El expositor describe un proyecto de LinkedIn: en un sistema de notification se optimizan simultáneamente CTR y retention, por lo que es necesario etiquetar los reward components en el dataset para permitir un entrenamiento descompuesto posterior.
+
+\begin{importantbox}{Truco práctico para reward multiobjetivo}
+En el dataset se precalcula un reward vector (CTR, retention, quality), y durante el offline training se usa una linear combination más CVaR regularization para controlar los worst-case outcomes.
+\end{importantbox}
+
+\subsection{Demostración visual}
+
+\begin{figure}[H]
+\centering
+\includegraphics[page=6,width=0.9\textwidth]{07_cs224r_offline_rl_2025.pdf}
+\caption{Reality check que muestran las slides: alineación entre el reward multiobjetivo y las métricas de deployment\protect\footnotemark}
+\end{figure}
+\footnotetext{Página 6 de las slides, que enfatiza la correspondencia uno a uno entre el reward vector y las deployment metrics.}
+
+\subsection{Resumen de la sección}
+
+En los casos reales el reward es multidimensional; es indispensable precisar a nivel de los datos el significado de cada dimensión, o de lo contrario la offline policy quedará desalineada.
+
+\section{Open Research Directions}
+
+\subsection{Maximizing offline + online handoff}
+
+Varios de los expositores mencionaron hybrid strategies: primero offline, después un fine-tuning online limitado. La pregunta clave es cómo hacer el handoff de manera segura:
+
+\begin{itemize}
+    \item Establecer un clear boundary: ¿en qué situaciones se permite query environment?
+    \item Evaluar el online potential ya en la offline phase (e.g., Q variance in shifted states).
+    \item Usar meta-RL para entrenar la supervisor policy decide when to go online.
+\end{itemize}
+
+\subsection{Counterfactual auditing}
+
+Actualmente el governance todavía depende de los replay logs; en el futuro podría adoptarse counterfactual referents: generar hypothetical trajectories to test safety constraints before deployment.
+
+\begin{knowledgebox}{Counterfactual auditing}
+Usar un learnt world model para generar la comparación de «qué pasaría si la policy hubiera tomado una acción distinta», lo cual permite que el safety team conozca la failure trajectory potencial y así identificar más rápido el policy drift.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Las direcciones de research incluyen el offline→online handoff, counterfactual auditing y una interpretabilidad más fuerte (como los gradient-level tracebacks).
+
+\section{Slides Gallery}
+
+\subsection{Slide: Monitoring Architecture}
+
+\begin{figure}[H]
+\centering
+\includegraphics[page=5,width=0.95\textwidth]{07_cs224r_offline_rl_2025.pdf}
+\caption{La monitoring / deployment architecture que muestran los slides del curso\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 5, que enfatiza la sala de control de monitoreo del offline RL.}
+
+\newpage
+\subsection{Slide: Real-world Deployment Flow}
+
+\begin{figure}[H]
+\centering
+\includegraphics[page=7,width=0.95\textwidth]{07_cs224r_offline_rl_2025.pdf}
+\caption{El flujo de despliegue real que muestran además los slides\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 7, que muestra el ciclo cerrado de rollout → monitor → replay.}
+
+\subsection{Resumen de la sección}
+
+Usar la Slides Gallery para visualizar el esquema de gobernanza/monitoreo ayuda a presentar todo el pipeline a los stakeholders.
+
+\section{Estudio de caso: control de robots}
+
+\subsection{Offline policy in robotics}
+
+En las tareas de robotics, el costo de recopilar datos es alto y el offline RL puede reducir considerablemente los real-world trials. Práctica típica:
+
+\begin{itemize}
+    \item Entrenar la policy en el simulator y hacer replay de las traj clave en el physical robot.
+    \item Usar el reward multiplier del offline dataset para enfatizar las acciones relacionadas con la seguridad (como low velocity).
+    \item Registrar las sensor readings de each deployment run para poder hacer un counterfactual audit de los errores.
+\end{itemize}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.25\textwidth} p{0.2\textwidth} p{0.2\textwidth} p{0.2\textwidth}}
+\toprule
+Task & Data source & Safety guardrail & Offline method \\
+\midrule
+Arm manipulation & Robot logs + human demos & Collision penalties & CQL \\
+Drone navigation & Simulation + recorded flights & Wind model alert & IQL + replay \\
+\bottomrule
+\end{tabular}
+\caption{Configuración de offline RL en escenarios de robots}
+\end{table}
+
+\subsection{Resumen de la sección}
+
+El estudio de caso de robots destaca que son indispensables: la diversidad de data source, el reward carefully shaped y el monitoring & replay.
+
+\section{Rastreos contrafactuales}
+
+\subsection{Contrafactuales basados en repetición}
+
+Counterfactual auditing genera hypothetical alternatives antes del despliegue:
+
+\begin{enumerate}
+    \item Selecciona high-risk state from replay buffer.
+    \item Use world model to generate alternative actions.
+    \item Score each trajectory via reward + safety classifier.
+    \item Si cualquier alternative viola constraints, se activa una revisión manual.
+\end{enumerate}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.3\textwidth} p{0.5\textwidth}}
+\toprule
+Paso & Descripción \\
+\midrule
+State selection & Se elige entre los state con KL drift alto o marcados manualmente \\
+Action generation & Se generan action alternativos con policy + noise o prioritized replay \\
+Audit & Scoring con reward + constraint classifier \\
+Action & Si se marca como flagged, se retrocede el entrenamiento o se aumenta la conservative regularization \\
+\bottomrule
+\end{tabular}
+\caption{Pasos de ejecución de Counterfactual tracebacks}
+\end{table}
+
+\subsection{Demostración visual}
+
+\begin{figure}[H]
+\centering
+\includegraphics[page=8,width=0.9\textwidth]{07_cs224r_offline_rl_2025.pdf}
+\caption{La página 8 de las Slides muestra el counterfactual log pipeline\protect\footnotemark}
+\end{figure}
+\footnotetext{Página 8 de las Slides, enfatiza alternative trajectory scoring.}
+
+\subsection{Resumen de la sección}
+
+Counterfactual audit permite que los equipos de governance identifiquen trayectorias anómalas antes de que ocurra el policy off-behavior.
+
+\section{Lista de verificación de operaciones}
+
+\subsection{Lista de verificación previa al despliegue}
+
+\begin{knowledgebox}{Operations readiness checklist}
+\begin{itemize}
+    \item Archivar el ID de la versión de los datos y el reward log.
+    \item El Training job config debe llevar human sign-off.
+    \item El Monitoring dashboard debe tener un alert threshold configurado.
+    \item El Governance doc debe registrar los expected failure modes.
+\end{itemize}
+\end{knowledgebox}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.28\textwidth} p{0.24\textwidth} p{0.3\textwidth}}
+\toprule
+Elemento de verificación & Frecuencia & Responsable \\
+\midrule
+Dataset audit & Cada publicación de una versión de los datos & Data engineer \\
+Policy rehearse & Cada major update & RL engineer + ops \\
+Monitor smoke test & Cada deployment & Devops \\
+Governance sign-off & Cada governance change & Compliance owner \\
+\bottomrule
+\end{tabular}
+\caption{Operations checklist}
+\end{table}
+
+\subsection{Resumen de la sección}
+
+El Operations checklist hace que cada etapa del offline RL pipeline deje rastro, lo que facilita la auditoría posterior.
+
+\section{Training-Deployment Playbook}
+
+\subsection{Step-by-step plan}
+
+Este playbook conecta training y deployment:
+
+\begin{enumerate}
+    \item Run offline baseline (IQL/CQL) & log metrics.
+    \item Conduct replay evaluation on hold-out states.
+    \item If metrics pass, run sandbox rollouts with limited online interaction.
+    \item Monitor dashboards; if alerts fire, rerun training with higher conservatism.
+    \item Only after compliance sign-off release to production; keep governance log updated.
+\end{enumerate}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.28\textwidth} p{0.2\textwidth} p{0.38\textwidth}}
+\toprule
+Etapa & Responsable & artifact de salida \\
+\midrule
+Training & RL engineer & model weights, training logs, Q variance plot \\
+Evaluation & ML ops & replay traces, benchmark report \\
+Deployment & Devops & rollout plan, dashboard alerts, governance sign-off \\
+\bottomrule
+\end{tabular}
+\caption{Training-Deployment Playbook}
+\end{table}
+
+\subsection{Resumen de la sección}
+
+El playbook le deja claro a devops qué artifact impulsa cada etapa; sin el playbook, el pipeline se rompe.
+
+\section{Frontier Workshop Notes}
+
+\subsection{Workshop focus areas}
+
+El docente también recomendó organizar workshops periódicos, para concentrarse en resolver los open problems dentro de offline RL:
+
+\begin{itemize}
+    \item Lab session: Replay buffer introspection, revisión manual de high-risk trajectories.
+    \item Governance: simulate counterfactual audits + compliance docs in same meeting.
+    \item Tooling: swap data versioning backends, evaluate time-to-recover metrics.
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\includegraphics[page=9,width=0.92\textwidth]{07_cs224r_offline_rl_2025.pdf}
+\caption{La diapositiva 9 resume la agenda del workshop y el checkpoint\protect\footnotemark}
+\end{figure}
+\footnotetext{La diapositiva 9 enumera el checkpoint del workshop y a los responsables.}
+
+\subsection{Resumen de la sección}
+
+El modelo de workshop puede traducir rápidamente los research insights en operational improvements, evitando los knowledge silo.
+
+\section{Retos futuros}
+
+\subsection{Combinación flexible de interpretabilidad y auditoría}
+
+A medida que los modelos se vuelven más poderosos, la simple replay evaluation ya no basta para garantizar la seguridad; es necesario introducir mechanistic interpretability y audit trails.
+
+\begin{itemize}
+    \item Registrar la información del Q gradient que dispara cada action, para facilitar el reverse engineer.
+    \item Combinar el audit log con la governance checklist, formando un ciclo de "explain -> sign off".
+    \item Al actualizar la policy, activar automated sanity checks automatizados y conservar el diff.
+\end{itemize}
+
+\begin{warningbox}{Ignorar la interpretabilidad provoca fallas de cumplimiento}
+Si no hay manera de explicar por qué la policy eligió cierta acción, el equipo de gobernanza la marcará como "opaca", lo que retrasará el despliegue. La interpretabilidad y el compliance son dos dimensiones que se sostienen mutuamente.
+\end{warningbox}
+
+\subsection{Adaptarse a cambios de regulación y de política}
+
+El docente enfatiza que los cambios de política tienen un impacto enorme en los proyectos de offline RL: restricciones al compartir datos, requisitos de logging e incluso la prohibición de ciertas formas de reward shaping. Es necesario dar seguimiento en tiempo real a la regulación y archivar los cambios documentados.
+
+\subsection{Resumen de la sección}
+
+Los proyectos futuros de offline RL deben vincular la interpretability con la governance, y mantener sincronizada la documentación de política con la documentación técnica, para avanzar con solidez bajo presión regulatoria.
+
+\section{Síntesis y ampliación}
+
+\begin{enumerate}
+    \item Offline RL optimiza la política sobre datos estáticos y necesita equilibrar la imitación y la exploración.
+    \item La cobertura del conjunto de datos y la calidad de reward determinan directamente la robustez del método.
+    \item IQL restringe implícitamente la búsqueda mediante expectile V, mientras que CQL impone conservatism mediante explicit penalty.
+    \item La evaluación multinivel, el monitoreo mediante logging y el marco de gobernanza son clave para un despliegue exitoso.
+    \item Monitorear el shift de distribución, Q variance y action entropy permite controlar el riesgo tras el despliegue.
+\end{enumerate}
+
+\subsection{Tabla de síntesis}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.2\textwidth} p{0.24\textwidth} p{0.24\textwidth} p{0.2\textwidth}}
+\toprule
+Dimensión & Problema central & Medida de respuesta & Herramienta típica \\
+\midrule
+Conjunto de datos & Cobertura, calidad de la recompensa & Filtrar recompensas bajas, ponderar imitation & D4RL, dataset diagnostics \\
+Algoritmo & Un desplazamiento grande provoca una sobreestimación de Q & IQL expectile, CQL penalty & IQL codebase, CQL repo \\
+Evaluación & benchmark score vs deployment performance & Evaluación multinivel, human audit & D4RL + replay evaluation + human review \\
+Despliegue & Monitoreo de drift, reward shift & logging/alert + replay & dashboards, entropy targets \\
+Gobernanza & traceability + sign-off & records, policy reviews & notebooks, compliance logs \\
+Tooling & pipeline automation & data-versioning, policy registry & W\&B, Feathr, Kubeflow \\
+Research & offline→online handoff safety & counterfactual auditing & world models, meta RL supervisors \\
+\bottomrule
+\end{tabular}
+\caption{Tabla de control de ingeniería para proyectos de Offline RL}
+\end{table}
+
+\subsection{Acciones adicionales}
+
+\begin{enumerate}
+    \item Usar primero la tabla de dataset diagnostics para identificar trayectorias buenas o malas, y luego decidir si aplicar filter, IQL o CQL.
+    \item Construir un replay simulator antes del despliegue, y reproducir escenarios de alto riesgo mediante replay.
+    \item Establecer un monitor dashboard (action KL, reward gap, Q variance) y definir claramente el alert threshold para el devops team.
+    \item Registrar la audit info de cada actualización de policy (data version, reward log, human sign-off) en el registro de gobernanza.
+\end{enumerate}
+
+\subsection{Lecturas adicionales}
+\begin{itemize}
+    \item Levine et al., \textit{Offline Reinforcement Learning: Tutorial, Review, and Perspectives on Open Problems} (2020).
+    \item Kostrikov et al., \textit{Offline Reinforcement Learning with Implicit Q-Learning} (IQL, 2022).
+    \item Kumar et al., \textit{Conservative Q-Learning for Offline Reinforcement Learning} (CQL, 2020).
+    \item Laskin et al., \textit{Offline Reinforcement Learning with Dense Rewards for Realistic Tasks} (2023).
+    \item cs224r course notes repository for practical code samples: \url{https://cs224r.stanford.edu/spring_2025/lecture/07.html}
+\end{itemize}
+
+\end{document}

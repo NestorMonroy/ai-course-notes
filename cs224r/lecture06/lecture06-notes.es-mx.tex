@@ -1,0 +1,522 @@
+\documentclass[a4paper]{article}
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+% FandolSong no cubre algunos caracteres de nombres (U+73FA); WenQuanYi Zen Hei sí.
+\usepackage[AutoFallBack=true]{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+\setCJKfallbackfamilyfont{\CJKrmdefault}{WenQuanYi Zen Hei}
+% polyglossia no traduce los nombres de listings.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{subcaption}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{float}
+\newtcolorbox{knowledgebox}[1]{enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black, coltitle=white, fonttitle=\bfseries, title={#1}, boxrule=1pt, sharp corners}
+\newtcolorbox{importantbox}[1]{enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black, coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners}
+\newtcolorbox{warningbox}[1]{enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black, coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners}
+\lstset{basicstyle=\ttfamily\small, keywordstyle=\color{blue}, stringstyle=\color{red!60!black}, commentstyle=\color{green!60!black}, breaklines=true, frame=single, numbers=left, numberstyle=\tiny\color{gray}, captionpos=b, extendedchars=true}
+\newcommand{\notetitle}{CS224R Lecture 6: Q-Learning}
+\newcommand{\noteauthors}{Elaboradas a partir de materiales públicos del curso}
+\newcommand{\notedate}{Primavera de 2025}
+\newcommand{\videochannel}{Stanford Online}
+\newcommand{\videopublishdate}{2025-04}
+\newcommand{\videoduration}{aproximadamente 80 minutos}
+\newcommand{\videourl}{https://cs224r.stanford.edu/spring\_2025/}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+% Footer with repo info
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\thepage}
+\fancyfoot[R]{\footnotesize\color{gray}\href{\repourl}{AI Course Notes}}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\begin{document}
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}\vspace{0.8cm}
+{\large \noteauthors\par}\vspace{0.3cm}
+{\large \notedate\par}\vspace{1.1cm}
+\ifdefempty{\videocoverpath}{{\small Portada no proporcionada.\par}}{\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par}
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\textbf{Ponente}: Chelsea Finn\par
+\textbf{Página del curso}: \href{https://cs224r.stanford.edu/spring_2025/}{cs224r.stanford.edu}\par
+\textbf{Página del proyecto}: \href{\repourl}{\nolinkurl{\repourl}}\par
+\end{tcolorbox}
+\end{titlepage}
+\tableofcontents
+\newpage
+
+\section{De actor-critic a métodos puramente basados en valor}
+
+Las clases anteriores presentaron el método actor-critic: mantiene simultáneamente una política (actor) y una función de valor (critic). Q-Learning va más lejos: \textbf{elimina por completo la política explícita} y solo aprende la función Q, de la cual se deriva implícitamente la política.
+
+\begin{knowledgebox}{Basado en valor vs. actor-critic}
+\begin{itemize}
+    \item \textbf{Actor-Critic}: aprende simultáneamente la política $\pi_\theta$ y la función de valor $\hat{V}$ o $\hat{Q}$.
+    \item \textbf{Basado en valor (Q-Learning)}: solo aprende la función Q óptima $Q^*$, y la política queda implícita como $\pi(s) = \arg\max_a Q^*(s, a)$.
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Q-Learning es un método puramente basado en valor que no necesita una red de política explícita.
+
+\section{Fundamentos de Q-Learning}
+
+\subsection{Función Q óptima}
+
+\begin{importantbox}{Ecuación óptima de Bellman}
+La función Q óptima $Q^*$ satisface:
+$$Q^*(s, a) = r(s, a) + \gamma \max_{a'} Q^*(s', a')$$
+
+Propiedad clave: la política $\pi^*(s) = \arg\max_a Q^*(s, a)$ correspondiente a $Q^*$ es óptima entre todas las políticas.
+\end{importantbox}
+
+A diferencia de actor-critic, donde se ajusta $Q^\pi$ (la función Q de la política actual), Q-Learning ajusta directamente $Q^*$ (la función Q de la política óptima), usando el máximo en lugar de $\mathbb{E}_{a' \sim \pi}$.
+
+\subsection{Algoritmo DQN}
+
+Deep Q-Network (DQN) usa una red neuronal profunda para parametrizar $Q_\phi(s, a)$:
+
+$$\min_\phi \sum_{(s,a,r,s') \in \mathcal{B}} \left\| Q_\phi(s, a) - \left(r + \gamma \max_{a'} Q_{\phi'}(s', a')\right) \right\|^2$$
+
+\begin{importantbox}{Técnicas clave de DQN}
+\begin{itemize}
+    \item \textbf{Replay Buffer}: almacena todas las transiciones históricas y muestrea aleatoriamente para romper la correlación entre los datos.
+    \item \textbf{Target Network}: usa un $Q_{\phi'}$ de actualización retrasada para calcular el TD target, evitando la inestabilidad de «perseguirse a sí mismo».
+    \item \textbf{Exploración $\epsilon$-Greedy}: con probabilidad $\epsilon$ se elige una acción aleatoria, de lo contrario se elige $\arg\max_a Q(s,a)$.
+\end{itemize}
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+ 
+Q-Learning obtiene la política óptima de manera indirecta al ajustar la función Q óptima. DQN extiende Q-Learning a espacios de estados de alta dimensión; replay buffer y target network son las técnicas clave de estabilización.
+
+\section{Recolección de datos y gestión del Replay Buffer}
+
+\subsection{Los buenos datos moldean la generalización}
+
+Q-Learning es un método off-policy típico, y durante el entrenamiento se pueden reutilizar transitions históricas, por lo que la calidad de los datos determina directamente el resultado.
+
+\begin{importantbox}{Marco de calidad de datos en tres dimensiones}
+\begin{enumerate}
+    \item \textbf{Coverage}: si los pares estado-acción cubren toda la distribución de entrenamiento.
+    \item \textbf{Freshness}: los datos antiguos pueden quedar obsoletos, sobre todo cuando la política itera muy rápido.
+    \item \textbf{Signal-to-Noise}: si la cadena causal entre la recompensa y el siguiente estado es suficientemente clara.
+\end{enumerate}
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth,page=1]{06_cs224r_qlearning_2025.pdf}
+\caption{Slide: sesgo de distribución en el muestreo del replay buffer y estrategias de corrección}
+\end{figure}
+
+\subsection{Repetición de experiencia priorizada y corrección de la distribución}
+
+La repetición de experiencia priorizada (PER) asigna la probabilidad de muestreo según el TD Error, de modo que el entrenamiento se concentre más en las muestras de alto valor o alto error. Los métodos de corrección incluyen:
+
+\begin{itemize}
+    \item el importance sampling weight, que se usa para contrarrestar el muestreo no uniforme
+    \item los hiperparámetros alpha y beta, que controlan la intensidad del muestreo y de la corrección
+\end{itemize}
+
+\begin{knowledgebox}{Consejos de práctica de ingeniería para el Replay Buffer}
+1. Limpiar periódicamente los elementos demasiado antiguos para evitar el sesgo de «arranque en frío». 2. Mantener el buffer size en el orden de millones para equilibrar la diversidad de las muestras. 3. Mantener varios buffers para distintas tareas (exploration vs. demonstration).
+\end{knowledgebox}
+
+\subsection{Caso: flujo de muestreo de Atari Replay}
+
+Tomando como ejemplo el Q-Learning clásico de Atari, el pipeline de entrenamiento puede simplificarse en los siguientes pasos:
+
+\begin{enumerate}
+    \item Recolectar transitions originales mediante epsilon-greedy e insertarlas en el `online buffer`.
+    \item Cada 1k steps, generar un mini-batch con prioritized sampling y registrar al mismo tiempo la TD error distribution.
+    \item Visualizar el TD error como una curva; si la dirección de la cola larga se desplaza de manera sostenida, activar `replay augmentation` (#32, #64 sampling).
+    \item Colocar periódicamente por adelantado los lotes de alta varianza en el `high-priority buffer` para su evaluación y debugging.
+\end{enumerate}
+
+\begin{importantbox}{Checklist de monitoreo del Replay}
+\begin{itemize}
+    \item Registrar el replay hit ratio, y asegurar que la tasa de reutilización del muestreo se mantenga entre 70-95\%.
+    \item Cuando el `TD error` aumenta, incrementar automáticamente `beta` para reforzar la corrección del importance sampling.
+    \item Copiar las human-verified failure transitions a un buffer separado, para facilitar la inspección posterior.
+\end{itemize}
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La naturaleza off-policy de Q-Learning hace del replay buffer el motor del rendimiento; la estrategia de muestreo y la calidad de los datos determinan directamente la capacidad de generalización final.
+
+\section{Retos de los espacios de acción continuos}
+
+La forma original de DQN solo funciona con espacios de acción \textbf{discretos} (la red produce el valor Q de cada acción y luego se toma el argmax). Para espacios de acción continuos, $\max_a Q(s,a)$ es en sí mismo un problema de optimización.
+
+Las soluciones incluyen:
+\begin{enumerate}
+    \item \textbf{Discretización}: discretizar el espacio continuo, aunque la maldición de la dimensionalidad es severa.
+    \item \textbf{Muestreo}: muestrear aleatoriamente varias acciones y tomar la de mayor valor Q.
+    \item \textbf{Aprender un actor}: volver al marco de actor-crítico (como SAC).
+    \item \textbf{DDPG}: entrenar una red de política determinista $\mu_\theta(s) = \arg\max_a Q(s,a)$.
+\end{enumerate}
+
+\begin{warningbox}{Dificultades de Q-Learning en espacios continuos}
+Q-Learning puro en un espacio de acción continuo necesita resolver el problema de optimización interno $\max_a Q(s,a)$, lo cual es computacionalmente costoso en espacios de alta dimensión. Esta es también la razón por la que, en tareas de control continuo, los métodos de actor-crítico (como SAC) suelen preferirse frente a Q-learning puro.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+ 
+Q-Learning es natural y eficiente en espacios de acción discretos, pero en espacios de acción continuos requiere técnicas adicionales o volver a los métodos de actor-crítico.
+
+\section{Estrategias de estabilización y regularización}
+
+\subsection{Bootstrapping y normalización de gradientes}
+
+El bootstrapping vincula la salida de la red con su propio objetivo, lo que fácilmente provoca explosión de gradientes. En la práctica se suelen usar el recorte de gradientes y la normalización para controlarla.
+
+\begin{importantbox}{Referencia rápida de técnicas de estabilización}
+\begin{itemize}
+    \item Recorte de gradientes a 1.0, para evitar que actualizaciones demasiado grandes provoquen divergencia.
+    \item Layer normalization y weight decay controlan el rango de la salida.
+    \item La separación entre selección de acción y estimación de valor de Double Q también es parte de las estrategias de estabilización.
+\end{itemize}
+\end{importantbox}
+
+\subsection{Moldeo de recompensa y normas de comportamiento}
+
+En tareas de alta dimensión, usar directamente el reward produce alta varianza. Se puede añadir un shaping term o una entropy penalty para suavizar la learning signal.
+
+\begin{warningbox}{Las trampas del moldeo de recompensa}
+El shaping term debe ser potential-based; de lo contrario puede cambiar la política óptima. Añadir una penalty tampoco debe permitir que el valor de Q crezca sin límite.
+\end{warningbox}
+
+\subsection{Restricción de acciones y recorte de salida}
+
+Para evitar que la salida de la función Q se desvíe, se pueden usar clipping y output constraint:
+
+\begin{itemize}
+    \item Limitar el TD target al observed reward range ± margin, para evitar que la estimación de valor explote.
+    \item Introducir Q regularization (como L2 shrinkage toward previous target) para que las actualizaciones sean más suaves.
+    \item Aplicar clamp tras añadir ruido al muestreo de la action, para garantizar que $\arg\max_a Q(s,a)$ no caiga en una región no observada.
+\end{itemize}
+
+\subsection{Resumen de la sección}
+
+La estabilización debe abordarse simultáneamente desde la señal del gradiente y la señal del comportamiento, para evitar tanto la explosión de la función de valor como la deriva de la política.
+
+\section{Double Q-Learning y el problema de sobreestimación}
+
+\subsection{Sesgo de sobreestimación}
+
+$$\max_{a'} Q_\phi(s', a') \geq Q^*(s', \pi^*(s'))$$
+
+Tomar la operación max sobreestima sistemáticamente el valor de Q, porque elige la \textbf{dirección con más ruido}.
+
+\subsection{Double DQN}
+
+Se usa la red actual para elegir la acción, pero se evalúa con la red target:
+$$y = r + \gamma Q_{\phi'}\left(s', \arg\max_{a'} Q_\phi(s', a')\right)$$
+
+Esto mitiga en cierta medida el problema de sobreestimación.
+
+\subsection{Resumen de la sección}
+
+Q-Learning tiene un sesgo sistemático de sobreestimación. Double Q-Learning mitiga este problema al separar la elección de la acción de su evaluación.
+
+\section{Evaluación, gobernanza y despliegue}
+
+\subsection{Matriz de evaluación multinivel}
+
+Un proceso de evaluación completo debe incluir benchmark automático, trajectory review y stress test:
+
+\begin{itemize}
+    \item Métricas numéricas como `score`, `TD error`, `episode length`
+    \item Revisión manual de failure trajectory / reward hack
+    \item Inyección de ruido, belief shift y perturbation del entorno para probar la estabilidad
+\end{itemize}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.25\textwidth} p{0.25\textwidth} p{0.2\textwidth}}
+\toprule
+Nivel & Métrica & Estrategia de activación \\
+\midrule
+Training eval & Q target, loss, entropy & Divergence or reward plateau \\
+Safety audit & reward hack detection, adversarial action & anomalous trajectories \\
+Deployment sim & latency, repeatability, replicates & hardware change / rollout \\
+\bottomrule
+\end{tabular}
+\caption{Matriz de evaluación y gobernanza}
+\end{table}
+
+\begin{knowledgebox}{Recomendaciones de monitoreo de logs}
+Registrar TD error distribution, max Q target, exploration ratio; configurar \texttt{td\_error > threshold} para activar replay augmentation, y \texttt{reward variance > 2σ} para activar reward shaping review.
+\end{knowledgebox}
+
+\subsection{Checklist de despliegue y gobernanza}
+
+\begin{warningbox}{Las tres «puertas» antes de salir a producción}
+\begin{enumerate}
+    \item El replay buffer solo puede contener transitions verificadas mediante human-in-the-loop.
+    \item El checkpoint debe evitar reward hack, por ejemplo mediante reward clipping + sanity check trajectories.
+    \item Definir condiciones claras de rollback (loss divergence, reward drop > threshold).
+\end{enumerate}
+\end{warningbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth,page=2]{06_cs224r_qlearning_2025.pdf}
+\caption{Slide: Q-Learning deployment guardrails y monitoring stack}
+\end{figure}
+
+\subsection{Evidence Matrix y línea de tiempo de acciones}
+\subsection{Evidence Matrix y línea de tiempo de acciones}
+
+Registrar el evidence matrix en cada ronda de entrenamiento ayuda a ubicar rápidamente la failure root cause. La misma matriz también puede mapearse a un action timeline:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.28\textwidth} p{0.58\textwidth}}
+\toprule
+Evidence & Action \\
+\midrule
+Prediction explosion & Retroceder a un checkpoint con learning rate bajo + aumentar el target damping \\
+Reward spike & Revisar los reward shaping logs, pausar el training y revisar el newly added shaping term \\
+TD error drift & Activar replay augmentation y aumentar el PER alpha \\
+Policy collapse (success rate drop) & Enforce early rollback + high-priority fail buffer replay \\
+\bottomrule
+\end{tabular}
+\caption{Evidence matrix y su línea de tiempo de acciones correspondiente}
+\end{table}
+
+\begin{knowledgebox}{Actions should be traceable}
+Registrar el context (checkpoint id, evidence source, actor responsible) de cada triggered action facilita la auditoría y el replay review.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La matriz de evaluación y el checklist de gobernanza garantizan que el algoritmo de Q-Learning no se vea afectado por reward hack o value explosion después del despliegue.
+\section{Perspectiva de ingeniería: flujo de trabajo de Q-Learning}
+
+\subsection{Ciclo cerrado datos → entrenamiento → despliegue}
+
+El ciclo cerrado típico de un proyecto de ingeniería incluye: recolección de datos → entrenamiento del modelo → revisión de la evaluación → Sim rollout + human feedback → monitoreo en producción.
+
+\begin{importantbox}{Nodos clave del ciclo cerrado}
+1. Recolectar transiciones de alta calidad, evitando que el agente haga trampa. 2. Usar PER + Double Q + regularización para estabilizar el entrenamiento. 3. Reforzar el paradigma de evaluación: replay con humano en el ciclo, etiquetado de casos de fallo. 4. Establecer límites de monitoreo: error de TD, varianza de la recompensa, latencia.
+\end{importantbox}
+
+\subsection{Estrategia de monitoreo en producción}
+
+Después del despliegue, el monitoreo se centra en:
+
+\begin{itemize}
+    \item deriva del `TD error` (si aumenta, es necesario reentrenar o hacer rollback)
+    \item varianza de la recompensa (si disminuye, puede indicar un colapso de la conducta)
+    \item `episode success rate` y `reward per step`, para asegurar que el desempeño no se degrade
+\end{itemize}
+
+\subsection{Resumen de la sección}
+
+El despliegue de ingeniería enfatiza la higiene del replay buffer, la vigilancia del error de TD y el rollback impulsado por telemetría.
+
+\section{Evidencia visual y cronología de la investigación}
+
+\subsection{Slide 3: Pipeline del modelo de Q-Learning}
+
+Esta página muestra el pipeline de Q-Learning desde los datos (from data) hasta el despliegue (deployment); cada etapa requiere un guardrail (replay hygiene, target network, threshold monitor).
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=3]{06_cs224r_qlearning_2025.pdf}
+\caption{Slide: Q-Learning pipeline and guardrail checks}
+\end{figure}
+\newpage
+
+\subsection{Slide 4: Temporal difference y replay dynamics}
+
+La Slide 4 relaciona el TD error con el replay sampling y enfatiza que el muestreo de `high-error` contribuye al prioritized buffer, pero que también requiere revisión humana.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=4]{06_cs224r_qlearning_2025.pdf}
+\caption{Slide: TD error monitoring y prioritized sampling}
+\end{figure}
+\newpage
+
+\subsection{Slide 5: Monitoreo del deployment}
+
+Durante el despliegue se necesita un monitoreo multicanal de la reward distribution, la episode success rate y la latency; la Slide 5 muestra el telemetry stack.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=5]{06_cs224r_qlearning_2025.pdf}
+\caption{Slide: deployment telemetry and alert stack}
+\end{figure}
+\newpage
+
+\subsection{Slide 6: Action timeline and evidence matrix}
+
+La Slide 6 incluye la evidence matrix y explica que cada failure tiene su action timeline correspondiente, tal como muestra la table que agregamos en este documento.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=6]{06_cs224r_qlearning_2025.pdf}
+\caption{Slide: Evidence matrix and action timeline}
+\end{figure}
+\newpage
+
+\subsection{Slide 7: Research directions}
+
+Esta página señala las future directions: multi-step Q-Learning, safety evaluation, sim-to-real.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=7]{06_cs224r_qlearning_2025.pdf}
+\caption{Slide: Research directions for safe Q-Learning}
+\end{figure}
+\newpage
+
+\subsection{Slide 8: Time/Loss visualization}
+
+La Slide 8 muestra el descenso simultáneo de la reward curve y del TD error, lo que ofrece una pista visual para cerrar el documento.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=8]{06_cs224r_qlearning_2025.pdf}
+\caption{Slide: Reward \& TD error visualization}
+\end{figure}
+\newpage
+
+\section{Direcciones de investigación y preguntas abiertas}
+
+\subsection{Replay escalable y priorización}
+
+En tareas de alta dimensión, el replay buffer tradicional no basta para cubrir los nuevos estados que es necesario explorar. La investigación futura debe resolver simultáneamente:
+
+\begin{itemize}
+    \item Cómo hacer que el prioritized sampling sea compatible con la estimación TD de múltiples pasos.
+    \item Cómo integrar demostraciones y correcciones humanas garantizando al mismo tiempo la diversidad del sampling.
+    \item Cómo lograr que el buffer se adapte al desplazamiento de la política (adapt to policy shift), como mediante `exponentially weighted recency`.
+\end{itemize}
+
+\begin{importantbox}{Problema abierto: higiene del replay a gran escala}
+En el entrenamiento distribuido, cuando cada worker escribe en el buffer hay que garantizar que no haya resampleo duplicado ni muestras omitidas; en el futuro se podría usar un vector clock para rastrear la procedencia de la experiencia.
+\end{importantbox}
+
+\subsection{Evaluación robusta y diagnóstico de fallas}
+
+Las fallas del Q-Learning suelen ser encubiertas: reward hacking, caída del retorno, colapso de la política. Además de las métricas de simulación, la investigación también debe resolver:
+
+\begin{itemize}
+    \item Extraer una `evidence matrix` y asociarla automáticamente a las acciones.
+    \item Construir una `mirrored failure suite` para reproducir transiciones catastróficas anteriores.
+    \item Conservar `checkpoints` en producción para su verificación con humano en el circuito (human-in-the-loop).
+\end{itemize}
+
+\begin{warningbox}{El punto ciego más común en el diagnóstico}
+Los equipos de ingeniería suelen fijarse solo en la curva de recompensa; en cuanto la recompensa se estanca, si eso se interpreta erróneamente como éxito, se pasa por alto el drift de la acción. Se recomienda una vista combinada (recompensa + error TD + tasa de éxito).
+\end{warningbox}
+
+\subsection{Orquestación y gobernanza de agentes}
+
+Una vez que el Q-Learning entra en el stack de agentes, la gobernanza debe abarcar varios niveles:
+
+\begin{itemize}
+    \item Hacer transparentes las exportaciones de métricas (error TD, Q máxima).
+    \item Hacer que el control plane del trabajo de entrenamiento registre (id de checkpoint, semilla de datos, estado de los guardrails).
+    \item Establecer un `deployment kill switch` que active un rollback cuando `reward drop > δ`.
+\end{itemize}
+
+\begin{knowledgebox}{Lista de verificación de gobernanza}
+1. Cada release debe llevar una evidence matrix junto con la línea de tiempo de acciones; 2. el pipeline de entrenamiento debe tratar la `reward variance` como señal de seguridad prioritaria; 3. el proceso de despliegue debe soportar un `fast rollback`.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Las direcciones de investigación se concentran en el replay escalable, la evaluación robusta y la gobernanza a nivel de agente; este trabajo determinará la confiabilidad del Q-Learning en tareas más complejas.
+La última diapositiva señala las futuras direcciones de investigación: Q-Learning de múltiples pasos, el puente de simulación a realidad (sim-to-real) y la evaluación de seguridad.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=7]{06_cs224r_qlearning_2025.pdf}
+\caption{Diapositiva: direcciones de investigación para un Q-Learning seguro}
+\end{figure}
+\newpage
+\subsection{Transferencia de simulación a realidad y migración de datos}
+
+Antes de desplegar el Q-Learning en un sistema real, suele ser necesaria la transferencia de simulación a realidad (sim-to-real):
+
+\begin{itemize}
+    \item Agregar ruido de observación y retardo del actuador en la simulación y volver a entrenar la Q.
+    \item Incorporar el checkpoint de simulación al replay buffer del objetivo mediante behavior cloning.
+    \item Usar destilación de políticas para que una red más pequeña aproxime la red de simulación.
+\end{itemize}
+
+\begin{importantbox}{Puntos clave de supervisión en la transferencia}
+1. Confirmar la alineación temporal entre la simulación y la realidad; 2. los datos simulados deben incluir el ruido real de campo; 3. el rollout completo debe quedar registrado para su revisión con humano en el circuito.
+\end{importantbox}
+\section{Síntesis y ampliación}
+
+\subsection{Tabla de síntesis central}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.26\textwidth} p{0.24\textwidth} p{0.25\textwidth}}
+\toprule
+Tema & Conclusión central & Consejo de ingeniería \\
+\midrule
+Núcleo de Q-Learning & Se aprende la función Q óptima; la política se obtiene mediante $\arg\max_a Q(s,a)$ & Prepara el replay buffer, la target network y la regularization \\
+DQN & replay buffer + target network + $\epsilon$-greedy es la versión escalable de Q-Learning & Mantén el buffer size, la diversidad de muestreo y la frecuencia de actualización de la target network \\
+Estabilización & Double Q, la prevención del reward hack y el reward shaping & Monitorea el TD error y la reward variance; configura un rollback guardrail \\
+Despliegue de ingeniería & Matriz de evaluación + checklist + telemetry & Verifica el checkpoint con sim rollout + human-in-the-loop replay; monitorea el Q drift con un guardrail en producción \\
+\bottomrule
+\end{tabular}
+\caption{Correspondencia entre método e ingeniería en Lecture 6}
+\end{table}
+
+\subsection{Lecturas adicionales}
+\subsection{Lecturas adicionales}
+
+\begin{itemize}
+    \item Mnih et al., \textit{Playing Atari with Deep Reinforcement Learning} (DQN, 2013)
+    \item Van Hasselt et al., \textit{Deep Reinforcement Learning with Double Q-learning} (Double DQN, 2016)
+    \item Lillicrap et al., \textit{Continuous Control with Deep Reinforcement Learning} (DDPG, 2016)
+    \item Schaul et al., \textit{Prioritized Experience Replay} (ICLR 2016)
+    \item Jaderberg et al., \textit{Population Based Training of Neural Networks} (NeurIPS 2017) — for lifecycle automation
+\end{itemize}
+
+\subsection{Resumen de la sección}
+
+El valor de Q-Learning radica en derivar la política a partir de la función de valor; al combinarlo con la estabilización, la gobernanza de datos y el despliegue de ingeniería, este algoritmo clásico puede operar de manera confiable en los sistemas de RL modernos.
+
+\subsection{Recordatorios de acción}
+
+\begin{itemize}
+    \item Después de cada ronda de entrenamiento, documenta la evidence matrix y el order-of-operations para facilitar el próximo rollback.
+    \item Monitorea `TD error drift`, `reward variance` y `episode success rate`; en cuanto cualquiera de estos indicadores active el guardrail, toma un snapshot de inmediato.
+    \item Programa una quarterly replay audit (human review de 20 failure trajectories).
+\end{itemize}
+
+\end{document}

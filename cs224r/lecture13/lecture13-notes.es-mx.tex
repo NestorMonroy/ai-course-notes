@@ -1,0 +1,516 @@
+\documentclass[a4paper]{article}
+
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+% FandolSong no cubre algunos caracteres de nombres (U+73FA); WenQuanYi Zen Hei sí.
+\usepackage[AutoFallBack=true]{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+\setCJKfallbackfamilyfont{\CJKrmdefault}{WenQuanYi Zen Hei}
+% polyglossia no traduce los nombres de listings.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{subcaption}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{float}
+
+\newtcolorbox{knowledgebox}[1]{
+    enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, boxrule=1pt, sharp corners
+}
+
+\newtcolorbox{importantbox}[1]{
+    enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black,
+    coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+\newtcolorbox{warningbox}[1]{
+    enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    stringstyle=\color{red!60!black},
+    commentstyle=\color{green!60!black},
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    captionpos=b,
+    extendedchars=true
+}
+
+\newcommand{\notetitle}{CS224R Lecture 13: Metaaprendizaje por refuerzo}
+\newcommand{\noteauthors}{Elaboradas a partir de materiales públicos del curso}
+\newcommand{\notedate}{Primavera de 2025}
+\newcommand{\videochannel}{Stanford Online}
+\newcommand{\videopublishdate}{2025}
+\newcommand{\videoduration}{Aproximadamente 80 minutos}
+\newcommand{\videourl}{https://cs224r.stanford.edu/}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+
+% Footer with repo info
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\thepage}
+\fancyfoot[R]{\footnotesize\color{gray}\href{\repourl}{AI Course Notes}}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\begin{document}
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}
+\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}
+\vspace{0.8cm}
+{\large \noteauthors\par}
+\vspace{0.3cm}
+{\large \notedate\par}
+\vspace{1.1cm}
+
+\ifdefempty{\videocoverpath}{
+{\small No se proporcionó imagen de portada.\par}
+}{
+\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par
+}
+
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\textbf{Ponente}: Chelsea Finn\par
+\textbf{Página del curso}: \href{https://cs224r.stanford.edu/}{cs224r.stanford.edu}\par
+\textbf{Página del proyecto}: \href{\repourl}{\nolinkurl{\repourl}}\par
+\end{tcolorbox}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+%% --- Inicio del contenido --- %%
+
+\section{Del RL multitarea al metaaprendizaje}
+
+\subsection{Repaso del RL multitarea}
+
+En la clase anterior se trató el RL multitarea: se aumenta el estado a $(s, z)$ (donde $z$ es la descripción de la tarea) y se entrena una política condicionada $\pi(a|s,z)$ para resolver varias tareas. Sin embargo, el RL multitarea tiene una limitación importante: supone que \textbf{todas las tareas se conocen desde el entrenamiento}.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-03.jpg}
+\caption{Repaso del RL multitarea: la descripción de la tarea se incorpora al estado y todo se unifica en un joint MDP}
+\end{figure}
+
+\begin{knowledgebox}{Limitaciones del RL multitarea}
+El RL multitarea cubre todas las tareas con una sola política compartida. Si en la prueba aparece una tarea nueva muy distinta de las tareas de entrenamiento, el desempeño puede caer drásticamente. Además, a medida que aumenta el número de tareas, se vuelve cada vez más difícil aprender una política que funcione bien en todas (el problema de interferencia entre tareas).
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-04.jpg}
+\caption{El goal-conditioned learning es un caso particular del RL multitarea}
+\end{figure}
+
+\subsection{Idea central del metaaprendizaje}
+
+\begin{importantbox}{Definición de Meta-RL}
+El objetivo del metaaprendizaje por refuerzo (Meta-RL) no es aprender «cómo resolver una tarea concreta», sino \textbf{aprender «cómo aprender rápidamente tareas nuevas»}.
+
+Formalmente: dada una distribución de tareas $p(\mathcal{T})$, en la etapa de entrenamiento el Meta-RL usa muchas tareas muestreadas de $p(\mathcal{T})$ para aprender un «algoritmo de aprendizaje» o un «mecanismo de adaptación rápida». En la prueba, ante una tarea nueva $\mathcal{T}_{\text{new}} \sim p(\mathcal{T})$, basta con pocos datos para adaptarse.
+\end{importantbox}
+
+\subsection{Por qué se necesita el Meta-RL}
+
+El ponente ilustra el problema con un ejemplo de la vida cotidiana: aprender a usar una máquina de espresso nueva. Si esta tarea se le asigna a un agent de RL entrenado desde cero, podría necesitar millones de intentos; en cambio, a una persona le bastan un poco de experiencia relacionada y algunas instrucciones para dominarla en unos minutos. La diferencia no está en que el ser humano sepa «optimizar la recompensa» mejor, sino en que el ser humano \textbf{nunca empieza desde cero}.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-06.jpg}
+\caption{Motivación del metaaprendizaje por refuerzo: ante una tarea nueva, las personas aprovechan su experiencia previa para adaptarse con rapidez}
+\end{figure}
+
+\begin{knowledgebox}{La carencia que el Meta-RL intenta cubrir}
+El RL convencional supone que cada tarea nueva exige recolectar de nuevo una gran cantidad de datos de interacción; el Meta-RL, en cambio, intenta codificar en el sistema de aprendizaje el hecho de «haber resuelto antes tareas similares», para que en una tarea nueva alcance más rápido un régimen de comportamiento eficaz.
+\end{knowledgebox}
+
+\subsection{Del transfer learning al meta-learning}
+
+En esta clase también se comparan varios paradigmas de transferencia comunes:
+\begin{enumerate}
+    \item \textbf{Forward transfer}: primero se resuelve la source task y después se hace fine-tuning hacia la target task.
+    \item \textbf{Multi-task transfer}: se entrena simultáneamente en varias tareas y se usa un task descriptor para permitir la generalización sin ejemplos.
+    \item \textbf{Meta-learning}: desde la etapa de entrenamiento se optimiza explícitamente «cómo adaptarse rápidamente a tareas nuevas».
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-07.jpg}
+\caption{Diferencias en el planteamiento del problema entre transfer, multi-task y meta-learning}
+\end{figure}
+
+\begin{warningbox}{Límites de generalización del Meta-RL}
+El Meta-RL no garantiza la adaptación a cualquier tarea nueva. Depende de un supuesto fundamental: las tareas nuevas que aparecen en el meta-test siguen proviniendo de una distribución de tareas cercana a la del meta-train. Si las tareas de prueba quedan por completo fuera de la distribución de entrenamiento, tanto la velocidad de adaptación como el desempeño final pueden disminuir de forma significativa.
+\end{warningbox}
+
+\subsection{La perspectiva del aprendizaje few-shot}
+
+El curso también plantea una analogía con la few-shot image classification y el in-context learning de los LLM. El punto en común es que el modelo no recibe solo la entrada $x$, sino también un pequeño conjunto de ejemplos $D_{\text{train}}$, y a partir de él infiere a qué tipo de tarea pertenece el problema actual y cómo debe responder.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-09.jpg}
+\caption{Abstracción del few-shot learning: la función de predicción depende a la vez de la entrada y de unos pocos ejemplos de entrenamiento}
+\end{figure}
+
+\subsection{Resumen de la sección}
+
+El Meta-RL eleva el nivel del aprendizaje de «aprender una política» a «aprender a aprender políticas», y es adecuado para escenarios que exigen adaptarse rápidamente a tareas nuevas.
+\section{Clasificación de los métodos de Meta-RL}
+
+\subsection{Planteamiento típico de una tarea de Meta-RL}
+
+El ejemplo clásico de Meta-RL es maze navigation: primero se recopila una pequeña cantidad de experiencia exploratoria en un laberinto nuevo y luego esa experiencia se usa para resolver ese laberinto. La dificultad propia de este caso es que el exploration-exploitation trade-off cambia: las primeras interacciones no solo deben obtener reward en el momento, sino también identificar de qué tarea se trata.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-10.jpg}
+\caption{Ejemplo de Meta-RL: primero se explora el laberinto nuevo y después se usa poca experiencia para resolver la tarea}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-11.jpg}
+\caption{Diferencia entre meta-train y meta-test: durante el entrenamiento se aprende a adaptarse con eficiencia; durante la prueba se enfrenta una tarea nueva y se domina rápidamente}
+\end{figure}
+
+\subsection{Formulación más formal del problema}
+
+Esta clase presentó un formal setup muy importante: Meta-RL no es un solo MDP, sino una \textbf{distribución de tareas} $p(\mathcal{T})$. En la fase de entrenamiento se extraen muchas tareas de ella y se aprende un mecanismo de adaptación; en la fase de prueba, ante una tarea nueva de la misma distribución, solo se dispone de poca experiencia.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-13.jpg}
+\caption{Definiciones más formales de multi-task, transfer y meta-learning}
+\end{figure}
+
+\begin{importantbox}{Entrada y salida de Meta-RL}
+Tomando como ejemplo la versión episódica:
+\begin{itemize}
+    \item Entrada: una pequeña cantidad de rollout / experience $D_{\text{train}}$ proveniente de cierta tarea
+    \item Salida: una política ajustada según $D_{\text{train}}$, $\pi(a\mid s, D_{\text{train}})$
+\end{itemize}
+Es decir, el task ID que en el RL multitarea tradicional se proporciona de forma explícita, en Meta-RL se sustituye por un breve tramo de experiencia de interacción.
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-14.jpg}
+\caption{Entrada y salida de Meta-RL: el contexto de experiencia sustituye al task descriptor explícito}
+\end{figure}
+
+\subsection{Método 1: métodos basados en contexto (Context-Based)}
+
+La idea central es introducir la experiencia de la tarea nueva como \textbf{contexto} en la red de política, para que la red infiera la tarea a partir del contexto y tome decisiones.
+
+\begin{importantbox}{Política con contexto}
+$$\pi_\theta(a | s, c)$$
+donde $c = \{(s_1, a_1, r_1, s_1'), \ldots, (s_k, a_k, r_k, s_k')\}$ es la poca experiencia recopilada en la tarea nueva. La red de política debe inferir las características de la tarea a partir de esa experiencia.
+
+Arquitecturas comunes:
+\begin{itemize}
+    \item Codificar el contexto como estado oculto mediante una RNN/LSTM
+    \item Codificar el contexto mediante el mecanismo de atención de un Transformer
+    \item Codificar el contexto mediante un codificador de conjuntos (permutation-invariant)
+\end{itemize}
+\end{importantbox}
+
+\begin{knowledgebox}{RL\textsuperscript{2} (Learning to Reinforcement Learn)}
+RL$^2$ es uno de los primeros métodos de context-based meta-RL. Trata todo el proceso de RL como un POMDP más grande, en el que el estado oculto de la RNN codifica la «creencia» sobre la tarea actual. El algoritmo de RL externo entrena la RNN para que, en el nivel interno, se adapte rápidamente a tareas nuevas.
+\end{knowledgebox}
+
+\subsection{Ciclo de entrenamiento de Black-box Meta-RL}
+
+Este curso se centra en black-box meta-RL: no se escribe de forma explícita una fórmula de actualización bayesiana, sino que se usa directamente una red neuronal con memoria para que el «cómo adaptarse a partir de la experiencia» quede aprendido en los parámetros.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-17.jpg}
+\caption{Algoritmo básico de Black-box Meta-RL: se recopilan varias episode por tarea y luego se actualiza de manera conjunta la política con memoria}
+\end{figure}
+
+\begin{knowledgebox}{En qué se distingue de una recurrent policy común}
+A primera vista, black-box meta-RL se parece mucho a «RL con una RNN», pero el curso destacó dos condiciones adicionales:
+\begin{enumerate}
+    \item el reward normalmente entra a la red como parte de la entrada;
+    \item el estado oculto debe conservarse a lo largo de varias episode de una misma tarea.
+\end{enumerate}
+Por eso, lo que la red recuerda no es solo una trayectoria individual, sino «lo que ya he observado en esta tarea».
+\end{knowledgebox}
+
+\subsection{Arquitecturas y optimizadores comunes}
+
+El espacio de implementación de black-box meta-RL es amplio: puede usarse RNN, attention o Transformer, y también combinarse con distintos optimizadores de RL del outer-loop, como TRPO/A3C o SAC.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-19.jpg}
+\caption{Elección de arquitectura y optimizador en Black-box Meta-RL: RNN, attention, off-policy context variable, etc.}
+\end{figure}
+
+\subsection{Método 2: métodos basados en gradiente (Gradient-Based)}
+
+\begin{importantbox}{MAML (Model-Agnostic Meta-Learning)}
+La idea central de MAML es aprender un buen conjunto de parámetros iniciales $\theta$, de modo que, para cualquier tarea nueva, basten unos pocos pasos de gradiente para adaptarse.
+
+\textbf{Actualización interna} (adaptación a la tarea):
+$$\theta_i' = \theta - \alpha \nabla_\theta \mathcal{L}_{\mathcal{T}_i}(\theta)$$
+
+\textbf{Actualización externa} (metaaprendizaje):
+$$\theta \leftarrow \theta - \beta \nabla_\theta \sum_i \mathcal{L}_{\mathcal{T}_i}(\theta_i')$$
+
+Punto clave: el objetivo de la optimización externa es que los parámetros \textbf{ya adaptados} $\theta_i'$ tengan buen desempeño en la tarea $\mathcal{T}_i$, no los parámetros originales $\theta$.
+\end{importantbox}
+
+\begin{warningbox}{Costo computacional de MAML}
+MAML necesita calcular el gradiente de un «gradiente» (derivadas de segundo orden), lo que implica un costo computacional considerable. Aunque es posible reducirlo con aproximaciones de primer orden (como FOMAML o Reptile), esto sacrifica cierta precisión. En RL, como el gradiente de política ya tiene una varianza alta por sí mismo, la estabilidad del entrenamiento de MAML es un reto.
+\end{warningbox}
+
+\subsection{Comparación de los dos tipos de métodos}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+& \textbf{Context-Based} & \textbf{Gradient-Based} \\
+\midrule
+Forma de adaptación & Propagación hacia adelante (inferencia) & Descenso de gradiente \\
+Velocidad de adaptación & Muy rápida (una sola pasada hacia adelante) & Requiere varios pasos de gradiente \\
+Capacidad expresiva & Limitada por la capacidad de la red & En teoría permite una adaptación exacta \\
+Dificultad de entrenamiento & Relativamente fácil & Requiere optimización de segundo orden \\
+Métodos típicos & RL$^2$, PEARL & MAML, ProMP \\
+\bottomrule
+\end{tabular}
+\caption{Comparación de los dos tipos de métodos de Meta-RL}
+\end{table}
+
+\subsection{Casos de Black-box Meta-RL}
+
+El curso presentó dos casos muy representativos. El primero es la navegación visual en laberintos: el modelo hace meta-train en una gran cantidad de laberintos pequeños y, durante la prueba, debe explorar rápidamente laberintos que nunca ha visto y encontrar la salida. El segundo caso está más cerca del contexto actual de los modelos grandes: se considera cada problema de matemáticas como una tarea distinta y se optimiza el test-time compute, para que el modelo, con un presupuesto fijo de tokens, intente, verifique y elija estrategias con mayor eficiencia.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-20.jpg}
+\caption{Caso 1 de Meta-RL: navegación visual en laberintos, para comprobar si el modelo forma rápidamente una política en un laberinto nuevo}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-22.jpg}
+\caption{Caso 2 de Meta-RL: considerar distintos problemas de matemáticas como tareas y optimizar el test-time compute}
+\end{figure}
+
+\subsection{Relación entre Meta-RL y las políticas multitarea}
+
+El ponente dedicó una de las slides a explicar un punto que se presta a confusión: la política multitarea depende de un task ID explícito $z_i$, mientras que Meta-RL usa \textbf{la propia experiencia} como task identifier. En otras palabras, la política multitarea equivale a «yo te digo qué tipo de tarea es ahora», y Meta-RL a «infiérelo tú mismo a partir de la interacción».
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-24.jpg}
+\caption{Cuando el task ID no está en el estado, la política debe inferir a partir de la experiencia en qué MDP se encuentra}
+\end{figure}
+
+\subsection{Resumen de la sección}
+
+Meta-RL tiene dos grandes líneas técnicas: los métodos context-based logran una adaptación implícita al codificar la experiencia, y los métodos gradient-based logran un ajuste fino rápido al aprender una buena inicialización.
+\section{Por qué la exploración es más difícil en Meta-RL}
+
+\subsection{El problema de exploración en Meta-RL no es igual a la exploración ordinaria}
+
+En el RL ordinario, el objetivo de la exploración es encontrar acciones con alto retorno; en Meta-RL, en cambio, la exploración asume además otra responsabilidad: \textbf{identificar cuál es realmente la tarea actual}. Por ello, una misma conducta puede tener valor a largo plazo aunque no produzca reward en el corto plazo, si reduce de forma considerable la incertidumbre sobre la tarea.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-29.jpg}
+\caption{La solución más directa: aprender de extremo a extremo exploration y exploitation al mismo tiempo}
+\end{figure}
+
+\subsection{Ejemplo del pasillo: exploración que aporta información pero no recompensa}
+
+La clase explicó esto con el ejemplo hallway. Si para saber en qué extremo está la meta primero hay que ver la indicación en la pared, entonces «ir primero a ver la indicación» es la conducta de meta-exploration correcta, pero por sí misma no produce directamente recompensa de la tarea. Así, cuando el aprendizaje de extremo a extremo optimiza solo según el reward final, al optimizador le cuesta reconocer el valor a largo plazo de esta exploración inicial sin recompensa.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-31.jpg}
+\caption{Ejemplo del pasillo: la conducta de exploración realmente útil no necesariamente produce reward de inmediato}
+\end{figure}
+
+\begin{warningbox}{Problema de acoplamiento (coupling problem)}
+Si la exploración no se hace bien, la fase de ejecución no obtiene un buen reward; y si la fase de ejecución no obtiene un buen reward durante mucho tiempo, la fase de exploración tampoco recibe una señal de entrenamiento suficientemente clara. Esta dependencia mutua puede hacer que la optimización quede atrapada en un óptimo local muy malo.
+\end{warningbox}
+
+\subsection{Ejemplo de la cocina: exploración y ejecución se bloquean mutuamente}
+
+El ejemplo de cooking que citó el ponente deja más claro este problema: si el agent no encuentra primero los ingredientes, no puede aprender a cocinar; pero si nunca aprende a cocinar, el reward final no basta para indicarle qué forma de buscar ingredientes es valiosa. El resultado es que exploration y execution se frenan mutuamente.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-33.jpg}
+\caption{El coupling problem en el ejemplo de la cocina: la exploración y la ejecución dependen una de otra, lo que dificulta el entrenamiento}
+\end{figure}
+
+\subsection{Enfoque alternativo: incorporar explícitamente la estructura de la exploración}
+
+Por ello, la clase no se quedó en «basta con aprender de extremo a extremo», sino que presentó además varios tipos de estrategias alternativas:
+\begin{enumerate}
+    \item \textbf{Posterior sampling / Thompson sampling}: mantener explícitamente la posterior sobre la tarea, muestrear de ella una tarea latente y actuar en consecuencia.
+    \item \textbf{Intrinsic rewards}: otorgar una recompensa adicional por la recolección de información en sí misma.
+    \item \textbf{Task dynamics / reward prediction}: aprender explícitamente un modelo de la dinámica o de la recompensa relacionado con la tarea, para ayudar a distinguir las tareas.
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-35.jpg}
+\caption{Solution 2a: PEARL realiza posterior sampling mediante una latent task posterior}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-36.jpg}
+\caption{Ventajas y desventajas de las estrategias de exploración alternativas: son más fáciles de optimizar, pero en algunos entornos pueden ser claramente subóptimas}
+\end{figure}
+
+\begin{importantbox}{La intuición central de PEARL}
+PEARL aprende la distribución a priori y la posterior de una latent task variable $z$, y luego condiciona la política a $z$. Una vez que la posterior se concentra, la política ya no necesita «adivinar» la tarea actual a partir del estado oculto, sino que actúa explícitamente con base en la belief actual. Esto tiene más estructura que una red de memoria puramente de caja negra, pero también introduce supuestos de modelado más fuertes.
+\end{importantbox}
+\section{Perspectiva teórica de Meta-RL}
+
+\subsection{Meta-RL como POMDP}
+
+\begin{importantbox}{Meta-RL vista como POMDP}
+Meta-RL puede entenderse como hacer RL dentro de un POMDP más amplio:
+\begin{itemize}
+    \item El estado oculto incluye la identidad de la tarea
+    \item La observación es el estado actual junto con la experiencia histórica
+    \item La política óptima necesita inferir la identidad de la tarea durante la interacción (inferencia bayesiana)
+\end{itemize}
+Desde esta perspectiva, los métodos context-based en esencia aproximan la política óptima de este POMDP.
+\end{importantbox}
+
+\subsection{Muestreo posterior y Thompson Sampling}
+
+En el caso ideal, el comportamiento óptimo de meta-RL debería parecerse a Thompson Sampling:
+\begin{enumerate}
+    \item Mantener una creencia posterior sobre la identidad de la tarea $p(\mathcal{T} | \text{history})$
+    \item Muestrear de la distribución posterior una hipótesis de tarea
+    \item Actuar según la política óptima bajo esa hipótesis
+    \item Actualizar la distribución posterior después de recolectar datos nuevos
+\end{enumerate}
+
+\subsection{Resumen de la sección}
+
+Desde el punto de vista teórico, Meta-RL puede entenderse de manera unificada como la toma de decisiones óptimas en un POMDP con incertidumbre sobre la tarea, lo cual ofrece un marco basado en principios para entender y mejorar los métodos de meta-RL.
+
+\section{Aplicaciones de Meta-RL}
+
+\subsection{Manipulación robótica}
+
+Meta-RL tiene en la robótica un campo de aplicación natural: un robot necesita adaptarse con rapidez a objetos distintos, a objetivos de agarre distintos, a parámetros dinámicos distintos, etcétera.
+
+\subsection{In-Context Learning en los modelos de lenguaje de gran tamaño}
+
+\begin{knowledgebox}{In-Context Learning como Meta-Learning}
+El in-context learning de los modelos de lenguaje de gran tamaño (resolver una tarea nueva a partir de los ejemplos incluidos en el prompt) puede verse como una forma de context-based meta-learning. Durante el preentrenamiento, el LLM ha visto una gran cantidad de «tareas» y ha aprendido a inferir la tarea a partir del contexto y a generar la salida correspondiente. Esto sigue directamente la idea de RL$^2$.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Las ideas de Meta-RL ya se han extendido a varios campos, como la robótica y el procesamiento de lenguaje natural; el in-context learning puede verse como el surgimiento natural del meta-learning en el preentrenamiento a gran escala.
+\section{Síntesis y ampliación}
+
+El valor central de Meta-RL está en lograr una \textbf{adaptación rápida}:
+
+\begin{enumerate}
+    \item El RL multitarea aprende una política que cubre todas las tareas; meta-RL aprende la capacidad de adaptarse rápidamente a tareas nuevas
+    \item Los métodos context-based realizan una inferencia implícita al codificar la experiencia histórica
+    \item Los métodos gradient-based (MAML) logran un fine-tuning rápido al aprender una buena inicialización
+    \item En teoría, meta-RL equivale a tomar decisiones óptimas en un POMDP con incertidumbre sobre la tarea
+    \item El in-context learning de los LLM es una implementación a gran escala de meta-learning
+\end{enumerate}
+
+\subsection{Mapa de métodos de esta clase}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.18\textwidth} p{0.22\textwidth} p{0.22\textwidth} p{0.22\textwidth}}
+\toprule
+Enfoque & Mecanismo de adaptación & Ventajas & Dificultades \\
+\midrule
+Multi-task RL & task descriptor $z$ explícito & Estructura sencilla; admite compartir parámetros & Carece de un mecanismo de adaptación rápida ante tareas nuevas \\
+Black-box Meta-RL & Contexto de experiencia + red de memoria & Gran capacidad expresiva; unificado de extremo a extremo & Difícil de entrenar y de explorar; la eficiencia de muestreo está limitada por el outer RL \\
+Gradient-based Meta-RL & Aprender una inicialización que admita un fine-tuning rápido & Mecanismo de adaptación claro & Alto costo de la optimización de segundo orden; poca estabilidad en escenarios de RL \\
+Structured exploration (PEARL, entre otros) & Muestreo posterior / recompensa intrínseca / modelado de la tarea & Facilita hacer explícita la estructura de la exploración & Puede introducir supuestos fuertes; subóptimo en algunos entornos \\
+\bottomrule
+\end{tabular}
+\caption{Relación entre los métodos centrales de la Lecture 13}
+\end{table}
+
+\subsection{Lista de verificación para implementar Black-Box Meta-RL}
+
+Al implementar en la práctica este tipo de algoritmos, lo que más se presta a errores no son las fórmulas, sino los «límites de la tarea» y los «límites de la memoria». Si el código de entrenamiento mezcla episode, task, hidden state y replay buffer, lo que se termina aprendiendo suele ser solo una recurrent policy común, y no una meta-policy capaz de adaptarse entre tareas.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.2\textwidth} p{0.28\textwidth} p{0.28\textwidth}}
+\toprule
+Módulo & Error frecuente & Práctica más segura \\
+\midrule
+Task sampling & Los límites entre tareas dentro de un mismo lote no están claros & Registrar explícitamente el task id y los límites de los episodes de cada tarea \\
+Hidden state & Reutilizar por error el estado oculto entre tareas distintas & Conservar la memoria solo entre los episodes sucesivos de una misma tarea \\
+Reward input & No introducir reward/history en la red como señal de adaptación & Usar explícitamente la secuencia $(s,a,r,s')$ como contexto \\
+Meta-test protocol & Usar en la prueba las tareas de entrenamiento o filtrar la etiqueta de la tarea & Proporcionar solo pocos datos de interacción con la tarea nueva y evaluar estrictamente con held-out tasks fuera de la distribución \\
+\bottomrule
+\end{tabular}
+\caption{Lista de verificación para implementar Black-box Meta-RL}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-39.jpg}
+\caption{Cierre de la clase: hoy se vieron los fundamentos de meta-RL; la próxima clase continúa con exploration y meta-exploration}
+\end{figure}
+
+\newpage
+\subsection{Por qué la exploration se trata por separado}
+
+Esta clase ya dio la respuesta: en el RL convencional, la exploración sirve para encontrar conductas de alta recompensa; en Meta-RL, la exploración además tiene la función de \textbf{identificar la tarea}. Por ello, una acción que «por ahora no parece rendir nada» puede ser justamente el paso de adaptación más importante. Precisamente por este doble papel, muchos métodos de black-box meta-RL, aunque conceptualmente unificados, se degradan de forma notable en entornos que exigen una exploración compleja.
+
+El valor de discutir la exploration por separado es que nos recuerda no reducir Meta-RL a una «red de políticas con memoria». La parte realmente difícil es: \textbf{cómo lograr que el agent gaste primero un costo pequeño en averiguar qué tarea enfrenta y luego dedique el presupuesto restante a la estrategia de ejecución correcta.} Esa es también la razón de ser de toda la línea de investigación posterior, desde posterior sampling e intrinsic reward hasta task dynamics prediction.
+
+\begin{knowledgebox}{Lecturas adicionales}
+\begin{itemize}
+    \item Finn et al., ``Model-Agnostic Meta-Learning for Fast Adaptation of Deep Networks (MAML),'' ICML 2017
+    \item Duan et al., ``RL$^2$: Fast Reinforcement Learning via Slow Reinforcement Learning,'' ICLR 2017
+    \item Rakelly et al., ``Efficient Off-Policy Meta-Reinforcement Learning via Probabilistic Context Variables (PEARL),'' ICML 2019
+    \item Zintgraf et al., ``VariBAD: A Very Good Method for Bayes-Adaptive Deep RL,'' ICLR 2020
+\end{itemize}
+\end{knowledgebox}
+
+\end{document}

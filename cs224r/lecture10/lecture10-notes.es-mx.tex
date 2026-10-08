@@ -1,0 +1,519 @@
+\documentclass[a4paper]{article}
+
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+% FandolSong no cubre algunos caracteres de nombres (U+73FA); WenQuanYi Zen Hei sí.
+\usepackage[AutoFallBack=true]{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+\setCJKfallbackfamilyfont{\CJKrmdefault}{WenQuanYi Zen Hei}
+% polyglossia no traduce los nombres de listings.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{subcaption}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{float}
+
+\newtcolorbox{knowledgebox}[1]{
+    enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, boxrule=1pt, sharp corners
+}
+
+\newtcolorbox{importantbox}[1]{
+    enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black,
+    coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+\newtcolorbox{warningbox}[1]{
+    enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    stringstyle=\color{red!60!black},
+    commentstyle=\color{green!60!black},
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    captionpos=b,
+    extendedchars=true
+}
+
+\newcommand{\notetitle}{CS224R Lecture 10: Aprendizaje por refuerzo para el razonamiento de LLM}
+\newcommand{\noteauthors}{Elaboradas a partir de materiales públicos del curso}
+\newcommand{\notedate}{Primavera de 2025}
+\newcommand{\videochannel}{Stanford Online}
+\newcommand{\videopublishdate}{2025}
+\newcommand{\videoduration}{Aproximadamente 80 minutos}
+\newcommand{\videourl}{https://cs224r.stanford.edu/}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+
+% Footer with repo info
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\thepage}
+\fancyfoot[R]{\footnotesize\color{gray}\href{\repourl}{AI Course Notes}}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\begin{document}
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}
+\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}
+\vspace{0.8cm}
+{\large \noteauthors\par}
+\vspace{0.3cm}
+{\large \notedate\par}
+\vspace{1.1cm}
+
+\ifdefempty{\videocoverpath}{
+{\small No se proporcionó la imagen de portada.\par}
+}{
+\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par
+}
+
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\textbf{Ponente}: Aviral Kumar (Carnegie Mellon University)\par
+\textbf{Página del curso}: \href{https://cs224r.stanford.edu/}{cs224r.stanford.edu}\par
+\textbf{Página del proyecto}: \href{\repourl}{\nolinkurl{\repourl}}\par
+\end{tcolorbox}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+%% --- Inicio del contenido --- %%
+\section{Introducción: por qué se necesita RL para el razonamiento}
+
+Esta clase la imparte como profesor invitado Aviral Kumar, de CMU, y se centra en la aplicación del aprendizaje por refuerzo (RL) al razonamiento en los modelos de lenguaje de gran tamaño (LLM). El ponente acota el razonamiento al escenario de resolución de problemas matemáticos y organiza el contenido en dos grandes partes a lo largo de una línea de tiempo: las técnicas clásicas de RL y las extensiones modernas.
+
+\begin{importantbox}{Motivación central}
+El paradigma tradicional de entrenamiento basado en next-token prediction (NTP) tiene una limitación fundamental: el error entre el modelo aprendido $\hat{p}_\theta(\mathbf{y}|\mathbf{x})$ y la distribución real $p^*(\mathbf{y}|\mathbf{x})$ es proporcional a $|\mathcal{D}(\mathbf{y}|\mathbf{x})|^{-\alpha}$; es decir, el error disminuye conforme aumenta la cantidad de datos similares a la entrada objetivo $\mathbf{x}$. En los problemas de razonamiento, los datos de alta calidad de pares problema--solución son sumamente escasos, y se prevé que hacia 2028 se agoten los datos de texto de alta calidad disponibles en internet.
+\end{importantbox}
+
+\subsection{Modos de falla de NTP}
+
+Cuando un modelo entrenado solo de forma supervisada resuelve problemas matemáticos difíciles, como los del AIME (American Invitational Mathematics Examination) o la IMO (Olimpiada Internacional de Matemáticas), puede generar texto que «parece una solución», pero su cadena de razonamiento lógico suele contener errores críticos. El modelo omite pasos de razonamiento necesarios o, durante una demostración, analiza términos aislados y pasa por alto la estructura global.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-03.jpg}
+\caption{Entrenamiento tradicional: la cota de error de next-token prediction\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 3.}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-04.jpg}
+\caption{El problema de la escasez de datos: limitaciones de datos en el razonamiento matemático y en la IA corporizada\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 4.}
+
+\subsection{Resumen de la sección}
+
+La razón principal por la que NTP falla en escenarios de razonamiento es la insuficiencia de datos de razonamiento de alta calidad. El valor de RL consiste en que no depende de soluciones completas anotadas por personas, sino que guía al modelo mediante una señal de recompensa (por ejemplo, si la respuesta es correcta) para que descubra por sí mismo las rutas de razonamiento correctas.
+\section{Esquema de la clase}
+
+El ponente divide RL for Reasoning en dos etapas históricas, con los modelos DeepSeek-R1/«thinking» como punto de separación:
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-06.jpg}
+\caption{Esquema de la clase: técnicas clásicas frente a extensiones modernas\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 6.}
+
+\begin{itemize}
+    \item \textbf{Part 1 --- Técnicas clásicas de RL}: Imitation Learning, Offline RL, Online RL
+    \item \textbf{Part 2 --- Extensiones modernas}: entrenamiento de modelos «thinking» con RL en línea, DeepSeek-R1, Kimi K1.5, entre otros
+\end{itemize}
+
+\section{Parte 1: técnicas clásicas de RL aplicadas al razonamiento de LLM}
+
+\subsection{Modelar el razonamiento como un problema de RL}
+
+\begin{importantbox}{Modelado como MDP}
+Un problema de razonamiento matemático se modela como un MDP:
+\begin{itemize}
+    \item \textbf{Estado} $s_t$: enunciado del problema + prefijo de la solución generado hasta el momento (secuencia de tokens)
+    \item \textbf{Acción} $a_t$: el siguiente paso de razonamiento (puede ser un token o un paso/oración de razonamiento)
+    \item \textbf{Recompensa} $r$: por lo general, una recompensa terminal dispersa; solo cuando se ha generado la solución completa se verifica si la respuesta es correcta (outcome-based reward)
+    \item \textbf{Política} $\pi_\theta(a_t | s_t)$: el propio modelo de lenguaje
+\end{itemize}
+\end{importantbox}
+
+\subsection{Ampliación de datos: aumentar el número de problemas y de soluciones}
+
+En el escenario más sencillo, se recopilan más pares (problema, solución) para hacer ajuste fino supervisado (SFT). Los experimentos de Setlur et al. (NeurIPS 2024) muestran lo siguiente:
+
+\begin{itemize}
+    \item En GSM8K, el error de prueba de SFT converge, conforme aumenta el número de problemas, a una tasa aproximada de $|\mathcal{D}|^{-0.15}$
+    \item En MATH es más lento, aproximadamente $|\mathcal{D}|^{-0.05}$
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-10.jpg}
+\caption{Warmup: comportamiento de scaling al aumentar el número de problemas y de soluciones Oracle\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 10.}
+
+\begin{knowledgebox}{RFT (Rejection Fine-Tuning)}
+RFT es un método sencillo que aprovecha la señal de RL para mejorar el SFT: se muestrean varias soluciones con el modelo actual y solo se conservan las que tienen la respuesta correcta para el ajuste fino. Esto equivale a una forma simplificada de offline RL, porque filtra los datos de entrenamiento mediante la señal de recompensa.
+\end{knowledgebox}
+
+\subsection{Por qué RFT deja de funcionar al seguir acumulando datos}
+
+El ponente subraya que RFT no es una estrategia que mejore indefinidamente con solo «muestrear más y entrenar más tiempo». El problema es que estas muestras positivas on-policy provienen de la distribución de comportamiento del propio modelo y arrastran los sesgos que la política actual ya ha formado. A corto plazo, el modelo puede aprender a «corregirse a sí mismo» en los prompts de entrenamiento, pero esa corrección suele no ser un dominio real de las regularidades del razonamiento, sino la memorización de patrones de trayectoria específicos.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-11.jpg}
+\caption{Punto de inflexión del scaling de RFT: seguir ajustándose a muestras positivas on-policy perjudica la generalización\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 11.}
+
+\begin{warningbox}{El riesgo central de RFT es que se refuercen pasos espurios}
+Si en cierto tipo de problemas el modelo genera por casualidad pasos intermedios que conducen a la respuesta correcta pero que no son lógicamente sólidos, RFT también tratará esos pasos como «muestras aprendibles» y los amplificará. Que el error de entrenamiento baje no significa que el razonamiento sea más estable; puede indicar únicamente que el modelo repite mejor sus propios hábitos previos.
+\end{warningbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-12.jpg}
+\caption{Los pasos espurios hacen que el modelo se desvíe de la trayectoria de resolución correcta en la prueba\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 12.}
+
+\subsection{RL fuera de línea: aprovechar la ventaja de las muestras negativas}
+
+Idea central: no solo hay que usar las soluciones correctas (muestras positivas), sino también aprovechar las \textbf{soluciones incorrectas} (muestras negativas) para obtener una señal de contraste.
+
+\begin{importantbox}{El concepto de Per-Step Advantage}
+Para cada paso de razonamiento de una solución incorrecta, puede estimarse la «ventaja» (advantage) de ese paso haciendo varios rollouts a partir de él. Si los rollouts que parten de cierto paso intermedio fallan siempre, ese paso es un «paso erróneo»; si a veces tienen éxito y a veces fallan, el paso es un «paso aceptable». En esencia, esto equivale a estimar la función de valor de la política de rollout.
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-15.jpg}
+\caption{Señal de ventaja que aportan los datos on-policy de muestras negativas\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 15.}
+
+El RL fuera de línea usa estas estimaciones de ventaja de dos maneras:
+
+\begin{enumerate}
+    \item \textbf{Option 1}: usar solo la ventaja estimada para un SFT ponderado (aumentar el peso de los pasos correctos y reducir el de los pasos erróneos)
+    \item \textbf{Option 2}: usar DPO (Direct Preference Optimization), conservando parte de los rollouts provenientes de $\tilde{\pi}$ para un entrenamiento por contraste de preferencias
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-20.jpg}
+\caption{Offline RL (DPO) con Advantage\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 20.}
+
+\subsection{Qué describe realmente la advantage}
+
+Este es el punto técnico de toda la clase que más conviene repasar. Aviral Kumar convierte de forma explícita la pregunta de «si vale la pena conservar cada paso» en un problema de estimación de valor: se fija un paso intermedio, se continúan los rollouts desde ahí y se observa varias veces la tasa de éxito final. Si después de cierto paso casi siempre se fracasa, ese paso debe recibir una advantage negativa; si la tasa de éxito posterior es claramente mayor, ese paso llevó el proceso de búsqueda hacia una región mejor.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-17.jpg}
+\caption{Intuición de la advantage: comparar el cambio de valor antes y después de dar un paso\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 17.}
+
+\begin{knowledgebox}{De step filtering al aprendizaje de preferencias}
+Una vez que se obtiene la step-level advantage, hay dos usos muy naturales para el entrenamiento:
+\begin{enumerate}
+    \item Filtrado directo: conservar solo los pasos con advantage alta para formar datos de imitation más limpios.
+    \item Formar pares de preferencia: combinar pasos buenos con pasos malos, y fragmentos de trayectoria buenos con fragmentos malos, en preference pairs, y luego optimizar con objetivos como DPO.
+\end{enumerate}
+Esta es también la línea principal que la clase subraya una y otra vez: \textbf{el valor del RL no está solo en la reward final, sino en convertir una señal de resultado dispersa en una supervisión de entrenamiento más densa.}
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-19.jpg}
+\caption{En los experimentos, el advantage filtering mitiga de forma notable el problema de los pasos espurios\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 19.}
+
+\begin{warningbox}{Limitaciones del RL fuera de línea}
+El problema central de Offline RL es que existe un desplazamiento de distribución (distribution shift) entre la política de rollout $\tilde{\pi}$ que se usa para estimar la advantage y la política $\pi_\theta$ que se está entrenando. A medida que avanza el entrenamiento y $\pi_\theta$ se actualiza, la estimación de la advantage se vuelve imprecisa.
+\end{warningbox}
+
+\subsection{RL en línea: REINFORCE y PPO}
+
+Para resolver el problema de desplazamiento de distribución del RL fuera de línea, el RL en línea muestrea continuamente datos nuevos con la política actual durante el entrenamiento.
+
+Flujo básico del RL en línea:
+\begin{enumerate}
+    \item Muestrear varias soluciones para cada problema con la política actual $\pi_\theta$
+    \item Evaluar esas soluciones con un modelo de recompensa o un verificador
+    \item Estimar la ventaja (advantage) de cada paso
+    \item Actualizar la política con métodos de gradiente de política (como REINFORCE o PPO)
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-25.jpg}
+\caption{Per-Step Advantages in Online RL\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 25.}
+
+Una pregunta central es: \textbf{¿conviene hacer rollouts en línea, en tiempo real, para estimar la advantage?} El ponente menciona que puede entrenarse un modelo de recompensa de proceso parametrizado (Process Reward Model, PRM) que prediga la advantage de cada paso, con lo que se evitan los costosos rollouts en línea.
+
+\subsection{PAV: convertir la outcome reward en dense reward}
+
+Si lo central del offline RL es convertir también las trayectorias erróneas en supervisión valiosa, lo central del online RL es hacer todavía más densa la señal de recompensa. El Process Advantage Verifier (PAV) que proponen Setlur et al. en «Rewarding Progress» sirve justamente para eso: aprende a predecir la mejora marginal que un paso de razonamiento aporta a la tasa de éxito posterior y, de este modo, reescribe la recompensa 0/1, que antes solo aparecía cuando la respuesta era correcta, como un dense bonus que recorre toda la cadena de la solución.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-26.jpg}
+\caption{PAV usa un verificador de ventaja parametrizado para dar a cada paso una señal de entrenamiento más fina\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 26.}
+
+\begin{importantbox}{Por qué la dense reward es especialmente adecuada para tareas de razonamiento}
+El espacio de búsqueda del razonamiento matemático y de código es enorme, y las trayectorias correctas son muy escasas. Depender solo de la reward de la respuesta final equivale a pedirle al modelo que busque a ciegas casi sin retroalimentación intermedia; en cambio, el step-level bonus que aporta PAV le indica de forma continua al modelo si el paso actual lo acerca a un espacio de soluciones con más probabilidad de éxito.
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-27.jpg}
+\caption{El online RL con dense reward ofrece mejor eficiencia de muestreo y mejor desempeño\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 27.}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-28.jpg}
+\caption{El valor de exploración de PAV: ayuda al modelo a encontrar soluciones que antes le resultaban difíciles de alcanzar\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 28.}
+
+\subsection{Resumen de la sección}
+
+Las técnicas clásicas de RL (SFT $\to$ RFT $\to$ Offline RL $\to$ Online RL) forman una cadena de herramientas que se refuerza paso a paso. El takeaway central es que el entrenamiento con RL puede mejorar de forma notable la eficiencia de datos del razonamiento de los LLM: frente al SFT puro, la mejora es de unas 8 veces.
+\section{Part 2: entrenamiento de modelos «Thinking»}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-30.jpg}
+\caption{Part 2: principales artículos sobre el entrenamiento de modelos «Thinking»\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 30.}
+
+\subsection{DeepSeek-R1: incentivar la capacidad de razonamiento mediante RL}
+
+DeepSeek-R1 es el trabajo emblemático del paradigma del «thinking model». Su hallazgo central es: \textbf{solo con entrenamiento por RL (sin cadenas de razonamiento anotadas por personas), el modelo desarrolla de forma espontánea comportamientos de razonamiento complejos}.
+
+\begin{importantbox}{Flujo de entrenamiento de DeepSeek-R1}
+\begin{enumerate}
+    \item Se aplica GRPO (Group Relative Policy Optimization) directamente sobre el modelo base para el entrenamiento por RL
+    \item La recompensa se basa únicamente en si la respuesta final es correcta (outcome reward), más una recompensa de formato
+    \item El modelo aprendió de forma espontánea metaestrategias como la verificación (verification), la vuelta atrás (backtracking), el establecimiento de submetas (subgoal setting) y el razonamiento hacia atrás (backward chaining)
+\end{enumerate}
+\end{importantbox}
+
+\begin{knowledgebox}{GRPO (Group Relative Policy Optimization)}
+GRPO es una variante simplificada de PPO. Para cada problema se muestrea un grupo de soluciones y se usa la recompensa relativa dentro del grupo (restando la media del grupo y normalizando) como estimación de la ventaja, lo que evita entrenar una red critic/value adicional. Esto resulta más eficiente en el entrenamiento de LLM a gran escala.
+\end{knowledgebox}
+
+\subsection{Entender qué es el «thinking» a partir de trayectorias concretas}
+
+La expresión «Thinking model» se presta fácilmente a descripciones misteriosas, pero los ejemplos que muestra el ponente son en realidad muy concretos: dentro de una sola respuesta, el modelo ejecuta más operaciones de nivel macro, por ejemplo, probar una dirección, descubrir que no funciona, verificar de forma explícita, retroceder y volver a planificar. Es decir, el RL no se limita a alargar la salida, sino que mejora la capacidad del modelo para organizar estas acciones de nivel macro dentro de un presupuesto fijo.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-31.jpg}
+\caption{Esquema de una sola trayectoria de un Thinking model: la verificación, la vuelta atrás y la replanificación se alternan\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 31.}
+
+\subsection{Lo que realmente cambia es el espacio de acciones, no el libro de texto de RL}
+
+En las slides, el ponente presenta de forma expresa un juicio muy importante: \textbf{el objetivo de entrenamiento no ha cambiado en lo esencial; lo que realmente cambió son las «macro actions» que el modelo ya puede ejecutar.} DeepSeek-R1 sigue haciendo policy gradient, y Kimi K1.5 también sigue dependiendo de actualizaciones de la política impulsadas por la advantage; pero el modelo base ya puede expresar, con un token budget más largo, comportamientos de alto nivel como la verificación, la vuelta atrás y la descomposición en submetas, por lo que la misma receta de RL puede producir efectos más fuertes en el nuevo espacio de acciones.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-32.jpg}
+\caption{Cambios en la era de los Thinking models: la forma de la recompensa permanece casi igual, mientras que el espacio de acciones y el presupuesto se amplían de manera notable\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 32.}
+
+\begin{knowledgebox}{Por qué «mejorar el espacio de acciones» es más decisivo que «mejorar la función objetivo»}
+Muchas discusiones atribuyen el avance de los thinking models a algún optimizador nuevo o a una nueva pérdida, pero el juicio de esta clase es más mesurado: basta con que el modelo base ya tenga cierto germen de metacognición para que ampliar el presupuesto de contexto, permitir rollouts más largos y luego recompensar estos comportamientos con RL amplifique de forma notable el desempeño en razonamiento. Dicho de otro modo, \textbf{las capacidades nuevas suelen surgir de amplificar y recombinar capacidades existentes, no de inventar de la nada un objetivo de entrenamiento completamente nuevo.}
+\end{knowledgebox}
+
+\subsection{Comportamientos de razonamiento emergentes}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-35.jpg}
+\caption{«Action» Space: comparación de las metaestrategias emergentes\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 35.}
+
+El estudio de Gandhi et al. (2025) muestra que el que surjan comportamientos cognitivos durante el entrenamiento por RL depende de si el modelo base ya posee las «semillas» de esos comportamientos. En los modelos de la serie DeepSeek, durante el entrenamiento por RL, la frecuencia de los comportamientos de verificación y de vuelta atrás primero aumenta y después disminuye; en cambio, los modelos Llama de Meta no mostraron en absoluto estos comportamientos, y el entrenamiento por RL tampoco logró mejorar su capacidad de razonamiento.
+
+\begin{warningbox}{El RL no lo resuelve todo}
+El RL no puede hacer que un modelo aprenda comportamientos que «no sabe hacer en absoluto». Si en la etapa de preentrenamiento el modelo base no estuvo expuesto a datos de razonamiento en cadena, es muy difícil que solo con RL surjan desde cero comportamientos de razonamiento complejos. La capacidad del modelo base es la condición previa para que el RL tenga efecto.
+\end{warningbox}
+
+\subsection{Objetivo de entrenamiento con presupuesto fijo}
+
+A continuación, el ponente reformula el problema como un objetivo muy de ingeniería: dado que cada pregunta de prueba cuenta con un compute budget total fijo, se entrena una política para que la sampled response maximice la tasa de éxito dentro de ese presupuesto. Este planteamiento tiene dos implicaciones prácticas:
+
+\begin{enumerate}
+    \item Razonar no consiste en que «más largo es mejor», sino en decidir, dentro de un \textbf{presupuesto limitado}, en qué gastar el cómputo.
+    \item RL, SFT y RFT pueden verse, en esencia, como distintos métodos de solución de este problema de adaptación; sus diferencias residen principalmente en si aprovechan la recompensa y en qué tan a fondo la aprovechan.
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-33.jpg}
+\caption{Objetivo del entrenamiento de Thinking models: maximizar la tasa de éxito dentro de un presupuesto de prueba fijo\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 33.}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-34.jpg}
+\caption{Bajo la misma restricción de presupuesto, tanto RL como SFT/RFT pueden verse como implementaciones distintas del «problema de adaptación»\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 34.}
+
+\subsection{Kimi K1.5: escalar el entrenamiento por RL}
+
+La contribución central de Kimi K1.5 consiste en cómo realizar de manera eficaz el entrenamiento por RL a gran escala:
+\begin{itemize}
+    \item Una ventana de contexto más larga (128K tokens)
+    \item Mejores estrategias de muestreo y un mejor diseño de la recompensa
+    \item Los experimentos muestran que el desempeño del entrenamiento por RL sigue mejorando a medida que aumenta el cómputo
+\end{itemize}
+
+\subsection{Amplificación de la longitud y el nuevo paradigma de test-time scaling}
+
+Otra consecuencia directa del entrenamiento por RL es que el modelo está dispuesto a dedicar más presupuesto de tokens a lo que realmente aporta valor. Citando el informe de Kimi, el ponente señala que, tras el entrenamiento por RL, la longitud de las respuestas del modelo crece de forma notable; pero no se trata de una verbosidad sin sentido, sino que va acompañada de más verificaciones, correcciones y exploración de ramas. Así, «dar un poco más de cómputo en el momento de la inferencia» empieza a convertirse en una vía de mejora del desempeño que puede situarse a la par de «seguir aumentando los parámetros del modelo».
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-36.jpg}
+\caption{El entrenamiento por RL amplifica la longitud de las respuestas y convierte esa longitud adicional en comportamientos de razonamiento más ricos\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 36.}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-37.jpg}
+\caption{Nuevo planteamiento del problema: además de escalar el modelo, también se puede escalar el test-time compute\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 37.}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-39.jpg}
+\caption{Un pensamiento más largo y una autocorrección más fuerte conforman la nueva vía de test-time scaling\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 39.}
+
+\subsection{Resultados de los modelos Thinking}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-40.jpg}
+\caption{Desempeño de los modelos Thinking en distintos benchmarks\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 40.}
+
+Los modelos Thinking lograron mejoras notables en varios bancos de prueba, como la programación competitiva de Codeforces, Humanity's Last Exam y AIME. DeepSeek-R1 alcanza un Pass@1 de 79.8\% en AIME 2024, comparable con el 79.2\% de OpenAI o1-1217.
+
+\subsection{Test-Time Compute y Meta-RL}
+
+Por último, el ponente menciona que optimizar el test-time compute (la asignación de cómputo en el momento de la inferencia) es, en esencia, un problema de Meta-RL: el modelo debe aprender cómo «gastar» el presupuesto de cómputo durante la inferencia.
+
+\subsection{Problemas aún sin resolver}
+
+Aunque los resultados en las leaderboards ya son muy llamativos, la última página de esta clase es, por el contrario, la que tiene el tono de advertencia más fuerte: los thinking models actuales todavía carecen de una formulation unificada y clara. Aún no hemos respondido por completo tres cuestiones: primero, si existe un diseño de dense reward más robusto que el outcome reward; segundo, en qué condiciones la ganancia del RL supera de manera estable a la del SFT; tercero, cómo enunciar con rigor el «reforzamiento del razonamiento» como un problema de adaptación, y no como una acumulación de técnicas empíricas.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-41.jpg}
+\caption{Preguntas abiertas planteadas al cierre del curso: la formulation, las dense rewards y los límites de la ventaja del RL sobre el SFT\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides, página 41.}
+
+\begin{warningbox}{El verdadero reto no está en replicar un DeepSeek-R1}
+Si uno se fija solo en algún modelo público o en alguna curva de benchmark, es fácil malinterpretar el problema como «encontrar la misma recipe». Pero la manera en que Aviral Kumar cierra la clase se parece más a una lista de preguntas de investigación: todavía necesitamos esclarecer la forma de la señal de recompensa, el modo en que se acoplan la búsqueda y la verificación, y por qué los distintos modelos base responden al RL de maneras tan diferentes.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Los thinking models como DeepSeek-R1 demostraron que: (1) el RL puede incentivar que los LLM desarrollen por sí mismos capacidades de razonamiento; (2) la condición previa decisiva es que el modelo base posea las «semillas» de los comportamientos de razonamiento; (3) los métodos simplificados de optimización de políticas, como GRPO, son a la vez eficientes y eficaces en el entrenamiento a gran escala.
+\section{Síntesis y ampliación}
+
+La idea central de esta sesión es: \textbf{las ideas básicas del RL clásico (gradiente de política, advantage estimation, la distinción entre on-policy y off-policy) también se aplican al razonamiento de los LLM y son fundamentales en él}.
+
+Takeaways principales:
+\begin{enumerate}
+    \item El SFT está limitado por la escasez de datos; el ritmo de scaling que se obtiene solo con ampliar los datos es muy lento
+    \item El RL, al aprovechar las muestras negativas y la señal de advantage, multiplica la eficiencia de datos por aproximadamente 8
+    \item El RL en línea (como GRPO/PPO) evita el desplazamiento de distribución gracias al muestreo continuo
+    \item Los modelos Thinking muestran que, con RL, pueden surgir conductas de razonamiento complejas a partir de una outcome reward simple
+    \item La calidad del preentrenamiento del modelo base es una condición previa para que el RL tenga éxito
+\end{enumerate}
+
+\subsection{Tabla general de la evolución de los métodos}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.18\textwidth} p{0.2\textwidth} p{0.24\textwidth} p{0.22\textwidth}}
+\toprule
+Método & Datos/señal utilizados & Beneficio principal & Riesgo principal \\
+\midrule
+SFT / NTP & Problema + solución de referencia & Entrenamiento simple, estable y fácil de escalar & Limitado por el volumen de datos de alta calidad; tiende a aprender patrones superficiales \\
+RFT & Muestras positivas on-policy + filtrado por resultado & Amplifica rápidamente las trayectorias correctas ya existentes & Los pasos espurios se refuerzan junto con los correctos; la generalización puede empeorar \\
+Offline RL & Trayectorias erróneas + advantage / preference & Aprovecha las muestras negativas y mejora notablemente la eficiencia de datos & Depende de la política de rollout; hay desplazamiento de distribución \\
+Online RL / GRPO / PPO & Muestreo de la política actual + outcome / dense reward & Optimiza directamente la distribución de conductas actual; adecuado para thinking model & Costo alto; sensible al diseño de la recompensa y a la calidad del modelo base \\
+\bottomrule
+\end{tabular}
+\caption{Relación y compromisos entre los tipos de métodos de la Lecture 10}
+\end{table}
+
+\begin{knowledgebox}{Lecturas adicionales}
+\begin{itemize}
+    \item DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via RL (2025)
+    \item Kimi K1.5: Scaling Reinforcement Learning with LLMs (2025)
+    \item Setlur et al., ``RL on Incorrect Synthetic Data Scales the Efficiency of LLM Math Reasoning by Eight-Fold,'' NeurIPS 2024
+    \item Gandhi et al., ``Cognitive Behaviors that Enable Self-Improving Reasoners,'' arXiv 2025
+    \item Setlur et al., ``Rewarding Progress: Scaling Automated Process Supervision for LLM Reasoning,'' arXiv 2024
+\end{itemize}
+\end{knowledgebox}
+
+\end{document}

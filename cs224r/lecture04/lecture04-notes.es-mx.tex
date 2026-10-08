@@ -1,0 +1,635 @@
+\documentclass[a4paper]{article}
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+% FandolSong no cubre algunos caracteres de nombres (U+73FA); WenQuanYi Zen Hei sí.
+\usepackage[AutoFallBack=true]{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+\setCJKfallbackfamilyfont{\CJKrmdefault}{WenQuanYi Zen Hei}
+% polyglossia no traduce los nombres de listings.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{subcaption}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{float}
+\newtcolorbox{knowledgebox}[1]{enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black, coltitle=white, fonttitle=\bfseries, title={#1}, boxrule=1pt, sharp corners}
+\newtcolorbox{importantbox}[1]{enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black, coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners}
+\newtcolorbox{warningbox}[1]{enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black, coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners}
+\lstset{basicstyle=\ttfamily\small, keywordstyle=\color{blue}, stringstyle=\color{red!60!black}, commentstyle=\color{green!60!black}, breaklines=true, frame=single, numbers=left, numberstyle=\tiny\color{gray}, captionpos=b, extendedchars=true}
+\newcommand{\notetitle}{CS224R Lecture 4: Métodos Actor-Critic}
+\newcommand{\noteauthors}{Elaboradas a partir de materiales públicos del curso}
+\newcommand{\notedate}{Primavera de 2025}
+\newcommand{\videochannel}{Stanford Online}
+\newcommand{\videopublishdate}{2025-04}
+\newcommand{\videoduration}{aproximadamente 80 minutos}
+\newcommand{\videourl}{https://cs224r.stanford.edu/spring\_2025/}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+% Footer with repo info
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\thepage}
+\fancyfoot[R]{\footnotesize\color{gray}\href{\repourl}{AI Course Notes}}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\begin{document}
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}\vspace{0.8cm}
+{\large \noteauthors\par}\vspace{0.3cm}
+{\large \notedate\par}\vspace{1.1cm}
+\ifdefempty{\videocoverpath}{{\small Imagen de portada no disponible.\par}}{\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par}
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\textbf{Ponente}: Chelsea Finn\par
+\textbf{Página del curso}: \href{https://cs224r.stanford.edu/spring_2025/}{cs224r.stanford.edu}\par
+\textbf{Página del proyecto}: \href{\repourl}{\nolinkurl{\repourl}}\par
+\end{tcolorbox}
+\end{titlepage}
+\tableofcontents
+\newpage
+
+\section{Repaso: las limitaciones del gradiente de políticas}
+
+El gradiente de políticas usa el reward-to-go muestreado para estimar qué tan buena o mala es cada acción, pero esta estimación tiene \textbf{varianza muy alta}.
+
+\begin{warningbox}{Los dos problemas centrales del gradiente de políticas}
+\begin{enumerate}
+    \item \textbf{Aprovechamiento insuficiente de los datos}: bajo recompensas dispersas, la recompensa de la mayoría de las trayectorias es cero, y la información del gradiente es escasa.
+    \item \textbf{Varianza alta}: el reward-to-go muestreado es una estimación de una sola muestra, con mucho ruido.
+\end{enumerate}
+\end{warningbox}
+
+Idea central de la mejora: ¿es posible \textbf{aprender} qué es bueno y qué es malo, en lugar de depender únicamente de la estimación muestreada?
+
+\subsection{Resumen de la sección}
+
+El principal enemigo del gradiente de políticas es la varianza alta y el aprovechamiento ineficiente de las trayectorias; construir un critic aprendido para estimar la función de ventaja puede mejorar considerablemente este fenómeno, y sienta las bases para la aparición de los sistemas Actor-Critic.
+
+\section{Repaso de los objetos centrales}
+
+\begin{importantbox}{Función de valor, función Q y función de ventaja}
+\begin{itemize}
+    \item \textbf{Función de valor} $V^\pi(s)$: la recompensa futura esperada al partir del estado $s$ y seguir $\pi$.
+    \item \textbf{Función Q} $Q^\pi(s, a)$: la recompensa futura esperada al ejecutar $a$ desde $s$ y luego seguir $\pi$.
+    \item \textbf{Función de ventaja} $A^\pi(s, a) = Q^\pi(s, a) - V^\pi(s)$: cuánto mejor es la acción $a$ en comparación con el desempeño promedio de la política $\pi$.
+\end{itemize}
+Relación clave: $V^\pi(s) = \mathbb{E}_{a \sim \pi(\cdot|s)}\left[Q^\pi(s, a)\right]$
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Las tres funciones $V$, $Q$ y $A$ describen desde distintos ángulos qué tan buena es una política. La función de ventaja $A$ resulta especialmente útil porque mide directamente qué tan buena es una acción en comparación con el desempeño promedio de la política.
+\section{Marco Actor-Critic}
+
+\subsection{Mejora del gradiente de política con la función de ventaja}
+
+Se sustituye el reward-to-go por $A^\pi$:
+$$\nabla_\theta J(\theta) \approx \frac{1}{N}\sum_{i=1}^{N}\sum_{t=1}^{T} \nabla_\theta \log \pi_\theta(a_{i,t} \mid s_{i,t}) \cdot \hat{A}^\pi(s_{i,t}, a_{i,t})$$
+
+Una mejor estimación de $\hat{A}$ $\Rightarrow$ un gradiente con menos ruido.
+
+\subsection{Cómo estimar la función de valor}
+
+Basta con ajustar $\hat{V}^\pi$, porque:
+$$\hat{A}^\pi(s_t, a_t) = r(s_t, a_t) + \gamma \hat{V}^\pi(s_{t+1}) - \hat{V}^\pi(s_t)$$
+
+Aquí se usa el $s_{t+1}$ obtenido por muestreo para aproximar la esperanza.
+
+\subsection{Métodos para ajustar la función de valor}
+
+\textbf{Método 1: regresión de Monte Carlo}
+
+$$\min_\phi \sum_{s_t \in \mathcal{D}} \left\| \hat{V}^\pi_\phi(s_t) - \sum_{t'=t}^{T} r(s_{t'}, a_{t'}) \right\|^2$$
+
+Se usa directamente la recompensa acumulada muestreada como target. Sin sesgo, pero con alta varianza.
+
+\textbf{Método 2: actualización Bootstrapped / TD}
+
+$$\min_\phi \sum_{(s,a,s') \in \mathcal{D}} \left\| \hat{V}^\pi_\phi(s) - \left(r(s,a) + \gamma \hat{V}^\pi_{\phi'}(s')\right) \right\|^2$$
+
+Se usa la propia estimación como target (bootstrap). Baja varianza, pero con sesgo.
+
+\textbf{Método 3: retorno de n pasos}
+
+Combina los dos métodos anteriores: usa las recompensas reales de $n$ pasos más bootstrap:
+$$y_{i,t} = \sum_{t'=t}^{t+n-1} r(s_{i,t'}, a_{i,t'}) + \gamma^n \hat{V}^\pi(s_{i,t+n})$$
+
+\begin{knowledgebox}{Bias-Variance Tradeoff}
+\begin{itemize}
+    \item Monte Carlo: sin sesgo, alta varianza.
+    \item TD (bootstrap de 1 paso): con sesgo (porque $\hat{V}$ no es exacta), baja varianza.
+    \item n-step: ofrece un equilibrio ajustable entre ambos.
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Arquitectura y flujo de datos}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slide-03.jpg}
+\caption{Diagrama del flujo de datos de Actor-Critic en las diapositivas de la clase: la política (Actor) produce las acciones, y el critic aporta la estimación de la ventaja para retroalimentar el gradiente.}
+\end{figure}
+
+En la figura se puede ver un ciclo típico de Actor-Critic: se generan acciones a partir de la política actual, que se guardan en el conjunto de experiencia; el critic usa los datos de experiencia para ajustar la función de valor o los valores Q; la estimación de Advantage se envía de regreso al Actor para la actualización del gradiente. Todo el proceso es asíncrono, pero mantener con precisión fina la consistencia de los datos (fixed target network, actualizaciones retrasadas) es clave para la estabilidad.
+
+\subsection{El critic como baseline y término de regularización}
+
+El critic no solo calcula la ventaja, sino que también funge como baseline y puede mejorar la robustez mediante términos de regularización. Por ejemplo, la regularización L2, el value clipping y el moving average del bootstrap target son prácticas comunes para evitar el critic drift.
+
+\begin{warningbox}{El colapso del entrenamiento causado por el critic drift}
+Si el critic se entrena demasiado rápido, arrastra la función de valor hacia una región de sobreestimación, lo que hace que el advantage sea siempre positivo; el Actor tenderá a preferir ciertas acciones y convergerá rápidamente a una política degradada. Controlar la tasa de aprendizaje del critic y agregar una target network son técnicas habituales para evitar este "pessimistic collapse".
+\end{warningbox}
+
+\begin{knowledgebox}{Probabilistic baseline vs learned critic}
+El gradiente de política tradicional usa el episode average reward como baseline, mientras que Actor-Critic aprende directamente una función parametrizada, más ajustada al estado actual. La ventaja de un critic aprendido es que puede manejar dependencias de largo plazo (como el retorno de n pasos con bootstrap) y corregir activamente el sesgo, lo que mejora la eficiencia de muestreo.
+\end{knowledgebox}
+
+\subsection{Generalized Advantage Estimation}
+
+GAE combina los retornos de múltiples pasos mediante un núcleo de decaimiento exponencial, con la siguiente fórmula:
+$$\hat{A}^\text{GAE}_{t} = \sum_{l=0}^{\infty} (\gamma \lambda)^l \delta_{t+l}, \qquad \delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)$$
+donde $\lambda \in [0,1]$ controla el bias-variance tradeoff. Con $\lambda=0$ se reduce al TD de 1 paso, y con $\lambda=1$ se reduce a Monte Carlo.
+
+\begin{importantbox}{La estrategia de programación de GAE}
+En la práctica, hacer anneal de $\lambda$ de manera gradual, de un valor bajo hacia 1, permite mantener una varianza baja al inicio del entrenamiento y absorber poco a poco, conforme avanza la convergencia, la información de dependencias de largo plazo. Combinado con una target network y el decay de $\gamma$, esto también evita que el critic se sobreajuste al reward de corto plazo.
+\end{importantbox}
+
+\subsection{Flujo completo de Actor-Critic}
+
+\begin{enumerate}
+    \item Ejecutar la política para recolectar datos
+    \item Ajustar la función de valor $\hat{V}^\pi$
+    \item Estimar la ventaja $\hat{A}^\pi$
+    \item Actualizar la política $\pi_\theta$ con el gradiente de política
+    \item Repetir
+\end{enumerate}
+
+\subsection{Resumen de la sección}
+
+Actor-Critic aprende una función de valor para estimar la ventaja, en sustitución del reward-to-go muestreado, muy ruidoso, del gradiente de política, con lo que reduce de forma considerable la varianza del gradiente.
+
+\section{Estabilidad, regularización y programación}
+
+\subsection{Entropy y regularización de la diversidad}
+
+\begin{equation*}
+\mathcal{L}_\pi = -\mathbb{E}_{s \sim \mathcal{D}, a \sim \pi} \left[\hat{A}(s,a)\log \pi(a|s)\right] + \beta \cdot \mathcal{H}(\pi(\cdot|s))
+\end{equation*}
+
+El término de entropy alienta a que la política conserve cierta aleatoriedad durante la etapa de actualización, con lo cual se evita que converja rápidamente hacia acciones subóptimas. Esto es especialmente importante en recompensas dispersas o en espacios de acción multimodales.
+
+\begin{importantbox}{La magnitud práctica de entropy regularization}
+En PPO / SAC es práctica común fijar el entropy bonus $\beta$ entre 0.01 y 0.1 de la loss de la política, es decir, conservar entre 1\% y 10\% de la energía de exploration. Si es demasiado pequeño se cae en un óptimo local; si es demasiado grande, se frena la convergencia de la política.
+\end{importantbox}
+
+\subsection{Trust region y clipped objective}
+
+El clipped objective de PPO:
+$${L}^{CLIP} = \mathbb{E} \left[ \min\left( r_t(\theta)\hat{A}_t, \; \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon)\hat{A}_t \right) \right]$$
+donde $r_t(\theta) = \frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_{\text{old}}}(a_t|s_t)}$.
+
+Tratar la restricción de KL o el mecanismo de clip como un trust region evita que la política dé pasos demasiado grandes. El docente enfatiza: en PPO hay que monitorear $KL(\pi_{\theta_{\text{old}}}||\pi_\theta)$ y, en cuanto se supere el umbral, regresar al checkpoint anterior.
+
+\begin{knowledgebox}{Trust region contra clipping}
+TRPO calcula con precisión la restricción sobre el gradiente, lo que exige mucho cómputo; PPO, en cambio, aproxima la restricción con clip, lo cual es sencillo de calcular y fácil de paralelizar, y es hoy el algoritmo dominante de elección.
+\end{knowledgebox}
+
+\subsection{Programación y target network}
+
+El Target Network del critic (como los pesos lentos de SAC) suaviza el valor objetivo mediante Polyak averaging. Por ejemplo:
+$$\theta_{\text{target}} \leftarrow \tau \theta + (1 - \tau) \theta_{\text{target}}$$
+
+Un valor de $\tau$ más pequeño hace que el target network se actualice más lentamente, lo que mejora la estabilidad, pero también puede volverlo lento para reaccionar en entornos no estacionarios.
+
+\begin{warningbox}{Si el target network se actualiza demasiado lento, no puede seguir el ritmo de la política}
+Si $\tau$ se fija demasiado pequeño, el critic seguirá persiguiendo un target ya «desactualizado», lo cual hace que la estimación que guía al Actor sea demasiado optimista y que la adaptación a muestras nuevas sea lenta. Normalmente se fija $\tau$ entre 0.005 y 0.05.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Las técnicas de estabilidad (entropy, clip objective, target network) son decisivas para que Actor-Critic pueda converger con rapidez. Monitorear la distribución de KL y de advantage permite detectar a tiempo actualizaciones que se salen de rango.
+
+\section{Introducción a Off-Policy Actor-Critic}
+
+Al combinarse con importance weights, Actor-Critic puede reutilizar datos anteriores para realizar actualizaciones de gradiente de varios pasos.
+
+$$\nabla_{\theta'} J(\theta') \approx \sum_{t,i} \frac{\pi_{\theta'}(a_{i,t} \mid s_{i,t})}{\pi_\theta(a_{i,t} \mid s_{i,t})} \nabla_{\theta'} \log \pi_{\theta'}(a_{t,i} \mid s_{t,i}) \hat{A}^{\pi_\theta}(s_{t,i}, a_{t,i})$$
+
+Sin embargo, los importance weights son inestables cuando la diferencia entre la política nueva y la anterior es grande. La siguiente clase mostrará cómo resolver este problema con restricciones de KL y clipping.
+
+\subsection{Resumen de la sección}
+
+Off-policy actor-critic reutiliza datos anteriores mediante importance sampling, pero necesita limitar el tamaño de paso de la actualización de la política para mantener la estabilidad.
+
+\section{Práctica de ingeniería y ajuste de hiperparámetros}
+
+\subsection{Replay buffer y estrategias de muestreo de datos}
+
+Los modelos Actor-Critic off-policy modernos suelen usar un replay buffer con prioridad, frame stacking y multi-environment rollout. Las notas de clases anteriores también han insistido reiteradamente en que la estrategia de muestreo de datos determina directamente la señal de entrenamiento del critic.
+
+\begin{knowledgebox}{Pequeños trucos del Prioritized replay}
+Se usa el valor absoluto del TD error como priority, lo que aumenta la probabilidad durante el sampling, y se multiplica el loss por el importance weight correction para garantizar que el update no favorezca los ejemplos con error alto.
+\end{knowledgebox}
+
+\subsection{Práctica de Batching y del retorno de múltiples pasos}
+
+El tamaño de lote, la frecuencia de muestreo y el n-step, en combinación, constituyen una dirección básica del ajuste de hiperparámetros. La siguiente tabla resume las combinaciones más comunes.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.25\textwidth}p{0.35\textwidth}p{0.28\textwidth}}
+\toprule
+Elemento de configuración & Valores comunes & Efecto en el entrenamiento \\
+\midrule
+Batch size & 256--4096 transitions & Cuanto mayor, menor el variance, pero el rendimiento del hardware es el cuello de botella \\
+n-step & 1--5 & Con más pasos el sesgo es menor, pero aparece drift; se usa comúnmente un $\lambda$ mix \\
+Update frequency & 1 update per 1--4 steps & Menos update reduce el off-policy bias \\
+Replay ratio & 1--4 & >1 significa que se actualiza varias veces después de cada muestreo; el learning rate de cada paso debe reducirse en la misma proporción \\
+\bottomrule
+\end{tabular}
+\caption{Combinaciones de hiperparámetros que se ajustan con frecuencia en la práctica}
+\end{table}
+
+\subsection{Ajuste de hiperparámetros y diagnóstico de fallas}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{slide-15.jpg}
+\caption{Diagrama de flujo de entrenamiento mostrado en la Lecture 4: varios worker extraen datos, el critic ajusta el objetivo y el Actor actualiza la política.}
+\end{figure}
+
+Cuando el entrenamiento presenta divergence, primero se observan las three signals: critic loss, KL y reward curve. Además, los failure mode comunes incluyen:
+\begin{itemize}
+    \item Critic overestimate: la regresión falla y hace que el advantage sea siempre positivo;
+    \item Replay buffer stale: el entorno cambia pero los datos del buffer siguen siendo los mismos;
+    \item Exploration collapse: el entropy cae rápidamente a 0.
+\end{itemize}
+
+\begin{warningbox}{Procedimiento rápido de reinicio cuando aparece divergence}
+Primero regrese la política al checkpoint anterior, desactive el entropy decay, reduzca el learning rate y luego recupérela gradualmente. No aumente el volumen de datos de una sola vez, o se acelerará el desastre.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+En la práctica, el muestreo de datos, el batching y la programación de hiperparámetros constituyen el problema sistemático de la estabilidad del entrenamiento de Actor-Critic. Monitorear el replay ratio, el entropy y el critic loss son los datos de primera mano para el ajuste de hiperparámetros.
+\section{Familias predominantes de Actor-Critic y diagnóstico}
+
+\subsection{Familias de algoritmos y diferencias de diseño}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.23\textwidth}p{0.21\textwidth}p{0.23\textwidth}p{0.2\textwidth}}
+\toprule
+Algoritmo & Tipo de Critic & Actualización de la política & Escenario adecuado \\
+\midrule
+PPO & soft target de V & clipped surrogate & entrenamiento síncrono de modelos, clústeres de CPU \\
+A2C/A3C & V de un paso + entropy & sobremuestreo con distintos workers & paralelismo coordinado, múltiples instancias \\
+SAC & doble Q + entropy max & off-policy replay buffer & acciones continuas, que requieren alta eficiencia de muestra \\
+DDPG/TD3 & Deterministic policy & deterministic actor gradient & control continuo de alta dimensión \\
+\bottomrule
+\end{tabular}
+\caption{Diferencias centrales entre las distintas variantes de Actor-Critic}
+\end{table}
+
+\begin{knowledgebox}{Dimensiones de diseño abstraídas de la diapositiva de la clase}
+Las diferencias que el docente enfatiza provienen principalmente de tres dimensiones: la frecuencia de actualización (on-policy vs off-policy), la restricción de la función objetivo (clipping / KL / trust region), y si incluye entropy o ajusta automáticamente la exploration.
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{slide-12.jpg}
+\caption{Figura comparativa de PPO y SAC de las Lecture slides, que enfatiza la complementariedad entre la estabilidad de on-policy y la eficiencia de muestra de off-policy.}
+\end{figure}
+
+\subsection{Monitoreo del entrenamiento y métricas experimentales}
+
+\begin{itemize}
+    \item \textbf{KL divergence}: monitorea si la actualización rebasa el trust region;
+    \item \textbf{Distribución de Advantage}: si es demasiado ancha indica high variance, si es demasiado angosta indica bias alto;
+    \item \textbf{Curva de Critic loss}: un aumento abrupto significa que el learning rate es demasiado alto o que el objetivo es inestable;
+    \item \textbf{Entropy}: si cae demasiado rápido indica que la exploration ha caído en determinism.
+\end{itemize}
+
+\begin{warningbox}{El tradeoff entre las métricas}
+Reducir el critic loss no siempre es bueno: mientras el sesgo en la estimación de advantage sea grande, el Actor recibirá una señal incorrecta. Un entrenamiento estable requiere observar simultáneamente las tendencias del loss, del KL y de la policy entropy.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Las familias predominantes de Actor-Critic ponen énfasis distinto en el trust region, la entropy y el off-policy buffer; en la práctica es necesario observar varias curvas junto con early stopping o checkpoint rollback.
+
+\section{Evaluación y puntos de referencia}
+
+\subsection{Sistema de métricas de evaluación}
+
+\begin{itemize}
+    \item \textbf{Sample efficiency}: cuántas transitions se consumen en promedio por cada update;
+    \item \textbf{Reward saturation}: si el plateau de la curva de reward es estable;
+    \item \textbf{Entropy decay}: una caída rápida de la entropy indica un colapso de la exploration;
+    \item \textbf{Policy divergence}: si la KL y la dirección del gradiente se mantienen consistentes con la critic signal.
+\end{itemize}
+
+\begin{importantbox}{Definir con cuidado la ventana de evaluación}
+Al probar cada checkpoint hay que usar una semilla aleatoria fija y un número fijo de rollout steps, para evitar que un single-run high reward induzca a conclusiones erróneas. Se recomienda reportar la puntuación de best-of-$N$ junto con la media y la desviación estándar.
+\end{importantbox}
+
+\subsection{Ejemplos de Benchmark}
+
+\begin{itemize}
+    \item \textbf{MuJoCo locomotion}: PPO como baseline, SAC ofrece mayor eficiencia de muestreo;
+    \item \textbf{Atari}: A3C/A2C mostraron que el paralelismo por lotes puede acortar significativamente la convergencia;
+    \item \textbf{Robotics sim2real}: se controlan estrictamente la KL, el safety filter y la entropy;
+    \item \textbf{StarCraft multiagente}: centralized critic + decentralized actor.
+\end{itemize}
+
+\begin{knowledgebox}{Errores frecuentes al hacer benchmark}
+Reproducir el best score usando una sola single random seed puede ocultar el policy collapse y la training instability. Se recomienda ejecutar al menos entre 3 y 5 semillas, y graficar juntas la trayectoria de la KL y la curva de reward.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La evaluación no debe limitarse a observar el final reward, sino también monitorear la entropy, la KL, la critic loss y el sampling ratio, para poder determinar si el Actor-Critic es realmente estable.
+
+\section{Moldeado de recompensas y asignación de crédito temporal}
+
+\subsection{LSTM convolucional y reward shaping}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{slide-24.jpg}
+\caption{Ejemplo de reward shaping que muestra la Lecture slide 24: se usa intermediate reward guidance en una multi-stage task para acortar el tiempo de entrenamiento.}
+\end{figure}
+
+El curso enfatiza que, en una multi-stage/hierarchical task, proporcionar un intermediate reward puede acelerar de manera significativa la convergencia del critic. La manera de hacerlo es descomponer el reward en \textit{completion reward} + \textit{auxiliary reward}, y usar dynamic weighting para controlar las gradient magnitudes.
+
+\begin{knowledgebox}{Los guardrails de reward shaping}
+El auxiliary reward debe mantenerse potential-based (es decir, no debe cambiar la optimal policy), de lo contrario incentivará al agent a desviarse del objective real. Por lo general se introduce una función de shaping $F(s,a,s')$ y se asegura que la suma $\sum_t \gamma^t F(s_t,a_t,s_{t+1})$ sea cero.
+\end{knowledgebox}
+
+\subsection{Planificador diferenciable y credit assignment}
+
+El ponente mencionó un trick práctico: en control complejo se usa un differentiable planner para estimar la trajectory futura, y luego se usa el soft value del planner como señal de supervisión del critic. Esto puede reducir de forma significativa el drift del long-term credit assignment.
+
+\begin{warningbox}{El soft planner requiere cómputo adicional}
+Introducir differentiable planning aumenta el costo de inferencia en cada paso; es necesario asegurarse de que ese planner pueda ejecutarse en un entorno de low latency, de lo contrario arruinará el real-time control.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Reward shaping + la señal del planner es una solución realista para manejar multi-stage task y long-horizon credit assignment, pero hay que asegurarse de que el shaping se mantenga potential-based, sin acaparar el inference budget.
+\section{Seguridad de la política y despliegue sistematizado}
+
+\subsection{Risk-aware fine-tuning}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-30.jpg}
+\caption{El pipeline consciente del riesgo que resume la diapositiva 30 de la clase: primero se usa el conservative critic para acotar el valor, y luego se hace un safety check antes del despliegue.}
+\end{figure}
+
+La clase menciona una capa de seguridad: antes del actor update se revisa la salida del critic, y si el valor de la política actual rebasa el pre-defined threshold, se retrocede al paso anterior. Esto es un análogo al trust region, pero está más orientado a servir de deployment guard.
+
+\begin{warningbox}{Recomendación sobre el conservative critic}
+Se guardan varios conjuntos de critic checkpoints, y al desplegar se elige el conjunto conservative. Así, aunque el newest critic overestimates, el actor tampoco será inducido a error por una señal demasiado fuerte.
+\end{warningbox}
+
+\subsection{Monitoreo en línea y rollback}
+
+En los sistemas de producción, una práctica común es enviar los promedios de KL, critic loss y entropy al dashboard. Si cualquier métrica supera el umbral tres veces seguidas, se dispara automáticamente un rollback y se reinicia el entropy bonus.
+
+\begin{knowledgebox}{Experiencia de los sistemas en producción}
+En los sistemas de LLM o RL, la señal de early warning de policy divergence es muy importante. La clase recomienda calcular el KL con una 3-day rolling window, y si supera 2 veces la historic std, pausar la actualización del actor para que el critic catch up.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Un despliegue seguro exige que el sistema actor-critic forme un cortafuegos entre la actualización y la inference: conservative critic, guard rails, rollback automático y monitoreo continuo.
+
+\section{Seguimiento y registro de hiperparámetros}
+
+\subsection{Estructura del logbook}
+
+El curso recomienda mantener un logbook para cada experimento, en el que se registren los siguientes campos:
+
+\begin{itemize}
+    \item \textbf{Learner IDs}: la LR de Actor, Critic y Target network;
+    \item \textbf{Replay ratio}: las transitions consumidas por cada update;
+    \item \textbf{Entropy schedule}: el valor inicial más la velocidad de decay;
+    \item \textbf{Benchmark metrics}: KL, critic loss, reward mean.
+\end{itemize}
+
+\begin{importantbox}{Por qué log mutation}
+Al comparar distintos seeds, con frecuencia solo hay una ligera desviación en los hiperparámetros. Llevar un logbook completo te permite reproducir rápidamente un good run, y también detectar rápidamente una catastrophic divergence.
+\end{importantbox}
+
+\subsection{Tablas automatizadas}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.25\textwidth}p{0.25\textwidth}p{0.25\textwidth}}
+\toprule
+Campo & Herramienta recomendada & Objetivo \\
+\midrule
+KL curve & TensorBoard / WandB & Monitorear si se rebasa el trust region \\
+Entropy & WandB custom scalar & Dar seguimiento al exploration collapse \\
+Critic loss & CSV + daily summary & Detectar señales tempranas de critic drift \\
+Replay ratio & elastic log & Asegurar que no se olvide la sample efficiency \\
+\bottomrule
+\end{tabular}
+\caption{Prácticas concretas de Hyperparameter logging}
+\end{table}
+
+\subsection{Resumen de la sección}
+
+El registro de hiperparámetros eleva el experimento de «ejecutar algunos seeds» a «un proceso de ingeniería reproducible», y lo alinea con la colaboración en equipo y la revisión de performance regression.
+
+\section{Reproducción de experimentos y publicación}
+
+\subsection{Del pipeline de datos a un modelo desplegable}
+
+Reproducir el experimento implica tres etapas: recolección de datos, ciclo de entrenamiento, guard de despliegue. En cada una de ellas hay que monitorear continuamente las metrics (KL, entropy, critic loss) y mantener un registro de experimentos para comparar los distintos run.
+
+\begin{itemize}
+    \item \textbf{Datos}: usar un deterministic rollout para guardar state/action/reward/truncation;
+    \item \textbf{Entrenamiento}: construir el actor/critic/stage scheduler, con guardado automático del best checkpoint;
+    \item \textbf{Despliegue}: usar el conservative critic como guard en inference-time, manteniendo una fallback policy.
+\end{itemize}
+
+\begin{importantbox}{Los tres pasos del pipeline de reproducción}
+1) primero asegurarse de que el replay buffer pueda serializarse; 2) mantener el actor update y el critic update en el mismo config; 3) cuando el guard stage dispare un rollback, registrar el KL y la entropy de ese momento.
+\end{importantbox}
+
+\subsection{Gestión de versiones y estrategia de rollback}
+
+Para poder hacer rollback con rapidez, el curso recomienda usar git tag para registrar el config (learning rate, lambda, entropy bonus) correspondiente a cada checkpoint. Si un new run presenta un KL alto, se hace revert al tag, para evitar un merge erróneo.
+
+\begin{warningbox}{Errores comunes en la estrategia de rollback}
+No hay que reiniciar el replay buffer durante el rollback, pues se perdería el critic signal anterior; basta con volver al checkpoint, conservar el estado del buffer y volver a hacer warm up de la entropy.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Reproducir el experimento consiste en empaquetar el entrenamiento, el registro y el rollback en un pipeline ejecutable, de manera que varios equipos puedan hacer copy/paste del mismo buen resultado.
+
+\section{Fórmulas y programación}
+
+\subsection{Combinación de fórmulas de advantage y TD}
+
+\begin{align*}
+\delta_t &= r_t + \gamma V_{\phi}(s_{t+1}) - V_{\phi}(s_t) \\
+\hat{A}_t^{\lambda} &= \sum_{l=0}^{\infty} (\gamma \lambda)^l \delta_{t+l} \\
+V_{\phi}(s_t) &\leftarrow V_{\phi}(s_t) + \alpha_\phi \delta_t \\
+\pi_\theta &\leftarrow \pi_\theta + \alpha_\theta \hat{A}_t^{\lambda} \nabla_\theta \log \pi_\theta(a_t|s_t)
+\end{align*}
+
+Este conjunto de fórmulas muestra el flujo de información entre actor y critic: el critic se actualiza a sí mismo mediante el TD error, mientras que el actor multiplica el advantage estimado por el logaritmo de la probabilidad para formar el gradiente. La programación de $\lambda$ afecta de manera significativa el equilibrio entre sesgo y varianza; se recomienda registrar cada cambio en el registro de arquitectura.
+
+\subsection{Policy loss y entropy}
+
+\begin{equation*}
+\mathcal{L}_\pi = -\mathbb{E} \left[ \min\left( r_t(\theta) \hat{A}_t, \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon)\hat{A}_t \right) \right] - \beta \mathcal{H}(\pi)
+\end{equation*}
+\begin{equation*}
+\mathcal{H}(\pi) = -\sum_a \pi(a|s) \log \pi(a|s)
+\end{equation*}
+
+\begin{knowledgebox}{Estrategia de estabilidad del clip objective}
+The clip objective minimizes whichever term is smaller between the unclipped ratio and the clipped ratio, so when $r_t(\theta)$ leaves the trust region it safely falls back to the clipped variant. Coupling this with the entropy bonus keeps the early-stage exploration from collapsing too quickly.
+\end{knowledgebox}
+
+\subsection{Heuristics de programación y tasa de aprendizaje}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slide-21.jpg}
+\caption{La diapositiva muestra las estrategias de programación de la tasa de aprendizaje y de entropy, que fomentan reducir gradualmente el entropy bonus a la mitad del entrenamiento.}
+\end{figure}
+
+Esquemas de programación comunes:
+\begin{itemize}
+    \item Anneal de la tasa de aprendizaje: de $3e-4$ a $1e-5$, usando cosine decay para mantener la suavidad.
+    \item Programación de $\lambda$: 0.95 en la etapa inicial, con una asíntota hacia 0.99 al converger.
+    \item Clipping eps: cuando la KL supera el umbral, se reduce $\epsilon$ y se hace un nuevo warm up.
+\end{itemize}
+
+\begin{warningbox}{El peligro de una programación demasiado rápida}
+Si el entropy bonus se reduce rápidamente a 0, la política cae fácilmente en un callejón sin salida determinista, en particular en entornos con reward escaso. Se recomienda mantener un piso, dejando al menos 0.01 de entropy.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Las fórmulas y la programación ofrecen el esqueleto matemático del Actor-Critic. Desde el advantage hasta el policy loss, cada término debe registrarse, poder sustituirse en caliente, y corresponder a una métrica concreta en el registro de programación.
+\section{Caso práctico: control de robots y multiagente}
+
+\subsection{Elección entre PPO/SAC en robótica}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slide-18.jpg}
+\caption{Robotics benchmark que muestra la diapositiva 18 de la clase: PPO se usa para un control on-policy estable, SAC destaca en espacios de acción continuos de alta dimensión.}
+\end{figure}
+
+En las tareas reales de control de robots, el entrenamiento suele enfrentar restricciones de muestreo y espacios de acción de alta dimensión. La arquitectura de trust-region más clipping que ofrece PPO facilita limitar el tamaño de paso en el equipo real, mientras que el buffer off-policy entropy-optimal de SAC permite un ajuste más rápido.
+
+\begin{knowledgebox}{Recomendaciones para la programación en producción}
+En tareas de robot arm / locomotion, una estrategia común es: usar pruebas de PPO con horizon corto para validar rápidamente la estructura de reward; migrar la configuración más prometedora a SAC, junto con soft target y automatic entropy tuning. Los resultados de PPO son más fáciles de interpretar y SAC ahorra más muestras.
+\end{knowledgebox}
+
+\subsection{Critic compartido en el entrenamiento multiagente}
+
+Cuando varios agent comparten un entorno, un common critic o un centralized value es clave para mejorar la estabilidad. La práctica habitual es entrenar un joint critic $Q(\boldsymbol{s}, \boldsymbol{a})$ conjunto y luego actualizar el actor por partes:
+
+$$\hat{A}_i = Q(\boldsymbol{s}, \boldsymbol{a}) - V(\boldsymbol{s})$$
+
+El agent solo observa su propia action, pero el critic ve el estado global, lo que le permite juzgar con más precisión el valor de las decisiones locales.
+
+\begin{warningbox}{Riesgos del critic compartido}
+Si el critic depende en exceso de la global information, o no cuenta con una value decomposition adecuada, el gradient de un agent individual puede quedar enmascarado por el noise global. Las soluciones incluyen information bottleneck, agent-specific mask y periodic critic reset.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+PPO y SAC desempeñan papeles distintos en el entrenamiento de agentes: PPO funciona como política segura, SAC gestiona el muestreo de alta frecuencia; en escenarios multiagente se necesita un critic compartido y prestar atención a la fuga de información.
+
+\section{Síntesis y ampliación}
+
+\begin{enumerate}
+    \item Los métodos Actor-Critic estiman la ventaja aprendiendo una función de valor, lo que reduce la varianza del gradiente de política.
+    \item La función de valor puede ajustarse con métodos Monte Carlo, TD o n-step, cada uno con su propio compromiso bias-variance.
+    \item La versión off-policy reutiliza datos antiguos mediante importance weights, lo que mejora la eficiencia de los datos.
+    \item Actor-Critic es la base de algoritmos modernos de RL como PPO y SAC.
+\end{enumerate}
+
+\subsection{Direcciones futuras}
+
+\begin{itemize}
+    \item \textbf{Self-supervised critic}: utiliza una representation autosupervisada para mejorar la generalization de la value estimation;
+    \item \textbf{Hierarchical actor-critic}: divide la policy en niveles jerárquicos hasta quinientas acciones, desde la decisión de alto nivel hasta la ejecución de bajo nivel;
+    \item \textbf{Co-training actor-critic with world models}: usa un dynamics model para predecir el next state, de manera que el critic cuente con un richer context;
+    \item \textbf{Adaptive compute}: permite que el hardware asigne dinámicamente más cómputo a las muestras donde el reward cambia de forma abrupta.
+\end{itemize}
+
+\begin{warningbox}{Riesgos potenciales de las direcciones futuras}
+Las arquitecturas nuevas suelen sacrificar estabilidad a cambio de un score más alto; es indispensable usar el KL y la critic loss como guard rails durante el pilot run, sin relajar la entropy a ciegas.
+\end{warningbox}
+
+\subsection{Generalización y transferencia de dominio}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slide-28.jpg}
+\caption{La diapositiva 28 de la clase muestra la configuración de aprendizaje por transferencia: después de entrenar Actor-Critic en la source task, se usa fine-tuning few-shot en la target task.}
+\end{figure}
+
+La estrategia de transferencia que propone el curso es: primero entrenar una policy en el source environment con PPO/SAC, luego fijar el critic y, con small amount of target data, hacer fine-tuning de los logits del actor. Así se evita que un target reward demasiado disperso provoque critic drift.
+
+\begin{knowledgebox}{Cambio de distribución en la transferencia}
+Durante la transferencia hay que prestar atención al shift del observation/action space; se puede mezclar source sample en el replay buffer y aplicar importance weight correction, para que el actor se adapte gradualmente a la new dynamics.
+\end{knowledgebox}
+
+\subsection{Tabla resumen}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.23\textwidth}p{0.25\textwidth}p{0.25\textwidth}p{0.2\textwidth}}
+\toprule
+Tema & Medida clave & Punto de riesgo & Recomendación práctica \\
+\midrule
+Estimación de advantage & El critic aprende $V$, usando GAE & Sesgo o high variance & Actualizaciones pequeñas + annealed $\lambda$ \\
+Regularización de entropy & Agregar un bonus $\mathcal{H}(\pi)$ & randomness excesivo & Usar entropy alta al inicio y decay al final \\
+Trust region & PPO clip / KL target & el step se dispara & Monitorear el KL, establecer un mecanismo de retroceso \\
+Uso de off-policy & Importance sampling + replay & Colapso de los weights & Usar clipping + target smoothing \\
+\bottomrule
+\end{tabular}
+\caption{Operaciones centrales y consideraciones propuestas en la clase 4}
+\end{table}
+
+\subsection{Lecturas adicionales}
+\begin{itemize}
+    \item Mnih et al., \textit{Asynchronous Methods for Deep Reinforcement Learning} (A3C).
+    \item Schulman et al., \textit{High-Dimensional Continuous Control Using Generalized Advantage Estimation} (GAE).
+    \item Schulman et al., \textit{Proximal Policy Optimization Algorithms} (PPO).
+    \item Haarnoja et al., \textit{Soft Actor-Critic: Off-Policy Maximum Entropy Deep Reinforcement Learning} (SAC).
+    \item Lillicrap et al., \textit{Continuous control with deep reinforcement learning} (DDPG).
+\end{itemize}
+
+\end{document}

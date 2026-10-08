@@ -1,0 +1,575 @@
+\documentclass[a4paper]{article}
+
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+% FandolSong no cubre algunos caracteres de nombres (U+73FA); WenQuanYi Zen Hei sí.
+\usepackage[AutoFallBack=true]{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+\setCJKfallbackfamilyfont{\CJKrmdefault}{WenQuanYi Zen Hei}
+% polyglossia no traduce los nombres de listings.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{subcaption}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{float}
+
+\newtcolorbox{knowledgebox}[1]{enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black, coltitle=white, fonttitle=\bfseries, title={#1}, boxrule=1pt, sharp corners}
+\newtcolorbox{importantbox}[1]{enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black, coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners}
+\newtcolorbox{warningbox}[1]{enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black, coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners}
+
+\lstset{basicstyle=\ttfamily\small, keywordstyle=\color{blue}, stringstyle=\color{red!60!black}, commentstyle=\color{green!60!black}, breaklines=true, frame=single, numbers=left, numberstyle=\tiny\color{gray}, captionpos=b, extendedchars=true}
+
+\newcommand{\notetitle}{CS224R Lecture 3: Gradiente de política}
+\newcommand{\noteauthors}{Compilado a partir del curso público CS224R 2025 de Stanford}
+\newcommand{\notedate}{4 de abril de 2026}
+\newcommand{\videochannel}{Stanford Online}
+\newcommand{\videopublishdate}{2025-04}
+\newcommand{\videoduration}{aproximadamente 80 minutos}
+\newcommand{\videourl}{https://cs224r.stanford.edu/spring\_2025/}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+
+% Footer with repo info
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\thepage}
+\fancyfoot[R]{\footnotesize\color{gray}\href{\repourl}{AI Course Notes}}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}\vspace{0.8cm}
+{\large \noteauthors\par}\vspace{0.3cm}
+{\large \notedate\par}\vspace{1.1cm}
+\ifdefempty{\videocoverpath}{{\small Portada no disponible.\par}}{\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par}
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\textbf{Ponente}: Chelsea Finn\par
+\textbf{Página del curso}: \href{https://cs224r.stanford.edu/spring_2025/}{cs224r.stanford.edu}\par
+\textbf{Página del proyecto}: \href{\repourl}{\nolinkurl{\repourl}}\par
+\end{tcolorbox}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+\section{Del aprendizaje por imitación al aprendizaje por refuerzo}
+
+\subsection{Espacio del problema y salto de capacidad}
+
+La clase anterior presentó el aprendizaje por imitación: dadas demostraciones expertas, se aprende una política mediante aprendizaje supervisado. Pero los dos cuellos de botella centrales del aprendizaje por imitación siguen presentes: no puede superar a quien demuestra y carece de un mecanismo de práctica que se refuerce a sí mismo. El aprendizaje por refuerzo introduce el concepto de reward, coloca la conducta en el contexto de una decisión a largo plazo y, por eso, puede mejorar de manera gradual mediante una gran cantidad de experiencia.
+
+\begin{knowledgebox}{La diferencia entre Offline y Online}
+\begin{itemize}
+    \item \textbf{Offline}: solo puede reutilizar datos históricos; es adecuado para escenarios donde no se puede interactuar libremente (simuladores/medicina).
+    \item \textbf{Online}: puede recolectar datos nuevos de manera continua y permite que la política explore en el entorno real.
+\end{itemize}
+El gradiente de política pertenece al RL online: toma la política de comportamiento directamente como variable de optimización.
+\end{knowledgebox}
+
+\subsection{El objetivo de optimización del aprendizaje por refuerzo}
+
+El objetivo final en el aprendizaje por refuerzo es maximizar el trajectory reward: $J(\theta) = \mathbb{E}_{\tau \sim p_\theta(\tau)} [\sum_t r_t]$. Ya no intentamos ajustar las acciones expertas, sino que hacemos descenso (o ascenso) de gradiente en el espacio de $\theta$, de modo que la política favorezca cada vez más las trayectorias con reward alto.
+
+\begin{importantbox}{¿Por qué no hacer aprendizaje supervisado directamente?}
+\begin{itemize}
+    \item Los datos de comportamiento provienen de la distribución de políticas distintas, por lo que no se puede suponer que sean IID;
+    \item el reward ofrece una retroalimentación para explorar desde cero, capaz de descubrir políticas que superen al experto;
+    \item en el RL, $\pi_\theta$ determina la recolección de datos, de modo que la política y los datos cambian de manera conjunta.
+\end{itemize}
+\end{importantbox}
+
+\subsection{El flujo básico del RL online}
+
+\begin{enumerate}
+    \item Inicializar $\pi_\theta$ (aleatoria, por imitación, heurística).
+    \item Ejecutar $\pi_\theta$ para muestrear varias trajectory (collect data).
+    \item Estimar el gradiente de política y actualizar los parámetros $\theta$.
+    \item Continuar el muestreo con la nueva política, formando un ciclo cerrado.
+\end{enumerate}
+
+\subsection{Resumen de la sección}
+
+Esta sección, desde la perspectiva de la forma del problema y el salto de capacidad, enfatiza que la relación entre el gradiente de política y el aprendizaje por imitación radica en la actualización de la distribución de muestreo, el modelado explícito del objetivo de reward y la capacidad de buscar soluciones con reward alto dentro de un espacio de políticas más amplio.
+
+\section{Deducción del gradiente de política}
+
+\subsection{Función objetivo y factorización de la trayectoria}
+
+La función objetivo que maximiza el gradiente de política es la esperanza de la recompensa de la trayectoria:
+$$J(\theta) = \mathbb{E}_{\tau \sim p_\theta(\tau)} \left[ \sum_t r(s_t, a_t) \right],$$
+donde $p_\theta(\tau) = p(s_1)\prod_t \pi_\theta(a_t\mid s_t)p(s_{t+1}\mid s_t,a_t)$. Consideramos el parámetro de política $\theta$ como el único objeto de optimización; los demás términos solo determinan la distribución de muestreo.
+
+\begin{knowledgebox}{Sentido de la factorización de la trayectoria}
+\begin{itemize}
+    \item La parte dinámica $p(s_{t+1}\mid s_t,a_t)$ no depende de $\theta$, por lo que no afecta al gradiente;
+    \item la política $\pi_\theta$ determina cómo se muestrea, y $J(\theta)$ también es una esperanza sobre la política de muestreo;
+    \item la recompensa se acumula a lo largo de toda la trayectoria y forma una señal global, que hay que descomponer en forma diferencial.
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Log-Gradient Trick}
+
+Usando la identidad $\nabla_\theta p_\theta(\tau) = p_\theta(\tau) \nabla_\theta \log p_\theta(\tau)$, se puede escribir:
+$$\nabla_\theta J(\theta) = \mathbb{E}_{\tau \sim p_\theta(\tau)} \left[ \nabla_\theta \log p_\theta(\tau) \cdot r(\tau) \right].$$
+Al desarrollar $\log p_\theta(\tau)$ se obtiene: $\log p(s_1) + \sum_t \left[\log \pi_\theta(a_t\mid s_t) + \log p(s_{t+1}\mid s_t,a_t)\right]$,
+donde solo $\log \pi_\theta$ depende de los parámetros, con lo cual se obtiene:
+$$\nabla_\theta J(\theta) = \mathbb{E}_{\tau \sim p_\theta(\tau)} \left[ \left(\sum_t \nabla_\theta \log \pi_\theta(a_t\mid s_t)\right) \cdot r(\tau) \right].$$
+
+\begin{importantbox}{No hace falta conocer el modelo del entorno}
+La dinámica del entorno $p(s_{t+1}\mid s_t,a_t)$ se cancela mediante el log-gradient trick, de modo que podemos muestrear trayectorias directamente y estimar el objetivo en un entorno model-free.
+\end{importantbox}
+
+\subsection{Aproximación de Monte Carlo: REINFORCE}
+
+En la práctica, se reemplaza la esperanza por una estimación de Monte Carlo:
+$$\nabla_\theta J(\theta) \approx \frac{1}{N} \sum_{i=1}^{N} \left(\sum_t \nabla_\theta \log \pi_\theta(a_{i,t}\mid s_{i,t})\right) \cdot r(\tau_i).$$
+Esta fórmula es precisamente el estimador de gradiente de REINFORCE. El flujo del algoritmo es: (1) muestrear $N$ trayectorias; (2) calcular la recompensa de cada trayectoria; (3) actualizar los parámetros con la estimación anterior.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{0.3\textwidth}p{0.45\textwidth}p{0.2\textwidth}}
+\toprule
+Símbolo & Significado & Observación \\
+\midrule
+$\sum_t r(s_t,a_t)$ & Recompensa total de la trayectoria & Supervisión a nivel de trayectoria \\
+$\nabla_\theta \log \pi_\theta$ & Gradiente de la log-verosimilitud de la política & Se puede diferenciar automáticamente \\
+$N$ & Número de trayectorias muestreadas & Afecta la varianza y el cómputo \\
+\bottomrule
+\end{tabular}
+\caption{Cantidades clave del estimador REINFORCE}
+\end{table}
+
+\subsection{Resumen de la sección}
+
+El núcleo del gradiente de política consiste en escribir la esperanza de la recompensa de la trayectoria como el producto de la log-verosimilitud por la recompensa, de modo que el gradiente se pueda estimar directamente sin modelar la dinámica. REINFORCE ofrece la implementación de Monte Carlo más elemental, pero con una varianza considerable; las secciones siguientes discuten formas de mejorarla.
+\section{Comprensión intuitiva y mejoras}
+
+\subsection{Aprendizaje por imitación ponderado por reward}
+
+El gradiente de política es en realidad \textbf{aprendizaje por imitación ponderado por el reward de la trayectoria}: refuerza las acciones con reward alto y suprime las acciones con reward bajo. A diferencia de la supervisión pura, esta formulación nos permite explorar mediante una stochastic policy.
+
+\begin{knowledgebox}{La naturaleza del aprendizaje por ensayo y error}
+\begin{itemize}
+    \item la política genera las muestras, y el reward determina la dirección del gradient;
+    \item maneja el reward disperso con más flexibilidad, porque el muestreo incluye la trayectoria completa;
+    \item el objetivo de optimización es el reward esperado, no la exactitud de un solo paso.
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Reward-to-Go y causalidad}
+
+Queremos que el gradient de un time step determinado solo se vea afectado por el reward de ese step y los posteriores. Usar el reward-to-go permite lograr la causalidad:
+$$\nabla_\theta J(\theta) \approx \frac{1}{N}\sum_{i=1}^{N}\sum_{t=1}^{T} \nabla_\theta \log \pi_\theta(a_{i,t} \mid s_{i,t}) \left(\sum_{t'=t}^{T} r(s_{i,t'}, a_{i,t'}) \right).$$
+Esta expresión, en cada acción, solo observa el reward futuro, por lo que se ajusta mejor al causal effect.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{0.3\textwidth}p{0.45\textwidth}p{0.2\textwidth}}
+\toprule
+Término & Significado & Función \\
+\midrule
+Trajectory reward & reward acumulado de toda la trayectoria & supervision global \\
+Reward-to-go & reward desde el instante actual hasta el final & mantiene la causalidad \\
+Baseline & una constante o una función de valor & reduce la variance \\
+\bottomrule
+\end{tabular}
+\caption{Expresiones de reward comunes en la estimación del gradiente de política}
+\end{table}
+
+\subsection{Baseline y Advantage}
+
+\begin{warningbox}{Sensible a la escala del reward}
+Si todos los rewards son positivos, el gradiente aumenta la verosimilitud de todas las acciones, incluso si algunas apenas son «no tan malas». Esto incrementa considerablemente la variance del gradiente.
+\end{warningbox}
+
+Al restar un baseline $b(s_t)$ del reward-to-go, no cambiamos la esperanza, pero podemos reducir la variance:
+$$\nabla_\theta J(\theta) = \mathbb{E}_{\tau \sim p_\theta(\tau)} \left[\sum_t \nabla_\theta \log \pi_\theta(a_t \mid s_t) \cdot (G_t - b(s_t))\right],$$
+donde $G_t$ es el reward-to-go. Si $b(s_t)=V^\pi(s_t)$, se obtiene el advantage estimator $A^\pi(s_t,a_t)$.
+
+\begin{importantbox}{La intuición del Advantage}
+El Advantage mide en qué medida una acción es mejor que el promedio del estado actual. Un advantage positivo refuerza esa acción, uno negativo la suprime.
+\end{importantbox}
+
+\subsection{Objetivo sustituto y diferenciación automática}
+
+Al incorporar el reward-to-go y el baseline en el surrogate objective:
+$$\tilde{J}(\theta) = \frac{1}{N}\sum_{i=1}^{N}\sum_{t=1}^{T} \log \pi_\theta(a_{i,t} \mid s_{i,t}) \cdot \text{adv}_{i,t}.$$
+Esta forma facilita calcular el gradiente mediante diferenciación automática, y permite que cada dato participe simultáneamente en la optimización de varios pasos, sin necesidad de retropropagar por separado $N \times T$ veces.
+
+\subsection{Resumen de la sección}
+
+Esta sección analiza el gradiente de política desde una perspectiva intuitiva: el énfasis está en la imitación ponderada por reward, el reward-to-go que aporta causalidad, y el papel de baseline/advantage en la reducción de la variance. La función objetivo sustituta permite implementar el cálculo del gradiente de manera estándar en el marco.
+
+\section{Control de varianza y mejora de la eficiencia de muestreo}
+\subsection{GAE y temporal smoothing}
+Generalized Advantage Estimation (GAE) hace una transición suave entre reward-to-go y TD error:
+$$\hat{A}_t^{GAE(\gamma,\lambda)} = \sum_{l=0}^{\infty}(\gamma\lambda)^l \delta_{t+l},$$
+donde $\delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)$. Ajustar $\lambda$ permite hacer un trade-off entre bias y variance.
+
+\begin{importantbox}{La lógica de ajuste de GAE}
+\begin{itemize}
+    \item $\lambda=1$ corresponde al Monte Carlo completo (alta variance / baja bias);
+    \item $\lambda=0$ corresponde a TD(0) (baja variance / alta bias);
+    \item En la práctica, tomar $\lambda \in [0.9,0.98]$ suele lograr el mejor compromiso.
+\end{itemize}
+\end{importantbox}
+
+\subsection{Regularización de Entropy y Trust Region}
+Para fomentar la exploración, se agrega entropy regularization al loss:
+$$\tilde{J}_{ent}(\theta) = \tilde{J}(\theta) + \beta \mathbb{E}[-\log \pi_\theta(a\mid s)].$$
+El Entropy term evita que la política se determine prematuramente y caiga en un suboptimal mode. Otra práctica común es limitar la KL divergence, formando un trust region update (como en TRPO):
+$$\max_\theta \mathbb{E}[\log \pi_\theta(a\mid s) \hat{A}] \quad \text{s.t. } D_{KL}(\pi_{\theta_{old}} \,\|\, \pi_\theta) \le \delta.$$
+
+\begin{knowledgebox}{El equilibrio entre exploración y estabilidad}
+\begin{itemize}
+    \item Entropy regularization ofrece un soft constraint que fomenta una distribución de probabilidad más plana;
+    \item El KL constraint limita explícitamente el tamaño de paso mediante el trust region, evitando el policy collapse;
+    \item Una combinación típica es PPO (clipped objective) + entropy bonus.
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+GAE, entropy boost y trust region son técnicas habituales para mejorar la estabilidad y la eficiencia de muestreo en el entrenamiento real; mantienen la variance dentro de un rango manejable y conservan sufficient exploration.
+
+\section{Restricciones del sistema y garantías de estabilidad}
+\subsection{Límites de recursos y de cómputo}
+El entrenamiento de gradiente de política suele enfrentar un cómputo y un budget limitados: las trayectorias de horizon largo implican un tiempo de GPU enorme, mientras que la entropy regularization requiere compute adicional. Solemos equilibrar la carga de entrenamiento mediante accumulate gradients, recorte de gradiente y mixed precision, y agregamos verificaciones de dependency temporal en el pipeline para evitar drift.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{0.34\textwidth}p{0.38\textwidth}p{0.28\textwidth}}
+\toprule
+Tipo de restricción & Manifestación concreta & Respuesta de ingeniería \\
+\midrule
+Latencia/presupuesto & La horizon larga de la trayectoria provoca un compute burst & gradient accumulation + distributed rollout \\
+Estabilidad & El entropy collapse provoca policy collapse & entropy bonus + KL guard \\
+Disponibilidad de datos & limited rollout data per day & replay buffer + prioritized sampling \\
+\bottomrule
+\end{tabular}
+\caption{Panorama de recursos del gradiente de política bajo restricciones del sistema}
+\end{table}
+
+\begin{importantbox}{Vínculo entre el cómputo y el logging}
+\begin{itemize}
+    \item En cada etapa de rollout deben registrarse seed, config y entropy curve para permitir la reproducción;
+    \item Las trayectorias de horizon largo requieren chunking al registrarse, para evitar que el archivo de log se dispare;
+    \item En el closed-loop pipeline se vincula el gradient step count con el runtime metric, lo que facilita el capacity planning.
+\end{itemize}
+\end{importantbox}
+
+\subsection{Institucionalidad y equidad}
+Además del hardware, el despliegue del modelo también está sujeto a restricciones institucionales de cumplimiento, equidad y seguridad. Por ejemplo, en un multi-domain rollout es necesario detectar la distribución del reward de la policy entre distintos grupos; si la brecha es demasiado grande, es necesario trigger guardrail. Aquí se suele usar un fairness dashboard para registrar disparity, reject rate y manual override logs.
+
+\begin{warningbox}{Riesgos de ignorar los requisitos institucionales}
+Si solo se presta atención al reward y se ignoran las métricas de fairness, la policy podría ser detenida por el regulator tras el release debido a un desempeño diferenciado, lo que retrasaría todo el avance del producto.
+\end{warningbox}
+
+\begin{knowledgebox}{Prácticas de garantía institucionalizada}
+\begin{itemize}
+    \item Establecer un `fairness gate`: realizar una evaluación anticipada del reward/distribution de los subgroup sensibles;
+    \item Aplicar structured logging a los `override event`, vinculándolos con la policy version y el prompt template;
+    \item Usar un audit-ready benchmark (como fairness-specific tasks) para garantizar la alineación en múltiples dimensiones.
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+Las restricciones del sistema provienen tanto del budget de cómputo como de los requisitos de equidad y compliance. Al refinar el logging, el entropy guard y el fairness gate, es posible llevar el entrenamiento de gradiente de política de regreso a una vía de ingeniería manejable.
+
+\section{Implementación y depuración de policy gradient}
+\subsection{Pseudocódigo y mejores prácticas}
+A continuación se muestra el pseudocódigo típico de policy gradient:
+\begin{enumerate}
+    \item Iniciar el entorno, inicializar $\theta$, preparar el buffer.
+    \item Recolectar $N$ trajectories, registrando $(s_t,a_t,r_t)$.
+    \item Calcular el reward-to-go y el baseline (puede usarse una value network).
+    \item Construir la surrogate loss y ejecutar una ronda de gradient update.
+    \item Repetir, evaluando la política cada $K$ pasos.
+\end{enumerate}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{0.32\textwidth}p{0.4\textwidth}p{0.26\textwidth}}
+\toprule
+Componente & Rango recomendado & Descripción \\
+\midrule
+Batch size & 2048--8192 steps & Determina la variance y el compute \\
+Learning rate & 1e-4 -- 5e-4 & Un learning rate pequeño garantiza estabilidad \\
+Entropy coeff & 0.01--0.03 & Incentiva la exploración y evita una convergencia demasiado rápida \\
+$\lambda$ & 0.9--0.98 & GAE smoothing \\
+\bottomrule
+\end{tabular}
+\caption{Hiperparámetros clave al entrenar policy gradient}
+\end{table}
+
+\subsection{Notas de depuración}
+\begin{warningbox}{Ignorar los registros hace perder errores}
+El policy gradient es propenso al gradient exploding/vanishing, a la exploding reward scale y al policy collapse. Es indispensable registrar la reward curve, la policy entropy y la KL divergence; de lo contrario resulta difícil ubicar el problema.
+\end{warningbox}
+
+\begin{importantbox}{Recomendaciones de depuración}
+\begin{itemize}
+    \item Verificar primero el pipeline de datos en un entorno pequeño (CartPole);
+    \item Monitorear manualmente la distribución del advantage, asegurando que su media se mantenga cerca de cero;
+    \item Usar gradient clipping o trust region para evitar actualizaciones con pasos demasiado grandes.
+\end{itemize}
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+A nivel de implementación es necesario encadenar el muestreo, la estimación, la optimización y el registro en un ciclo cerrado; hiperparámetros razonables, métricas de depuración y un mecanismo de registro son la garantía para evitar que el entrenamiento se descomponga.
+\section{Combinación de gradiente de política y Actor-Critic}
+\subsection{Introducción a la arquitectura Actor-Critic}
+La estructura Actor-Critic entrena en conjunto la política (actor) y la función de valor (critic). El critic proporciona una estimación de advantage y el actor ajusta la política según ese advantage, formando una estructura de dos torres:
+\begin{enumerate}
+    \item El actor produce la distribución de acciones $\pi_\theta(a\mid s)$.
+    \item El critic estima $V_w(s)$, con lo que se calcula el advantage $\hat{A}_t = G_t - V_w(s_t)$.
+    \item El actor se actualiza usando el advantage anterior, y el critic actualiza la red de valor con la pérdida TD.
+\end{enumerate}
+\begin{knowledgebox}{La sinergia del Actor-Critic}
+El actor, en tanto política, aporta la decisión de alto nivel; el critic evalúa la recompensa estimada; ambos en conjunto mitigan la alta varianza del gradiente de política tradicional.
+\end{knowledgebox}
+
+La actualización con bootstrap del critic define el error TD con $\delta = r_t + \gamma V_w(s_{t+1}) - V_w(s_t)$, y minimizar $\delta^2$ permite que el critic ofrezca una línea base más precisa.
+
+\subsection{Actor-Critic frente al gradiente de política original}
+El gradiente de política original solo usa recompensa por Monte Carlo, por lo que tiene alta varianza y aprovecha mal los datos; el Actor-Critic introduce la estimación de valor como línea base, lo que reduce la varianza y permite el bootstrapping.
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{0.34\textwidth}p{0.34\textwidth}p{0.3\textwidth}}
+\toprule
+Método & Tipo de estimación & Aprovechamiento de muestras \\
+\midrule
+REINFORCE & Completamente Monte Carlo & Se usa cada trayectoria una vez \\
+Actor-Critic & Valor con bootstrap & Los mismos datos se pueden actualizar repetidamente \\
+PPO & Sustituto recortado + cabeza de valor & Aprovecha varias épocas \\
+\bottomrule
+\end{tabular}
+\caption{Comparación de los métodos de la familia de gradiente de política}
+\end{table}
+
+En el entrenamiento real, la expresión del gradiente del actor sigue siendo $\mathbb{E}[\nabla_\theta \log \pi_\theta(a\mid s) \cdot \hat{A}]$, pero el advantage lo proporciona el critic, y puede usarse la forma GAE para mejorar la estabilidad. Al actualizar el critic, puede fusionarse con TD de varios pasos (como TD($\lambda$)) la señal de Monte Carlo con la de bootstrap, formando así sinergia dentro de la arquitectura de dos torres.
+
+\subsection{Resumen de la sección}
+El Actor-Critic combina el gradiente de política con la función de valor, reduce la varianza y mejora la eficiencia de muestras; PPO/TRPO agregan además una región de confianza sobre esta base, formando un ciclo de entrenamiento más estable.
+
+\section{Gradiente de política off-policy}
+
+\subsection{Limitaciones de on-policy}
+
+El vanilla policy gradient es completamente on-policy: después de cada actualización del gradiente, los datos anteriores ya no se pueden usar. Esto significa que \textbf{cada paso de gradiente requiere recolectar datos de nuevo}, lo cual es muy poco eficiente.
+
+\subsection{Importance Sampling}
+
+Se pueden usar importance weights para reutilizar los datos recolectados por la política anterior $\pi_\theta$ y así actualizar la nueva política $\pi_{\theta'}$:
+$$\nabla_{\theta'} J(\theta') \approx \frac{1}{N}\sum_{i=1}^{N}\sum_{t=1}^{T} \frac{\pi_{\theta'}(a_{i,t} \mid s_{i,t})}{\pi_\theta(a_{i,t} \mid s_{i,t})} \nabla_{\theta'} \log \pi_{\theta'}(a_{i,t} \mid s_{i,t}) \left(\sum_{t'=t}^{T} r(s_{i,t'}, a_{i,t'}) - b\right)$$
+
+\begin{warningbox}{Importance Sampling no es infalible}
+Cuando la nueva política y la anterior difieren mucho, la varianza de los importance weights puede volverse enorme, lo que hace que la estimación no sea confiable. Por eso importance sampling solo es adecuado cuando las políticas son \textbf{muy cercanas} entre sí.
+\end{warningbox}
+
+\subsection{Replay Buffer y Truncated Importance Sampling}
+Para mejorar aún más el aprovechamiento de los datos, se pueden almacenar las trajectory pasadas en un replay buffer y combinarlas con truncated importance sampling (por ejemplo, los clips o el ratio clipping de PPO) para acotar el weight:
+$$\hat{g} = \min\left(\frac{\pi_{\theta'}(a\mid s)}{\pi_\theta(a\mid s)}, 1+\epsilon\right) \nabla_\theta \log \pi_\theta(a\mid s) \hat{A}.$$
+El mecanismo de Clip limita el crecimiento excesivo del ratio, evitando que un importance weight demasiado grande provoque una explosión del gradiente.
+
+\begin{importantbox}{La función del Clip ratio}
+\begin{itemize}
+    \item Limita el ratio al intervalo $[1-\epsilon,1+\epsilon]$, evitando una actualización over-optimistic;
+    \item Conserva la capacidad de reutilización off-policy, siempre que la nueva política y la anterior se mantengan similares.
+\end{itemize}
+\end{importantbox}
+
+\subsection{Nota sobre el control de la varianza}
+Además del ratio clipping, también se puede anneal $\epsilon$, añadir un entropy bonus o incorporar un trust region gate. Un enfoque más complejo consiste en normalizar el importance weight asociado a cada trajectory, de modo que, al hacer update con múltiples muestras, ningún dato con weight alto domine el resultado.
+
+\subsection{Resumen de la sección}
+
+El vanilla policy gradient es on-policy y tiene un bajo aprovechamiento de los datos. Importance sampling permite lograr cierto grado de actualización off-policy, pero está limitado por la similitud entre la nueva política y la anterior.
+\section{Métricas de evaluación y benchmark}
+\subsection{Métricas de confiabilidad e interpretabilidad}
+El gradiente de política debe evaluarse en múltiples dimensiones: no solo el reward promedio, sino también la estabilidad de la policy entropy, la KL divergence y la advantage distribution. Solemos usar los siguientes indicadores:
+\begin{itemize}
+    \item \textbf{Reward Curve}: reward promedio por unidad de tiempo o por epoch;
+    \item \textbf{Entropy}: mide la diversidad de la policy, para evitar el collapse;
+    \item \textbf{KL Divergence}: la diferencia entre la política nueva y la anterior; el drop-out puede usarse para early stopping;
+    \item \textbf{Advantage Signal}: monitorea la media y la varianza del advantage, para asegurar que la training signal sea simétrica.
+\end{itemize}
+
+\begin{warningbox}{El riesgo de ignorar los indicadores multidimensionales}
+Si solo se observa la curva de reward, se puede pasar por alto el mode collapse que ocurre durante el update. Es necesario registrar al mismo tiempo entropy + KL en el registro de entrenamiento, para juzgar la estabilidad desde una perspectiva de ciencia de datos.
+\end{warningbox}
+
+\subsection{Benchmark Suites}
+Los benchmark que se usan comúnmente en CS224R incluyen CartPole, Pendulum y las MuJoCo Control tasks. Cada benchmark evalúa una capacidad distinta: CartPole enfatiza quick convergence, Pendulum enfatiza continuous control y MuJoCo enfatiza long-horizon stability.
+
+\begin{importantbox}{Lógica de selección de benchmark}
+\begin{itemize}
+    \item Usar un entorno simple (CartPole) para ajustar los hiperparámetros, y asegurar que el pipeline no tenga bugs;
+    \item Pasar a un entorno más complejo (MuJoCo), y revisar los cambios de entropy y KL;
+\item Registrar de manera uniforme el config y el seed, para facilitar la reproducibility.
+\end{itemize}
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+Evaluar el gradiente de política no consiste solo en ver el reward, sino también en monitorear entropy + KL + advantage. Los entornos de benchmark ofrecen conjuntos de prueba escalonados, que permiten recolectar signal de depuración en distintas etapas.
+
+\section{Estudio de caso: CartPole y PPO}
+\subsection{Introducción al entorno y a la tarea}
+CartPole es el problema clásico de "balancing": la política necesita controlar el carro para que el poste se mantenga vertical; el reward normalmente es el survival time. Cada trayectoria tiene una longitud limitada, lo que la hace adecuada para mostrar la convergencia en línea del policy gradient.
+
+\subsection{Proceso de entrenamiento y registros}
+Entrenamos con PPO, muestreando 2048 pasos; un estilo A2C podría fallar en esta etapa. El registro de entrenamiento típicamente incluye: total reward, policy entropy, clip fraction, value loss.
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{0.3\textwidth}p{0.5\textwidth}}
+\toprule
+Metric & Interpretation \\
+\midrule
+Clip fraction & Detecta si el gradiente hit clip threshold con frecuencia \\
+Entropy & Grado de variación de la policy \\
+Value loss & Indica si el Critic converge \\
+Reward std & Robustez de la política \\
+\bottomrule
+\end{tabular}
+\caption{Indicadores frecuentes en el entrenamiento de CartPole con PPO}
+\end{table}
+
+\subsection{Revisión y ajuste}
+Si el reward se estanca, se puede realizar una revisión aumentando el entropy coefficient, reduciendo el learning rate o aumentando el horizon. Después de cada ajuste hay que registrar el prompt y los hyper parameters, y agregar una `override note` para que el future engineer pueda reproducirlo.
+
+\begin{knowledgebox}{Pasos de revisión}
+\begin{itemize}
+    \item Comprobar si la reward curve presenta Plateau;
+    \item Observar la distribución de advantage y el value loss;
+\item Ajustar entropy / clip threshold y registrar el seed;
+\item Ejecutar un soft reset (fijar los pesos del critic al previous checkpoint) y observar si se recupera.
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+CartPole + PPO ofrece un pipeline completo: desde el muestreo, la estimación y la actualización, hasta el registro y la revisión. Este caso puede servir como un modelo micro de un benchmark grande para que los principiantes dominen rápidamente el policy gradient training.
+
+\section{Tema ampliado: multitarea y deriva de distribución}
+\subsection{Policy gradient multitarea}
+En multi-task RL, el policy gradient necesita compartir parámetros entre distintas tareas. El enfoque más común es usar un shared encoder + task-specific head, lo que permite cambiar rápidamente entre distintas reward function. Durante el entrenamiento suele agregarse un task-id embedding para distinguir los contexts.
+
+\begin{knowledgebox}{Puntos clave del entrenamiento multitarea}
+\begin{itemize}
+    \item En un mismo lote se mezclan varias tareas; si el reward scale difiere, es necesario estandarizarlo;
+    \item Se usa un task embedding para que la policy sea aware of active task;
+    \item El critic puede compartir el backbone, pero un value head de múltiples cabezas se usa para estimar el advantage por separado.
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Deriva de distribución y domain adaptation}
+En el despliegue real, la diferencia entre los datos de entrenamiento y los datos en producción provoca policy drift. Las formas comunes de mitigarlo incluyen: agregar domain randomization, usar un adversarial buffer para muestrear hard cases, y ampliar automáticamente el replay buffer durante el rollout (cohort of policies). Necesitamos registrar explícitamente en el log el `data shift ratio` y el `reward shift ratio`.
+
+\begin{warningbox}{Consecuencias de ignorar el domain shift}
+Ignorar la deriva de distribución hace que el desempeño de la política colapse ante cambios pequeños (como sensor noise), y quedar registrado en una compliance review puede clasificarse como «lacks robustness».
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+El entrenamiento multitarea y la deriva de distribución son los retos clave tras extender el gradiente de política a sistemas reales, y exigen trabajar a fondo tanto en la policy architecture como en el logging pipeline.
+
+\section{Cumplimiento normativo, auditoría y puesta en producción}
+\subsection{Logging y trazabilidad}
+Cada policy update debe acompañarse de un registro: seed, hyper parameters, KL divergence, critic loss. Las conclusiones deben vincularse a una `audit note` para que el regulator documente las assessments.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{0.3\textwidth}p{0.6\textwidth}}
+\toprule
+Artifact & Contenido \\
+\midrule
+Prompt registry & Registra el prompt template + temperature \\
+Override log & Registra el clinician override + su justificación \\
+Evidence patch bank & Almacena el attention map y los highlight frames \\
+Release ticket & Incluye el rollout plan + rollback criteria \\
+\bottomrule
+\end{tabular}
+\caption{Audit artifacts del policy gradient release}
+\end{table}
+
+\subsection{Checklist de entrega de ingeniería}
+Antes de cada release debe completarse:
+\begin{enumerate}
+    \item Congelar el prompt + hyper parameters;
+    \item Verificar que KL divergence < threshold;
+    \item Archivar la reward curve + entropy log;
+    \item Registrar la fail-safe policy + rollback plan.
+\end{enumerate}
+
+\begin{importantbox}{El valor del checklist de release}
+\begin{itemize}
+    \item Garantiza que cada update tenga una ruta de decisiones trazable;
+    \item Acelera el proceso de regulator review;
+    \item Forma una knowledge base de mejora continua.
+\end{itemize}
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+El cumplimiento normativo y la auditoría son el último tramo de la puesta en producción del policy gradient: los registros, los artifacts y el checklist conforman el evidence trail aceptable para el regulator.
+\section{Síntesis y ampliación}
+
+\subsection{Tabla resumen}
+La siguiente tabla resume los principales módulos, conceptos centrales y puntos de práctica de esta clase, y ofrece una ruta directa de consulta para la revisión y el audit:
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{0.27\textwidth}p{0.33\textwidth}p{0.33\textwidth}}
+\toprule
+Módulo & Concepto central & Puntos clave de ingeniería/práctica \\
+\midrule
+Imitación \(\to\) refuerzo & Online RL + ciclo cerrado de muestreo & Los parámetros de la política controlan directamente la distribución de datos \\
+Derivación del gradiente de política & log-gradient trick & Solo optimiza \(\pi_\theta\), sin necesidad de conocer la dinámica \\
+Intuición y mejoras & reward-to-go + baseline & La estimación de advantage reduce la variance \\
+Técnicas de estabilidad & GAE + Entropy + Trust Region & PPO/TRPO + entropy bonus \\
+Detalles de implementación & Hiperparámetros + métricas de depuración & monitoring reward curve y entropy \\
+Off-policy & Importance weights & Solo reutiliza datos antiguos cuando la política es aproximadamente la misma \\
+\bottomrule
+\end{tabular}
+\caption{Resultados clave y control de riesgos por módulo}
+\end{table}
+
+\subsection{Lecturas complementarias}
+\begin{itemize}
+    \item Williams, \textit{Simple Statistical Gradient-Following Algorithms for Connectionist Reinforcement Learning} (artículo original de REINFORCE, 1992).
+    \item Schulman et al., \textit{High-Dimensional Continuous Control Using Generalized Advantage Estimation}.
+    \item Sergey Levine, \textit{CS285 Lecture on Policy Gradients}: otro conjunto de derivaciones del gradiente de política y técnicas de ingeniería.
+    \item Schulman et al., \textit{Proximal Policy Optimization Algorithms}: para entender la implementación práctica del trust region/clipped objective.
+    \item Sutton \& Barto, \textit{Reinforcement Learning: An Introduction} (capítulo 13) cubre policy gradient y actor-critic.
+\end{itemize}
+
+\subsection{Resumen de la sección}
+Esta clase se desarrolla en torno a la derivación formal del gradiente de política, su interpretación intuitiva y su práctica de ingeniería, y enfatiza el variance control, la entropy regularization y las estrategias de logging/checkpoint a nivel de implementación. La discusión sobre Off-policy señala el cuello de botella de datos de esta familia de métodos y prepara el terreno para introducir, en el siguiente paso, el actor-critic y el value-based hybrid.
+
+\end{document}

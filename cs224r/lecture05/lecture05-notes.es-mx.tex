@@ -1,0 +1,591 @@
+\documentclass[a4paper]{article}
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+% FandolSong no cubre algunos caracteres de nombres (U+73FA); WenQuanYi Zen Hei sí.
+\usepackage[AutoFallBack=true]{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+\setCJKfallbackfamilyfont{\CJKrmdefault}{WenQuanYi Zen Hei}
+% polyglossia no traduce los nombres de listings.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{subcaption}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{float}
+\newtcolorbox{knowledgebox}[1]{enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black, coltitle=white, fonttitle=\bfseries, title={#1}, boxrule=1pt, sharp corners}
+\newtcolorbox{importantbox}[1]{enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black, coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners}
+\newtcolorbox{warningbox}[1]{enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black, coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners}
+\lstset{basicstyle=\ttfamily\small, keywordstyle=\color{blue}, stringstyle=\color{red!60!black}, commentstyle=\color{green!60!black}, breaklines=true, frame=single, numbers=left, numberstyle=\tiny\color{gray}, captionpos=b, extendedchars=true}
+\newcommand{\notetitle}{CS224R Lecture 5: Off-Policy Actor-Critic}
+\newcommand{\noteauthors}{Elaboradas a partir de materiales públicos del curso}
+\newcommand{\notedate}{Primavera de 2025}
+\newcommand{\videochannel}{Stanford Online}
+\newcommand{\videopublishdate}{2025-04}
+\newcommand{\videoduration}{aproximadamente 80 minutos}
+\newcommand{\videourl}{https://cs224r.stanford.edu/spring\_2025/}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+% Footer with repo info
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\thepage}
+\fancyfoot[R]{\footnotesize\color{gray}\href{\repourl}{AI Course Notes}}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\begin{document}
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}\vspace{0.8cm}
+{\large \noteauthors\par}\vspace{0.3cm}
+{\large \notedate\par}\vspace{1.1cm}
+\ifdefempty{\videocoverpath}{{\small Portada no proporcionada.\par}}{\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par}
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\textbf{Ponente}: Chelsea Finn\par
+\textbf{Página del curso}: \href{https://cs224r.stanford.edu/spring_2025/}{cs224r.stanford.edu}\par
+\textbf{Página del proyecto}: \href{\repourl}{\nolinkurl{\repourl}}\par
+\end{tcolorbox}
+\end{titlepage}
+\tableofcontents
+\newpage
+
+\section{El problema de las actualizaciones de gradiente en varios pasos}
+
+On-policy actor-critic solo puede hacer un paso de actualización de gradiente por cada lote de datos recolectado, lo cual es muy poco eficiente. Queremos hacer \textbf{varios pasos} de actualización sobre el mismo lote de datos.
+
+\subsection{Repaso de los Importance Weights}
+
+Al usar datos de la política antigua $\pi_\theta$ para actualizar la política nueva $\pi_{\theta'}$, se necesitan importance weights:
+$$\nabla_{\theta'} J(\theta') \approx \sum_{t,i} \frac{\pi_{\theta'}(a_{i,t} \mid s_{i,t})}{\pi_\theta(a_{i,t} \mid s_{i,t})} \nabla_{\theta'} \log \pi_{\theta'}(a_{t,i} \mid s_{t,i}) \hat{A}^{\pi_\theta}(s_{t,i}, a_{t,i})$$
+
+\begin{warningbox}{Riesgo de las actualizaciones en varios pasos}
+Si se hacen muchos pasos de ascenso de gradiente sobre la función objetivo sustituta (surrogate objective), la política se ve incentivada a alejarse mucho de la política antigua. En ese caso los importance weights dejan de ser confiables, la estimación de la ventaja también deja de ser válida, y esto provoca sobreajuste y colapso del desempeño.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Las actualizaciones de gradiente en varios pasos mejoran la eficiencia de los datos, pero es necesario restringir la magnitud de la actualización de la política para mantener la estabilidad.
+
+\section{Monitoreo del entrenamiento y sistema de registro}
+
+\subsection{Forma estructurada de escribir el registro}
+
+Para poder reproducir todo el proceso de entrenamiento es fundamental contar con un logging schema detallado. Los siguientes campos son el requisito mínimo:
+
+\begin{itemize}
+    \item `step`, `episode`, `wall_time`: para ubicar el slice en que ocurrió el problema
+    \item `avg_return`, `std_return`, `kl_divergence`, `entropy`: para medir la tendencia futura de la policy
+    \item `buffer_size`, `td_error_mean`, `td_error_std`: el estado interno del Replay buffer
+    \item `learning_rate`, `grad_norm`, `value_loss`: para diagnosticar el optimizador y el value head
+\end{itemize}
+
+\begin{importantbox}{Granularidad del registro y alarmas}
+El logging de alta frecuencia (cada 1k step) combinado con threshold-based alarms (KL > 0.06, return variance > 0.2) puede interrumpir el entrenamiento antes de que ocurra una divergence, lo cual es particularmente importante en entornos Sim2Real para evitar un daño físico.
+\end{importantbox}
+
+\subsection{Panel de métricas}
+
+El dashboard de visualización en tiempo real generalmente incluye al menos:
+
+\begin{enumerate}
+    \item PPO ratio distribution histogram
+    \item SAC entropy \& Q-value curves
+    \item Batch-wise advantage histogram to detect saturation
+\end{enumerate}
+
+\subsection{Resumen de la sección}
+
+Un logging estructurado junto con un dashboard en tiempo real les permite a los investigadores detectar a tiempo failure modes como divergence, explosion y overfitting, lo cual permite reproducir más rápidamente el desempeño central.
+
+\section{Pipeline de datos de Actor-Critic}
+
+\subsection{Recolección, almacenamiento y distribución}
+
+El flujo de datos del marco de Actor-Critic puede dividirse en cuatro etapas: recolección (rollout), almacenamiento (buffer), procesamiento (advantage estimation) y distribución (learning step). Cada etapa tiene sus trampas. Por ejemplo, si en la etapa de recolección todos los datos provienen de una sola deterministic policy, se produce low diversity, lo que provoca que en el replay buffer aparezcan muchas near-duplicate transitions, reduciendo el número efectivo de muestras de cada actualización real.
+
+\begin{knowledgebox}{Coordinación entre rollout y buffer}
+Para mantener la diversidad de la recolección, se suelen usar técnicas como epsilon/entropy noise o la mezcla de políticas aleatorias; al mismo tiempo, se procura evitar escribir la misma trayectoria de manera repetida en el buffer, haciendo al menos, al momento del enqueue, un tenure check (que registra cuántas veces se ha accedido a la transition).
+\end{knowledgebox}
+
+\subsection{Estimación de la ventaja y asignación de atribución}
+
+La estimación de la ventaja (advantage estimation) es el centro del Actor-Critic. El algoritmo más usado es GAE($\lambda$), que hace un trade-off entre bias-variance:
+
+$$\hat{A}_t = \sum_{l=0}^{T-t}(\gamma \lambda)^l \delta_{t+l},\quad \delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)$$
+
+Elegir $\lambda=0.95$ es un valor por defecto común, y al mismo tiempo es necesario mantener estable el entrenamiento de la función de valor $\hat{V}$; de lo contrario, la varianza del advantage se dispara.
+
+\subsection{Resumen de la sección}
+
+El pipeline de datos de Actor-Critic abarca rollout, buffer, advantage estimation y update step. Cada eslabón necesita monitoreo para evitar la instability provocada por desviaciones abruptas.
+
+\section{PPO: Proximal Policy Optimization}
+
+\subsection{Idea central: limitar el desplazamiento de la política}
+
+Dos estrategias:
+
+\textbf{Estrategia 1: restricción de KL}
+
+$$\max_{\theta'} \tilde{J}(\theta') \quad \text{s.t.} \quad \mathbb{E}_{s \sim \pi_\theta}\left[D_{\mathrm{KL}}\left(\pi_{\theta'}(\cdot \mid s) \| \pi_\theta(\cdot \mid s)\right)\right] \leq \epsilon$$
+
+Muy común en la optimización de preferencias de los LLM.
+
+\textbf{Estrategia 2: Clipping}
+
+En lugar de restringir directamente la política, se recortan los importance weights, eliminando el incentivo cuando la política se desvía en gran medida:
+
+$$\tilde{J}(\theta') = \sum_{t,i} \min\left(\frac{\pi_{\theta'}(a_{i,t} \mid s_{i,t})}{\pi_\theta(a_{i,t} \mid s_{i,t})} \hat{A}^{\pi_\theta}, \; \mathrm{clip}\left(\frac{\pi_{\theta'}(a_{i,t} \mid s_{i,t})}{\pi_\theta(a_{i,t} \mid s_{i,t})}, 1-\epsilon, 1+\epsilon\right) \hat{A}^{\pi_\theta}\right)$$
+
+\begin{importantbox}{El objetivo central de PPO}
+Este es el surrogate objective final de PPO. Mediante el clipping y la operación de mínimo, la política ya no tiene incentivo para desviarse en gran medida de la política anterior, y se mantiene estable incluso al hacer actualizaciones de varios pasos.
+\end{importantbox}
+
+\subsection{Algoritmo completo de PPO}
+
+\begin{enumerate}
+    \item Recolectar un lote de datos con la política actual $\pi_\theta$
+    \item Ajustar la función de valor $\hat{V}^\pi_\phi$
+    \item Calcular la ventaja $\hat{A}^{\pi_\theta}$
+    \item Sobre este lote de datos, hacer varios pasos de actualización de gradiente del objetivo de PPO (aproximadamente 3--10 pasos)
+    \item Repetir
+\end{enumerate}
+
+\subsection{Resumen de la sección}
+
+PPO limita el desplazamiento de la política recortando los importance weights, lo que permite hacer varias actualizaciones sobre el mismo lote de datos, y es uno de los algoritmos de RL on-policy más utilizados en la actualidad.
+
+\section{SAC: Soft Actor-Critic}
+
+\subsection{Off-Policy más completo}
+
+PPO todavía necesita recolectar datos nuevos periódicamente. SAC va más allá: usa un \textbf{replay buffer} para almacenar todos los datos históricos, del cual muestrea aleatoriamente para actualizar la función Q y la política.
+
+\subsection{Ajuste de la función Q}
+
+SAC ajusta directamente $Q^\pi$ en lugar de $V^\pi$, usando una actualización TD:
+$$\min_\phi \sum_{(s,a,s') \in \mathcal{D}} \left\| \hat{Q}^\pi_\phi(s, a) - \left(r(s,a) + \gamma \mathbb{E}_{a' \sim \pi_\theta(\cdot|s')}\left[\hat{Q}^\pi_{\phi'}(s', a')\right]\right)\right\|^2$$
+
+\begin{knowledgebox}{Por qué la función Q puede usar datos off-policy}
+En el TD target de la función Q, $r(s,a) + \gamma \mathbb{E}_{a' \sim \pi}\left[Q(s', a')\right]$, $a'$ se muestrea de la política \textbf{actual} (y no se lee de los datos). Por eso los datos de transición $(s, a, s')$ pueden provenir de cualquier política, siempre que $a'$ se muestree de nuevo.
+\end{knowledgebox}
+
+\subsection{Actualización de la política}
+
+El objetivo de optimización de la política incorpora una \textbf{regularización de entropía}:
+$$\max_\theta \mathbb{E}_{s \sim \mathcal{D}, a \sim \pi_\theta(\cdot|s)} \left[\hat{Q}^\pi(s, a) - \alpha \log \pi_\theta(a \mid s)\right]$$
+
+El término de entropía $-\alpha \log \pi_\theta$ incentiva a la política a mantener cierta aleatoriedad, lo cual favorece la exploración.
+
+\subsection{Algoritmo completo de SAC}
+
+\begin{enumerate}
+    \item Interactuar con el entorno usando la política actual y almacenar la transición $(s, a, r, s')$ en el replay buffer $\mathcal{B}$
+    \item Muestrear un mini-batch de $\mathcal{B}$
+    \item Actualizar la función Q (usando el TD target)
+    \item Actualizar la política (maximizando Q + entropía)
+    \item Repetir los pasos 1-4
+\end{enumerate}
+
+\begin{importantbox}{PPO vs. SAC}
+\begin{itemize}
+    \item \textbf{PPO}: on-policy (con una pequeña cantidad de off-policy), usa el clipped surrogate objective. Después de cada recolección de datos nuevos hace unos cuantos pasos de actualización. Más estable y más fácil de ajustar.
+    \item \textbf{SAC}: completamente off-policy, usa un replay buffer + función Q. Tiene mayor eficiencia de datos. Es adecuado para espacios de acción continuos.
+\end{itemize}
+Ambos son actualmente los algoritmos de RL profundo más usados.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+SAC logra un algoritmo actor-critic completamente off-policy al ajustar la función Q y usar un replay buffer, con una eficiencia de datos mucho mayor que la de los métodos on-policy. La regularización de entropía favorece la exploración y mejora la estabilidad.
+
+\section{Gestión del replay buffer y selección de datos}
+
+\subsection{Por qué son clave el tamaño y la estrategia de muestreo}
+
+El replay buffer proporciona los datos para múltiples rondas de entrenamiento, pero su diseño influye directamente en el desempeño. Las dos dimensiones centrales son la \textbf{capacidad} y la \textbf{estrategia de muestreo}:
+
+\begin{itemize}
+    \item \textbf{Capacidad}: si es demasiado pequeña, sobrescribe con frecuencia las muestras antiguas y pierde diversidad; si es demasiado grande, reduce la eficiencia del entrenamiento. En la práctica, suele elegirse una capacidad que pueda almacenar varios millones de transitions.
+    \item \textbf{Estrategia de muestreo}: el muestreo uniforme es el más simple; Prioritized Experience Replay permite que las transitions con TD error alto se visiten con más frecuencia.
+\end{itemize}
+
+\begin{knowledgebox}{Efecto directo de la estrategia de muestreo en el desempeño}
+Las transitions con TD error alto suelen incluir decisiones más difíciles o escenarios de colapso; priorizar su retorno permite que la función Q converja más rápido, pero si la priorización es excesiva, puede introducir un sesgo en la estimación. El compromiso habitual es usar pesos de importance-sampling con un $\beta$ que decae hacia 1 para corregir el sesgo.
+\end{knowledgebox}
+
+\subsection{Limpieza de los datos del replay: filtrado frente a complementación}
+
+Cada vez que el agente ejecuta una nueva política, debe evaluarse la calidad de los datos recién recopilados:
+
+\begin{itemize}
+    \item Filtrado: retirar las transitions con reward anómalo o fuera de los límites (por ejemplo, obtener un reward de 1 tras chocar con una pared), para evitar ruido de entrenamiento;
+    \item Complementación: sintetizar artificialmente transitions con etiquetas específicas (por ejemplo, reward shaping, domain randomization) para ayudar al agente a aprender situaciones raras pero cruciales.
+\end{itemize}
+
+\begin{warningbox}{Efecto de contaminación del replay buffer}
+Si el buffer acumula datos de baja calidad durante un periodo prolongado (por ejemplo, las exit transitions tras el colapso de la policy), el modelo puede seguir optimizándose sobre ejemplos incorrectos. Vaciar periódicamente cerca del 7\% de las muestras con el reward más bajo del buffer y volver a recolectarlas puede evitar el «data poisoning».
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La capacidad del replay buffer, la estrategia de muestreo y la estrategia de limpieza de datos determinan en conjunto la estabilidad del aprendizaje off-policy. Un muestreo prioritario moderado, la corrección IS y la eliminación/el muestreo de las transitions anómalas pueden evitar que el modelo sobreajuste sobre datos antiguos o se vea afectado por el ruido.
+
+\section{Ajuste de hiperparámetros y reproducción de experimentos}
+
+\subsection{Combinaciones comunes de hiperparámetros}
+
+En los experimentos de CS224R, Chelsea y su equipo obtuvieron un desempeño estable con las siguientes combinaciones:
+
+\begin{itemize}
+    \item \textbf{PPO}: clip $\epsilon=0.1$, tamaño de lote=64, learning rate=2e-4, value coeff=0.5, entropy coeff=0.01.
+    \item \textbf{SAC}: Q learning rate=3e-4, policy learning rate=3e-4, replay buffer size=10e5, tamaño de lote=256, target smoothing coeff=0.005.
+    \item \textbf{Replay buffer}: prioritized sampling weight $\alpha=0.6$, importance sampling exponent $\beta$ crece linealmente de 0.4 a 1.0.
+\end{itemize}
+
+\subsection{Puntos clave de la reproducción}
+
+Reproducir experimentos de forma adversarial requiere fijar la semilla aleatoria y utilizar un deterministic rollout. Se recomienda registrar en cada run
+
+\begin{itemize}
+    \item seed, env name, max episode length
+    \item optimizer state (Adam momenta) y learning rate schedule
+    \item buffer size, prioritization hyperparameters
+\end{itemize}
+
+\begin{warningbox}{Sensibilidad a la semilla}
+Para prevenir fallas esporádicas, es necesario incluir en el logging el return, la length y la std de las advantages de cada rollout. Si la return variance supera lo esperado, se debe detener de inmediato el entrenamiento e investigar si el replay buffer está saturado de high-loss transitions.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La combinación de hiperparámetros y el registro de logs son fundamentales para la reproducción de experimentos. Fijar el seed, registrar el optimizer state, monitorear la variance y establecer un umbral de interrupción automática puede reducir de manera significativa la probabilidad de long-tail failure.
+\section{Seguridad de la política y regularización}
+
+\subsection{Regularization para prevenir el colapso de la política}
+
+Ya sea PPO o SAC, cuando la actualización de la política es demasiado agresiva, el desempeño puede colapsar. En la práctica, las técnicas de regularization más comunes incluyen:
+
+\begin{itemize}
+    \item \textbf{KL penalty}: se añade $\lambda D_{\mathrm{KL}}(\pi_{\theta'}\|\pi_\theta)$ al objective, penalizando directamente las desviaciones excesivas.
+    \item \textbf{Entropy decay}: en SAC se ajusta $\alpha$ para que la política reduzca gradualmente la exploración hacia el final del entrenamiento y así converja.
+    \item \textbf{Gradient clipping}: limita la norma del gradiente para evitar pasos demasiado grandes.
+\end{itemize}
+
+\subsection{Monitoreo del comportamiento de la política}
+
+Métricas de monitoreo recomendadas:
+
+\begin{itemize}
+    \item \textbf{Average KL divergence} between successive policies
+    \item \textbf{Episode variance} of returns—high variance signals instability
+    \item \textbf{Q-value rollout test}—simulate fixed rollout to check escalation
+\end{itemize}
+
+\begin{knowledgebox}{Diseño de alertas automáticas}
+Establecer umbrales (por ejemplo, generar un error cuando KL > 0.05, o detener el entrenamiento cuando la episode std dev aumenta 30\%) permite que el pipeline regrese automáticamente a un prior checkpoint. Este mecanismo se usa ampliamente en proyectos de Walls-Free RL (Sim2Real).
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La programación segura requiere combinar regularization con métricas de monitoreo. KL penalty, entropy decay y gradient clipping son las técnicas comunes para evitar desviaciones excesivas, mientras que el monitoreo de KL, variance y Q-value rollout ofrece alertas de riesgo en tiempo real.
+
+\section{Reward Shaping y estabilización del valor}
+
+\subsection{Técnicas de ajuste fino para la estabilidad de la función de valor}
+
+En las actualizaciones off-policy, el drift en la predicción de la función Q afecta gravemente al actor. Los stabilizers comunes en la práctica incluyen:
+
+\begin{itemize}
+    \item \textbf{Target smoothing}: en el TD target se usa twin Q average + Polyak average smoothing coefficient $\tau$.
+    \item \textbf{Reward clipping}: limita el reward a $[-1,1]$ para evitar un gradient explosivo.
+    \item \textbf{Value normalization}: en batch_level se realiza una normalización poblacional de los valores Q, para reducir el scale drift.
+\end{itemize}
+
+\subsection{Principios de diseño del Shaping}
+
+El reward shaping debe seguir el potential-based shaping theorem, para garantizar que el shaping term no cambie la política óptima:
+
+$$F(s, a, s') = \gamma \Phi(s') - \Phi(s)$$
+
+donde $\Phi$ es la potential function. Un ejemplo práctico de $\Phi(s)$ es distance-to-goal, que mejora la guiding signal del agent en las early stages.
+
+\begin{warningbox}{Consecuencias de un shaping incorrecto}
+Si el shaping recompensa directamente «acercarse al objetivo» en lugar de «completar la tarea», el agent puede quedarse antes de tiempo en un estado con un reward potencial alto, lo cual produce reward hacking. Por eso el potential-based shaping debe apegarse estrictamente a la MDP structure.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El reward shaping y la value stabilization son el núcleo para mantener estable el long-term training. Usar en conjunto target smoothing, reward clipping y potential-based shaping permite evitar eficazmente la value explosion y el reward hacking.
+
+\section{Recomendaciones de evaluación y despliegue}
+
+\subsection{Conjunto de evaluación multidimensional}
+
+Al terminar el entrenamiento, no basta con depender de un solo benchmark; el multi-evaluation pool recomendado incluye:
+
+\begin{itemize}
+    \item \textbf{Policy rollouts} in multiple seeds and environments
+    \item \textbf{Stress tests} with adversarial perturbations (e.g., shifted dynamics)
+    \item \textbf{Human-in-the-loop scoring} for safety-critical behaviors
+\end{itemize}
+
+\subsection{Mapa de despliegue}
+
+Deployment checklist:
+
+\begin{enumerate}
+    \item Validate ability to recover from buffer corruption / reset seeds
+    \item Ensure logging of policy drift and extreme rewards
+    \item Provide rollback snapshot and auto-stop when variance spikes
+\end{enumerate}
+
+\begin{importantbox}{Reglas del Sim2Real}
+En un despliegue real, debe existir una fallback policy (por ejemplo, una script policy), así como safety net monitors; al mismo tiempo hay que log policy decisions to enable post-hoc analysis, lo cual es especialmente importante en aplicaciones médicas y de navegación.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La evaluación debe combinar rollouts diversos, adversarial stress tests y calificación humana. Establecer un checklist, snapshots y un mecanismo de rollback antes del despliegue evita que el entorno de producción se salga de control.
+
+\section{Lo esencial de las diapositivas}
+
+\subsection{Diagrama de conceptos centrales}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=3]{05_cs224r_offpolicy_actor_critic_2025.pdf}
+\caption{La diapositiva de la clase retoma el flujo de datos de off-policy actor-critic y el surrogate objective.}
+\end{figure}
+\clearpage
+
+\subsection{Comparación estructural entre PPO y SAC}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=5]{05_cs224r_offpolicy_actor_critic_2025.pdf}
+\caption{El diagrama comparativo de la diapositiva muestra el clipping objective de PPO y el entropy regularization de SAC.}
+\end{figure}
+\clearpage
+
+\subsection{Caso de estabilidad de la función Q}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=6]{05_cs224r_offpolicy_actor_critic_2025.pdf}
+\caption{La diapositiva muestra las curvas empíricas de la explosión de la función Q frente al smoothing.}
+\end{figure}
+\clearpage
+
+\subsection{Replay Buffer y Sim2Real}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=8]{05_cs224r_offpolicy_actor_critic_2025.pdf}
+\caption{La diapositiva ilustra el prioritized replay y el pipeline de sim-to-real.}
+\end{figure}
+\clearpage
+
+\subsection{Diagrama de flujo de la destilación de políticas}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=9]{05_cs224r_offpolicy_actor_critic_2025.pdf}
+\caption{La diapositiva muestra el flujo de interacción entre Sim2Real y policy distillation.}
+\end{figure}
+\clearpage
+
+\subsection{Radar de desempeño}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=10]{05_cs224r_offpolicy_actor_critic_2025.pdf}
+\caption{La diapositiva muestra el radar chart de PPO/SAC en distintas dimensiones (data efficiency, stability, deployment cost).}
+\end{figure}
+\clearpage
+
+\subsection{Esquema de la transferencia de simulación a realidad}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=12]{05_cs224r_offpolicy_actor_critic_2025.pdf}
+\caption{La diapositiva resume el domain randomization y el mecanismo de fallback dentro del pipeline de sim-to-real.}
+\end{figure}
+\clearpage
+
+\subsection{Flujo de trabajo de entrenamiento y despliegue}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=13]{05_cs224r_offpolicy_actor_critic_2025.pdf}
+\caption{La diapositiva presenta el diagrama de flujo cerrado de experimento de entrenamiento, registro, evaluación y despliegue.}
+\end{figure}
+\clearpage
+
+\subsection{Ejemplo de depuración y registro}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=14]{05_cs224r_offpolicy_actor_critic_2025.pdf}
+\caption{La diapositiva muestra las debugging metrics habituales (KL divergence, return variance, entropy).}
+\end{figure}
+\clearpage
+
+\subsection{Diagnóstico de Overfit y Regularization}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=15]{05_cs224r_offpolicy_actor_critic_2025.pdf}
+\caption{La diapositiva ilustra la comparación entre la curva de reward en un caso de Overfit y con regularization.}
+\end{figure}
+\clearpage
+
+\subsection{Monitoreo mediante entropy}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=16]{05_cs224r_offpolicy_actor_critic_2025.pdf}
+\caption{La diapositiva muestra la curva de entropy decay y la policy action distribution.}
+\end{figure}
+\clearpage
+
+\subsection{Monitoreo a largo plazo después del despliegue}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=17]{05_cs224r_offpolicy_actor_critic_2025.pdf}
+\caption{La diapositiva señala el drift que debe monitorearse después del despliegue, así como los umbrales de seguridad.}
+\end{figure}
+\clearpage
+
+\subsection{Resumen de la sección}
+
+Las visualizaciones de las diapositivas ayudan a resumir el flujo de datos de actor-critic, el equilibrio entre PPO y SAC, el tratamiento de suavizado de la Q function y la aplicación de la arquitectura de replay en Sim2Real, y ofrecen una referencia intuitiva para el trabajo de ingeniería posterior.
+
+\section{Comparación de casos y patrones de diseño}
+
+\subsection{Desempeño de PPO / SAC en distintas tareas}
+
+Los patrones observados en varios benchmarks son los siguientes:
+
+\begin{itemize}
+    \item \textbf{env de baja dimensión y discretos} (CartPole, Acrobot): PPO es suficiente, la entropy de SAC puede causar una exploration variance alta.
+    \item \textbf{env de alta dimensión y continuos} (Humanoid, Walker2D): SAC es más estable; SAC + twin Q networks for target smoothing evita la Q divergence.
+    \item \textbf{escenarios de cambio de distribución} (Sim2Real): el Replay buffer + prioritized sampling + policy bootstrap layer son clave, la naturaleza off-policy de SAC resulta más ventajosa.
+\end{itemize}
+
+\begin{importantbox}{Enfoque híbrido}
+En escenarios de Sim2Real u offline RL, la práctica habitual es converger primero la policy con SAC y luego volver a hacer fine-tune con PPO para cumplir con las safety constraints (PPO ofrece clipping guardrails concretos).
+\end{importantbox}
+
+\subsection{Patrones de diseño de ingeniería}
+
+Dos patrones habituales:
+
+\begin{enumerate}
+    \item \textbf{Dual Agent Pattern}: la policy de PPO y la policy de SAC se entrenan en paralelo; el training job elige automáticamente, según las metrics, la versión más estable para desplegar.
+    \item \textbf{Safety Gate Pattern}: se antepone un rule-based gate (supervisory policy) al deployment path; cuando el gate determina que la KL divergence supera el threshold, se pausa el agent y se hace fallback.
+\end{enumerate}
+
+\begin{warningbox}{No basta con mirar solo el reward}
+En algunos env el reward está diseñado de forma demasiado simple (por ejemplo, basta con completar la tarea para obtener un reward alto), lo que facilita que el agent haga exploit del reward shape. Es indispensable evaluarlo junto con episode length, entropy y KL divergence.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La comparación de casos mostró la estabilidad de PPO en env de baja dimensión y la ventaja de SAC en env de alta dimensión y en Sim2Real, y recomienda usar los patrones dual agent y safety gate para combinar capacidad y controlabilidad.
+
+\section{Sim2Real y destilación de políticas}
+
+\subsection{Estrategias de desplazamiento de distribución en Sim2Real}
+
+Al migrar el entrenamiento de laboratorio al mundo físico, el Dynamics gap reduce significativamente el desempeño. Las contramedidas habituales incluyen: domain randomization (aleatorizar los parámetros del entorno), system identification (modelar la dinámica real) y una backup policy analítica como fallback. El `Sim-to-Real index` que la clase enfatiza se obtiene comparando la total variation distance entre el sim rollout y el real rollout, y da como resultado un indicador de policy drift.
+
+\subsection{Destilación de políticas y despliegue de modelos pequeños}
+
+El pipeline de distillation generalmente se divide en: teacher run -> dataset harvest -> student training -> student evaluation. Un dataset de calidad necesita cubrir los edge cases en los que el teacher se equivoca. En el student training suele usarse un objective compuesto de pérdida `mse` + `kl` para mantener la consistencia del comportamiento.
+
+\begin{knowledgebox}{Por qué la distillation sigue siendo necesaria}
+Aunque el teacher logre el desempeño más avanzado, su tamaño y su costo de inferencia elevado obligan a distillarlo hacia una policy latency-friendly. El proceso de destilación escribe el knowledge del teacher en el student en forma de soft target, de modo que el student pueda ejecutarse en un resource-constrained device.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Sim2Real requiere domain randomization, system ID y fallback policies. La destilación de políticas transfiere la capacidad del teacher a un student más ligero y es la vía clave para el despliegue en plataformas móviles/embebidas.
+
+\section{Síntesis y ampliación}
+
+\begin{enumerate}
+    \item Los métodos actor-crítico off-policy mejoran la eficiencia reutilizando datos antiguos.
+    \item PPO usa el clipping para limitar la desviación de la política, lo que permite actualizaciones de varios pasos y equilibra la estabilidad con el desempeño.
+    \item SAC combina el replay buffer con la regularización de entropía para lograr actualizaciones completamente off-policy.
+    \item La gestión del replay buffer, el monitoreo de seguridad de la política y el checklist de despliegue permiten que el algoritmo se aplique a sistemas reales.
+\end{enumerate}
+
+\subsection{Lecturas adicionales}
+\begin{itemize}
+    \item Schulman et al., \textit{Proximal Policy Optimization Algorithms} (artículo original de PPO, 2017).
+    \item Haarnoja et al., \textit{Soft Actor-Critic: Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor} (artículo original de SAC, 2018).
+    \item Open Perfect Blend (Hugging Face) — esquema de mezcla de conjuntos de datos de SFT de uso general.
+    \item mergekit — herramienta de código abierto para fusionar modelos.
+    \item TRL (Hugging Face) — la biblioteca de herramientas de Post-Training más completa.
+    \item Rafailov et al., \textit{Direct Preference Optimization} (NeurIPS 2023) — artículo original de DPO.
+    \item Hu et al., \textit{LoRA: Low-Rank Adaptation of Large Language Models} (ICLR 2022) — artículo original de LoRA.
+    \item Snell et al., \textit{Scaling LLM Test-Time Compute} (2024) — fundamento teórico del Test-Time Compute.
+    \item Chatbot Arena (\url{https://arena.lmsys.org}) — clasificación de modelos basada en las preferencias humanas.
+\end{itemize}
+
+\subsection{Tabla de síntesis y ruta de ingeniería}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.25\textwidth} p{0.2\textwidth} p{0.28\textwidth}}
+\toprule
+Contenido clave & Función & Riesgos clave y contramedidas \\
+\midrule
+PPO + clipping & Permite actualizaciones de varios pasos y estabiliza el entrenamiento on-policy & Un clip demasiado laxo provoca que la política se dispare; mantener el clip entre 1\%--5\% y monitorear el KL \\
+SAC + replay buffer & Alta eficiencia de datos; permite reutilizar transitions históricas & Contaminación del buffer; limpieza periódica + priority sampling + corrección de IS \\
+Gestión del replay buffer & Mantener la diversidad y la vigencia de las muestras & Drift; actualizar periódicamente las muestras más antiguas/peores e incorporar casos de high-reward \\
+Seguridad de la política + monitoreo & Monitoreo de KL/variance/rollout para detectar tendencias de riesgo & Un variance spike activa el rollback; alerta automática \\
+Checklist de despliegue & snapshot, logging, auto stop & production drift; fallback policy + rollback \\
+\bottomrule
+\end{tabular}
+\caption{Síntesis de la ruta de ingeniería de la Lecture 5}
+\end{table}
+
+\section{Apéndice: problemas prácticos comunes}
+
+Al entrenar RL profundo es inevitable encontrar problemas recurrentes; aquí se registran algunos casos mencionados en la clase o inferidos razonablemente:
+
+\begin{enumerate}
+    \item \textbf{Por qué la política presenta un sudden collapse}: esto suele ocurrir cuando el importance sampling weight es demasiado alto o el clipping supera 1.2. Se recomienda calcular `std(ratio)` y `max(ratio)` después de cada epoch de entrenamiento; si el promedio supera 0.12, revertir al checkpoint anterior.
+    \item \textbf{Por qué existen trayectorias duplicadas en el replay buffer}: la causa suele ser un reset de alta frecuencia (el reset comienza desde estados cercanos). La solución consiste en insertar `prioritized eviction` en el buffer, eliminando primero los pares de transition con `similarity > 0.9`.
+    \item \textbf{Cómo controlar el entropy decay}: en SAC, el coeficiente de entropy $\alpha$ no debe ser fijo; en su lugar, el value head debe estimar un entropy target (por ejemplo, 0.2) y ajustarlo automáticamente con `log_alpha`.
+    \item \textbf{Cómo contrarrestar el reward hacking}: establecer `constraint auxiliary rewards`, por ejemplo una penalización de `-0.2` por llegar a estados no naturales, y usar el potential-based theorem en el reward shaping para garantizar que la optimal policy no cambie.
+    \item \textbf{Cómo mantener el training trace}: usar structured logging para registrar `config, seed, buffer stats, loss curves`, y subir estos registros a un centralized experiment dashboard para facilitar el future debugging.
+    \item \textbf{Cuándo se debe cambiar de algoritmo}: si la training variance supera la checkpoint window (por ejemplo, 10 episodes consecutivos con variance > 50\% of mean), se puede convertir el job en un PPO + SAC dual training, con PPO como anchor policy.
+\end{enumerate}
+
+\begin{warningbox}{No tomes el apéndice como un checklist}
+Estos problemas son solo heuristics comunes y no sustituyen el ablation de un entorno específico. Incluso en un env similar, conviene verificar la variación longitudinal de `variance`, `kl` y `reward`, y ajustar los thresholds en consecuencia.
+\end{warningbox}
+
+\end{document}

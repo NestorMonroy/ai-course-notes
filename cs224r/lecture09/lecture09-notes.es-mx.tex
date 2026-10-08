@@ -1,0 +1,745 @@
+\documentclass[a4paper]{article}
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+% FandolSong no cubre algunos caracteres de nombres (U+73FA); WenQuanYi Zen Hei sí.
+\usepackage[AutoFallBack=true]{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+\setCJKfallbackfamilyfont{\CJKrmdefault}{WenQuanYi Zen Hei}
+% polyglossia no traduce los nombres de listings.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{subcaption}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{float}
+\newtcolorbox{knowledgebox}[1]{enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black, coltitle=white, fonttitle=\bfseries, title={#1}, boxrule=1pt, sharp corners}
+\newtcolorbox{importantbox}[1]{enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black, coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners}
+\newtcolorbox{warningbox}[1]{enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black, coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners}
+\lstset{basicstyle=\ttfamily\small, keywordstyle=\color{blue}, stringstyle=\color{red!60!black}, commentstyle=\color{green!60!black}, breaklines=true, frame=single, numbers=left, numberstyle=\tiny\color{gray}, captionpos=b, extendedchars=true}
+\newcommand{\notetitle}{CS224R Lecture 9: RLHF y optimización de preferencias}
+\newcommand{\noteauthors}{Elaborado a partir del curso abierto Stanford CS224R}
+\newcommand{\notedate}{12 de mayo de 2025}
+\newcommand{\videochannel}{Stanford Online}
+\newcommand{\videopublishdate}{2025-05-07}
+\newcommand{\videoduration}{aproximadamente 80 minutos}
+\newcommand{\videourl}{https://cs224r.stanford.edu/spring\_2025/}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+% Footer with repo info
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\thepage}
+\fancyfoot[R]{\footnotesize\color{gray}\href{\repourl}{AI Course Notes}}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\begin{document}
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}\vspace{0.8cm}
+{\large \noteauthors\par}\vspace{0.3cm}
+{\large \notedate\par}\vspace{1.1cm}
+\ifdefempty{\videocoverpath}{{\small No se proporcionó imagen de portada.\par}}{\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par}
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\textbf{Ponente}: Archit Sharma (Guest Lecture)\par
+\textbf{Página del curso}: \href{https://cs224r.stanford.edu/spring_2025/}{cs224r.stanford.edu}\par
+\textbf{Página del proyecto}: \href{\repourl}{\nolinkurl{\repourl}}\par
+\end{tcolorbox}
+\end{titlepage}
+\tableofcontents
+\newpage
+
+\section{De los modelos de lenguaje a los asistentes}
+
+\subsection{Limitaciones de los modelos de lenguaje preentrenados}
+
+Los modelos de lenguaje preentrenados aprenden a \textbf{completar texto}, pero eso no equivale a \textbf{ayudar al usuario}. Entre el objetivo de modelado del lenguaje y «satisfacer las preferencias humanas» existe un desalineamiento de fondo.
+
+\begin{knowledgebox}{Qué se aprende en el preentrenamiento}
+Con grandes cantidades de texto, el preentrenamiento adquiere un conocimiento amplio: hechos, gramática, resolución de correferencias, análisis de sentimiento, razonamiento básico, matemáticas, programación, etc. Sin embargo, lo que aprende es «el siguiente token más probable», no «la respuesta que el usuario más desea».
+\end{knowledgebox}
+
+\subsection{La diversidad de las preferencias humanas}
+
+Las preferencias reales de los usuarios no forman una sola función de recompensa: se componen de varias dimensiones, como el grado de cumplimiento de la tarea, la creatividad, la cortesía, la interpretabilidad e incluso la estética. En la clase, Archit afirma que \textit{«las preferencias son un espacio vectorial multimodal, no un escalar único»}, y subraya que, al construir las señales, es indispensable recopilarlas por niveles.
+
+Según su origen, las preferencias pueden clasificarse así:
+\begin{itemize}
+    \item \textbf{Comparaciones humanas}: el usuario o el anotador recibe una lista de respuestas y elige la mejor.
+    \item \textbf{Métricas verificables}: los problemas de matemáticas, las tareas de programación, la coherencia factual, etc., pueden calificarse de forma automática.
+    \item \textbf{Datos de comportamiento}: la tasa de clics, la tasa de reescritura, la tasa de abandono, etc., reflejan de manera implícita la satisfacción del usuario.
+    \item \textbf{Restricciones de gobernanza}: los requisitos de seguridad y de cumplimiento normativo exigen señales adicionales de guardrail.
+\end{itemize}
+
+\begin{knowledgebox}{Idea central del modelado con matriz de preferencias}
+Combinar varias señales de preferencia en una \textit{hierarchical preference matrix} permite delimitar con claridad el alcance de cada señal y alinear objetivos distintos mediante una ponderación durante la optimización.
+\end{knowledgebox}
+
+\begin{importantbox}{Interpretabilidad de las preferencias con múltiples señales}
+Dividir las signal en dos clases, \textit{primary preference} (satisfacción central) y \textit{secondary constraint} (seguridad, bias), y tratarlas por separado con un reward model y con un guardrail filter, respectivamente, reduce el reward hacking y aumenta la transparencia de la gobernanza.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Un LM preentrenado posee un conocimiento amplio, pero para convertirse en asistente debe alinearse en varias dimensiones, como el fine-tuning con instrucciones, la separación de las señales de preferencia y la incorporación de señales de gobernanza; solo así se evita que una reward única lo desvíe.
+\section{Instruction Finetuning}
+
+\subsection{Método básico}
+
+Se recopilan pares (instruction, output) y se continúa con un ajuste fino supervisado sobre el modelo preentrenado.
+
+\begin{importantbox}{Efecto del Instruction Finetuning}
+Después de aplicar instruction finetuning en más de 1,800 tareas, FLAN-T5 mejora de forma notable su desempeño en tareas no vistas. Los modelos más grandes obtienen más beneficio del finetuning.
+\end{importantbox}
+
+\subsection{Estrategia de datos y alineación}
+
+- En el nivel de los datos, primero se aplican prompt rewriting y canonicalization para reducir la redundancia semántica; después se etiquetan la mejor respuesta y las respuestas alternativas.
+- Se simulan diálogos de varios turnos para aumentar la dependencia del contexto; a los ejemplos negativos se les agregan tipos de error diversos para mejorar la robustness.
+- Al recopilar las instrucciones, se conserva también la user intent metadata (tipo de tarea, complejidad, preferencias) para que después el reward model pueda hacer un modelado estratificado.
+
+\begin{knowledgebox}{Hacer interpretables los datos de instruction}
+Se agrega metadata a cada instruction para que, durante el entrenamiento, pueda elegirse de manera dinámica la reward signal según la intención (por ejemplo, \textit{creative vs. factual}), lo que reduce el error de generalización causado por una sola loss.
+\end{knowledgebox}
+
+\begin{importantbox}{La calidad de los datos importa más que el tamaño del modelo}
+Aunque los modelos más grandes tienen capacidades subyacentes más sólidas, la calidad de los datos del ajuste fino con instructions determina la confiabilidad del asistente final. Los campos adversariales, la diversidad de instrucciones y la revisión humana son garantías básicas.
+\end{importantbox}
+
+\subsection{Limitaciones del Instruction Finetuning}
+
+\begin{enumerate}
+    \item \textbf{La generación abierta no tiene una respuesta estándar}: tareas como la escritura creativa no pueden supervisarse con una única salida correcta.
+    \item \textbf{La penalización a nivel de Token no distingue la gravedad del error}: la pérdida del modelado de lenguaje trata por igual todos los errores de token.
+    \item \textbf{Las respuestas generadas por personas no son perfectas}: los datos etiquetados tienen ruido.
+\end{enumerate}
+
+\subsection{Resumen de la sección}
+
+El instruction finetuning es el primer paso para pasar de un LM a un asistente. Debe acompañarse de una estrategia de datos y de una separación de preferencias para proporcionar una política inicial estable a RLHF o DPO.
+
+\section{RLHF: aprendizaje por refuerzo a partir de preferencias humanas}
+
+\subsection{Marco central}
+
+\begin{enumerate}
+    \item \textbf{Instruction Finetuning}: sirve como inicialización.
+    \item \textbf{Entrenamiento del modelo de recompensa}: se aprende $R_\phi(x, y)$ a partir de comparaciones de preferencias humanas.
+    \item \textbf{Optimización con RL}: se maximiza la salida del modelo de recompensa con algoritmos como PPO.
+\end{enumerate}
+
+\subsection{Entrenamiento del modelo de recompensa}
+
+Una persona compara dos respuestas y elige la mejor. Se usa el modelo de Bradley-Terry:
+$$p(y_w \succ y_l \mid x) = \sigma(R_\phi(x, y_w) - R_\phi(x, y_l))$$
+
+Función de pérdida:
+$$\mathcal{L}(\phi) = -\mathbb{E}_{(x, y_w, y_l)}\left[\log \sigma(R_\phi(x, y_w) - R_\phi(x, y_l))\right]$$
+
+\begin{knowledgebox}{Por qué comparar en lugar de calificar}
+Cuando las personas asignan calificaciones absolutas, el ruido es alto y la calibración es inconsistente. La comparación por pares es más sencilla y más confiable: solo hay que juzgar «A es mejor que B», no «A vale 7.3 puntos».
+\end{knowledgebox}
+
+\subsection{Policy Gradient aplicado a LLM}
+
+La generación de un LLM se plantea como un problema de RL:
+$$\max_\theta \; \mathbb{E}_{y \sim p_\theta(y|x)} \left[R_\phi(x, y)\right]$$
+
+Se usa REINFORCE / policy gradient:
+$$\theta_{t+1} := \theta_t + \alpha \frac{1}{m}\sum_{i=1}^{m} R(s_i) \nabla_{\theta_t} \log p_{\theta_t}(s_i)$$
+
+Intuición: las generaciones con recompensa alta aumentan su probabilidad y las de recompensa baja la reducen.
+
+\begin{warningbox}{Por qué es necesaria la regularización KL}
+Si se optimiza el modelo de recompensa sin restricciones, la política aprovecha (exploit) las debilidades del modelo de recompensa (reward hacking). La práctica estándar es añadir una penalización KL:
+$$\max_\theta \; \mathbb{E}_{y \sim p_\theta}\left[R_\phi(x, y)\right] - \beta \, D_{\mathrm{KL}}(p_\theta \| p_{\mathrm{ref}})$$
+donde $p_{\mathrm{ref}}$ es el modelo SFT. $\beta$ controla cuánto se aleja la política del modelo inicial.
+\end{warningbox}
+
+\subsection{Control de calidad de los datos de recompensa}
+
+La calidad de los datos de preferencias determina directamente la capacidad de generalización del reward model. Las dimensiones de calidad habituales son: consistencia de las comparaciones, experiencia de los anotadores, context diversity y proporción de hard negatives.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.25\textwidth} p{0.62\textwidth}}
+\toprule
+Dimensión & Práctica de implementación \\
+\midrule
+Consistencia & Varias rondas de revisión a ciegas y cálculo del Cohen's kappa; las entradas inconsistentes se envían a revisión de nivel superior \\
+Diversidad & Se agregan deliberadamente prompts de tipo creative, factual y multi-turn, para evitar que la reward solo aumente con cierto tipo de instrucciones \\
+Negativos difíciles & Se recolectan respuestas near-miss para que el reward model distinga subtle flaws \\
+Metadatos & Se registran intent, topic y difficulty para poder hacer muestreo estratificado por intención humana durante el entrenamiento \\
+\bottomrule
+\end{tabular}
+\caption{Elementos del control de calidad de los datos de preferencias}
+\end{table}
+
+\begin{knowledgebox}{La calidad importa más que el tamaño del modelo}
+En la cadena de atribución del reward model, el eslabón más débil suele ser la label quality, no el tamaño en parámetros. Construir un audit trail y devolver las inconsistencias (inconsistency) al labeler es un atajo para mejorar la estabilidad de la alineación.
+\end{knowledgebox}
+
+\subsection{Regularización de la política y estrategias de muestreo}
+
+La KL no es solo un regularizer; también es un medio para mantener la diversidad durante el sampling:
+\begin{itemize}
+    \item En PPO se usa una KL constraint para vigilar el drift de la política; si la KL de algún rollout supera el umbral, se regresa de inmediato a la reference.
+    \item Se añade un entropy bonus para que la política no haga collapse hacia una solución deterministic.
+    \item Con temperature sweep y rejection sampling se evalúa la risk surface del reward model, y el resultado se registra en el rollout ledger.
+\end{itemize}
+
+\begin{importantbox}{La KL como mecanismo de revisión}
+Archit enfatiza: \textit{«La KL hace que el modelo escuche la autocrítica de la política de referencia antes de alejarse demasiado»}; esto mantiene un diálogo sano entre el reward model y la reference policy.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+El pipeline completo de RLHF: instruction finetuning $\to$ entrenamiento del modelo de recompensa $\to$ optimización con PPO. El control de calidad de los datos, la regularización KL y las estrategias de muestreo garantizan en conjunto que el reward model no se desvíe; solo así el LM se convierte en un asistente confiable.
+\section{DPO: Direct Preference Optimization}
+
+\subsection{Cómo prescindir del modelo de recompensa}
+
+\begin{importantbox}{La idea central de DPO}
+El problema de RL con restricción KL que plantea RLHF tiene una \textbf{solución de forma cerrada}:
+$$\pi^*(y \mid x) = \frac{1}{Z(x)} \pi_{\mathrm{ref}}(y \mid x) \exp\left(\frac{1}{\beta} r(x, y)\right)$$
+
+A la inversa, la recompensa puede expresarse como función de la política:
+$$r(x, y) = \beta \log \frac{\pi^*(y \mid x)}{\pi_{\mathrm{ref}}(y \mid x)} + \beta \log Z(x)$$
+
+Al sustituir esta expresión en el modelo de Bradley-Terry, el término $Z(x)$ se cancela y se obtiene la pérdida de DPO:
+$$\mathcal{L}_{\mathrm{DPO}}(\theta) = -\mathbb{E}_{(x, y_w, y_l)}\left[\log \sigma\left(\beta \log \frac{\pi_\theta(y_w \mid x)}{\pi_{\mathrm{ref}}(y_w \mid x)} - \beta \log \frac{\pi_\theta(y_l \mid x)}{\pi_{\mathrm{ref}}(y_l \mid x)}\right)\right]$$
+\end{importantbox}
+
+Ventajas de DPO:
+\begin{itemize}
+    \item No requiere entrenar un modelo de recompensa por separado.
+    \item No requiere entrenamiento con RL (no hace falta PPO).
+    \item Basta con un ciclo estándar de entrenamiento supervisado.
+    \item El entrenamiento es más estable y más sencillo.
+\end{itemize}
+
+\subsection{La intuición detrás de DPO}
+
+La pérdida de DPO hace implícitamente dos cosas:
+\begin{enumerate}
+    \item \textbf{Aumenta} la probabilidad de la respuesta preferida $y_w$.
+    \item \textbf{Reduce} la probabilidad de la respuesta no preferida $y_l$.
+\end{enumerate}
+
+El peso se ajusta automáticamente mediante la «diferencia de recompensa implícita» dentro de la función $\sigma$.
+
+\begin{knowledgebox}{DPO vs. RLHF}
+\begin{itemize}
+    \item \textbf{RLHF}: se entrena un modelo de recompensa $\to$ optimización con RL. Son dos etapas y se necesita infraestructura de RL.
+    \item \textbf{DPO}: optimiza la política directamente sobre los datos de preferencias. Es una sola etapa y basta con el código de SFT.
+    \item En teoría, DPO y RLHF optimizan \textbf{el mismo objetivo}.
+    \item En la práctica, DPO es más sencillo, pero en algunos escenarios puede ser menos flexible que RLHF.
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Práctica y elección de parámetros}
+
+Elementos clave durante el entrenamiento con DPO:
+\begin{itemize}
+    \item Elegir una reference policy estable; por lo general se usa un instruction finetuned checkpoint.
+    \item Ajustar $\beta$ para controlar el grado de preferencia: cuanto menor es $\beta$, más se acerca la política a la reference; cuanto mayor es, más fácil resulta reforzar la preferencia.
+    \item Los pesos de muestreo deben equilibrar la cabeza y la cola de la distribución, para evitar que el reward model prefiera únicamente las respuestas de alta probabilidad.
+\end{itemize}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.32\textwidth} p{0.58\textwidth}}
+\toprule
+Hiperparámetro & Configuración recomendada \\
+\midrule
+$\beta$ & 0.1-1.0; hacer un sweep según la intensidad de la preferencia y observar el trade-off entre KL y accuracy \\
+Reference policy & SFT checkpoint + small RL finetuning for stability \\
+Composición del lote & Mantener una balanced ratio de pares winning/losing para evitar el collapse \\
+\bottomrule
+\end{tabular}
+\caption{Ajuste de hiperparámetros y práctica de entrenamiento en DPO}
+\end{table}
+
+\begin{knowledgebox}{DPO Training Insight}
+DPO convierte el reward scoring en una diferencia de logits; por eso, al observar el shift de $\log \pi_\theta / \pi_{\mathrm{ref}}$, puede juzgarse de forma intuitiva cuánto se ha reforzado la preferencia.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+DPO sustituye la solución de forma cerrada del objetivo de RL en el modelo de Bradley-Terry y así reduce la optimización de preferencias a un problema de aprendizaje puramente supervisado. Combinar un sweep de $\beta$ con la elección de la política de referencia permite equilibrar la precisión y la estabilidad.
+\section{RL for LLM Reasoning}
+
+\subsection{Más allá de las preferencias: recompensas verificables}
+
+En dominios como las matemáticas y la programación, la corrección de una respuesta puede \textbf{verificarse automáticamente}. En ese caso no se necesitan preferencias humanas: la corrección puede usarse directamente como recompensa para el entrenamiento con RL.
+
+\begin{importantbox}{El auge de RL for Reasoning}
+Modelos como DeepSeek-R1 mostraron que el entrenamiento con RL permite a un LLM aprender capacidades como la autocorrección durante el razonamiento y la cadena de pensamiento. Esta es otra dirección de aplicación importante de RL en los LLM, además de la alineación.
+\end{importantbox}
+
+\subsection{Diseño de recompensas verificables}
+
+Las señales habituales en tareas verificables incluyen:
+\begin{itemize}
+    \item \textbf{Consistencia lógica}: determinar automáticamente si la solución de un problema matemático cumple la lógica de sus pasos.
+    \item \textbf{Razonamiento sintético}: revisar la cadena de razonamiento con un symbolic executor; la reward se retroalimenta directamente al token.
+    \item \textbf{Verificación generativa}: usar un verifier LM para calificar las respuestas candidate, como auxiliary reward.
+\end{itemize}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.3\textwidth} p{0.35\textwidth} p{0.32\textwidth}}
+\toprule
+Categoría de tarea & Señal verificable & Métrica típica \\
+\midrule
+Razonamiento matemático & steps correctness & chain-of-thought accuracy, full solution correctness \\
+Programación & unit test pass rate & pass@k, runtime exceptions \\
+Preguntas y respuestas de conocimiento & factuality consistency & TruthfulQA, F1 against evidence \\
+\bottomrule
+\end{tabular}
+\caption{Tareas y métricas que cubren las recompensas verificables}
+\end{table}
+
+\begin{knowledgebox}{La función del verifier autosupervisado}
+Cuando la comparación humana no es viable, introducir un verifier autosupervisado (como un program executor o un verifier LM) permite generar la reward signal y asegura el ciclo cerrado del reasoning RL.
+\end{knowledgebox}
+
+\subsection{Experimentos y evaluación}
+
+Trabajos como DeepSeek-R1 suelen usar como baseline: Instruction tuned LM + RLHF contrast, DPO y el RL for reasoning pipeline. Los métodos de verificación incluyen la generación con LM, los prompts de varios turnos y la revisión con un external verifier.
+
+\begin{importantbox}{Lo que revela el Reasoning RL}
+\textit{``RL proporciona al modelo un mecanismo de autocorrección, en lugar de solo reforzar la imitación''}: esta retroalimentación hace que el model, ante razonamientos de cadena larga o multi-hop question, esté más dispuesto a traverse deeper reasoning tree.
+\end{importantbox}
+
+En la evaluación también debe considerarse la inference latency, porque el reasoning RL suele requerir rollouts y un verifier; al desplegarlo hay que sopesar la experiencia en real-time.
+
+\subsection{Resumen de la sección}
+
+En los LLM, RL no solo se usa para la alineación (RLHF/DPO), sino también para el reasoning: mediante recompensas verificables y un verifier pipeline, el modelo obtiene supervisión para autocorregirse; en los experimentos hay que considerar a la vez el trade-off entre correctness y latency.
+\section{Evaluación y evidencia}
+
+\subsection{Benchmark Stack}
+
+El objetivo de la optimización de preferencias es que el modelo muestre una mejora consistente en diversos benchmarks. Los niveles de evaluación habituales son:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.2\textwidth} p{0.28\textwidth} p{0.34\textwidth}}
+\toprule
+Nivel & Métricas de ejemplo & Descripción \\
+\midrule
+Benchmark automatizado & HumanEval, MMLU, TruthfulQA & Cuantifica las capacidades y el reasoning \\
+Consistencia de preferencias & Pairwise Preference Accuracy & Si el modelo de recompensa puede predecir las preferencias humanas \\
+Verificación de alineación & Red Team, Safety Gym & Desempeño del modelo dentro de los límites de seguridad \\
+Métricas de despliegue & Rejection Rate, Hallucination Rate & Calidad de la experiencia en el uso real \\
+\bottomrule
+\end{tabular}
+\caption{Pila de evaluación de RLHF/DPO}
+\end{table}
+
+\subsection{Evidence Matrix}
+
+Antes del despliegue hay que organizar una evidence matrix para construir la cadena de evidencia de la alineación y la validación:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.2\textwidth} p{0.24\textwidth} p{0.24\textwidth} p{0.24\textwidth}}
+\toprule
+Evidence & Source & Metric & Decision Use \\
+\midrule
+Pairwise human ranking & crowdsourced label studio & Accuracy & Reward model calibration \\
+Automated guardrails & prompt test suite & Reject rate & Safety filter tuning \\
+Long-context consistency & multi-turn benchmark & Drift score & Deployment guardrail \\
+Deployment logs & tooling + telemetry & Incident count & Postmortem loop \\
+\bottomrule
+\end{tabular}
+\caption{Evidence matrix para la validación entre etapas}
+\end{table}
+
+\subsection{Calibration y Robustness}
+
+No basta con alinear la evaluation: también hay que mantener la estabilidad ante distintas inyecciones semánticas, longitudes de contexto y variaciones del token budget. Las medidas habituales son:
+
+\begin{itemize}
+    \item Aplicar temperature calibration a la salida del reward model para llevarla al intervalo 0-1
+    \item Construir un multi-context benchmark para detectar el evidence drift
+    \item Usar counterfactual prompts (e.g. `change numeric context`) para verificar que la tendencia de cambio del reward sea consistente
+    \item Registrar los rejection case IDs para poder hacer drill-down
+\end{itemize}
+
+\begin{warningbox}{Riesgo de juzgar mal el drift del modelo de preferencias}
+Aunque el reward model tenga buen desempeño en el conjunto de entrenamiento, puede presentar drift con prompts reales. Sin calibration ni drift detection, no puede garantizarse que la alignment siga vigente después del despliegue.
+\end{warningbox}
+
+\subsection{Métricas de despliegue y evidence ranking}
+
+Cuando el modelo entra en despliegue gradual o completo, la evaluation stack debe conectarse de forma robusta con la capa de monitoreo:
+\begin{itemize}
+    \item \textbf{Rejection/deferral rate}: determina si la guardrail es demasiado permisiva o demasiado estricta.
+    \item \textbf{Hallucination trend}: agrupar por topic y revisar si la hallucination rate se concentra en direcciones específicas.
+    \item \textbf{Latency drift}: si, después de actualizar la política, la latency rebasa el SLO.
+    \item \textbf{Evidence score}: ordenar por niveles el benchmark, la human eval y los deployment logs, para dar al decision board un fundamento en tiempo real.
+\end{itemize}
+
+\begin{knowledgebox}{El valor del evidence ranking}
+Asignar pesos distintos a la evidence de cada etapa (por ejemplo: logs de despliegue > benchmark) permite avanzar con rapidez en la iteración de versiones sin sacrificar la seguridad.
+\end{knowledgebox}
+
+\begin{importantbox}{El tablero de evaluación necesita visualización en tiempo real}
+Archit advierte: \textit{«La evidence matrix no es una tabla escrita en un documento, sino un mapa de calor que se actualiza continuamente en el dashboard»}; solo la visualización en tiempo real permite descubrir los puntos ciegos del drift.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+El sistema de evaluación y evidencia debe cubrir, nivel por nivel, desde el benchmark hasta el despliegue; la Evidence Matrix es el eje que combina distintas señales en conclusiones accionables, y las deploy metrics extienden la evaluation stack hasta production.
+\section{Ingeniería y monitoreo}
+
+\subsection{RLHF Pipeline Timeline}
+
+Dividir el RLHF pipeline en etapas facilita la colaboración del equipo:
+
+\begin{itemize}
+    \item Semana de construcción de datos: recolección de instruction + comparison data
+    \item Semana de modelado de recompensa: entrenamiento repetido + calibration + validation
+    \item Semana de optimización de la política: iteraciones de PPO o DPO + KL/entropy tuning
+    \item Semana de control de calidad: benchmark + red team + human eval
+    \item Monitoreo y rollout: gradual deployment + drift monitoring
+\end{itemize}
+
+\begin{importantbox}{Action Timeline}
+Cada etapa define un deliverable claro: resultados de la construcción de datos, blueprints del modelo de recompensa, checkpoint de PPO, informe de revisión y decisión de despliegue. Solo así el equipo sabe cuándo puede avanzar al siguiente paso.
+\end{importantbox}
+
+\subsection{Operational Monitoring}
+
+Después del despliegue es indispensable monitorear de forma continua hallucination, rejection y latency.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.8\textwidth]{slide-01.jpg}
+\caption{La Slide 1 muestra a la vez el RLHF pipeline y las métricas de monitoreo, y enfatiza el seguimiento de latency y rejection.}
+\end{figure}
+
+\begin{knowledgebox}{Diseño de las métricas del tablero de observación}
+Se recomienda mostrar al mismo tiempo: Reward score drift, human rejection rate, token latency y deploy coverage. Combinar distintas métricas ayuda al equipo a determinar con rapidez si se trata de model drift o de data drift.
+\end{knowledgebox}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.3\textwidth} p{0.6\textwidth}}
+\toprule
+Métrica & Descripción \\
+\midrule
+Reward score drift & Compara con una rolling window la distribución de recompensa current vs baseline \\
+Reject ratio & Tasa de rechazo de la retroalimentación de revisión; sirve para evaluar la sensibilidad de los guardrails \\
+Latency P99 & Garantiza que el pipeline de transformer + verifier no exceda el SLO \\
+Human override count & Número de intervenciones humanas; sirve para calibrar la automation trust \\
+\bottomrule
+\end{tabular}
+\caption{Métricas centrales del tablero de observación posterior al despliegue}
+\end{table}
+
+\subsection{Governance Checklist}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.2\textwidth} p{0.35\textwidth} p{0.28\textwidth}}
+\toprule
+Punto de control & Pregunta central & Salida \\
+\midrule
+Reward model approval & ¿Pasó por blind eval validation? & Approval checklist \\
+Policy guardrails & ¿Existe automatic rejection for forbidden topics? & Guardrail rules \\
+Deployment gating & ¿Se amplía la capacidad de forma gradual y se retienen las anomalías? & Rollout policy \\
+\bottomrule
+\end{tabular}
+\caption{Lista de verificación de gobernanza de RLHF}
+\end{table}
+
+\subsection{Arquitectura de Drift Detection}
+
+Una vez que el modelo está en producción, hay que detectar dos tipos de drift: prompt drift (cambios en la entrada del usuario) y distribution drift (cambios en el comportamiento de la salida).
+
+\begin{itemize}
+    \item Capturar en el logging pipeline la prompt signature (hash + metadata)
+    \item Calcular con una rolling window la distribución de reward score
+    \item Proporcionar una alert que active una human review cuando KL divergence vs zscore supere el umbral
+    \item Crear un `drift ticket` que incluya snapshot prompt, reward score y output diff
+\end{itemize}
+
+\begin{knowledgebox}{Drift detection no es solo anomaly detection}
+Requiere context-aware thresholds: distintas tareas (summaries vs math) tienen de por sí una variance distinta en el reward score. Sin un context-specific threshold, se generan muchas falsas alarmas.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+En el plano de la ingeniería hay que integrar el timeline, el monitoreo y la gobernanza; el dashboard de monitoreo y la checklist son una base importante de la confianza posterior al despliegue.
+\subsection{Ops Playbook}
+
+\begin{enumerate}
+    \item \textbf{Observe}: agregar reward scores, rejection logs y prompt hash.
+    \item \textbf{Assess}: revisar el drift con una evidence matrix y counterfactual prompts.
+    \item \textbf{Act}: hacer que la IA recomiende acciones de mitigación low-risk y genere un rollback plan, que se ejecuta después de la aprobación humana.
+    \item \textbf{Document}: registrar la decisión en la checklist / runbook para usarla en la siguiente ronda de evaluation.
+\end{enumerate}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.18\textwidth} p{0.4\textwidth} p{0.3\textwidth}}
+\toprule
+Etapa & Salida & Participantes principales \\
+\midrule
+Observe & Reward + guardrail logs & SRE + Data Eng \\
+Assess & Evidence scorecard + drift report & Alignment + QA \\
+Act & Rollback plan/mitigation action & Product + Legal \\
+Document & Runbook entry + retrospective & Ops + PM \\
+\bottomrule
+\end{tabular}
+\caption{Entregables ejecutables del Ops Playbook}
+\end{table}
+
+\begin{knowledgebox}{El valor del Ops runbook}
+Registrar cada ciclo de Act como una entrada del runbook no solo permite guarantee la reproducibilidad, sino que también ofrece un audit trail transparente en la board review.
+\end{knowledgebox}
+
+\begin{warningbox}{La IA se encarga principalmente del triage; la decisión sigue requiriendo supervisión humana}
+Aunque la IA sugiera una regla, en las líneas de alto riesgo una persona debe revisarla, para evitar que un error de juicio de la automatización tenga consecuencias irreversibles.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+En el plano de la ingeniería hay que encadenar el timeline, el monitoreo, la gobernanza, la drift detection y el ops playbook en un ciclo cerrado; solo así se mantiene la confianza en el alignment durante las etapas de despliegue gradual y despliegue completo.
+\section{Despliegue y confianza}
+
+\subsection{Revisión del despliegue y reversión}
+
+Después de cada release hay que hacer pre-mortem, post-mortem y verificación de rollback:
+\begin{itemize}
+    \item \textbf{Pre-mortem}: antes del rollout, simular el worst-case prompt drift y confirmar la cobertura de los guardrails.
+    \item \textbf{Post-mortem}: recopilar el rejection log y el reward score drift, y anotarlos en el incident log.
+    \item \textbf{Verificación de rollback}: diseñar un rollback playbook y ensayar primero en staging el restore checkpoint y el recover guardrail.
+\end{itemize}
+
+\begin{importantbox}{El valor de anticipar incidentes}
+Hacer un simulacro de estimación de riesgos antes de que el gerente de producto apruebe el rollout permite incluir los high-risk prompts en una watchlist y evitar improvisar con prisa cuando ocurra un incidente.
+\end{importantbox}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.25\textwidth} p{0.65\textwidth}}
+\toprule
+Etapa de revisión & Contenido \\
+\midrule
+Pre-mortem & drift risk list, revisión de la evidence matrix, guardrail traceability \\
+Post-mortem & reward score drift graph, human override log, root cause analysis \\
+Rollback & reference checkpoint + runbook, alert escalation path \\
+\bottomrule
+\end{tabular}
+\caption{Entregables de la revisión del despliegue y la reversión}
+\end{table}
+
+\subsection{Gobernanza con múltiples roles y confianza}
+
+Un alignment pipeline no es solo research: el equipo de gobernanza, el área legal y SRE también deben participar:
+\begin{itemize}
+    \item El equipo de investigación y desarrollo se encarga del reward model y del policy update.
+    \item El equipo de operación y monitoreo se encarga de los drift alerts y del dashboard.
+    \item El área legal y de cumplimiento se encarga del guardrail audit y de la privacy review.
+    \item El PM y el decision board deciden en última instancia el rollout o el rollback con base en el evidence ranking.
+\end{itemize}
+
+\begin{knowledgebox}{Propuesta de gobernanza con múltiples roles}
+Declarar la evidence matrix como un multi-stakeholder checkpoint; por ejemplo, en cada policy update, el compliance team debe revisar de nuevo los long-form prompts.
+\end{knowledgebox}
+
+\begin{warningbox}{Cadena de amplificación del riesgo}
+Si falta un governance checkpoint, puede ocurrir que, después del fine-tune del reward model, se eleve cierto tipo de prompt sin que compliance lo detecte (catch), de modo que las high-risk replies lleguen directamente a production.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El despliegue y la confianza requieren pre-mortem/post-mortem+rollback y una evidence governance con múltiples roles; solo así se puede mantener la confianza en el alignment dentro de un RLHF pipeline en iteración continua.
+\section{Casos y direcciones de investigación}
+
+\subsection{Visual Agent Evidence}
+
+La diapositiva clave muestra el acoplamiento entre la evidence matrix y el agent swarm:
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.8\textwidth]{slide-02.jpg}
+\caption{La Slide 2 analiza la relación entre el agent swarm, la data quality y la governance, y adjunta una evidence matrix.}
+\end{figure}
+
+\subsection{Correspondencia entre las Slides y la práctica}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.8\textwidth]{slide-03.jpg}
+\caption{La Slide 3 muestra la integración del RLHF pipeline, el ops playbook y los checkpoint de gobernanza; es la evidencia visual de la importancia que la clase da a la actionability.}
+\end{figure}
+
+La Slide 3 enlaza la timeline, el monitoring y la governance en una matriz, y recuerda al equipo que en cada etapa debe haber un artifact entregable claramente definido.
+
+\begin{knowledgebox}{Correspondencia entre las diapositivas y los entregables}
+Antes del despliegue, convertir la timeline, los artifact y los checkpoints de la slide en un sprint backlog permite asegurar que cada deliverable tenga un responsable.
+\end{knowledgebox}
+
+\subsection{Research Directions}
+
+La investigación futura puede centrarse en:
+
+\begin{itemize}
+    \item Conectar de forma automática (auto-connected) la reward model calibration con la policy evaluation
+    \item La preference alignment con identidades Multi-agent
+    \item Una Explainability layer que haga interpretables las restricciones KL
+    \item Sim-to-real research para que el reward model se adapte a escenarios más amplios
+\end{itemize}
+
+Archit también insistió en la necesidad de cerrar el ciclo de retroalimentación entre la investigación teórica y la deployment real: las nuevas direcciones de investigación deben producir playbooks ejecutables, no solo paper-level insight.
+
+\begin{knowledgebox}{Interpretabilidad de ingeniería de las direcciones de investigación}
+Para que los resultados de investigación lleguen a la práctica, lo decisivo es la \textbf{interpretabilidad de ingeniería}: solo al explicar el KL margin, el reward model drift y los indicadores del agent dash board se consigue que los gerentes de producto y el equipo legal confíen en el alignment pipeline.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La parte de casos enlaza la evidencia visual de las slides, la estructura del agent swarm y las direcciones de investigación futura, y nos recuerda que el RLHF sigue evolucionando con rapidez.
+\section{Lista de acciones y siguientes pasos}
+
+\subsection{Preparación previa al despliegue}
+
+Antes del rollout, es necesario consolidar los siguientes entregables:
+\begin{itemize}
+    \item \textbf{Data readiness}: confirmar que el preference dataset cubra los nuevos prompt cluster, para evitar la distribution shift.
+    \item \textbf{Model readiness}: verificar que RLHF tenga limit order y que las versiones DPO/dRL mantengan el KL margin.
+    \item \textbf{Governance readiness}: todas las guardrail policies se registran en el policy doc y el compliance team las firma.
+\end{itemize}
+
+\begin{knowledgebox}{Lista automatizada de la etapa de preparación}
+Vincular la readiness checklist de vuelta con el issue tracker; para cada item, un automation bot hace ping al owner correspondiente, de modo que no se omita ningún punto.
+\end{knowledgebox}
+
+\subsection{Retroalimentación después de la puesta en producción}
+
+Después del despliegue hay que mantener un ciclo de retroalimentación continuo:
+\begin{itemize}
+    \item Apoyarse en el \textbf{evidence dashboard} para disparar auto-alert; cuando reward drift y latency spikes ocurren al mismo tiempo, se hace escalate de forma automática.
+    \item Informar cada semana el \textbf{ops scorecard}: reward score drift, human override y rejection trend.
+    \item Usar un \textbf{post-deployment study} para verificar si los new prompts, los adversarial tests y las user complaints se retroalimentan de forma sincronizada al labeling pipeline.
+\end{itemize}
+
+\begin{importantbox}{La importancia de la retroalimentación continua}
+La auto-alert ayuda a detectar rápidamente la drift, pero la verdadera alignment sigue dependiendo de la weekly review meeting, que convierte las quantitative signals en qualitative insights.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La lista de acciones completa incluye la readiness checklist previa al despliegue y el feedback loop posterior al deployment; solo un ciclo cerrado y riguroso permite convertir la research del RLHF pipeline en un resilient product.
+
+\section{Diapositivas y evidencia visual}
+
+\subsection{Capas de estrategia y evidencia: Slide 0-04}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.8\textwidth]{slide-0-04.jpg}
+\caption{Slide 0-04 superpone el reward model, la policy update y el proceso de gobernanza en un mismo lienzo, y enfatiza el track de evidence-to-action.}
+\end{figure}
+
+Slide 0-04 muestra cómo se recopilan y revisan varias evidence signal dentro de una misma timeline. Recuerda a los equipos que no pueden centrarse solo en un benchmark, sino que deben convertir la evidence matrix en un dashboard operativo.
+
+\begin{knowledgebox}{Evidence dashboard por capas}
+Si en el dashboard se presentan benchmark, human eval y deployment logs en una stacked view, es más fácil identificar en qué capa la signal hace drift primero.
+\end{knowledgebox}
+
+\subsection{Ritmo operativo: Slide 0-05}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.8\textwidth]{slide-0-05.jpg}
+\caption{Slide 0-05 traza el ritmo de alignment-engineering (data → training → deployment → monitoring) junto con los action items.}
+\end{figure}
+
+Cada etapa cuenta con sus artifacts: la data stage tiene un prompt catalog; la training stage, un KL margin report; la deployment stage, una drift alarm; y la monitoring stage, un ops playbook. Un diagrama de ritmo como este puede servir de referencia para la quarterly planning.
+
+\begin{importantbox}{Lo esencial del ritmo operativo}
+La vista timeline+artifact permite que los equipos multifuncionales lleguen rápidamente a un consenso en las reuniones de planning. Así se evita que la lógica de alignment se rompa entre la entrega y el monitoreo.
+\end{importantbox}
+
+\subsection{Matriz de calidad: Slide 0-06}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.8\textwidth]{slide-0-06.jpg}
+\caption{Slide 0-06 organiza en una matriz la calidad, la confianza y la gobernanza, y enfatiza los criterios de medición de cada stakeholder.}
+\end{figure}
+
+Esta diapositiva combina quality gate, trust signal y governance checkpoints en una matriz. Así es más fácil transmitir la evidence capa por capa a product, ops y legal.
+
+\begin{warningbox}{No reforzar una signal de forma aislada}
+Reforzar solo una automation metric (como la latency) sin integrarla con una governance checklist lleva a lanzar versiones eficientes pero inseguras. Slide 0-06 nos recuerda que debemos mantener el equilibrio dentro de la matriz.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Estas diapositivas sirven como visual anchor: convierten el RLHF pipeline abstracto en un evidence-dashboard layer-by-layer, un ops rhythm y una governance matrix, lo que favorece la cross-team alignment.
+\section{Síntesis y ampliación}
+
+\begin{enumerate}
+    \item Pasar de un LM preentrenado a un asistente requiere tres pasos: instruction finetuning, modelado de recompensas y optimización de la política.
+    \item \textbf{RLHF}: entrenar un modelo de recompensa y optimizar con PPO; es la técnica central de modelos como ChatGPT.
+    \item \textbf{DPO}: simplifica la optimización de preferencias a un problema de aprendizaje supervisado, sin necesidad de infraestructura de RL.
+    \item La regularización KL evita el reward hacking y es un componente esencial de la optimización de preferencias.
+    \item El RL muestra un gran potencial en el razonamiento de los LLM (matemáticas, programación).
+    \item Las comparaciones de preferencias son más confiables que las calificaciones absolutas; el modelo de Bradley-Terry es el marco estándar.
+    \item La fase de despliegue requiere un evidence dashboard, una drift alarm y un ops playbook, que en conjunto forman un ciclo cerrado de monitoreo en tiempo real.
+    \item Cada drift intervention se registra en el runbook y se vincula con el governance checklist, para asegurar el registro de auditoría y una recuperación rápida.
+\end{enumerate}
+
+\subsection{Tabla de síntesis}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.2\textwidth} p{0.35\textwidth} p{0.35\textwidth}}
+\toprule
+Tema & Aprendizaje central & Acción de ingeniería \\
+\midrule
+Instruction Finetuning & Aporta las capacidades básicas & Inicializar el modelo con instruction data a gran escala \\
+RLHF + KL & Logra el alignment mediante un modelo de recompensa y la restricción KL & Mantener la reference policy para evitar el reward hacking \\
+DPO & La optimización de preferencias puede prescindir del RL & Entrenar la política directamente y reducir la complejidad de la infraestructura \\
+Pipeline Monitoring & Requiere timeline + checklist & Establecer un dashboard y un guardrail checklist \\
+Evidence Matrix & Validación conjunta del alineamiento con varias señales & Estructurar benchmark, drift, red team y logs \\
+Deployment Trust & Pre-mortem/post-mortem + multi-role governance & Establecer un rollback runbook, definir responsabilidades y alinearlas con la evidence matrix \\
+\bottomrule
+\end{tabular}
+\caption{Arquitectura de RLHF y puntos clave de ejecución}
+\end{table}
+
+\subsection{Lecturas adicionales}
+\begin{itemize}
+    \item Ouyang et al., \textit{Training Language Models to Follow Instructions with Human Feedback} (InstructGPT, 2022).
+    \item Rafailov et al., \textit{Direct Preference Optimization: Your Language Model is Secretly a Reward Model} (DPO, 2023).
+    \item DeepSeek-AI, \textit{DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning} (2025).
+    \item Chung et al., \textit{Scaling Instruction-Finetuned Language Models} (FLAN-T5, 2022).
+\end{itemize}
+
+\end{document}

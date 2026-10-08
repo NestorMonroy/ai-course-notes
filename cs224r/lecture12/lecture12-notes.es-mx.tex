@@ -1,0 +1,501 @@
+\documentclass[a4paper]{article}
+
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+% FandolSong no cubre algunos caracteres de nombres (U+73FA); WenQuanYi Zen Hei sí.
+\usepackage[AutoFallBack=true]{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+\setCJKfallbackfamilyfont{\CJKrmdefault}{WenQuanYi Zen Hei}
+% polyglossia no traduce los nombres de listings.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{subcaption}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{float}
+
+\newtcolorbox{knowledgebox}[1]{
+    enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, boxrule=1pt, sharp corners
+}
+
+\newtcolorbox{importantbox}[1]{
+    enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black,
+    coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+\newtcolorbox{warningbox}[1]{
+    enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    stringstyle=\color{red!60!black},
+    commentstyle=\color{green!60!black},
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    captionpos=b,
+    extendedchars=true
+}
+
+\newcommand{\notetitle}{CS224R Lecture 12: RL multitarea y RL condicionado por objetivos}
+\newcommand{\noteauthors}{Elaboradas a partir de materiales públicos del curso}
+\newcommand{\notedate}{Primavera de 2025}
+\newcommand{\videochannel}{Stanford Online}
+\newcommand{\videopublishdate}{2025}
+\newcommand{\videoduration}{Aproximadamente 80 minutos}
+\newcommand{\videourl}{https://cs224r.stanford.edu/}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+
+% Footer with repo info
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\thepage}
+\fancyfoot[R]{\footnotesize\color{gray}\href{\repourl}{AI Course Notes}}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\begin{document}
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}
+\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}
+\vspace{0.8cm}
+{\large \noteauthors\par}
+\vspace{0.3cm}
+{\large \notedate\par}
+\vspace{1.1cm}
+
+\ifdefempty{\videocoverpath}{
+{\small No se proporcionó imagen de portada.\par}
+}{
+\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par
+}
+
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\textbf{Ponente}: Chelsea Finn\par
+\textbf{Página del curso}: \href{https://cs224r.stanford.edu/}{cs224r.stanford.edu}\par
+\textbf{Página del proyecto}: \href{\repourl}{\nolinkurl{\repourl}}\par
+\end{tcolorbox}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+%% --- Inicio del contenido --- %%
+
+\section{Complemento de model-based RL: generación de datos sintéticos}
+
+La primera mitad de esta clase cierra primero lo que quedó pendiente de model-based RL en la clase anterior. El punto de partida de Chelsea Finn es muy claro: si ya aprendimos un modelo capaz de predecir estados futuros, además de usarlo para planning, ¿podemos usarlo también para \textbf{producir más datos de entrenamiento} y, a su vez, entrenar una política más fuerte y más barata?
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-04.jpg}
+\caption{Planning with learned models: planificar, recolectar datos, actualizar el modelo y replanificar periódicamente}
+\end{figure}
+
+\subsection{De planning a policy optimization}
+
+La clase anterior trató de «dado el estado actual, usar un learned model para buscar en tiempo de prueba secuencias de acciones futuras». Esta clase va un paso más allá: si buscar repetidamente en tiempo de prueba resulta demasiado costoso, ¿es posible convertir la capacidad predictiva que aporta el modelo en una herramienta de aumento de datos para la etapa de aprendizaje de la política?
+
+\begin{importantbox}{El problema que esta sección busca resolver en realidad}
+Planning y policy optimization cumplen funciones distintas:
+\begin{itemize}
+    \item La ventaja de planning es su flexibilidad: si cambia el objetivo, se puede volver a calcular.
+    \item La desventaja de planning es que su test-time compute es alto y, con un horizon largo, la acumulación del error del modelo es notable.
+    \item La ventaja de aprender directamente la política es que su despliegue es barato.
+    \item La desventaja de aprender directamente la política es que, si los datos de entrenamiento no bastan, es difícil aprenderla de forma estable.
+\end{itemize}
+Por lo tanto, la pregunta más natural es: \textbf{cómo usar un learned model para producir más datos útiles para la política y, al mismo tiempo, evitar que el error del modelo se amplifique hasta volverse incontrolable.}
+\end{importantbox}
+
+\subsection{Aumento de datos al estilo Dyna}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-05.jpg}
+\caption{La decisión central de model-based policy optimization: desde dónde iniciar el rollout y qué tan largo hacerlo}
+\end{figure}
+
+El curso plantea este problema de manera muy concreta. Supongamos que ya recolectamos varias trayectorias en el entorno real; entonces, al generar datos con el modelo, hay al menos tres estrategias:
+\begin{enumerate}
+    \item Hacer rollouts de trayectorias muy largas a partir del estado inicial.
+    \item Hacer solo rollouts cortos a partir del estado inicial.
+    \item Hacer rollouts cortos a partir de \textbf{todos los estados que ya aparecen} en el conjunto de datos.
+\end{enumerate}
+
+La tercera estrategia es la práctica central que recomienda esta clase, porque equilibra la cobertura con el control del error.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-06.jpg}
+\caption{Un término medio más seguro: partir de todos los estados de los datos y generar synthetic rollouts locales}
+\end{figure}
+
+\begin{knowledgebox}{Por qué «rollout corto + todos los estados» es la opción más segura}
+\begin{enumerate}
+    \item Si solo se generan trayectorias largas desde el estado inicial, el error del modelo se amplifica continuamente a lo largo de la cadena.
+    \item Si solo se generan trayectorias cortas desde unos pocos puntos de partida, la cobertura de los estados posteriores resulta muy insuficiente.
+    \item Hacer rollouts cortos a partir de todos los estados de los datos equivale, en esencia, a extrapolar localmente cerca de la distribución real, lo que mejor equilibra estabilidad y cobertura.
+\end{enumerate}
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-07.jpg}
+\caption{Algoritmo completo: los datos reales actualizan el modelo y los rollouts cortos del modelo generan muestras de entrenamiento adicionales}
+\end{figure}
+
+\subsection{Cuándo vale la pena aprender un modelo del mundo}
+
+Model-based RL resulta muy atractivo porque parece «imaginar el futuro». Sin embargo, el criterio de Chelsea Finn es mesurado: \textbf{lo decisivo no es si el modelo suena sofisticado, sino si en verdad es más fácil de aprender que la política.}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-08.jpg}
+\caption{Ventajas y costos de model-based RL: equilibrio entre eficiencia de datos, independencia de la tarea y complejidad del entrenamiento}
+\end{figure}
+
+Los principios de decisión que da la ponente pueden resumirse en una tabla breve:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.2\textwidth} p{0.28\textwidth} p{0.28\textwidth}}
+\toprule
+Característica del escenario & Más probablemente favorable a model-based & Riesgos \\
+\midrule
+La interacción real es costosa & Se puede mejorar la eficiencia de datos con synthetic rollouts & La política absorbe el sesgo del modelo \\
+La dinámica es relativamente regular & Es más fácil aprender una aproximación útil del modelo del mundo & Es fácil subestimar el error con horizon largo \\
+La recompensa cambia con frecuencia & Un mismo modelo puede servir a varios objetivos posteriores & No implica que el modelo mismo optimice el desempeño en la tarea \\
+Entorno muy estocástico o parcialmente observable & No necesariamente adecuado & Puede ser más difícil que aprender directamente la política \\
+\bottomrule
+\end{tabular}
+\caption{Cuándo considerar primero model-based RL}
+\end{table}
+
+\begin{warningbox}{No hay que tomar model-based como la vía más fuerte por defecto}
+El modelo del mundo requiere entrenamiento y ajuste de hiperparámetros propios, y además introduce nuevas fuentes de error. Si la dinámica del entorno es en sí más difícil de aprender que la política, o si el rollout se distorsiona en cuanto se alarga un poco, aprender un modelo puede, al contrario, volver más frágil todo el sistema.
+\end{warningbox}
+
+\subsection{El modelo del mundo no tiene una sola forma}
+
+Al final, el curso advierte que la forward dynamics tradicional $p(s_{t+1}\mid s_t, a_t)$ es solo un tipo de modelo del mundo. Un inverse model, un inverse model de varios pasos, un modelo que solo predice observaciones futuras e incluso la distribución conjunta de las transition tuples pueden resultar más útiles en tareas específicas.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-09.jpg}
+\caption{Las diversas formas del modelo del mundo: forward/inverse/future prediction tienen cada una su uso}
+\end{figure}
+
+\subsection{Resumen de la sección}
+
+En esta clase, model-based RL se reubica como una \textbf{herramienta de aumento de datos}: lo importante no es lograr la simulación del mundo más perfecta, sino usar un modelo local lo bastante preciso para ampliar las muestras de entrenamiento cerca de los datos reales, manteniendo siempre el sesgo del modelo dentro de un rango aceptable.
+\section{Aprendizaje por refuerzo multitarea}
+
+\subsection{Motivación: por qué el RL tarde o temprano tiene que avanzar hacia una generalist policy}
+
+El expositor plantea la motivación del RL multitarea de forma muy directa: los sistemas inteligentes del mundo real casi nunca enfrentan una sola tarea. Un asistente general tiene que encargarse de reservar viajes, hacer compras y responder preguntas; un robot tiene que caminar, agacharse, transportar objetos y limpiar; un sistema de recomendación tiene que atender las preferencias de distintos usuarios. La verdadera pregunta no es «si cierta política puede aprender una tarea», sino «si podemos entrenar una política capaz de compartir conocimiento entre muchas tareas».
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-11.jpg}
+\caption{Panorama de aplicaciones del RL multitarea: desde asistentes basados en LLM hasta robots de manipulación móvil y sistemas de recomendación}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-12.jpg}
+\caption{La motivación de fondo del RL multitarea: repartir la complejidad de datos entre las tareas para construir sistemas más general}
+\end{figure}
+
+\subsection{Una tarea es, en realidad, un MDP distinto}
+
+\begin{importantbox}{Formalización del MDP multitarea}
+El problema multitarea se escribe como un conjunto de MDP $\{\mathcal{M}_i\}$; cada tarea puede variar en el espacio de estados, el espacio de acciones, la distribución del estado inicial, la dinámica y la función de recompensa. En el entrenamiento, es habitual incorporar el identificador de la tarea $z_i$ al estado, lo que se escribe como:
+$$\tilde{\mathcal{M}} = (\mathcal{S} \times \mathcal{Z}, \mathcal{A}, \tilde{p}, \tilde{r}, \gamma)$$
+Así, la política se convierte en una política condicionada $\pi(a\mid s, z)$.
+\end{importantbox}
+
+Esta definición es más amplia que muchas nociones intuitivas de «etiqueta de tarea». Una tarea no consiste necesariamente solo en «hacer cosas distintas»; también puede tratarse de usuarios distintos, configuraciones iniciales distintas, ajustes de dinámica distintos o incluso estructuras corporales distintas.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-14.jpg}
+\caption{Ejemplos de distribuciones de tareas: las diferencias entre tareas en sistemas de recomendación, animación de personajes y RL con múltiples robots}
+\end{figure}
+
+\subsection{Cómo se le proporciona a la política el identificador de la tarea}
+
+La descripción de la tarea $z$ puede adoptar varias formas:
+\begin{itemize}
+    \item \textbf{One-hot task ID}: es sencillo de implementar, pero casi no permite la generalización sin ejemplos previos.
+    \item \textbf{Instrucciones en lenguaje natural}: son más adecuadas para tareas de vocabulario abierto y se integran con mayor facilidad con VLA/LLM.
+    \item \textbf{Estado objetivo}: expresa la tarea como «a dónde ir».
+    \item \textbf{Parámetros de recompensa o demostraciones en video}: convienen cuando la tarea tiene una semántica más compleja.
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-15.jpg}
+\caption{El identificador de la tarea puede ser un índice, lenguaje, una demostración en video o un estado objetivo}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-16.jpg}
+\caption{Al incorporar el identificador de la tarea al estado, el RL multitarea puede reescribirse como un MDP estándar}
+\end{figure}
+
+\begin{knowledgebox}{La importancia de esta reescritura}
+Una vez que se acepta la notación $s=(\bar{s}, z)$, el RL multitarea ya no necesita un aparato matemático de RL completamente nuevo. La policy, la Q-function y el critic del caso de una sola tarea pueden reescribirse casi directamente en forma condicionada:
+\begin{itemize}
+    \item $\pi_\theta(a\mid s)\rightarrow \pi_\theta(a\mid \bar{s}, z)$
+    \item $Q_\phi(s,a)\rightarrow Q_\phi(\bar{s}, a, z)$
+\end{itemize}
+Por esta razón, la implementación del RL multitarea resulta mucho menos ajena de lo que parece a primera vista.
+\end{knowledgebox}
+
+\subsection{Cómo se lleva a cabo el imitation learning multitarea}
+
+La forma más directa de aprendizaje multitarea sigue siendo la clonación de comportamiento: se reúnen datos de demostración de varias tareas y se entrena una política condicionada $\pi_\theta(a\mid s,z)$. Sin embargo, el curso señala de manera especial una técnica práctica que suele pasarse por alto: \textbf{stratified sampling}. Es decir, procurar que cada mini-batch contenga datos de varias tareas, para evitar que las tareas más frecuentes dominen el entrenamiento.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-18.jpg}
+\caption{Imitation learning multitarea: una política condicionada combinada con muestreo estratificado reduce la varianza del gradiente}
+\end{figure}
+
+\begin{knowledgebox}{Por qué el aprendizaje multitarea puede compartir datos}
+Las distintas tareas suelen compartir subestructuras de habilidades. Por ejemplo, «tomar el cubo rojo» y «tomar el cubo azul» comparten la acción de sujetar; «limpiar la mesa» y «ordenar la cocina» comparten la capacidad de desplazarse y ubicarse. El valor esencial del aprendizaje multitarea consiste en que estas habilidades locales se reutilicen dentro de parámetros compartidos, en lugar de aprenderse desde cero por separado para cada tarea.
+\end{knowledgebox}
+
+\subsection{De BC-Z a OpenVLA: formas actuales de introducir el condicionamiento por tarea}
+
+Las slides también presentan expresamente dos tipos de ejemplos que muestran cómo el task conditioning se ha fusionado en los últimos años con los foundation model:
+\begin{itemize}
+    \item Los métodos del tipo de BC-Z usan un task embedding explícito o condiciones multimodales, con el objetivo de lograr la generalización zero-shot entre tareas.
+    \item Sistemas como OpenVLA son más directos: introducen la descripción de la tarea como prompt en un modelo de visión-lenguaje-acción.
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-19.jpg}
+\caption{BC-Z: generalización sin ejemplos previos entre tareas mediante el condicionamiento por tarea}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-20.jpg}
+\caption{OpenVLA: la descripción de la tarea se introduce como prompt en el modelo VLA}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-21.jpg}
+\caption{Ejemplo robótico de imitation multitarea: de «doblar la toalla» a «colgar la toalla»}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-22.jpg}
+\caption{De unas cuantas tareas a tareas domésticas abiertas: la escala de las políticas multitarea crece con rapidez}
+\end{figure}
+
+\subsection{Resumen de la sección}
+
+Lo esencial del RL multitarea no es «meter más tareas en una sola red», sino expresar, mediante el condicionamiento, las distintas tareas como un conjunto de problemas relacionados que una misma política debe resolver. Siempre que exista una estructura compartida entre las tareas, el entrenamiento multitarea puede repartir la complejidad de datos.
+\section{Aprendizaje por refuerzo condicionado a metas}
+
+\subsection{La meta como descripción de la tarea}
+
+Goal-conditioned RL es el caso particular más importante y más natural del RL multitarea: el identificador de la tarea deja de ser un task ID abstracto y pasa a ser un estado meta $g$. En este caso, la política se escribe $\pi(a\mid s,g)$ y la recompensa se expresa como recompensa por alcanzar la meta o como distancia a la meta:
+
+\begin{importantbox}{Formalización del RL condicionado a metas}
+\begin{itemize}
+    \item Política: $\pi(a \mid s, g)$
+    \item Recompensa dispersa: $r(s,a,g)=1$ si y solo si $d(s,g)<\epsilon$
+    \item Recompensa densa: $r(s,a,g)=-d(s,g)$
+    \item Objetivo: aprender una política general que vaya desde cualquier punto de partida hacia cualquier meta
+\end{itemize}
+\end{importantbox}
+
+Una vez que la meta también se considera un task descriptor, muchas de las técnicas del RL multitarea pueden trasladarse directamente a las tareas de goal-reaching.
+
+\subsection{¿Puede reutilizarse la experiencia entre metas?}
+
+Lo verdaderamente interesante de esta sección es que Chelsea Finn no presenta HER como una técnica aislada, sino que primero plantea una pregunta más general. Supongamos que reunimos una experiencia en la tarea 1: ¿puede esa experiencia ayudar también en la tarea 2? Si es así, conviene intentar reinterpretar esa trayectoria con una nueva etiqueta de tarea y una nueva recompensa.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-23.jpg}
+\caption{La pregunta central del RL multitarea: si una misma trayectoria puede reutilizarse en tareas distintas}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-24.jpg}
+\caption{Ejemplo intuitivo: se quería tirar a gol, pero se dio por accidente un pase excelente}
+\end{figure}
+
+\subsection{El procedimiento general de Hindsight Relabeling}
+
+\begin{importantbox}{HER (Hindsight Experience Replay)}
+La idea central de HER es: \textbf{aunque una trayectoria no cumpla la meta original, puede reetiquetarse con otra meta que sí alcanzó en la práctica.}
+\end{importantbox}
+
+El curso divide este proceso en cuatro pasos:
+\begin{enumerate}
+    \item Recolectar trayectorias con la política actual, $\tau=(s_{1:T}, a_{1:T}, z, r_{1:T})$.
+    \item Guardar primero los datos en el replay buffer con la etiqueta de la tarea original.
+    \item Elegir después una nueva tarea o meta, recalcular la recompensa y formar una relabeled trajectory.
+    \item Usar juntas la trayectoria original y la trayectoria relabeled en la actualización off-policy.
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-25.jpg}
+\caption{Procedimiento unificado de RL multitarea with relabeling: recolectar, reetiquetar y volver a entrenar}
+\end{figure}
+
+\begin{knowledgebox}{Cuándo puede hacerse relabeling de forma segura}
+En la slide, el curso presenta tres condiciones previas:
+\begin{enumerate}
+    \item La función de recompensa puede calcularse para la nueva tarea.
+    \item La dinámica es la misma, o suficientemente parecida, entre las distintas metas.
+    \item El algoritmo de entrenamiento es off-policy, porque una misma experiencia se reutiliza varias veces.
+\end{enumerate}
+\end{knowledgebox}
+
+\subsection{Por qué goal-conditioned RL es especialmente adecuado para HER}
+
+En el escenario goal-conditioned, el relabeling se simplifica a su forma más elegante: si la trayectoria terminó en $s_T$, se cambia la meta a $g'=s_T$ y, con base en ella, se recalcula la recompensa de toda la trayectoria. Así, una trayectoria fallida que tenía «recompensa cero en todos los pasos» por no haber alcanzado la meta indicada se convierte de inmediato en una muestra exitosa para la nueva meta.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-26.jpg}
+\caption{Goal-conditioned RL with HER: el estado final alcanzado se toma directamente como nueva meta}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-27.jpg}
+\caption{Ejemplo con brazo robótico: desde la perspectiva hindsight, una trayectoria fallida se convierte en una muestra exitosa}
+\end{figure}
+
+\begin{warningbox}{Los supuestos implícitos de HER}
+HER no puede aplicarse indiscriminadamente en cualquier tarea. Requiere que la recompensa pueda recalcularse para la nueva meta, que las metas compartan la dinámica y que las muestras reetiquetadas del replay buffer no comprometan la estabilidad del entrenamiento. Si la recompensa es muy semántica o no puede reevaluarse, HER no necesariamente es aplicable.
+\end{warningbox}
+
+\subsection{Por qué HER es tan eficaz}
+
+Lo más profundo de HER es que cambia nuestra forma de ver los datos de fracaso. Muchas trayectorias de RL resultan «inútiles» no porque carezcan de información, sino porque les asignamos una etiqueta de meta demasiado estrecha. Mediante la reescritura hindsight, HER convierte «no llegué a donde quería ir» en «pero sí llegué a algún lugar», de modo que cada trayectoria aporta supervisión sobre la estructura de alcanzabilidad.
+
+\subsection{Resumen de la sección}
+
+Goal-conditioned RL lleva la idea del RL multitarea a su forma más natural, y HER muestra además que, en tareas con recompensa dispersa, lo verdaderamente escaso no es la experiencia, sino la manera de \textbf{interpretar la experiencia}.
+\section{Síntesis y ampliación}
+
+Esta clase conectó de principio a fin tres líneas de trabajo: usar un learned model para ampliar los datos, usar el condicionamiento por tarea para construir una generalist policy y usar hindsight relabeling para convertir las trayectorias fallidas en supervisión útil. Aunque en apariencia son distintas, en esencia las tres responden a la misma pregunta: \textbf{cómo hacer que una experiencia limitada sirva para más decisiones.}
+
+\subsection{Tabla resumen de la clase}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.18\textwidth} p{0.22\textwidth} p{0.22\textwidth} p{0.24\textwidth}}
+\toprule
+Tema & Pregunta central & Técnica principal & Limitación principal \\
+\midrule
+Model-based RL & Cómo reducir el costo de la interacción real & learned model + short synthetic rollout & Sesgo del modelo, acumulación de error en horizons largos \\
+RL multitarea & Cómo compartir experiencia y habilidades entre tareas & task conditioning + shared policy & Transferencia negativa, distribución desbalanceada de tareas \\
+Goal-conditioned RL & Cómo aprender una política general para alcanzar metas & La meta entra en la política como condición & Dificultad para representar la meta y diseñar la recompensa \\
+HER & Cómo lograr que las trayectorias fallidas también sirvan para entrenar & hindsight relabeling + off-policy reuse & Requiere recompensas recalculables y dinámica compartida \\
+\bottomrule
+\end{tabular}
+\caption{Hilo de los métodos de la Lecture 12}
+\end{table}
+
+\subsection{Reflexiones adicionales}
+
+\begin{itemize}
+    \item Cuando el task descriptor pasa de one-hot a lenguaje natural, la frontera entre el RL multitarea y los foundation models se vuelve cada vez más difusa.
+    \item El éxito de HER nos recuerda que muchos datos que parecen «fallidos» en realidad solo carecen de una etiqueta y una interpretación adecuadas.
+    \item La pregunta que el curso anticipa al final surge de forma natural: si es posible compartir conocimiento entre varias tareas, ¿se puede ir más allá y lograr una adaptación rápida a tareas completamente nuevas?
+\end{itemize}
+
+\subsection{Del aprendizaje compartido entre tareas a la adaptación rápida}
+
+El final de esta clase deja planteado un giro de investigación muy importante: si el RL multitarea resuelve el problema de «compartir estructura entre un conjunto de tareas conocidas», el paso siguiente es preguntarse: \textbf{ante una tarea nueva que nunca se ha visto, ¿es posible adaptarse rápidamente, como en el in-context learning, en lugar de volver a entrenar toda la política?}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-29.jpg}
+\caption{La siguiente pregunta que plantea el cierre de la clase: ¿es posible lograr una adaptación rápida a tareas nuevas?}
+\end{figure}
+
+Desde esta perspectiva, las tres líneas principales de esta clase constituyen precisamente la base de la investigación posterior:
+\begin{enumerate}
+    \item El Model-based RL permite que el agent reutilice mejor la experiencia existente y la estructura del entorno.
+    \item El RL multitarea permite que la política aprenda a compartir parámetros y patrones de comportamiento entre varias tareas.
+    \item HER muestra que una misma trayectoria puede aportar supervisión repetidamente bajo distintas interpretaciones de la meta.
+\end{enumerate}
+
+En conjunto apuntan a una pregunta más amplia: \textit{si la experiencia, el condicionamiento por tarea y la interpretación de la meta pueden reutilizarse, ¿no debería la política contar también con una mayor capacidad de test-time adaptation?}
+
+\subsection{Errores más frecuentes al implementar los métodos de esta clase}
+
+Aunque conceptualmente esta clase se divide en tres partes, al escribir el código los errores suelen aparecer en el pipeline de datos. En particular, con HER y con las políticas condicionadas por tarea, muchas veces el problema no está en las fórmulas del algoritmo, sino en que el replay buffer, el task descriptor y la reward recomputation no están bien conectados entre sí.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{slides-images/slide-28.jpg}
+\caption{Repaso de las líneas principales de la Lecture 12: model-based augmentation, task conditioning y hindsight relabeling}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.2\textwidth} p{0.28\textwidth} p{0.28\textwidth}}
+\toprule
+Módulo de implementación & Error más común & Práctica más segura \\
+\midrule
+Synthetic rollout & Un rollout demasiado largo hace que el sesgo del modelo domine el entrenamiento & Partir de estados intermedios de los datos reales y hacer solo rollouts cortos \\
+Task conditioning & El task ID y el estado no se envían juntos a la policy / critic & Usar de forma uniforme $(\bar{s}, z)$ como interfaz de entrada condicional \\
+HER relabeling & Cambiar solo la meta sin recalcular la recompensa de toda la trayectoria & Implementar explícitamente la reward recomputation y la lógica de reescritura en el buffer \\
+Replay buffer & Desbalance entre la distribución de muestras originales y la de muestras relabeled & Registrar la proporción de muestreo y, si hace falta, usar muestreo estratificado \\
+\bottomrule
+\end{tabular}
+\caption{Lista de verificación de implementación de la Lecture 12}
+\end{table}
+
+\begin{knowledgebox}{Lecturas adicionales}
+\begin{itemize}
+    \item Andrychowicz et al., ``Hindsight Experience Replay,'' NeurIPS 2017
+    \item Schaul et al., ``Universal Value Function Approximators,'' ICML 2015
+    \item Yu et al., ``Meta-World: A Benchmark and Evaluation for Multi-Task and Meta Reinforcement Learning,'' CoRL 2020
+    \item Ghosh et al., ``Learning to Reach Goals via Iterated Supervised Learning,'' ICLR 2021
+\end{itemize}
+\end{knowledgebox}
+
+\end{document}

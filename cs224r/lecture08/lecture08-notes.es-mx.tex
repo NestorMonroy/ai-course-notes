@@ -1,0 +1,494 @@
+\documentclass[a4paper]{article}
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+% FandolSong no cubre algunos caracteres de nombres (U+73FA); WenQuanYi Zen Hei sí.
+\usepackage[AutoFallBack=true]{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+\setCJKfallbackfamilyfont{\CJKrmdefault}{WenQuanYi Zen Hei}
+% polyglossia no traduce los nombres de listings.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{subcaption}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{float}
+\newtcolorbox{knowledgebox}[1]{enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black, coltitle=white, fonttitle=\bfseries, title={#1}, boxrule=1pt, sharp corners}
+\newtcolorbox{importantbox}[1]{enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black, coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners}
+\newtcolorbox{warningbox}[1]{enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black, coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners}
+\lstset{basicstyle=\ttfamily\small, keywordstyle=\color{blue}, stringstyle=\color{red!60!black}, commentstyle=\color{green!60!black}, breaklines=true, frame=single, numbers=left, numberstyle=\tiny\color{gray}, captionpos=b, extendedchars=true}
+\newcommand{\notetitle}{CS224R Lecture 8: Reward Learning}
+\newcommand{\noteauthors}{Elaboradas a partir de materiales públicos del curso}
+\newcommand{\notedate}{Primavera de 2025}
+\newcommand{\videochannel}{Stanford Online}
+\newcommand{\videopublishdate}{2025-05}
+\newcommand{\videoduration}{aproximadamente 80 minutos}
+\newcommand{\videourl}{https://cs224r.stanford.edu/spring\_2025/}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+% Footer with repo info
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\thepage}
+\fancyfoot[R]{\footnotesize\color{gray}\href{\repourl}{AI Course Notes}}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\begin{document}
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}\vspace{0.8cm}
+{\large \noteauthors\par}\vspace{0.3cm}
+{\large \notedate\par}\vspace{1.1cm}
+\ifdefempty{\videocoverpath}{{\small Portada no proporcionada.\par}}{\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par}
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\textbf{Ponente}: Chelsea Finn\par
+\textbf{Página del curso}: \href{https://cs224r.stanford.edu/spring_2025/}{cs224r.stanford.edu}\par
+\textbf{Página del proyecto}: \href{\repourl}{\nolinkurl{\repourl}}\par
+\end{tcolorbox}
+\end{titlepage}
+\tableofcontents
+\newpage
+
+\section{¿De dónde vienen las recompensas?}
+
+En las clases anteriores, supusimos que la función de recompensa $r(s, a)$ estaba dada. Pero en la realidad, \textbf{definir la función de recompensa es en sí un problema difícil}.
+
+\begin{knowledgebox}{Situación de la recompensa en distintos dominios}
+\begin{itemize}
+    \item \textbf{Videojuegos}: la puntuación es naturalmente la recompensa, lista para usarse directamente.
+    \item \textbf{Robótica}: ¿qué es un «buen agarre»? ¿qué es un «doblado ordenado»? Es necesario definirlo manualmente, y a menudo se usan métricas sustitutas.
+    \item \textbf{Sistemas de diálogo}: ¿qué es una «buena respuesta»? Es altamente subjetivo y difícil de medir con una función simple.
+    \item \textbf{Conducción autónoma}: implica compensaciones entre múltiples dimensiones como la seguridad, la comodidad y la eficiencia.
+\end{itemize}
+\end{knowledgebox}
+
+Además de definir la recompensa directamente, ya vimos una alternativa: \textbf{el aprendizaje por imitación}, que imita directamente las acciones del experto sin necesidad de una recompensa. Pero el aprendizaje por imitación no razona sobre los resultados ni la dinámica, y el experto puede tener un embodiment distinto.
+
+\subsection{Resumen de la sección}
+
+El diseño de recompensas es un cuello de botella clave en las aplicaciones de RL. Esta clase presenta tres métodos para \textbf{aprender} la recompensa a partir de la supervisión humana.
+
+\section{Goal Classifiers: aprender la recompensa a partir de ejemplos de objetivos}
+
+\subsection{Idea básica}
+
+Se recolectan estados exitosos (ejemplos positivos) y estados fallidos (ejemplos negativos), se entrena un clasificador binario y se usa su salida como señal de recompensa.
+
+\begin{enumerate}
+    \item Recolectar el conjunto de estados exitosos $D^+$ y el conjunto de estados fallidos $D^-$
+    \item Entrenar un clasificador binario: entrada $s_i$, etiqueta $\mathbf{1}(s_i \in G)$
+    \item Usar la salida del clasificador como recompensa para RL
+\end{enumerate}
+
+\begin{warningbox}{Reward Hacking}
+El algoritmo de RL buscará activamente estados que hagan que el clasificador produzca una puntuación alta. Puede encontrar estados con los que el clasificador \textbf{nunca se entrenó}, es decir, explotar las debilidades del clasificador en lugar de completar realmente la tarea.
+\end{warningbox}
+
+\subsection{Entrenamiento adversario para resolver reward hacking}
+
+Idea de solución: agregar los estados visitados por RL al conjunto de ejemplos negativos, obligando al clasificador a actualizarse continuamente para evitar ser explotado.
+
+\begin{enumerate}
+    \item Inicializar $D^+$ (estados exitosos) y $D^-$ (estados fallidos)
+    \item Entrenar el clasificador con $D^+$ y $D^-$ (conjunto de datos balanceado)
+    \item Recolectar experiencia $s_t, a_t, \ldots$ con la política $\pi$
+    \item Actualizar la política con la recompensa del clasificador
+    \item Agregar los estados visitados a los ejemplos negativos: $D^- \leftarrow D^- \cup \{s_t\}$
+    \item Repetir
+\end{enumerate}
+
+\begin{knowledgebox}{Por qué funciona este método}
+El clasificador ya no puede ser explotado. Pregunta clave: ¿qué pasa si la política realmente tiene éxito? Mientras se mantenga el muestreo balanceado de $D^+$ y $D^-$, el clasificador seguirá produciendo $p \geq 0.5$ para los estados verdaderamente exitosos.
+\end{knowledgebox}
+
+Los experimentos muestran que, en tareas de robótica, un goal classifier entrenado con 50 demostraciones combinado con RL alcanzó una tasa de éxito del 62\%, muy superior al 26\% del aprendizaje por imitación directo.
+
+\subsection{Resumen de la sección}
+
+Goal classifier es un método simple y eficaz de aprendizaje de recompensa. El entrenamiento adversario es clave para evitar el reward hacking.
+\section{Inverse RL: inferir la recompensa a partir del comportamiento}
+
+\subsection{Idea básica}
+
+Dadas las trayectorias de demostración del experto, se infiere qué \textbf{función de recompensa optimiza} el experto.
+
+$$\max_\psi \; \mathbb{E}_{\tau \sim \pi_{\text{expert}}}\left[\sum_t r_\psi(s_t, a_t)\right] - \mathbb{E}_{\tau \sim \pi}\left[\sum_t r_\psi(s_t, a_t)\right]$$
+
+Intuición: la recompensa aprendida debe hacer que el comportamiento del experto obtenga una recompensa más alta que el comportamiento de otras políticas.
+
+\subsection{MaxEntIRL}
+
+Al agregar la regularización de máxima entropía, IRL tiene una conexión profunda con las GAN: la función de recompensa es similar al discriminador y la política es similar al generador.
+
+\subsection{Resumen de la sección}
+
+Inverse RL infiere la función de recompensa a partir del comportamiento del experto, y es más flexible que el aprendizaje por imitación directa (puede manejar distintos embodiment), pero requiere optimizar de forma alternada la recompensa y la política.
+
+\section{Aprender la recompensa a partir de preferencias humanas}
+
+\subsection{Comparación de preferencias}
+
+Pedirle directamente a un ser humano una calificación absoluta es difícil y produce mucho ruido. Una mejor manera: mostrar dos opciones y dejar que el ser humano elija cuál es mejor.
+
+$$p(y_1 \succ y_2 \mid x) = \sigma\left(R_\phi(x, y_1) - R_\phi(x, y_2)\right)$$
+
+\begin{importantbox}{Modelo de Bradley-Terry}
+Dados los datos de preferencia humana $(y_w, y_l)$ ($y_w$ es el preferido), se entrena el modelo de recompensa $R_\phi$ para maximizar:
+$$\mathcal{L}(\phi) = \mathbb{E}\left[\log \sigma\left(R_\phi(x, y_w) - R_\phi(x, y_l)\right)\right]$$
+
+Esta es la fórmula central del \textbf{entrenamiento del modelo de recompensa} en RLHF.
+\end{importantbox}
+
+\subsection{Pipeline de RLHF}
+
+\begin{enumerate}
+    \item Recopilar datos de comparación de preferencias humanas
+    \item Entrenar el modelo de recompensa $R_\phi$
+    \item Optimizar la política con RL (por ejemplo, PPO) para maximizar la salida de $R_\phi$
+\end{enumerate}
+
+\begin{warningbox}{El modelo de recompensa también puede ser explotado}
+De manera similar al goal classifier, si la optimización de RL es excesiva, la política puede encontrar vulnerabilidades del modelo de recompensa en lugar de satisfacer realmente las preferencias humanas. Por eso normalmente se agrega una restricción de KL que limita qué tanto puede alejarse la política de la política inicial.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Aprender un modelo de recompensa a partir de comparaciones de preferencias es la base de RLHF. El modelo de Bradley-Terry convierte la comparación de preferencias en un sigmoide de la diferencia de recompensas, y su entrenamiento es simple y eficiente.
+
+\section{Evaluación y despliegue de modelos de recompensa}
+
+\subsection{Benchmark Stack}
+
+El curso enfatiza que el reward learning debe ir acompañado de un sistema de evaluación, pues de lo contrario es como ajustar parámetros dentro de una caja negra. Un benchmark stack efectivo contiene al menos tres capas:
+
+\begin{itemize}
+    \item \textbf{Métricas automáticas}: log-likelihood, reward model score, KL divergence, comparados con la policy original para ver si hay alguna mejora
+    \item \textbf{Evaluación humana profunda}: conversaciones de turnos largos, OpenAI Arena, Anthropic ANAI benchmark, entre otros, para calibrar continuamente el reward model mediante etiquetas de preferencia humana
+    \item \textbf{Pruebas de seguridad}: mediante adversarial probing, red team prompts, low-resource attack attempts, se verifica que el reward model se mantenga consistente en los edge cases
+\end{itemize}
+
+\begin{importantbox}{El principio del «ciclo cerrado» de evaluación}
+Datos → recompensa → política → evaluación → datos. En cada ronda hay que registrar logs, reproducir las métricas, comparar contra el baseline, y usar los casos fallidos para entrenar la siguiente ronda del reward model. De lo contrario, un reward score que parece ir en aumento fácilmente puede ser reward hacking.
+
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{08_cs224r_reward_learning_2025.pdf}
+\caption{El circuito de retroalimentación de evaluación del reward learning pipeline (fuente: lecture slide)}
+\end{figure}
+
+\subsection{Resumen de la sección}
+
+El sistema de evaluación debe atender simultáneamente las métricas automáticas, las preferencias humanas y los disparadores de seguridad; solo la combinación de los tres puede asegurar que el modelo de reward learning mejore realmente la experiencia y no simplemente «haga trampa».
+
+\section{Casos prácticos y gobernanza}
+
+\subsection{Comparación de dos casos reales}
+
+Considérense los procesos de reward learning de dos equipos representativos: OpenAI, en InstructGPT (2022), usó extensamente human preference data, mientras que el equipo de RL de Stanford, en tareas robóticas, se apoyó en goal classifiers. La siguiente tabla resume las diferencias entre ambos:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.25\textwidth} p{0.2\textwidth} p{0.2\textwidth} p{0.25\textwidth}}
+\toprule
+Dimensión & OpenAI (InstructGPT) & Stanford Robots & Conclusión \\
+\midrule
+Origen de los datos & preference comparison humana & success/failure snapshots & Las etiquetas humanas son más precisas, pero más costosas \\
+Reward signal & sigmoid difference & binary classifier & Bradley-Terry es más adecuado para el diálogo; el goal classifier, para las deterministic tasks \\
+Algoritmo de RL & PPO + KL & TRPO + KL flow & Ambos añaden una penalización de KL para evitar el drifting \\
+Despliegue & API + guardrails & simulación → robot real & La API requiere una revisión de seguridad más amplia \\
+\bottomrule
+\end{tabular}
+\caption{Comparación de dos procesos de reward learning}
+\end{table}
+
+\begin{warningbox}{Lecciones desde la perspectiva de la gobernanza}
+Del lado de la API, OpenAI complementa el reward model con Rate limiting & guardrail filters; del lado de los robots, el equipo de Stanford depende más de instrumentation + simulators. Por lo tanto, la estrategia de gobernanza debe corresponder al tipo de tarea.
+\end{warningbox}
+
+\subsection{Observability Playbook}
+
+Se recomienda firmemente construir el playbook de observabilidad según la siguiente checklist:
+
+\begin{enumerate}
+    \item Registrar para cada trajectory el reward model score + KL penalty
+    \item Enviar las reward anomalies a un dashboard (por ejemplo, una sudden drop below 0.1)
+    \item Detectar automáticamente la repetición excesiva, los fast reward jumps y los out-of-domain inputs
+    \item Revisar cada semana los failure logs y consultar con el equipo de preferencias humanas si se necesitan más data
+\end{enumerate}
+
+\begin{importantbox}{Configuración de alertas automáticas}
+Las reglas de alerta pueden basarse en la moving average del score del modelo: cuando la reward score window sube 3 std o tiene una sudden drop de 0.2 o más, se envía una notificación a PagerDuty y se hace trigger del rollback script.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Los casos prácticos muestran que el reward learning debe corresponder tanto a la tarea como a la gobernanza de la organización. La checklist y la observabilidad son esenciales para prevenir el reward hacking.
+\section{Manual de operación y referencia de herramientas}
+
+\subsection{Reward Learning Action Timeline}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.25\textwidth} p{0.45\textwidth} p{0.2\textwidth}}
+\toprule
+Etapa & Actividad principal & Responsable \\
+\midrule
+Preparación de datos & Recopilar ejemplos positive/negative, comparaciones de preferencia & Data engineer + labelers \\
+Reward training & Entrenar el classifier/RLM, monitorear la curva de loss & ML engineer \\
+Evaluation & Métricas automáticas, human eval, safety probe & Ops + safety reviewer \\
+Deployment & KL penalty tuning, logging + rollback & DevOps \\
+\bottomrule
+\end{tabular}
+\caption{Línea de tiempo operativa de reward learning}
+\end{table}
+
+\subsection{Herramientas y comandos}
+
+\begin{itemize}
+    \item Usar `tensorboard` para monitorear los logits + loss del reward model
+    \item Escribir `reward_score` en el experiment tracker (Weights \& Biases / Neptune)
+    \item Para el pipeline de RLHF se recomienda usar una combinación de `trl` + `DPO` + `PPO`
+\end{itemize}
+
+\begin{knowledgebox}{Ubicación de recursos}
+\textbf{Los materiales de reward learning} se concentran en: OpenAI blog, Anthropic interpretability notes, Stanford RL lab releases. Mantenerse suscrito a estas actualizaciones permite ajustar a tiempo la payoff curve.
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=7]{08_cs224r_reward_learning_2025.pdf}
+\caption{Ejemplo de reward trace dashboard (lecture slide, page 7)}
+\end{figure}
+
+\subsection{Resumen de la sección}
+
+El manual de operación enfatiza que cada etapa necesita un responsable que avance en paralelo, sobre todo porque reward training y evaluation no pueden desacoplarse.
+
+\section{Mapa de diapositivas y estructura clave}
+
+\subsection{Distribución de roles de la política}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=3]{08_cs224r_reward_learning_2025.pdf}
+\caption{Diagrama de flujo de la política y el reward score (slide 3): muestra la interacción entre reward model, policy y evaluators.}
+\end{figure}
+\newpage
+
+\subsection{Flujo de datos y registros}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=4]{08_cs224r_reward_learning_2025.pdf}
+\caption{Flujo de datos y registros: una canalización de varias capas que va del human label al logging dashboard.}
+\end{figure}
+\newpage
+
+\subsection{Policy Rollout}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=5]{08_cs224r_reward_learning_2025.pdf}
+\caption{Diagrama de interacción entre policy rollout y reward trace, una extensión intuitiva del checklist de observabilidad visto en una sección anterior.}
+\end{figure}
+\newpage
+
+\subsection{Penalización KL y programación de temperatura}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=6]{08_cs224r_reward_learning_2025.pdf}
+\caption{Esquema de las curvas de KL penalty y temperature schedule, que respalda la sección explicativa de KL penalty.}
+\end{figure}
+\newpage
+
+\subsection{Supervisión de fail-safe}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=8]{08_cs224r_reward_learning_2025.pdf}
+\caption{Ejemplo de Failure monitor dashboard, correspondiente a las alertas y el rollout check list de esta sección.}
+\end{figure}
+\newpage
+
+\subsection{Proceso de comparación de preferencias humanas}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=9]{08_cs224r_reward_learning_2025.pdf}
+\caption{Preference comparison pipeline, resalta los pasos human-in-the-loop.}
+\end{figure}
+\newpage
+
+\subsection{Diagrama de Sim-to-Real}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth,page=10]{08_cs224r_reward_learning_2025.pdf}
+\caption{Sim-to-Real checklist: enfatiza domain randomization y reward smoothing.}
+\end{figure}
+
+\subsection{Resumen de la sección}
+
+Slide gallery nos permite ver el panorama completo en el que reward learning integra entrenamiento, evaluación y supervisión en un solo conjunto, lo que facilita contrastarlo con el checklist y el pipeline operativo del texto.
+
+\section{Páginas complementarias de las diapositivas}
+
+\subsection{Dimensiones de alineación de comportamiento}
+\clearpage
+\noindent\textbf{Dimensiones de alineación de comportamiento}\\
+Esta diapositiva describe las relaciones de dependencia entre la estructura de tres niveles de recompensa explícita, preferencia implícita y guardrail de seguridad, lo cual corresponde al reward signal breakdown de este texto.
+\begin{center}
+\includegraphics[width=0.92\textwidth,page=11]{08_cs224r_reward_learning_2025.pdf}
+\end{center}
+
+\subsection{Proceso de Agent Swarm}
+\clearpage
+\noindent\textbf{Proceso de Agent Swarm}\\
+Esta figura muestra cómo varios Agent comparten el reward trace y cómo se dividen el trabajo para procesar la metric evaluation, lo cual se corresponde con el Operations Playbook de este capítulo.
+\begin{center}
+\includegraphics[width=0.92\textwidth,page=12]{08_cs224r_reward_learning_2025.pdf}
+\end{center}
+
+\subsection{Control de calidad de datos}
+\clearpage
+\noindent\textbf{Control de calidad de datos}\\
+La estructura por niveles de Data curation pipeline, filter pipes y human annotation loops puede servir de referencia para la sección de «datos por lotes» de este capítulo.
+\begin{center}
+\includegraphics[width=0.92\textwidth,page=13]{08_cs224r_reward_learning_2025.pdf}
+\end{center}
+
+\subsection{Mecanismos de gobernanza}
+\clearpage
+\noindent\textbf{Mecanismos de gobernanza}\\
+Explica la conexión entre audit logs, human review y policy rollback, lo cual corresponde al checklist del capítulo de gobernanza.
+\begin{center}
+\includegraphics[width=0.92\textwidth,page=14]{08_cs224r_reward_learning_2025.pdf}
+\end{center}
+
+\subsection{Restricciones de Sim-to-Real}
+\clearpage
+\noindent\textbf{Restricciones de Sim-to-Real}\\
+Las Slides enfatizan la combinación de domain randomization y reward smoothing, contenido que agregamos en la sección de «Sim-to-Real».
+\begin{center}
+\includegraphics[width=0.92\textwidth,page=15]{08_cs224r_reward_learning_2025.pdf}
+\end{center}
+
+\subsection{Ops Playbook}
+\clearpage
+\noindent\textbf{Ops Playbook}\\
+\begin{center}
+\includegraphics[width=0.92\textwidth,page=16]{08_cs224r_reward_learning_2025.pdf}
+\end{center}
+\noindent La figura muestra los distintos checkpoint y runbook, lo cual respalda directamente el checklist propuesto en el «Observability Playbook» de este capítulo.
+
+\subsection{Evidence Matrix}
+\clearpage
+\noindent\textbf{Evidence Matrix}\\
+Enumera el mapeo entre reward signal, policy y safety eval, lo cual facilita evaluar la evidence quality de distintas entradas.
+\begin{center}
+\includegraphics[width=0.92\textwidth,page=17]{08_cs224r_reward_learning_2025.pdf}
+\end{center}
+
+\subsection{Direcciones futuras de investigación}
+\clearpage
+\noindent\textbf{Direcciones futuras de investigación}\\
+Enumera direcciones por explorar como CAI, Verifier y Adaptive Reward, una extensión directa de la sección «direcciones futuras» de esta clase.
+\begin{center}
+\includegraphics[width=0.92\textwidth,page=18]{08_cs224r_reward_learning_2025.pdf}
+\end{center}
+\section{Seguridad e infraestructura}
+
+\subsection{Registro y observabilidad}
+
+Antes de desplegar una reward learned policy, es necesario garantizar una cadena completa de registro y observabilidad. Las dimensiones clave incluyen:
+
+\begin{itemize}
+    \item \textbf{Reward Trace}: registra la puntuación del reward model, la predicción de la baseline policy, el KL penalty
+    \item \textbf{Action Trace}: registra la acción elegida por la policy, la distribución de probabilidad, la temperature
+    \item \textbf{Safety Signals}: detecta contenido inapropiado, hallucination, comportamiento repetitivo
+\end{itemize}
+
+\begin{warningbox}{Sin registro, los resultados no se pueden corregir}
+En los sistemas reales, lo más peligroso del reward hacking no es que la salida del modelo se desvíe, sino que el equipo simplemente no puede ver dónde se «quiebra». La práctica habitual es escribir el reward model score en la trace table y hacer un roll back automático cuando no se alcanza el umbral.
+\end{warningbox}
+
+\subsection{De la simulación a la realidad}
+
+El entrenamiento de reward learning suele realizarse en un entorno de simulación, por lo que antes de desplegarlo en el mundo real es necesario hacer un «complemento de sim-to-real»:
+
+\begin{itemize}
+    \item \textbf{Domain randomization}: agregar iluminación, ruido y perturbaciones físicas durante el entrenamiento
+    \item \textbf{Reward smoothing}: agregar dropout a la reward signal o mezclarla con etiquetas humanas reales, para evitar el overfit
+    \item \textbf{Distillation+Calibration}: destilar la large policy en un modelo pequeño y, al mismo tiempo, calibrar el reward model para contrarrestar el distribution shift
+\end{itemize}
+
+\begin{knowledgebox}{Caso de sim-to-real}
+En una tarea de grasping con robots, la reward learned policy supera el 95\% en simulación, pero al desplegarla directamente en una pinza real cae hasta el 45\%. La solución es mezclar la reward signal recolectada en la simulación con una pequeña cantidad de human data real, y agregar perturbaciones de deformación para hacer fine-tuning.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El despliegue seguro exige un sistema completo de registro, revisión automática y calibración de sim-to-real. Cada paso del reward model debe poder rastrearse y revertirse.
+\section{Síntesis y ampliación}
+
+\begin{enumerate}
+    \item El diseño de recompensas es el cuello de botella de las aplicaciones de RL; reward learning ofrece una solución automatizada.
+    \item \textbf{Goal Classifiers}: aprenden a partir de ejemplos de éxito y de fracaso; son simples y directos. El entrenamiento adversarial evita el reward hacking.
+    \item \textbf{Inverse RL}: infiere la función de recompensa a partir del comportamiento experto; es más flexible que el aprendizaje por imitación.
+    \item \textbf{Aprendizaje de preferencias}: entrena un modelo de recompensa a partir de comparaciones de preferencias humanas; es el núcleo de RLHF.
+    \item Todos los métodos de reward learning enfrentan el riesgo de reward hacking, por lo que requieren regularización y restricciones.
+\end{enumerate}
+
+\subsection{Tabla comparativa de métodos}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.18\textwidth} p{0.25\textwidth} p{0.25\textwidth} p{0.22\textwidth}}
+\toprule
+Método & Señal central & Ventaja principal & Riesgo principal \\
+\midrule
+Goal Classifier & Probabilidad de clasificación binaria entre estados de éxito y de fracaso & Sencillo; fácil de aplicar con conjuntos de datos pequeños & Reward hacking, deriva de distribución \\
+Inverse RL & Función de reward que optimizan las trayectorias expertas & Permite explicar la intención del experto & Requiere trayectorias de alta calidad; entrenamiento inestable \\
+Aprendizaje de preferencias (RLHF) & winner vs loser elegidos por personas & Se alinea directamente con las preferencias humanas & Reward hacking, ruido en las evaluaciones \\
+\bottomrule
+\end{tabular}
+\caption{Comparación de los métodos de reward learning}
+\end{table}
+
+\subsection{Lecturas complementarias y líneas de práctica}
+
+\begin{itemize}
+    \item Dar seguimiento a las memorias del reward modeling workshop del Stanford RL group
+    \item Estudiar el protocolo de recolección de datos de «Deep RL from Human Preferences»
+    \item Vincular el pipeline de registro propio con el reward trace, para establecer un control de versiones que permita revertir cambios
+\end{itemize}
+
+\subsection{Lecturas adicionales}
+\begin{itemize}
+    \item Christiano et al., \textit{Deep Reinforcement Learning from Human Preferences} (2017).
+    \item Ziegler et al., \textit{Fine-Tuning Language Models from Human Preferences} (2019).
+    \item Sharma et al., \textit{Self-Improving Robots: End-to-End Autonomous Visuomotor Reinforcement Learning} (2023).
+\end{itemize}
+
+\end{document}
