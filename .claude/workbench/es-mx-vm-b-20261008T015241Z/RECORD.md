@@ -45,9 +45,67 @@ ya muestra la historia de la rama (Nestor Monroy, noreply de GitHub).
 
 No se tocaron `translation_memory.jsonl`, `batches.tsv` ni `.last-bank`.
 
+## Verificación por digest desde ES-B (2026-10-08T07:48Z)
+
+HEAD anónimo contra `registry-1.docker.io`, con los digests completos que imprimió
+`local-proof.sh` en VM A (TASK-THYROX-1040):
+
+| Repositorio | Objeto | Digest | HTTP |
+|---|---|---|---|
+| `ollama/ollama` | manifiesto | `sha256:2a6e883b917fc543389599dae79918f5cac9e1438890506982f44aa4f5625d01` | 200 |
+| `th3rox/kaupamex-ai-model-artifacts` | blob GGUF del 9B | `sha256:03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8` | 200 |
+
+Las dos piezas que la unidad del modelo necesita son alcanzables desde esta VM; lo que
+falta es la autoridad que las trae (`bin/local-models-ensure`), no el registro.
+
+## Reintento del acceso a thyrox (2026-10-08T07:48Z)
+
+Tras pedirlo la persona («continúa»), `add_repo` NestorMonroy/thyrox volvió a ser
+rechazado por el clasificador de permisos. Sigue `BLOCKED sin acceso a thyrox`.
+
 ## Ciega a
 
-- No se verificaron por HEAD los digests de Docker Hub desde esta VM: los digests completos
-  y `probes/manifest-head.sh` viven en thyrox.
+- Sin la imagen task-runner ni los espejos `cache-*`: sus digests completos viven en thyrox.
 - No hay revisión periódica programada: sin thyrox, levantar el carril cada 20 min no
   tiene qué levantar.
+
+## Auditoría y entrega (2026-10-08T17:50Z, orden de ES-A)
+
+`VM_ES-B_LOCAL_WORKER = NOT_PROVEN sin acceso a thyrox`: medido, no supuesto. En esta VM no
+existe `/home/user/thyrox`, nunca corrió llama-server ni Ollama, y ningún modelo, ni local
+ni remoto, escribió un solo fragmento. Los commits de ES-B son `93bfc7f8` y `1b65eb85`
+(más el de esta entrega); ninguno toca un `*.es-mx.tex`.
+
+### Quién escribió cada cosa
+
+| Ruta | Escritor | Evidencia |
+|---|---|---|
+| `.claude/workbench/translation/articles/` (25 notas, 258 fragmentos) | ninguno: `prepare` determinista | 0 `*.es.tex`, sin `translate/`, sin `<n>.json` |
+| `.claude/workbench/translation/talks__berkeley-llm-agents__f25/` (12 notas, 213 fragmentos) | ninguno: `prepare` determinista | ídem |
+| `.claude/workbench/translation/cs231n/` (18 notas, 171 fragmentos) | ninguno: `prepare` determinista | ídem |
+| `.claude/workbench/es-mx-vm-b-20261008T015241Z/RECORD.md` | este banco | — |
+
+Lote 27 cs25-v6: ES-B **no lo tocó**. Ya estaba en la rama desde `657e3396` (2026-10-07,
+anterior a ES-B). Para que ES-A lo sepa al consolidar:
+
+- los 9 `chunks/*/000.es.tex` contienen sólo `\makecscover` (14 bytes), copia
+  determinista de `prepare`, no traducción;
+- `translate/20261007T073658/1.json` y `2.json` dicen `model: qwen35-9b-es-mx`,
+  `runtime: llama-direct`: corrida local de ES-A, no de ES-B.
+
+Escrito por un modelo no local: **nada**.
+
+### Lo que entrego
+
+- `.claude/workbench/translation/articles/` (`notes.tsv`, `units.tsv`, `prompt.md`, `chunks/*/*.zh.tex`, `head.tex`)
+- `.claude/workbench/translation/talks__berkeley-llm-agents__f25/` (ídem)
+- `.claude/workbench/translation/cs231n/` (ídem)
+- `.claude/workbench/es-mx-vm-b-20261008T015241Z/RECORD.md`
+
+### Lo que no entrego y por qué
+
+- Ningún `*.es.tex` traducido ni `*.es-mx.tex` de los lotes 27–30: no hubo modelo local
+  (sin thyrox no hay `bin/local-models-ensure` ni carril llama-direct).
+- `VM_ES-B_BOOTSTRAP_PRISTINE` ni calificación en `.thyrox/models/qualifications.json`:
+  dependen de thyrox.
+- `translation_memory.jsonl`, `batches.tsv`, `.last-bank`: los integra ES-A; ES-B no los modificó.
