@@ -116,3 +116,28 @@ Opus por el pool sólo el 34. Lotes 27–30 → ES-B, 31–33 → ES-C.
 Las dos parten de `4822fd5` (ai-course-notes) y `ddc729130` (thyrox). La plantilla
 común es `prompts/worker-template.md` (`__VM__`, `__vm__`, `__LOTES__`); una VM nueva se
 crea con ella, su propia rama `feature/es-mx-vm-<x>-local-worker` y lotes disjuntos.
+
+## Prueba local de ES-A (2026-10-08T06:4xZ, `outputs/proof-es-a-kaist-cs492d.tsv`)
+
+`tools/scripts/llama_direct_proof.sh <lote>` extiende la cadena de
+`vm-utilization-audit-*/probes/local-proof.sh` (thyrox) al carril llama-direct, que no pasa
+por el coordinador: SHA del blob GGUF montado = catálogo → contenedor del carril con la
+imagen de Ollama por digest → modelo residente en `/api/ps` → `model` de cada resultado
+del runner = el pedido, runtime `llama-direct` → ningún modelo remoto. Resultado en el
+lote 26: **`LOCAL_WORKER PROVEN`**.
+
+Ciega a: de las 142 respuestas del último `translate/`, la mayoría son reutilizadas de
+ejecuciones anteriores del mismo carril (`reused_from`); la prueba confirma su
+procedencia llama-direct, no que se hayan generado en esta ejecución.
+
+Lo que destapó al escribirla (H-THYROX-599): tras el reinicio de las 06:22 había siete
+contenedores de Ollama de arranques anteriores; `reconcile-orphans` retiró cuatro y
+también el servidor vivo, y dejó dos huérfanos con imagen por etiqueta montando el mismo
+blob. La primera versión de la prueba eligió uno de ellos y falló cerrada.
+
+## ES-B y ES-C (06:2xZ)
+
+Integradas en `feature/es-mx-translation` (`9fd582a5`, `632a26a6`): prepararon sus lotes
+sin modelo. Siguen `BLOCKED`: sus sesiones no pueden adjuntar thyrox (`add_repo` y
+`git clone` rechazados por el clasificador de permisos). Requiere aprobación de la persona
+en cada sesión o recrearlas con thyrox como segunda fuente.
