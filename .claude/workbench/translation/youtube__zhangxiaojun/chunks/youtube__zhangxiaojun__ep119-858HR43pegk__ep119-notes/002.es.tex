@@ -1,0 +1,45 @@
+\section{Mapa de problemas de Attention: CoT largo, KV Cache y Decoding}
+
+La sección anterior explicó por qué hay que volver a investigar Attention; esta sección empieza por desglosar el problema. La ventaja de Full Attention es su gran capacidad expresiva, su entrenamiento estable y la amplia experiencia acumulada con ella; su desventaja es que, con secuencias largas, tanto el cómputo como la memoria de GPU resultan costosos. El CoT largo y la Agentic AI generan cadenas de razonamiento de decenas de miles de tokens; el decoding genera token por token, el KV cache crece cada vez más y el costo de inferencia se convierte en un cuello de botella real.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.96\textwidth]{attention-problem-map.png}
+\caption{Mapa de problemas de Attention: la inferencia con contexto largo lleva el KV cache, el decoding y la atención global hasta el cuello de botella. Diagrama conceptual propio, elaborado a partir de la conversación de 00:12:20--00:14:39.}
+\end{figure}
+
+\begin{knowledgebox}{Lectura de la figura: un contexto largo no solo aumenta la longitud de la entrada}
+El CoT largo hace que el modelo produzca tokens de forma continua durante la fase de generación. En cada paso, Full Attention debe interactuar con el contexto histórico, el KV cache debe guardar las key/value históricas y el costo del decoding aumenta a medida que el contexto se alarga. El objetivo de las nuevas variantes de Attention es reducir estos costos sin una pérdida notable de desempeño.
+\end{knowledgebox}
+
+\subsection{Complejidad aproximada de Full Attention}
+
+En la Softmax Attention autorregresiva estándar, dada una longitud de secuencia \(L\), el modelo construye \(QK^\top\) para obtener una matriz de puntuaciones de atención de \(L \times L\), y después aplica la causal mask, el softmax y la multiplicación por \(V\). Por ello, el cálculo de atención en la fase de entrenamiento o de prefill suele tener complejidad cuadrática:
+\[
+\text{cost}_{\text{full}} = O(L^2).
+\]
+Aquí, \(L\) es la longitud de la secuencia; \(Q,K,V\) son, respectivamente, las representaciones query, key y value; \(O(L^2)\) indica que el costo crece con el cuadrado de la longitud de la secuencia.
+
+\begin{warningbox}{La complejidad no es el único indicador}
+Full Attention tiene una complejidad teórica alta, pero está compuesta por grandes multiplicaciones de matrices, por lo que se adapta muy bien al hardware. Muchos algoritmos lineales o dispersos tienen menor complejidad teórica, pero si su paralelismo es deficiente, sus kernels son difíciles de escribir o su acceso a memoria es poco eficiente, su velocidad real no necesariamente es mejor.
+\end{warningbox}
+
+\subsection{Por qué importa el KV Cache}
+
+El KV cache es la caché que guarda las key/value históricas durante la inferencia. Permite que el modelo no tenga que recalcular todas las representaciones históricas al generar un nuevo token, pero a cambio la memoria de GPU crece con el número de capas, la longitud de la secuencia, el batch size y la dimensión oculta. Una ventaja de la ruta de atención lineal híbrida es que muchas capas pueden funcionar como el estado recurrente de una RNN, lo que reduce el KV cache; la ruta de atención dispersa, en cambio, reduce el cómputo de cada paso sobre todo al atender solo a los tokens Top-K o a los de una ventana.
+
+\begin{knowledgebox}{Cuentas aproximadas del KV cache}
+Si un modelo tiene \(N\) capas, cada capa guarda key y value, la longitud de la secuencia es \(L\), el batch size es \(B\) y la dimensión de la representación KV de cada token es \(d\), entonces el orden de magnitud del KV cache puede escribirse como:
+\[
+\text{KV cache} \propto 2 \times N \times B \times L \times d.
+\]
+Aquí, el 2 inicial proviene de las dos cachés, una para key y otra para value. Esta expresión muestra que, en cuanto crece la longitud de contexto \(L\) o el batch size \(B\), la presión sobre la memoria de GPU aumenta linealmente; si todas las capas conservan el KV cache de Full Attention, la inferencia con contexto largo resulta muy costosa.
+\end{knowledgebox}
+
+\begin{importantbox}{Por qué ahorrar KV cache aumenta el rendimiento de procesamiento}
+Cuando el KV cache es más pequeño, en la misma memoria de GPU cabe un batch size mayor, y un batch size mayor a su vez aumenta el rendimiento de procesamiento del servidor. Por ello, la ruta hybrid linear de Kimi y similares no solo reduce el uso de memoria de GPU, sino que también influye en la economía del servicio de inferencia.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+El cuello de botella de Attention no es un problema exclusivo de FLOPs, sino el efecto conjunto del cómputo, la memoria de GPU, el batch size, la latencia del decoding y la eficiencia del hardware con secuencias largas. Solo al entender estas restricciones se comprende por qué Kimi, DeepSeek y MiniMax eligieron rutas distintas.
