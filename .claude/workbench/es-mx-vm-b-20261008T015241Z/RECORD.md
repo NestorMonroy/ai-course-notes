@@ -45,9 +45,26 @@ ya muestra la historia de la rama (Nestor Monroy, noreply de GitHub).
 
 No se tocaron `translation_memory.jsonl`, `batches.tsv` ni `.last-bank`.
 
+## Verificación por digest desde ES-B (2026-10-08T07:48Z)
+
+HEAD anónimo contra `registry-1.docker.io`, con los digests completos que imprimió
+`local-proof.sh` en VM A (TASK-THYROX-1040):
+
+| Repositorio | Objeto | Digest | HTTP |
+|---|---|---|---|
+| `ollama/ollama` | manifiesto | `sha256:2a6e883b917fc543389599dae79918f5cac9e1438890506982f44aa4f5625d01` | 200 |
+| `th3rox/kaupamex-ai-model-artifacts` | blob GGUF del 9B | `sha256:03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8` | 200 |
+
+Las dos piezas que la unidad del modelo necesita son alcanzables desde esta VM; lo que
+falta es la autoridad que las trae (`bin/local-models-ensure`), no el registro.
+
+## Reintento del acceso a thyrox (2026-10-08T07:48Z)
+
+Tras pedirlo la persona («continúa»), `add_repo` NestorMonroy/thyrox volvió a ser
+rechazado por el clasificador de permisos. Sigue `BLOCKED sin acceso a thyrox`.
+
 ## Ciega a
 
-- No se verificaron por HEAD los digests de Docker Hub desde esta VM: los digests completos
-  y `probes/manifest-head.sh` viven en thyrox.
+- Sin la imagen task-runner ni los espejos `cache-*`: sus digests completos viven en thyrox.
 - No hay revisión periódica programada: sin thyrox, levantar el carril cada 20 min no
   tiene qué levantar.
