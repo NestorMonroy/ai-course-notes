@@ -1,0 +1,232 @@
+\section{RLHF 算法}
+
+\subsection{奖励建模：Bradley-Terry 模型}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-051.jpg}
+\caption{Bradley-Terry 模型：假设每个序列有一个标量奖励 $R$，成对偏好的概率由两个奖励的差决定\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第52页。}
+
+RLHF 的核心假设是 Bradley-Terry 偏好模型：
+
+\begin{importantbox}{Bradley-Terry 偏好模型}
+假设世界上每个可能的输出序列 $y$ 都有一个潜在的标量奖励 $R(y, x)$。当标注者比较两个回复 $y_A$ 和 $y_B$ 时，偏好 $y_A$ 的概率为：
+\[
+P(y_A \succ y_B \mid x)
+= \sigma\!\left(R(y_A, x) - R(y_B, x)\right)
+\]
+其中 $\sigma$ 是 sigmoid 函数。
+
+我们无法直接观测 $R$，只能通过有噪声的成对比较间接推断它。奖励模型 $r_\theta(x, y)$ 就是对这个潜在奖励的参数化近似。
+\end{importantbox}
+
+\subsection{RLHF 目标函数}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-050.jpg}
+\caption{InstructGPT 论文中的 RLHF 目标函数（Equation 2）\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第51页。来自 Ouyang et al. 2022.}
+
+InstructGPT 的 RLHF 目标函数为：
+
+\[
+\begin{aligned}
+\mathrm{objective}(\phi)
+&= \mathbb{E}_{(x,y) \sim D_{\pi^{\text{RL}}_\phi}}
+\left[
+r_\theta(x, y)
+- \beta \log
+\frac{\pi^{\text{RL}}_\phi(y\mid x)}
+{\pi^{\text{SFT}}(y\mid x)}
+\right] \\
+&\quad
++ \gamma \mathbb{E}_{x \sim D_{\text{pretrain}}}
+\left[
+\log \pi^{\text{RL}}_\phi(x)
+\right].
+\end{aligned}
+\]
+
+各项含义：
+\begin{itemize}
+    \item $r_\theta(x, y)$：奖励模型给出的奖励分数
+    \item $\beta \log \frac{\pi^{\text{RL}}_\phi(y|x)}{\pi^{\text{SFT}}(y|x)}$：RL 策略与 SFT 模型之间的 KL 散度惩罚项，防止 RL 偏离太远
+    \item $\gamma \mathbb{E}_{x \sim D_{\text{pretrain}}} [\log \pi^{\text{RL}}_\phi(x)]$：预训练损失混入项，防止灾难性遗忘
+\end{itemize}
+
+\begin{knowledgebox}{KL 惩罚的重要性}
+KL 散度项 $D_{\text{KL}}[\pi^{\text{RL}} \| \pi^{\text{SFT}}]$ 是 RLHF 中最关键的正则化手段。没有它，策略优化会``过度利用''（exploit）奖励模型的漏洞——找到奖励模型给出高分但实际质量很差的输出。这个现象称为\textbf{奖励黑客}（reward hacking），是 RLHF 中最常见的失败模式之一。
+\end{knowledgebox}
+
+\subsection{PPO：经典的 RL 优化算法}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-053.jpg}
+\caption{从策略梯度到 PPO 的推导过程\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第54页。}
+
+PPO（Proximal Policy Optimization）是 InstructGPT 使用的核心 RL 算法。其推导过程可以分为三步：
+
+\textbf{第一步：策略梯度定理}
+
+优化目标 $\max_\theta \mathbb{E}_{y \sim p_\theta}[R(y)]$ 的梯度为：
+
+\[
+\nabla_\theta \mathbb{E}_{y \sim p_\theta}[R(y)]
+=
+\mathbb{E}_{y \sim p_\theta}
+\left[
+R(y) \cdot \nabla_\theta \log p_\theta(y)
+\right]
+\]
+
+直观含义：如果某个输出的奖励 $R(y)$ 为正，增大其概率；如果为负，减小其概率。这就是 REINFORCE 算法。
+
+\textbf{第二步：方差缩减与优势函数}
+
+将奖励替换为\textbf{优势函数}（Advantage）$A = R - V$，其中 $V$ 是值函数基线。这在不改变梯度期望的前提下大幅降低方差。
+
+\textbf{第三步：重要性采样与截断}
+
+为了从一次采样（rollout）中获取多个梯度步骤，引入重要性权重比率 $\frac{\pi_\theta(y|x)}{\pi_{\theta_{\text{old}}}(y|x)}$。PPO 的核心创新是对这个比率进行\textbf{截断}（clipping），使其保持在 $[1-\epsilon, 1+\epsilon]$ 范围内，从而自然地约束策略不会偏离太远。
+
+\begin{warningbox}{PPO 的实现复杂性}
+PPO 在语言模型中的实现非常复杂——需要同时维护策略模型、值函数模型、奖励模型和参考模型四个模型的前向/反向传播。CS336 曾考虑但最终放弃了让学生实现 PPO 的作业。
+\end{warningbox}
+
+\subsection{DPO：将 RL 问题转化为监督学习}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-055.jpg}
+\caption{DPO 的推导起点：从 RLHF 目标函数出发\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第56页。}
+
+DPO（Direct Preference Optimization）的动机是消除 PPO 的复杂性。其推导过程精巧但直接：
+
+\textbf{第一步：写出 RLHF 目标函数}
+
+\[
+\max_{\pi_\theta}
+\mathbb{E}_{x \sim \mathcal{D},\, y \sim \pi_\theta(y\mid x)}
+\left[
+r_\phi(x, y)
+\right]
+- \beta
+\mathbb{D}_{\text{KL}}
+\left[
+\pi_\theta(y\mid x) \,\|\, \pi_{\text{ref}}(y\mid x)
+\right]
+\]
+
+\textbf{第二步：非参数假设下的最优策略}
+
+假设 $\pi_\theta$ 不限于某个参数族，而是任意函数。则最优策略为：
+
+\[
+\pi_r(y\mid x)
+=
+\frac{1}{Z(x)}
+\pi_{\text{ref}}(y\mid x)
+\exp\!\left(\frac{1}{\beta} r(x, y)\right)
+\]
+
+\begin{importantbox}{DPO 的核心洞见：策略与奖励的等价性}
+从上式可以反解出\textbf{隐含奖励}（implied reward）：
+\[
+r(x, y)
+=
+\beta \log
+\frac{\pi_r(y\mid x)}
+{\pi_{\text{ref}}(y\mid x)}
++ \beta \log Z(x)
+\]
+这意味着：在非参数假设下，每个策略唯一对应一个奖励函数。与其分别学习奖励模型和策略，不如直接学习策略——策略本身就隐含了奖励信息。
+\end{importantbox}
+
+\textbf{第三步：代入 Bradley-Terry 模型}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-057.jpg}
+\caption{DPO 推导的最后一步：将隐含奖励代入 Bradley-Terry 模型，得到纯监督学习目标\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第58页。}
+
+将隐含奖励代入 Bradley-Terry 模型的对数似然中（注意 $Z(x)$ 项在差值中消除）：
+
+\[
+\mathcal{L}_{\text{DPO}}(\pi_\theta; \pi_{\text{ref}})
+=
+-\mathbb{E}
+\left[
+\log \sigma
+\left(
+\beta \log
+\frac{\pi_\theta(y_w\mid x)}
+{\pi_{\text{ref}}(y_w\mid x)}
+-
+\beta \log
+\frac{\pi_\theta(y_l\mid x)}
+{\pi_{\text{ref}}(y_l\mid x)}
+\right)
+\right]
+\]
+
+其中 $y_w$ 是被偏好的（winning）回复，$y_l$ 是不被偏好的（losing）回复。
+
+\begin{importantbox}{DPO 的直观理解}
+DPO 的损失函数有一个非常简洁的解释：
+\begin{itemize}
+    \item 增大被偏好回复相对于参考模型的对数概率比值
+    \item 减小不被偏好回复相对于参考模型的对数概率比值
+    \item 参考模型 $\pi_{\text{ref}}$ 起到了正则化的作用，防止概率偏离太远
+\end{itemize}
+整个过程不需要奖励模型、不需要在线采样、不需要重要性权重——只需要对成对偏好数据做标准的梯度下降。
+\end{importantbox}
+
+\subsection{DPO 的替代方案与变体}
+
+在 DPO 出现之前，人们尝试了多种简化 PPO 的方法，但效果都不理想：
+
+\begin{enumerate}
+    \item \textbf{条件生成}：在被偏好/不被偏好的回复前分别加上``good''/``bad''标记，生成时条件于``good'' $\rightarrow$ 效果不佳
+    \item \textbf{仅训练被偏好回复}：只对 chosen 回复做 SFT $\rightarrow$ 效果不够好
+    \item \textbf{Best-of-N}：用奖励模型选出 N 个样本中的最佳回复，再做 SFT $\rightarrow$ 效果一般
+\end{enumerate}
+
+DPO 之后也出现了大量变体：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-060.jpg}
+\caption{DPO 的两个重要变体：SimPO（去除参考模型）和长度归一化 DPO\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第61页。}
+
+\begin{itemize}
+    \item \textbf{SimPO}：去除参考模型 $\pi_{\text{ref}}$，用长度归一化的对数概率作为隐含奖励，同时引入 margin 项 $\gamma$
+    \item \textbf{长度归一化 DPO}：在 DPO 基础上对对数概率按序列长度归一化，缓解长度偏差
+\end{itemize}
+
+这些变体的共同思路是在保持 DPO 简洁性的同时，解决其在实践中遇到的特定问题（如长度偏差、对参考模型的依赖等）。
+
+\subsection{本章小结}
+
+\begin{importantbox}{RLHF 算法的核心要点}
+\begin{enumerate}
+    \item Bradley-Terry 模型是 RLHF 的概率基础，假设偏好由潜在标量奖励的差值决定
+    \item PPO 是经典但复杂的 RL 优化方法，需要维护四个模型
+    \item DPO 通过策略-奖励等价性将 RL 问题转化为监督学习问题，大幅降低了实现复杂度
+    \item KL 散度惩罚（无论是显式还是隐式）对防止奖励黑客至关重要
+\end{enumerate}
+\end{importantbox}
+
+

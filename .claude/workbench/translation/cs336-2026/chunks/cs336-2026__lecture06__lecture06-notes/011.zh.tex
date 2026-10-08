@@ -1,0 +1,28 @@
+\section{更细的硬件解释：为什么这些细节会影响性能}
+
+\subsection{Warps、divergence 与 occupancy}
+
+Warp 是 GPU 执行的基本调度粒度。一个 warp 内的 32 个 threads 通常执行同一条指令。如果一半 threads 走 if 分支 A，另一半走分支 B，硬件往往需要串行执行 A 和 B，这叫 control divergence。
+
+Occupancy 则描述一个 SM 上有多少 warps 可以同时驻留。高 occupancy 能隐藏 memory latency，因为一个 warp 等 HBM 时，SM 可以切到另一个 ready warp。但 occupancy 太高不一定最好：如果每个 thread 使用更多 registers 来做更多 work，低 occupancy 也可能换来更高 arithmetic intensity。
+
+\begin{knowledgebox}{occupancy 计算直觉}
+如果每个 thread 用 160 个 registers，一个 block 有 128 threads，那么一个 block 需要 \(160\times128=20480\) registers。若一个 SM 有 65536 registers，最多只能同时放下 3 个这样的 blocks。register pressure、block size 和 max warps 共同决定 occupancy。
+\end{knowledgebox}
+
+\subsection{Bank conflicts 与 swizzling}
+
+Shared memory 被分成多个 banks。若同一 cycle 内多个 threads 访问同一个 bank 的不同地址，访问会被串行化，形成 bank conflict。矩阵乘法中，读取 A 的行和 B 的列很容易造成不同访问模式，因此高性能 kernel 常通过 swizzling 改变 shared memory layout，减少冲突。
+
+\begin{warningbox}{bank conflict 很隐蔽}
+代码语义完全正确，但性能可能因为 bank conflict 急剧下降。Profiler 或更底层的 Nsight 指标才能确认这类问题。只看 Python 层时间很难定位。
+\end{warningbox}
+
+\subsection{Memory coalescing 与 HBM transaction}
+
+HBM 访问通常以 cache line / transaction 为单位。若一个 warp 的 threads 访问连续地址，硬件可以合并成少量 transaction；若访问跨越很多不连续位置，就会浪费带宽。Coalescing 是 global memory 访问优化的第一原则。
+
+\begin{importantbox}{coalescing 的一句话判断}
+同一个 warp 的相邻 threads 最好访问相邻地址。若 thread 0、1、2、... 访问的是矩阵同一行的连续元素，通常更 coalesced；若访问同一列且 row stride 很大，往往更差。
+\end{importantbox}
+

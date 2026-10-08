@@ -1,0 +1,109 @@
+\section{Tensor 与 Memory：所有训练状态都在张量里}
+
+Tensor 是训练系统的基本载体。Data、parameters、gradients、optimizer state、activations 都是 tensor，只是生命周期不同。
+
+\begin{longtable}{p{0.20\textwidth}p{0.34\textwidth}p{0.36\textwidth}}
+\toprule
+\textbf{状态} & \textbf{什么时候存在} & \textbf{资源含义} \\
+\midrule
+Data & 每步 batch 输入 & 影响 batch size、sequence length、host-to-device 传输。 \\
+Parameters & 全程存在 & 模型权重，forward/backward/optimizer 都要访问。 \\
+Gradients & backward 后到 step 前 & 默认累积，需要及时清理或分片。 \\
+Optimizer state & 多个 step 间长期存在 & AdamW 的 \(m,v\) 等统计量，常是显存大头。 \\
+Activations & forward 后到 backward 用完 & 随 batch、sequence、layers 增长，可用 checkpointing 处理。 \\
+\bottomrule
+\end{longtable}
+
+Transformer 中常见 rank-4 tensor：
+
+\[
+x\in\mathbb{R}^{B\times S\times H\times D},
+\]
+
+其中 \(B\) 是 batch size，\(S\) 是 sequence length，\(H\) 是 number of heads，\(D\) 是 head dimension。
+
+\begin{knowledgebox}{shape ledger}
+Shape 不是注释，而是资源账本。\(B\) 增大会提升吞吐但增加 activation memory；\(S\) 增大会提高 attention 和 KV cache 成本；\(H,D\) 改变 attention/MLP 矩阵形状；\(L\) 影响参数、activation 和 checkpointing tradeoff。
+\end{knowledgebox}
+
+\subsection{数值格式：fp32、fp16、bf16、fp8、fp4}
+
+本节把抽象 tensor 账本落到具体 byte 数。Tensor memory 由元素个数和 dtype 决定，但数值格式同时影响动态范围、舍入误差、tensor-core 吞吐和是否需要额外 master weights；因此“改成低精度”既是容量优化，也是数值稳定性与硬件支持问题：
+
+\[
+\text{memory}(x)=\text{numel}(x)\times \text{element\_size}(x).
+\]
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{fp32.png}
+\caption{fp32 格式：1 bit sign、8 bits exponent、23 bits mantissa。}
+\figsource{CS336 Spring 2026 Lecture 2 官方可执行讲义，\texttt{tensors\_memory()}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：fp32 为什么稳}
+fp32 有较大的 exponent 和 mantissa，动态范围和精度都充足，所以传统科学计算和 optimizer state 常用它。缺点是每个值 4 bytes，显存和带宽成本高。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.72\textwidth]{fp16.png}
+\caption{fp16 把每个值压到 2 bytes，但 exponent 位数少，容易 underflow。}
+\figsource{CS336 Spring 2026 Lecture 2 官方可执行讲义，\texttt{tensors\_memory()}。}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.72\textwidth]{bf16.png}
+\caption{bf16 也是 2 bytes，但保留 fp32 的 8-bit exponent，因此动态范围更适合训练。}
+\figsource{CS336 Spring 2026 Lecture 2 官方可执行讲义，\texttt{tensors\_memory()}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：fp16 与 bf16 的差别}
+fp16 给 mantissa 更多位，数值更细，但动态范围窄；bf16 给 exponent 更多位，动态范围接近 fp32。深度学习训练更怕数值下溢/溢出，因此 bf16 常比 fp16 更稳。
+\end{knowledgebox}
+
+\begin{warningbox}{mixed precision 不是简单全改低精度}
+训练常用 bf16 存 parameters、activations、gradients，但 optimizer state 保留 fp32。这样省显存和带宽，同时让长期统计量保持稳定。
+\end{warningbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{fp8-formats.png}
+\caption{FP8 E4M3 与 E5M2 的 exponent/mantissa 分配不同，分别偏向精度或动态范围。}
+\figsource{CS336 Spring 2026 Lecture 2 官方可执行讲义，\texttt{tensors\_memory()}，图片来自 NVIDIA Transformer Engine 文档。}
+\end{figure}
+
+\begin{knowledgebox}{读图：为什么 FP8 有两个格式}
+E4M3 用 4 位 exponent 和 3 位 mantissa，精度相对好但范围小；E5M2 范围更大但精度更粗。FP8 能否有效使用，取决于硬件、scale 管理和库支持，不只是 dtype 名字。
+\end{knowledgebox}
+
+FP4/NVFP4 进一步把每个值压到 4 bits，通常需要 block-wise scale 扩展动态范围。它更像高度优化库中的系统能力，而不是普通 PyTorch 默认路线。
+
+\begin{knowledgebox}{课堂提示：Mixed precision 是按操作分配精度}
+老师先用一句“deep learning can be a lot sloppier”说明神经网络允许比传统科学计算更激进的低精度，但紧接着强调 fp16/bf16 仍可能不稳定。课程给出的实用账本是：parameters、activations、gradients 可优先用 bf16，长期累积的一阶/二阶 optimizer states 保持 fp32；AMP 只在安全的操作上自动降精度，例如 matmul，而不是对 \texttt{exp} 等数值敏感操作一刀切。Mixed precision 的核心不是“全都换成低位数”，而是逐类算子管理动态范围、精度和吞吐。
+\end{knowledgebox}
+
+\subsection{CPU 与 GPU memory}
+
+前面的 dtype 账本只计算了“占多少”，本节进一步区分“放在哪里”。CPU DRAM 与 GPU HBM 是不同地址空间，tensor 的 device 决定哪个执行器能直接访问；显式 copy、统一内存或异步传输都会改变端到端时间，所以显存够不等于数据移动免费。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{cpu-gpu.png}
+\caption{CPU 与 GPU 有不同 memory 空间，tensor 必须移动或直接创建在 GPU 上才能由 GPU kernel 使用。}
+\figsource{CS336 Spring 2026 Lecture 2 官方可执行讲义，\texttt{tensors\_on\_gpus()}。}
+\end{figure}
+
+\begin{knowledgebox}{讲义提醒：先确认 device，再解释性能}
+很多“GPU 很慢”其实是 tensor 仍在 CPU、循环里频繁 host-device copy，或 benchmark 没有同步。调试顺序应先打印 shape、dtype、device 与 contiguous/layout，再看 kernel；不要一开始就把问题归因于 CUDA 或硬件峰值。
+\end{knowledgebox}
+
+\begin{knowledgebox}{读图：CPU-GPU 图的系统含义}
+`.to(device)` 不是语法细节，而是数据移动。大模型训练中，CPU/GPU、GPU/GPU、HBM/SM 之间的每次移动都可能成为瓶颈。Lecture 2 从这里开始把 tensor 运算变成硬件数据流问题。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+Memory accounting 从 tensor、shape、dtype、device、生命周期开始。低精度能节省显存，但必须理解动态范围；GPU 能提供并行性，但前提是数据在正确位置，并且移动成本可控。
+

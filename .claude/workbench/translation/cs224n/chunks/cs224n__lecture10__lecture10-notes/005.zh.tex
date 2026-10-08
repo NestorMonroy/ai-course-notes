@@ -1,0 +1,171 @@
+\section{直接偏好优化（DPO）}
+
+\subsection{核心思想：用语言模型自身表达奖励}
+
+DPO（Direct Preference Optimization）的核心洞察是：\textbf{奖励模型可以用语言模型自身来表达}，从而完全绕过强化学习步骤。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-066.jpg}
+\caption{DPO 的核心思想：直接将偏好数据用于优化语言模型，绕过奖励模型和 RL\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第67页。}
+
+直觉上理解：一个好的语言模型应该把更高的概率分配给人类喜欢的回答。因此，模型的对数概率\textbf{本身}就可以作为一种隐式的奖励信号。
+
+\begin{importantbox}{DPO 的思路}
+\begin{enumerate}
+    \item RLHF 管线中，唯一的外部信息来源是\textbf{人类偏好标注}
+    \item 奖励模型只是偏好数据的一个中间表示
+    \item 如果能直接用偏好数据优化语言模型参数，就可以\textbf{同时省去}奖励模型训练和 RL 优化两个步骤
+    \item 最终问题变成一个简单的\textbf{二分类}问题
+\end{enumerate}
+\end{importantbox}
+
+\subsection{数学推导}
+
+\subsubsection{Step 1: KL 约束优化的闭式解}
+
+回忆 RLHF 的优化目标：
+
+$$\max_\theta \; \mathbb{E}_{y \sim p_\theta(\cdot|x)} \left[ r(x, y) - \beta \log \frac{p_\theta(y|x)}{p_{\text{ref}}(y|x)} \right]$$
+
+这个优化问题有\textbf{闭式解}（类似于 Boltzmann 分布）：
+
+$$p^*(y|x) = \frac{1}{Z(x)} \, p_{\text{ref}}(y|x) \cdot \exp\left(\frac{r(x, y)}{\beta}\right)$$
+
+其中 $Z(x) = \sum_y p_{\text{ref}}(y|x) \cdot \exp\left(\frac{r(x, y)}{\beta}\right)$ 是归一化常数（配分函数）。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-069.jpg}
+\caption{闭式解：最优策略是参考分布按奖励的指数进行加权\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第70页。}
+
+直觉：最优策略就是将参考模型的分布\textbf{按奖励的指数加权}——高奖励的补全获得更高概率，低奖励的获得更低概率。$\beta$ 控制这种重新加权的程度：$\beta$ 越小，越偏向高奖励；$\beta$ 越大，越接近参考分布。
+
+\subsubsection{Step 2: 用语言模型表达奖励}
+
+对闭式解取对数并移项，可以将奖励表达为语言模型参数的函数：
+
+$$r(x, y) = \beta \log \frac{p_\theta(y|x)}{p_{\text{ref}}(y|x)} + \beta \log Z(x)$$
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-071.jpg}
+\caption{关键恒等式：奖励可以表达为当前策略与参考策略的对数概率比\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第72页。}
+
+这个等式告诉我们：一个补全 $y$ 的\textbf{隐式奖励}由两部分决定：
+\begin{itemize}
+    \item $\beta \log \frac{p_\theta(y|x)}{p_{\text{ref}}(y|x)}$：当前模型相对于参考模型赋予 $y$ 的``额外概率''
+    \item $\beta \log Z(x)$：一个只依赖于 $x$ 的归一化常数
+\end{itemize}
+
+\begin{knowledgebox}{``每个策略都隐式定义了一个奖励模型''}
+这是一个深刻的洞察：不只是最优策略对应某个奖励模型，\textbf{任何}策略 $p_\theta$ 都隐式地定义了某个奖励函数。这种一一对应关系使得我们可以直接通过优化策略来优化奖励，反之亦然。
+\end{knowledgebox}
+
+\subsubsection{Step 3: 配分函数的消除}
+
+将上述奖励表达式代入 Bradley-Terry 模型：
+
+$$p(y_w \succ y_l | x) = \sigma\left(r(x, y_w) - r(x, y_l)\right)$$
+
+由于 $r(x, y_w) - r(x, y_l)$ 中，\textbf{配分函数 $\beta \log Z(x)$ 被消去}（因为两个奖励共享同一个 $x$，$Z(x)$ 在两项中相同），我们得到：
+
+$$p(y_w \succ y_l | x) = \sigma\left(\beta \log \frac{p_\theta(y_w|x)}{p_{\text{ref}}(y_w|x)} - \beta \log \frac{p_\theta(y_l|x)}{p_{\text{ref}}(y_l|x)}\right)$$
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-073.jpg}
+\caption{DPO 推导的关键步骤：配分函数 $Z(x)$ 在奖励差值中被消去\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第74页。}
+
+\subsubsection{最终的 DPO 损失函数}
+
+$$\boxed{\mathcal{L}_{\text{DPO}}(\theta) = -\mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}} \left[ \log \sigma\left(\beta \log \frac{p_\theta(y_w|x)}{p_{\text{ref}}(y_w|x)} - \beta \log \frac{p_\theta(y_l|x)}{p_{\text{ref}}(y_l|x)}\right) \right]}$$
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-074.jpg}
+\caption{DPO 损失函数：一个优雅的二分类损失\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第75页。}
+
+\begin{importantbox}{DPO 损失函数的直觉解读}
+DPO 损失的含义极其清晰：
+\begin{itemize}
+    \item 对于人类偏好的``赢''的回答 $y_w$，\textbf{增大}其相对于参考模型的概率比
+    \item 对于``输''的回答 $y_l$，\textbf{减小}其相对于参考模型的概率比
+    \item 这本质上就是一个\textbf{二分类问题}：输入是两个回答的对数概率比之差，标签是人类偏好
+    \item 不需要奖励模型，不需要采样，不需要 RL——只需要标准的梯度下降！
+\end{itemize}
+\end{importantbox}
+
+\subsection{DPO 的实验效果}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-076.jpg}
+\caption{DPO vs PPO：在摘要任务上，DPO 的效果与完整 RLHF 管线相当\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第77页。}
+
+实验表明，DPO 在多个任务上达到了与完整 RLHF（PPO）\textbf{相当的性能}，但实现简单得多。在摘要任务上，DPO 和 PPO 的表现几乎相同。
+
+\subsection{DPO 的广泛采用}
+
+DPO 的简洁性使其迅速被开源社区和工业界广泛采用：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-081.jpg}
+\caption{DPO 在开源社区的广泛采用：HuggingFace 排行榜上 9/10 的模型使用 DPO\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第82页。}
+
+\begin{itemize}
+    \item HuggingFace Open LLM Leaderboard 上排名靠前的模型中，9/10 使用了 DPO
+    \item Mistral、Llama 3 等主要开源模型都采用了 DPO
+    \item DPO 使得小团队和研究者也能进行偏好对齐，大大降低了门槛
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-082.jpg}
+\caption{DPO 被主要生产模型采用：Mistral 和 Llama 3 均使用 DPO 进行偏好对齐\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第83页。}
+
+\subsection{SFT vs RLHF/DPO 的输出对比}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-083.jpg}
+\caption{SFT 输出 vs RLHF/DPO 输出：经过偏好优化的模型回答更详细、结构更清晰\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第84页。}
+
+经过 RLHF/DPO 优化的模型，回答通常具有以下特征（与纯 SFT 模型相比）：
+\begin{itemize}
+    \item 更详细和全面的内容
+    \item 更好的组织结构（使用列表、分段等）
+    \item 更符合人类阅读习惯的表达方式
+    \item 语气更加自信和权威
+\end{itemize}
+
+\subsection{本章小结}
+
+\begin{itemize}
+    \item DPO 通过一个优雅的数学推导，将 RLHF 的三步流程简化为\textbf{一步二分类优化}
+    \item 核心洞察：语言模型的对数概率隐式定义了一个奖励模型，配分函数在偏好差值中被消去
+    \item DPO 的性能与完整 RLHF 管线相当，但实现简单得多
+    \item 已被工业界和开源社区广泛采用（Mistral、Llama 3 等）
+\end{itemize}
+
+%% ========== Part 6: InstructGPT 与 ChatGPT ==========
+

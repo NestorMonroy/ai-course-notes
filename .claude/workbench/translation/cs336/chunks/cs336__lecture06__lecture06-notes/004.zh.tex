@@ -1,0 +1,104 @@
+\section{基准测试（Benchmarking）}
+
+\subsection{为什么要基准测试}
+
+基准测试测量操作的\textbf{端到端墙钟时间}（wall-clock time）。虽然简单，但它是性能优化的基础：
+
+\begin{itemize}
+    \item 比较不同实现的速度（``CUDA 版本比 PyTorch 快吗？''）
+    \item 理解性能如何随参数缩放（``矩阵增大一倍，时间增加多少？''）
+\end{itemize}
+
+\begin{warningbox}{不能只靠理论推断性能}
+你可以阅读 spec sheet（营销材料）和论文，但实际性能取决于你的\textbf{库版本}、\textbf{硬件}和\textbf{工作负载}。没有什么能替代实际的基准测试。
+\end{warningbox}
+
+\subsection{正确的基准测试方法}
+
+一个正确的 GPU 基准测试函数需要注意以下几点：
+
+\begin{lstlisting}[caption={基准测试函数模板（Python）}]
+def benchmark(description, run, num_warmups=1, num_trials=3):
+    # 1. Warmup: 避免测量启动开销
+    for _ in range(num_warmups):
+        run()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()  # 等待 GPU 完成
+
+    # 2. 计时
+    times = []
+    for trial in range(num_trials):
+        start_time = time.time()
+        run()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()  # 重要！
+        end_time = time.time()
+        times.append((end_time - start_time) * 1000)
+
+    return mean(times)
+\end{lstlisting}
+
+\begin{importantbox}{基准测试两大要点}
+\begin{enumerate}
+    \item \textbf{Warmup}：首次运行时，PyTorch 会在后台编译 CUDA 代码、发送指令到 GPU 等。这些一次性开销不应计入稳态性能。
+    \item \textbf{torch.cuda.synchronize()}：GPU 和 CPU 是\textbf{两个独立的计算设备}。CPU 发送 CUDA 内核到 GPU 后会立即返回（异步执行）。如果不调用 synchronize()，你测量的是 CPU 端\textbf{入队}的时间，而非 GPU 端\textbf{执行}的时间。
+\end{enumerate}
+\end{importantbox}
+
+\subsection{基准测试案例：矩阵乘法}
+
+对方阵矩阵乘法进行基准测试，可以观察到性能随维度的变化：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{cc}
+\toprule
+\textbf{矩阵维度} & \textbf{典型耗时趋势} \\
+\midrule
+1024 & 基线 \\
+2048 & $\sim$3--4x 增长 \\
+4096 & $\sim$8--12x 增长 \\
+8192 & 显著增长，接近理论 $O(N^3)$ \\
+16384 & 非常大，充分利用 GPU \\
+\bottomrule
+\end{tabular}
+\caption{矩阵乘法的性能随维度缩放}
+\end{table}
+
+\subsection{基准测试案例：MLP 缩放}
+
+用一个简单的 MLP（Linear $\rightarrow$ GeLU $\rightarrow$ Linear $\rightarrow$ GeLU $\rightarrow \ldots$）作为实验对象，分别缩放不同参数：
+
+\begin{lstlisting}[caption={MLP 定义}]
+class MLP(nn.Module):
+    def __init__(self, dim, num_layers):
+        super().__init__()
+        self.layers = nn.ModuleList(
+            [nn.Linear(dim, dim) for _ in range(num_layers)]
+        )
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+            x = torch.nn.functional.gelu(x)
+        return x
+\end{lstlisting}
+
+缩放实验的发现：
+\begin{itemize}
+    \item \textbf{步数 (num\_steps)}：线性缩放——2x 步数 $\approx$ 2x 时间
+    \item \textbf{层数 (num\_layers)}：线性缩放——每层增加固定时间
+    \item \textbf{批大小 (batch\_size)}：小批量时增长缓慢（GPU 未充分利用），大批量时接近线性
+    \item \textbf{维度 (dim)}：增长不太可预测——涉及矩阵乘法的非均匀 CUDA 内核调度
+\end{itemize}
+
+\begin{knowledgebox}{性能不总是可预测的}
+由于 CUDA 内核调度、硬件特性、缓存行为等因素，基准测试结果不总是符合简单的理论预测。这正是实际基准测试不可替代的原因。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+基准测试是性能优化的第一步。正确的基准测试需要 warmup 和 CUDA synchronize。它告诉你``多快''，但不告诉你``为什么快/慢''——这需要 Profiling。
+
+%% ========== Section 4: Profiling ==========
+

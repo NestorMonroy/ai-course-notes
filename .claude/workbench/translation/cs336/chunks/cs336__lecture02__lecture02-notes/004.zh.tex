@@ -1,0 +1,119 @@
+\section{Models}
+
+\subsection{\texttt{nn.Parameter}}
+
+PyTorch 里模型参数通常以 `nn.Parameter` 的形式保存。它和普通 tensor 类似，但会自动被 `nn.Module` 注册为可训练参数，并出现在 `parameters()` 和 \texttt{state\_dict()} 里。
+
+\begin{knowledgebox}{参数与普通 tensor 的差异}
+`nn.Parameter` 的本质还是 tensor，但它明确表达了“这是要被训练的东西”。这会影响：
+\begin{itemize}
+    \item 自动求导
+    \item 模型参数遍历
+    \item checkpoint 保存/恢复
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{初始化：为什么要按输入维度缩放}
+
+如果直接用高斯随机初始化，输出的尺度会随着输入维度增长而变大。一个简单的做法是除以 \(\sqrt{\text{input\_dim}}\)，这样可以让输出的方差大致稳定。
+
+\begin{importantbox}{Xavier 的直觉}
+初始化要尽量让前向传播和反向传播中的数值尺度都保持稳定。最简单的经验就是：参数规模要随输入维度做归一化。
+\end{importantbox}
+
+在更实际的实现里，通常会使用 truncated normal，把极端离群值裁掉，进一步减少训练不稳定的风险。
+
+\subsection{自定义模块}
+
+下面这类简单线性模块很关键，因为它展示了 `nn.Module` 的最小骨架。
+
+\begin{lstlisting}
+class Linear(nn.Module):
+    def __init__(self, input_dim: int, output_dim: int):
+        super().__init__()
+        self.weight = nn.Parameter(
+            torch.randn(input_dim, output_dim) / np.sqrt(input_dim)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x @ self.weight
+\end{lstlisting}
+
+再往上堆叠多个层，就能得到一个简单的深度线性模型。重点不是”线性模型很强”，而是”\textbf{理解模块化结构如何把参数组织起来}”。
+
+\subsection{Transformer 参数量估算}
+
+理解模型参数量的具体构成，对于内存预算和训练规划至关重要。以一个标准的 decoder-only Transformer 为例：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.25\textwidth}p{0.30\textwidth}p{0.28\textwidth}}
+\toprule
+\textbf{组件} & \textbf{参数量} & \textbf{说明} \\
+\midrule
+Token embedding & $V \times d$ & $V$: 词表大小，$d$: 隐藏维度 \\
+每层 QKV 投影 & $3 \times d \times d$ & 三个矩阵各 $d \times d$ \\
+每层输出投影 & $d \times d$ & Attention 输出映射 \\
+每层 FFN & $2 \times d \times 4d$ & 上投影 + 下投影 \\
+每层 LayerNorm & $2 \times 2d$ & 两个 LN 各有 $\gamma, \beta$ \\
+LM Head & 通常与 embedding 共享 & 不额外计数 \\
+\midrule
+\textbf{每层合计} & $\approx 12d^2$ & 忽略 LN 的 $O(d)$ 项 \\
+\textbf{$L$ 层总计} & $\approx 12Ld^2 + Vd$ & \\
+\bottomrule
+\end{tabular}
+\caption{Decoder-only Transformer 的参数量分解}
+\end{table}
+
+\textbf{Worked Example}：LLaMA-2 7B 的参数量验证
+
+LLaMA-2 7B 的超参数为 $d = 4096$, $L = 32$, $V = 32000$, FFN 隐藏维度为 $11008$（使用 SwiGLU，实际为 $\frac{8}{3}d$ 上取整）。
+
+\begin{itemize}
+    \item Embedding: $32000 \times 4096 = 131M$
+    \item 每层 Attention: $4 \times 4096^2 = 67M$（QKV + O）
+    \item 每层 FFN (SwiGLU): $3 \times 4096 \times 11008 = 135M$（gate + up + down）
+    \item 每层 LN: $2 \times 2 \times 4096 = 16K$（可忽略）
+    \item 32 层合计: $32 \times (67M + 135M) = 6,464M$
+    \item 最终 LN + embedding: $\approx 131M + 16K$
+    \item \textbf{总计}: $\approx 6,738M \approx 6.7B$
+\end{itemize}
+
+这和”7B”的命名基本吻合（考虑到 RoPE、bias 等细节的差异）。
+
+\begin{importantbox}{$12d^2$ 速算法}
+对于标准 Transformer（FFN 倍率为 4），每层参数约为 $12d^2$。因此给定隐藏维度 $d$ 和层数 $L$，总参数量（不含 embedding）约为 $12Ld^2$。这个公式在做 napkin math 时非常方便：
+\begin{itemize}
+    \item $d=4096, L=32$: $12 \times 32 \times 4096^2 \approx 6.4B$
+    \item $d=5120, L=40$: $12 \times 40 \times 5120^2 \approx 12.6B$
+    \item $d=8192, L=80$: $12 \times 80 \times 8192^2 \approx 64.4B$
+\end{itemize}
+\end{importantbox}
+
+\begin{knowledgebox}{\texttt{state\_dict} 里有什么}
+\texttt{state\_dict()} 负责保存模型的状态。对一个模块来说，它通常包括：
+\begin{itemize}
+    \item 所有 `nn.Parameter`
+    \item 有状态层的缓存
+\end{itemize}
+所以 checkpoint 不只是保存参数本身，而是保存整个训练状态。
+\end{knowledgebox}
+
+\subsection{模型参数、缓存和 checkpoint 的关系}
+
+\texttt{state\_dict()} 的价值不只是“方便保存文件”。它把训练时需要恢复的所有重要状态显式列出来，避免你把“模型”误以为只是权重。对有些层来说，除了权重还有 running statistics、动量缓存或其他持久状态。若恢复时漏掉这些内容，模型行为就会和上次训练完全不是同一个轨迹。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.21\textwidth}p{0.27\textwidth}p{0.28\textwidth}}
+\toprule
+\textbf{对象} & \textbf{存什么} & \textbf{恢复时影响什么} \\
+\midrule
+Model state & 参数和模块缓存 & 前向输出、收敛路径 \\
+Optimizer state & 动量、平方梯度等 & 更新方向、学习率适配 \\
+Random seed & RNG 状态 & 数据顺序、dropout、初始化 \\
+\bottomrule
+\end{tabular}
+\caption{checkpoint 不只是参数文件，而是一份训练状态快照}
+\end{table}
+

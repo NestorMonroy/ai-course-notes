@@ -1,0 +1,108 @@
+\section{如何选择并行策略}
+
+\subsection{三种策略的直观对比}
+
+现在可以把三种并行方式放在一起看：
+
+\begin{table}[H]
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{p{2.6cm}p{3.3cm}p{3.4cm}p{3.4cm}p{3.2cm}}
+\toprule
+\textbf{策略} & \textbf{切分对象} & \textbf{主要通信} & \textbf{主要优点} & \textbf{主要缺点} \\
+\midrule
+数据并行 & batch & 每步梯度 all-reduce & 最简单、最稳 & 模型要能单卡放下 \\
+张量并行 & hidden width & 每层 all-gather / reduce-scatter & 能切更大的层 & 互联要求高 \\
+流水线并行 & depth / layers & stage 间 send / recv & 深模型更自然 & bubble 与调度复杂 \\
+\bottomrule
+\end{tabular}
+}
+\caption{三种并行方式的核心差别}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[every node/.style={font=\small, align=center}]
+\node[draw, rounded corners, fill=blue!8, minimum width=3.5cm, minimum height=0.9cm] (data) at (0,0) {数据并行\\切 batch};
+\node[draw, rounded corners, fill=orange!14, minimum width=3.5cm, minimum height=0.9cm] (tensor) at (5,0) {张量并行\\切 width};
+\node[draw, rounded corners, fill=green!14, minimum width=3.5cm, minimum height=0.9cm] (pipe) at (10,0) {流水线并行\\切 depth};
+\draw[->, thick] (data) -- (tensor);
+\draw[->, thick] (tensor) -- (pipe);
+\end{tikzpicture}
+\caption{三种并行策略分别对应 batch、width、depth 三个维度}
+\end{figure}
+
+\begin{knowledgebox}{为什么经常要组合使用}
+单一策略很少同时解决“显存不够、单层太大、总层数太深”这三个问题。现实训练通常会把数据并行放在外层，再叠加张量并行或流水线并行。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[every node/.style={font=\small, align=center}]
+\node[draw, rounded corners, fill=yellow!10, minimum width=3.8cm, minimum height=1cm] (dp) at (0,0) {外层 DDP\\复制模型、切数据};
+\node[draw, rounded corners, fill=yellow!18, minimum width=3.8cm, minimum height=1cm] (tp) at (5,0) {内层 TP\\切宽度};
+\node[draw, rounded corners, fill=yellow!26, minimum width=3.8cm, minimum height=1cm] (pp) at (10,0) {内层 PP\\切深度};
+\draw[->, thick] (dp) -- (tp);
+\draw[->, thick] (tp) -- (pp);
+\end{tikzpicture}
+\caption{常见的组合思路：外层数据并行，内层张量并行或流水线并行}
+\end{figure}
+
+\begin{warningbox}{没有免费午餐}
+切得越细，单卡显存压力越小，但通信和调度复杂度越高。分布式训练不是”让模型免费变大”，而是”把复杂度从显存转移到系统设计上”。
+\end{warningbox}
+
+\subsection{三种并行策略的详细对比}
+
+下面这张表从更多维度对比三种核心并行策略，帮助建立完整的决策框架：
+
+\begin{table}[H]
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{p{2.5cm}p{2.5cm}p{2.8cm}p{2.5cm}p{2.5cm}p{2.8cm}}
+\toprule
+\textbf{维度} & \textbf{数据并行} & \textbf{张量并行} & \textbf{流水线并行} \\
+\midrule
+切分对象 & batch 维度 & hidden width 维度 & depth（层）维度 \\
+每卡存储 & 完整模型+优化器 & $\frac{1}{p}$ 的参数 & $\frac{1}{p}$ 的层 \\
+通信原语 & all-reduce & all-gather, reduce-scatter & send / recv \\
+通信频率 & 每步 1 次 & 每层 2 次 & 每 stage 边界 1 次 \\
+通信量/步 & $O(\text{params})$ & $O(L \times \text{activation})$ & $O(\text{activation})$ \\
+互联要求 & InfiniBand 够用 & 必须 NVLink & 中等（点对点） \\
+典型 GPU 范围 & 跨节点可用 & 同节点 2--8 卡 & 跨节点可用 \\
+实现复杂度 & 低（DDP 一行代码） & 中高 & 高（调度复杂） \\
+主要开销 & 显存冗余 & 通信延迟 & pipeline bubble \\
+扩展性瓶颈 & 模型必须放进单卡 & 互联带宽 & stage 负载均衡 \\
+\bottomrule
+\end{tabular}
+}
+\caption{三种并行策略的多维度对比。$L$ 为层数，$p$ 为并行度。}
+\end{table}
+
+\subsection{一个实用的决策表}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{3.1cm}p{3.8cm}p{4.5cm}}
+\toprule
+\textbf{如果你遇到...} & \textbf{优先考虑} & \textbf{原因} \\
+\midrule
+模型能放下，但 batch 很大 & 数据并行 & 最少改动、最容易扩展 \\
+单层矩阵已经太大 & 张量并行 & 先把层宽切开 \\
+模型很深，stage 很重 & 流水线并行 & 让层分布到不同设备 \\
+三者都很紧张 & 组合方案 & 现实训练通常只能组合解决 \\
+\bottomrule
+\end{tabular}
+\caption{选择并行策略的实用起点}
+\end{table}
+
+\begin{importantbox}{工程上最重要的一句}
+并行策略不是先选“最酷”的，而是先看瓶颈到底在哪里：是模型太大、单层太宽，还是通信太慢。瓶颈不同，切法就不同。
+\end{importantbox}
+
+\begin{knowledgebox}{从教学角度看 MLP 的价值}
+讲里用深 MLP 作为例子，不是因为 MLP 最重要，而是因为它最容易看清楚本质：参数如何复制、数据如何切、激活如何走、梯度如何同步、通信在哪里发生。把这套逻辑看懂，后面再看 transformer 也会更清楚。
+\end{knowledgebox}
+

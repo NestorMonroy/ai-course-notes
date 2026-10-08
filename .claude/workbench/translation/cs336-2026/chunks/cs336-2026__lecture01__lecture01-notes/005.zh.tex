@@ -1,0 +1,121 @@
+\section{课程版图：五个单元如何串起来}
+
+Lecture 1 的 syllabus 把学期拆成 Basics、Systems、Scaling Laws、Data、Alignment。它们不是并列主题，而是从“能训练一个模型”逐步走向“在真实约束下训练、服务和改进模型”。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.68\textwidth]{transformer-architecture.png}
+\caption{Transformer architecture 是 Basics 单元的模型起点。后续会逐步拆 attention、MLP、normalization、position encoding 等组件。}
+\figsource{CS336 Spring 2026 Lecture 1 官方可执行讲义，\texttt{basics()}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Transformer 架构图在第一讲里的作用}
+这张图不是要在第一讲完整推导 Transformer，而是告诉读者后续要拆哪些对象：attention、feed-forward、residual、normalization、position information。From-scratch 的意思是这些模块都要能实现、计账、调试和替换。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.45\textwidth]{compute-memory.png}
+\caption{compute 与 memory 的基本关系贯穿 systems 和 resource accounting。}
+\figsource{CS336 Spring 2026 Lecture 1 官方可执行讲义，\texttt{systems()}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：compute-memory 小图为什么反复出现}
+图中数据从 memory 进入 compute units，计算后再写回 memory。它会在 Lecture 2 变成 arithmetic intensity，在 kernels 单元变成 fusion/tiling，在 inference 单元变成 KV cache 读写。模型效率不是只看 FLOPs，还要看数据移动。
+\end{knowledgebox}
+
+\begin{knowledgebox}{first-use glossary：DRAM、SRAM、HBM}
+DRAM 是 Dynamic Random-Access Memory，动态随机存储器；GPU 上的大容量高带宽显存通常是 HBM，即 High Bandwidth Memory。SRAM 是 Static Random-Access Memory，静态随机存储器，常对应芯片内部高速缓存或片上存储。计算单元不能无限快地直接从 HBM 取数，数据通常要经过片上缓存/寄存器才能高效计算，因此“少搬数据”是 kernel 优化的核心。
+\end{knowledgebox}
+
+\begin{knowledgebox}{first-use glossary：fused kernel 与 collectives}
+Fused kernel 是把多个 GPU 操作合并成一个 kernel，减少 HBM 读写和 kernel launch overhead。例如 RMSNorm 中的均方、缩放、乘权重可以尽量融合。Collectives 是多 GPU 集合通信原语，如 all-reduce、reduce-scatter、all-gather、broadcast；DDP 梯度同步常用 all-reduce，ZeRO/FSDP 会大量使用 reduce-scatter 和 all-gather。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{dgx-b200-system-topology.png}
+\caption{DGX B200 拓扑图提醒学生：真实训练不是抽象 FLOPs，而是 GPU、CPU、NVLink、NIC、storage 的组合系统。}
+\figsource{CS336 Spring 2026 Lecture 1 官方可执行讲义，\texttt{systems()}，图片来自 NVIDIA 文档。}
+\end{figure}
+
+\begin{knowledgebox}{读图：DGX 拓扑图说明什么}
+图中每张 GPU 都通过 NVLink/NVSwitch、CPU、NIC、storage 参与系统。数据并行、张量并行、流水线并行、optimizer state sharding、checkpointing 都会受到拓扑约束。真实训练不是“GPU 越多越快”，而是通信和计算要匹配。
+\end{knowledgebox}
+
+\begin{longtable}{p{0.15\textwidth}p{0.20\textwidth}p{0.22\textwidth}p{0.25\textwidth}}
+\toprule
+\textbf{并行方式} & \textbf{切分对象} & \textbf{单卡能否独立 forward} & \textbf{通信代价与适用场景} \\
+\midrule
+Data parallelism & batch & 能 & 低到中；主要同步梯度，适合模型能放进单卡但想提升吞吐。 \\
+Tensor parallelism & matrix / attention tensors & 不能 & 高；每层可能通信，适合单层矩阵太大或要吃满多卡 tensor cores。 \\
+Pipeline parallelism & layers & 不能 & 中；层边界传 activation，有 pipeline bubble，适合深模型跨设备放置。 \\
+Sequence parallelism & sequence dimension & 不能 & 中；支撑长上下文，attention/norm 等需要跨序列通信。 \\
+Expert parallelism & MoE experts & 部分不能 & all-to-all 代价高，适合稀疏 MoE 扩大参数量。 \\
+\bottomrule
+\end{longtable}
+
+\begin{importantbox}{并行方式可以组合}
+真实训练常用 3D/4D parallelism，例如 data parallel × tensor parallel × pipeline parallel，再叠加 sequence/expert parallelism。选择组合不是形式问题，而是为了把参数、activation、optimizer state 和通信量放进硬件拓扑。
+\end{importantbox}
+
+\begin{knowledgebox}{Systems 单元导读：为什么第一讲先讲这些词}
+第一讲只是预告 systems 单元，但这些词会在后续反复出现。Kernel 解决单 GPU 内部“少搬 HBM、让 tensor cores 忙起来”的问题；parallelism 解决多 GPU 上参数、activation、gradient、optimizer state 放不下或算不快的问题；inference 解决模型训练好以后如何低延迟、高吞吐地生成 token 的问题。三者共同约束 architecture 选择：例如 GQA 是架构改动，也是推理 KV cache 优化；RMSNorm 是模型组件，也是减少数据移动的系统优化。
+\end{knowledgebox}
+
+\begin{warningbox}{并行表格的误读}
+Data parallelism 中“单卡能独立 forward”只在模型完整复制到每卡时成立；ZeRO-3/FSDP 会把参数也分片，此时 forward 前需要 all-gather 参数。Tensor/pipeline/sequence/expert parallelism 也不是互斥选项，而是经常组合成多维并行。第一讲的表格是地图，不是完整实现说明。
+\end{warningbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.68\textwidth]{prefill-decode.png}
+\caption{Inference 被拆成 prefill 与 decode；两者并行性和瓶颈不同。}
+\figsource{CS336 Spring 2026 Lecture 1 官方可执行讲义，\texttt{systems()}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：prefill/decode 为什么提前出现}
+Prefill 阶段 prompt tokens 已知，可以并行处理，形态接近训练；decode 阶段每次只能生成一个 token，容易 memory-bound。推理不是简单 forward pass，而是有独立系统瓶颈。
+\end{knowledgebox}
+
+\subsection{Scaling laws 与 data 的视觉例子}
+
+前面的 systems 图展示同一模型在训练与推理阶段的不同瓶颈，本节再用两类视觉证据连接资源与模型质量：IsoFLOP 曲线回答固定 compute 下参数量和 token 数如何配平，数据混合图则提醒相同 token 数并不等于相同学习价值。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{chinchilla-isoflop.png}
+\caption{Chinchilla 风格 IsoFLOP 分析：在固定 compute 下寻找参数量与训练 token 数的平衡。}
+\figsource{CS336 Spring 2026 Lecture 1 官方可执行讲义，\texttt{scaling\_laws()}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：IsoFLOP 曲线怎么看}
+每条曲线对应一个固定 compute budget，曲线上不同点代表不同参数量和 token 数组合。最低点表示该预算下最优模型大小。多个预算的最优点连起来，可以外推到更大 compute。重点是 forecasting workflow，不是机械记住 \(D=20N\)。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.75\textwidth]{marin-loss-forecast.jpg}
+\caption{Marin live example 展示预注册 scaling 预测和实际训练 loss 的对照。}
+\figsource{CS336 Spring 2026 Lecture 1 官方可执行讲义，\texttt{scaling\_laws()}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Marin 预测图的教学信号}
+这类图把 scaling laws 从论文公式变成训练前承诺。如果实际 loss 落在预测附近，说明小规模实验、超参迁移和数据假设比较可靠；若偏离很大，就要检查实现、数据、优化器和分布漂移。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.76\textwidth]{pile-chart.png}
+\caption{The Pile 数据构成展示预训练数据来自多种来源，而不是同质 token 池。}
+\figsource{CS336 Spring 2026 Lecture 1 官方可执行讲义，\texttt{data()}，图片来自 The Pile 论文页面。}
+\end{figure}
+
+\begin{knowledgebox}{读图：数据混合图为什么重要}
+每个扇区对应一种数据来源。不同 token 消耗相近 FLOPs，但带来的学习信号不同。高质量代码、论文、书籍、网页噪声对模型能力的影响差别很大，所以 data curation 是效率问题。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+五个单元其实都在回答同一个问题：固定资源下如何最大化有效能力。Basics 让模型能训练，systems 让训练能跑快，scaling laws 让大训练可预测，data 让 compute 花在有价值 token 上，alignment 让模型行为符合目标。
+

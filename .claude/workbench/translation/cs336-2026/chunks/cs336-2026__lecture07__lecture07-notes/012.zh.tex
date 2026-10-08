@@ -1,0 +1,45 @@
+\section{Summary：总结与延伸}
+
+Lecture 7 的 Summary 可以压缩成一句话：分布式训练不是“把模型丢到很多 GPU 上”，而是用 collective operations 在硬件拓扑上实现某种 sharding/replication 计划。Data parallel 沿 batch 切，tensor parallel 沿 width 切，pipeline parallel 沿 depth 切；它们分别改变通信对象、通信频率和状态放置。
+
+\begin{importantbox}{最终 takeaways}
+\begin{enumerate}
+    \item 多 GPU 的两个动机是容量和速度：放不下，或想更快。
+    \item Collective operations 是分布式训练的基础语言；all-reduce、reduce-scatter、all-gather 是工作马。
+    \item \(\text{all-reduce}=\text{reduce-scatter}+\text{all-gather}\) 是理解 DDP 到 FSDP/ZeRO 的关键。
+    \item Tensor parallel 通信频繁，通常要求 NVLink/NVSwitch；pipeline parallel 通信较粗粒度，但要处理 bubble。
+    \item 真实训练系统是在 recompute、memory 和 communication 之间换瓶颈。
+    \item 分布式优化必须用 benchmark/profile 验证，不能只按硬件规格表推断。
+\end{enumerate}
+\end{importantbox}
+
+\subsection{和下一讲的连接}
+
+本讲先搭起 collectives 和三种基本 parallelism。下一步自然是更系统地处理模型状态分片：ZeRO/FSDP 如何用 all-gather 和 reduce-scatter 降低 replicated state，以及怎样通过 overlap/prefetch 把通信藏到计算后面。进入下一讲前，应能把下面四个问题写成一张状态与通信账本：
+
+\begin{center}
+\begin{tabular}{L{0.2\textwidth}L{0.28\textwidth}L{0.38\textwidth}}
+\toprule
+问题 & 本讲已有答案 & 下一讲继续追问 \\
+\midrule
+参数放哪里 & DDP 每个 rank 完整复制。 & ZeRO-3/FSDP 何时 all-gather 当前层参数，何时释放？ \\
+梯度放哪里 & all-reduce 后每卡保留完整梯度。 & reduce-scatter 后如何只保留本 rank shard？ \\
+optimizer state 放哪里 & 普通 DDP 每卡完整复制。 & ZeRO-1 如何分片 Adam 的 \(m,v\)，由谁更新参数？ \\
+通信何时发生 & 同步示例把 collective 放在关键路径。 & prefetch、bucketing、overlap 如何把通信藏进 forward/backward？ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{最小复现实验：}选择一个两层 MLP，在 1/2/4 张 GPU 上分别记录每步计算时间、all-reduce 时间、峰值显存和有效带宽。然后把梯度同步拆成 reduce-scatter 与 all-gather，先验证数值等价，再预测哪一部分状态可以不再完整复制。若预测、显存曲线与通信 trace 对不上，就回到本讲的两张图：状态图说明“谁持有什么”，通信图说明“何时把什么送给谁”。
+
+\textbf{闭卷自测：}
+\begin{enumerate}
+    \item 给定四个 ranks、每个 rank 一段不同向量，分别画出 all-gather、reduce-scatter 和 all-reduce 后每个 rank 持有的内容；不能只写操作名字。
+    \item 若一次 tensor-parallel block 每层都要 all-gather 激活，解释为什么把 TP 从节点内 NVLink 域扩到跨节点 fabric 后，扩展效率可能突然下降，而不是平滑下降。
+    \item 对比 data parallel 与 pipeline parallel：前者复制哪些模型状态、后者传输什么激活；各自最怕“张量太大”还是“同步太频繁”。
+    \item 看到一个宣称“all-reduce 达到 300 GB/s”的结果时，列出必须补齐的实验条件：tensor bytes、dtype、world size、拓扑、warmup、同步方式和带宽口径。
+\end{enumerate}
+
+完成这四题的标准不是术语正确，而是每个答案都同时写出 \textbf{state placement、collective、frequency、hardware path}。这四列若有一列空白，就还没有形成可用于真实系统设计的并行账本。
+
+\end{document}

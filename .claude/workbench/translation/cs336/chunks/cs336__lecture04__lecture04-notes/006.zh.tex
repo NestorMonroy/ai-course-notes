@@ -1,0 +1,130 @@
+\section{案例分析：DeepSeek MoE 架构演进}
+
+本节追溯 DeepSeek 从 V1 到 V3 的 MoE 架构变化，展示一个现代高性能 MoE 系统是如何逐步构建的。
+
+\subsection{DeepSeek MoE V1（16B, 2.8B active）}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-040.jpg}
+\caption{DeepSeek MoE V1 架构：2 个共享 expert + 64 个细粒度 routed experts（激活 4 个），标准 Top-K 路由 + Auxiliary-Loss 均衡\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第41页。来自 DeepSeek MoE 论文。}
+
+V1 的关键设计：
+\begin{itemize}
+    \item \textbf{16B 总参数，2.8B 激活}
+    \item \textbf{2 共享 expert + 64 细粒度 routed expert}，激活 $K_r = 4$ 个
+    \item \textbf{标准 Top-K 路由}：Softmax 在 Top-K 之前
+    \item \textbf{标准辅助损失}：Expert-level + Device-level 均衡
+\end{itemize}
+
+\subsection{DeepSeek V2（236B, 21B active）}
+
+V2 是 V1 的直接放大版本：
+
+\begin{itemize}
+    \item \textbf{236B 总参数，21B 激活}——规模增长一个数量级
+    \item \textbf{MoE 架构完全不变}——同样的共享+细粒度 expert 结构、同样的路由、同样的辅助损失
+    \item 唯一变化是 expert 数量和模型规模的增大
+    \item 新增 \textbf{Multi-head Latent Attention (MLA)}——一种压缩 KV Cache 的注意力机制
+\end{itemize}
+
+\begin{importantbox}{架构的稳定性}
+从 V1 到 V2，DeepSeek 在 MoE 部分\textbf{没有做任何架构修改}——他们在 V1 时就已经找到了正确的架构。这说明好的架构设计可以在小规模验证后直接放大，体现了 DeepSeek 团队扎实的工程和研究能力。
+\end{importantbox}
+
+\subsection{DeepSeek V3（671B, 37B active）}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-046.jpg}
+\caption{DeepSeek V3 架构：671B 参数、37B 激活，新增 Auxiliary-Loss-Free Balancing 和 Multi-Token Prediction\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第47页。来自 DeepSeek V3 论文。}
+
+V3 相对于 V2 的变化：
+
+\begin{enumerate}
+    \item \textbf{规模继续放大}：671B 总参数，37B 激活
+    \item \textbf{Auxiliary-Loss-Free Balancing}：用 per-expert bias + 在线学习替代部分辅助损失（但保留了 sequence-level 辅助损失）
+    \item \textbf{Multi-Token Prediction (MTP)}：使用轻量级单层 Transformer 同时预测下一个 token（虽然论文展示了预测多个 token 的框架，实际只预测了 1 个额外 token）
+    \item \textbf{Multi-head Latent Attention (MLA)}：继承自 V2 的 KV Cache 压缩技术
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-010.jpg}
+\caption{DeepSeek V3 在多个基准上的表现：在 MMLU-Pro、MATH 500、AIME 2024、Codeforces 等多项评测中显著领先\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第11页。来自 DeepSeek V3 论文。}
+
+\subsection{Multi-head Latent Attention (MLA)}
+
+MLA 是 DeepSeek V2/V3 中的另一个重要创新，虽然不直接属于 MoE 范畴，但值得简要介绍：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-044.jpg}
+\caption{Multi-head Latent Attention：将 KV 投影到低维潜在空间 $\mathbf{c}$，缓存 $\mathbf{c}$ 而非全维度 KV，推理时上投影回 KV\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第45页。来自 DeepSeek V2 论文。}
+
+MLA 的核心思路：
+
+\begin{enumerate}
+    \item 将隐藏状态 $\mathbf{h}_t$ 投影到低维 latent vector $\mathbf{c}_t = W_{\text{DKV}} \mathbf{h}_t$
+    \item 只缓存 $\mathbf{c}_t$（维度远小于 $\mathbf{h}_t$）
+    \item 需要 K/V 时，从 $\mathbf{c}_t$ 上投影恢复：$\mathbf{k}_t = W_{UK} \mathbf{c}_t$，$\mathbf{v}_t = W_{UV} \mathbf{c}_t$
+    \item 利用矩阵乘法结合律，将 $W_{UK}$ 合并到 Q 的投影矩阵中，\textbf{不增加额外的矩阵乘法}
+\end{enumerate}
+
+\begin{knowledgebox}{MLA vs GQA}
+GQA（Grouped Query Attention）通过减少 KV head 数量来压缩 KV Cache。MLA 采取完全不同的思路——保持所有 head 但将 KV 投影到低维空间。两者目标相同（减少 KV Cache），但 MLA 在理论上可以保留更多信息。
+\end{knowledgebox}
+
+\begin{warningbox}{MLA 与 RoPE 不兼容}
+标准 MLA 中，因为 RoPE 的旋转矩阵夹在 Q 投影和 K 上投影之间，矩阵乘法不能自由交换顺序，导致无法合并矩阵。DeepSeek 的解决方案是在非压缩维度上应用 RoPE，或为 RoPE 添加专门的非压缩维度。
+\end{warningbox}
+
+\subsection{Multi-Token Prediction (MTP)}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-045.jpg}
+\caption{Multi-Token Prediction 架构：主模型预测 next token，轻量级 MTP 模块预测更远的 token。实际中 DeepSeek V3 只预测 1 个额外 token\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第46页。来自 DeepSeek V3 论文。}
+
+MTP 的思路简单但有效：
+\begin{itemize}
+    \item 在主模型的隐藏状态基础上，添加一个轻量级单层 Transformer
+    \item 这个小模型预测下一个 token 之后的 token（即 ``next-next token''）
+    \item 额外的预测损失可以为主模型提供更丰富的梯度信号
+    \item 推理时，MTP 模块还可以用于 speculative decoding（类似 EAGLE）
+\end{itemize}
+
+\subsection{本章小结}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccc}
+\toprule
+& \textbf{V1} & \textbf{V2} & \textbf{V3} \\
+\midrule
+总参数 & 16B & 236B & 671B \\
+激活参数 & 2.8B & 21B & 37B \\
+共享 Expert & 2 & 2 & 2 \\
+Routed Expert & 64 & 160 & 256 \\
+Top-K & 6 (4 routed) & 6 & 8 \\
+路由方式 & Top-K + Softmax & Top-K + Softmax & Top-K + Sigmoid \\
+均衡策略 & Aux Loss & Aux Loss & Bias + Seq Aux Loss \\
+注意力 & MHA & MLA & MLA \\
+MTP & -- & -- & 1 token ahead \\
+\bottomrule
+\end{tabular}
+\caption{DeepSeek MoE V1-V2-V3 关键参数对比}
+\end{table}
+
+%% ========== Part 7: 总结 ==========
+

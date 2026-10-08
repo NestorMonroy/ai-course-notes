@@ -1,0 +1,77 @@
+\section{Megakernel：把 GPU 看成一个分布式系统}
+
+Decode 的关键矛盾是：为了生成一个 token，需要运行整个模型；计算量并不总是大，但权重和状态必须被持续搬运。若每个算子都由独立 kernel 执行，launch、tear-down、同步和尾部等待会在整层、整模型范围内累积。
+
+\teachervoice{课堂提示：Megakernel 的目标不是让单个矩阵乘更快，而是消除整条 decode 时间线上的 boundary、straggler 与 weight-load 空洞。读性能图时应先看哪些 SM 在等待，再判断 fusion 是否真的移动了瓶颈。}
+
+\subsection{为什么会出现 GPU bubbles}
+
+本节先解释空洞从哪里来。传统实现按 RMSNorm、QKV projection、RoPE、attention、O projection、MLP 等算子逐个 launch。时间线上的彩色条代表 SM 在做有效工作，空白代表等待。即使单个 kernel 已经很快，kernel boundary、weight-load latency 和 straggler 仍会造成大面积空洞。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.87\textwidth]{00-36-45-kernel-bubbles.jpg}
+\caption{独立 kernel 带来的 launch gap、load latency 与 tail effects。}
+\figsource{课堂视频 00:35:03--00:37:32。}
+\end{figure}
+
+\begin{warningbox}{平均利用率掩盖依赖关系}
+空洞不是简单把 batch 加大就能消除。部分空洞来自算子依赖，部分来自不同序列长度，部分来自下一组权重尚未到达。必须知道每段工作依赖什么、需要什么 memory page，才能安全重排。
+\end{warningbox}
+
+\subsection{Whole-model megakernel 的核心思想}
+
+因此，Megakernel 不再让每个算子拥有独立 kernel boundary，而是在一个长期驻留 kernel 内定义更细粒度的 instructions，把各个 SM 当成工作节点。调度器依据 dependency graph 分配 QKV、attention、reduction、O projection 和 MLP 等任务，并尽可能让 load、compute 与 reduction 重叠。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{00-38-20-megakernel-solution.jpg}
+\caption{Megakernel 通过细粒度调度填补 kernel 之间的空洞。}
+\figsource{课堂视频 00:37:32--00:38:53。}
+\end{figure}
+
+这与 FlashAttention 的 fusion 有共同思想，但范围更大：不仅在一个 attention 算子内部融合 load/compute，还可能覆盖整层乃至整个 Llama-1B forward pass。代价是调度、共享内存和硬件适配都变得更复杂。
+
+\subsection{Fine-grained overlap：依赖未结束，准备可以先开始}
+
+接下来把 overlap 具体化。QKV+RoPE 尚未完全结束时，可以先加载已存在的 KV cache；attention 尚未完全结束时，可以预取 O projection 权重。关键是把“数学依赖”与“数据准备”拆开：真正依赖结果的计算必须等待，但不依赖结果的 load、地址计算和部分 reduction 可以提前。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{00-39-40-fine-grained-overlap.jpg}
+\caption{细粒度 overlap：attention 与权重/KV load 在同一时间线上交错。}
+\figsource{课堂视频 00:39:04--00:40:15。}
+\end{figure}
+
+\subsection{ThunderKittens 提供什么抽象}
+
+为了让上述 schedule 可实现，课堂中的系统使用 instruction-based abstraction：每个 sub-kernel 仍可独立编写，但由统一 interpreter 和 virtualized shared memory 协调。ThunderKittens 提供 tile、async load/store、shared-memory page 与 worker specialization 等底层构件，比 Triton 更低层，也给程序员更细的控制。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{00-40-45-thunderkittens.jpg}
+\caption{ThunderKittens 的抽象层：把 load/store、shared memory 与 compute worker 显式化。}
+\figsource{课堂视频 00:40:15--00:40:56。}
+\end{figure}
+
+\subsection{收益与适用边界}
+
+本节不把一次 benchmark 当作普遍结论，而是用它判断瓶颈是否真正被移动。这里要同时检查延迟、吞吐和硬件利用率，确认加速不是把成本转移到另一个未观测阶段。课堂图报告 H100 上约百分之 72 的 bandwidth utilization，并显示 megakernel 在该 Llama-1B decode 设置中明显快于通用引擎。这里应把数字理解为“特定模型、batch 和硬件下接近带宽上限”的证据，而不是所有模型都能获得相同收益。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{00-41-10-decoding-payoff.jpg}
+\caption{Megakernel 的 decode throughput 与带宽利用率证据。}
+\figsource{课堂视频 00:40:56--00:41:32；具体数值以该次课堂展示配置为准。}
+\end{figure}
+
+\begin{dialoguebox}{问答：为什么不把所有模型都写成 megakernel？（01:03:28--01:04:44）}
+学生问 megakernel 的代价。Dan Fu 的回答可以概括为：速度上限很高，但需要大量 kernel engineering；一个工程师一年可能只覆盖一种硬件、少数模型和有限 batch 范围，batch 或硬件变化都可能要求重新调优。
+\end{dialoguebox}
+
+这段回答指出了自动化编译器的真正价值：不是让一个已知 kernel 再快 $1\%$，而是降低跨模型、跨硬件、跨 shape 维护 whole-model schedule 的人力成本。
+
+\subsection{本章小结}
+
+Megakernel 的本质是把 GPU 从“依次调用算子”改看成“带依赖图、局部内存和工作节点的分布式系统”。收益来自消除 boundary 与重叠 load/compute；代价是可移植性和工程复杂度。
+

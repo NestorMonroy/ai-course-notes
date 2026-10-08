@@ -1,0 +1,124 @@
+\section{Instruction Following}
+
+ChatGPT 之后，很多人关注的不是``知识会不会答''，而是``你会不会照着我说的做''。这类任务更开放，也更接近真实产品交互。
+
+\subsection{Chatbot Arena}
+
+Chatbot Arena 的核心思想是 pairwise 比较：给用户两个匿名模型回答，让用户选更好的那个，然后基于这些对比算 ELO。它的优点是活的、可持续更新、并且能接纳新模型。
+
+\begin{itemize}
+    \item 优点：接近真实用户偏好。
+    \item 缺点：输入是活流量，比较不稳定，而且可能受到提示词分布影响。
+    \item 结果：更像“谁更受欢迎”，不完全等于“谁更强”。
+\end{itemize}
+
+\subsection{IFEval}
+
+IFEval 的策略是给 instruction 加上可自动检查的简单约束。这样可以保留一定的开放性，同时让评估可程序化。
+
+\begin{knowledgebox}{IFEval 的思路}
+把自然语言指令拆成若干个可验证约束，比如长度、格式、包含某些关键词等。它不是在完整意义上评估语义正确性，而是在评估模型是否遵守了显式要求。
+\end{knowledgebox}
+
+\subsection{Chatbot Arena ELO 评分的计算直觉}
+
+Chatbot Arena 使用 Bradley-Terry 模型来从 pairwise 比较中推导出模型排名。其核心思想是：给每个模型赋一个``实力分''$\theta_i$，然后假设模型 $i$ 赢模型 $j$ 的概率为：
+\[
+P(i \text{ beats } j) = \frac{1}{1 + 10^{(\theta_j - \theta_i)/400}}
+\]
+
+这就是经典的 ELO 公式。直觉上：
+\begin{itemize}
+    \item 如果两个模型分差为 0，则各有 50\% 的胜率。
+    \item 如果分差为 400，强者有约 91\% 的胜率。
+    \item 如果分差为 200，强者有约 76\% 的胜率。
+\end{itemize}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{3.0cm}p{4.0cm}p{5.5cm}}
+\toprule
+\textbf{ELO 分差} & \textbf{强者预期胜率} & \textbf{直觉含义} \\
+\midrule
+0 & 50\% & 两个模型实力相当 \\
+100 & 64\% & 有优势但不压倒性 \\
+200 & 76\% & 明显更强 \\
+400 & 91\% & 几乎总赢 \\
+800 & 99\% & 代差级别的差距 \\
+\bottomrule
+\end{tabular}
+\caption{ELO 分差与预期胜率的对应关系}
+\end{table}
+
+更新规则也很直觉：如果一个被认为很弱的模型赢了一个被认为很强的模型，赢家获得更多分数（因为这是一场``冷门''）；如果强者赢了弱者，分数变动很小。具体来说，每场比赛后的更新量为：
+\[
+\Delta\theta_i = K \cdot (S_i - E_i)
+\]
+其中 $S_i$ 是实际结果（赢=1，输=0，平=0.5），$E_i$ 是预期胜率，$K$ 是学习率（控制排名变动的速度）。
+
+\begin{warningbox}{ELO 的隐含假设与实际偏差}
+ELO 假设能力是一维的：如果 A 比 B 强，B 比 C 强，那么 A 一定比 C 强。但语言模型的能力是多维的——一个擅长代码的模型可能不擅长创意写作。这种``非传递性''在 Chatbot Arena 中确实存在，意味着 ELO 排名只是对复杂多维能力的一维投影。此外，用户群体的 prompt 分布也会影响排名：如果大部分用户在问编程问题，编程强的模型排名就会被高估。
+\end{warningbox}
+
+\subsection{AlpacaEval 和 WildBench}
+
+AlpacaEval 主要看 win rate，但一个重要问题是：评判者本身可能偏向某些模型。WildBench 则强调从真实人类对话中抽样，并尝试用更稳的判定方式来减少偏差。
+
+\begin{warningbox}{LLM-as-judge 的风险}
+如果裁判模型和被评模型有共同偏差，或者裁判本身不稳定，那么 leaderboard 可能主要衡量的是”裁判喜欢什么”，而不是”用户真正需要什么”。
+\end{warningbox}
+
+\subsection{评估方法对比：人工、自动与 LLM-as-Judge}
+
+在 instruction following 和开放式生成领域，评估方法可以分为三大类。每种方法都有自己的适用场景和固有缺陷。
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{2.4cm}p{3.0cm}p{3.0cm}p{2.4cm}p{2.4cm}}
+\toprule
+\textbf{方法} & \textbf{优点} & \textbf{缺点} & \textbf{成本} & \textbf{代表} \\
+\midrule
+人工评估 & 最接近真实偏好；能捕捉细微语义 & 慢、贵、不可完全复现；标注者之间一致性有限 & 高 & Chatbot Arena \\
+\midrule
+自动 metric & 快、便宜、完全可复现 & 只能检查表面特征；无法评估语义质量 & 低 & IFEval, BLEU, pass@k \\
+\midrule
+LLM-as-judge & 速度与质量的折中；可大规模运行 & 存在位置偏差、长度偏差和自我偏好；与人类判断有系统性偏移 & 中 & AlpacaEval, MT-Bench \\
+\bottomrule
+\end{tabular}
+\caption{三种评估方法的系统性对比}
+\end{table}
+
+LLM-as-judge 的具体偏差模式值得展开：
+\begin{itemize}
+    \item \textbf{位置偏差}：在 pairwise 比较中，judge 倾向于选择第一个（或第二个）位置的回答，与内容无关。缓解方法是随机交换位置后取平均。
+    \item \textbf{长度偏差}：更长的回答通常被 judge 评为更好，即使额外内容没有信息量。
+    \item \textbf{自我偏好}：GPT-4 作为 judge 时会倾向于给 GPT-4 的回答更高分；Claude 作为 judge 也类似。
+    \item \textbf{风格偏差}：更``礼貌''、更``结构化''的回答（用列表、标题等格式）通常得分更高，即使简洁的回答可能更有用。
+\end{itemize}
+
+\subsection{主要 Leaderboard 对比}
+
+不同的 leaderboard 在设计哲学上有根本差异：
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{2.5cm}p{2.8cm}p{2.8cm}p{2.5cm}p{2.5cm}}
+\toprule
+\textbf{Leaderboard} & \textbf{评估方式} & \textbf{覆盖范围} & \textbf{更新频率} & \textbf{主要局限} \\
+\midrule
+HELM & 标准化自动评估；统一 prompt 和 metric & 多任务、多维度（准确率、鲁棒性、公平性、效率） & 定期 & 任务选择偏保守；更新慢于 frontier \\
+\midrule
+Chatbot Arena & 真实用户 pairwise 投票 & 综合对话能力 & 实时 & 用户群体不均匀；prompt 分布偏向编程和英语 \\
+\midrule
+Open LLM Leaderboard & 固定 benchmark 套件自动评估 & 开源模型为主；知识+推理任务 & 较快 & 容易被过拟合；benchmark 组合会变动 \\
+\bottomrule
+\end{tabular}
+\caption{三个主流 leaderboard 的设计哲学和适用场景}
+\end{table}
+
+\begin{knowledgebox}{如何交叉使用多个 leaderboard}
+单个 leaderboard 就像从一个角度看一个多面体——你只能看到部分面。实际做模型选型时，建议至少交叉参考两到三个不同哲学的排行榜：一个看自动 benchmark（如 HELM 或 Open LLM Leaderboard），一个看人类偏好（如 Chatbot Arena），一个看实际部署指标（如 Artificial Analysis 的成本-性能前沿）。如果一个模型在三个维度上都排名靠前，比只在一个维度上领先更值得信赖。
+\end{knowledgebox}
+

@@ -1,0 +1,123 @@
+\section{案例研究二：MiniCPM}
+
+\subsection{模型概述与动机}
+
+MiniCPM 来自中国的研究团队，目标是训练\textbf{高质量的小语言模型}（1.2B--2.4B 参数），通过大量计算实现远超同规模模型的性能。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-007.jpg}
+\caption{MiniCPM 概述：1.2B--2.4B 参数模型，在当时击败了大多数同规模模型，甚至匹配了部分 7B 模型\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第8页。}
+
+\begin{knowledgebox}{MiniCPM 的研究价值}
+讲者指出，MiniCPM 虽然在西方学术圈没有获得足够关注，但它是最早展示中国研究组在 scaling 和模型优化方面达到前沿水平的论文之一。其 scaling 研究的深度和质量与 DeepSeek 不相上下。
+\end{knowledgebox}
+
+\subsection{MuP + 超参数搜索}
+
+MiniCPM 同样使用了 MuP 来稳定和简化 scaling 过程。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-008.jpg}
+\caption{MiniCPM 的 MuP 缩放策略：embedding 保持常数，残差连接层按 $\sqrt{\text{layers}}$ 缩放，初始化按 fan-in 缩放，学习率按 width 缩放\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第9页。}
+
+MiniCPM 在超参数搜索和稳定扩展方面与 Cerebras GPT 采用了非常类似的策略：在小规模模型（约 9M--30M 参数）上进行大量超参数搜索，然后利用 MuP 确保学习率等关键超参数在更大规模下保持稳定。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-009.jpg}
+\caption{MiniCPM 的超参数搜索与模型缩放：从小模型（9M--30M）到大模型（0.5B--1B），固定宽高比后仅调整整体规模\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第10页。}
+
+\subsection{学习率稳定性验证}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-010.jpg}
+\caption{MiniCPM 的学习率迁移验证：从小模型（浅色）到大模型（深色），最优学习率始终保持在 $\sim 10^{-2}$ 附近\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第11页。}
+
+\begin{importantbox}{学习率迁移的经验验证}
+如果 MuP 有效，那么从小模型到大模型，最优学习率应保持不变。MiniCPM 的实验清楚地展示了这一点：不同规模的模型在 $\sim 10^{-2}$ 处都达到最低 loss，且 loss 曲线呈现宽阔的 basin（不敏感区域）和陡峭的不稳定边界——这与 Kaplan 论文中的早期观察一致。
+\end{importantbox}
+
+\subsection{WSD 学习率调度：Chinchilla 的高效替代}
+
+MiniCPM 最重要的贡献之一是推广了\textbf{WSD（Warmup-Stable-Decay）学习率调度}。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-012.jpg}
+\caption{WSD vs Cosine 学习率调度对比：WSD 的 stable 阶段可被复用，而 Cosine 的每个终止点对应不同的调度曲线\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第13页。}
+
+\begin{warningbox}{Cosine 学习率的致命缺陷}
+使用 Cosine 学习率调度时，\textbf{不能}从一次训练中取早期 checkpoint 来推断不同数据量下的 scaling 行为。因为不同数据目标对应不同的 Cosine 曲线——短数据训练的 Cosine 下降很快，长数据训练的 Cosine 下降很慢。这意味着要拟合 Chinchilla scaling law，需要对每个数据量-模型规模组合从头训练，计算量接近 $n^2$ 级别。\textbf{很多人在这个问题上踩过坑。}
+\end{warningbox}
+
+WSD 学习率调度分为三个阶段：
+\begin{enumerate}
+    \item \textbf{Warmup}：与 Cosine 相同的升温阶段
+    \item \textbf{Stable}：学习率保持恒定的平坦阶段
+    \item \textbf{Decay}：快速冷却到最小学习率
+\end{enumerate}
+
+\begin{importantbox}{WSD 的核心优势：一次训练，多次复用}
+WSD 的 Stable 阶段是平坦的，这意味着可以共享同一个 Stable 阶段的训练。要获取不同数据量的结果，只需从 Stable 阶段的不同 checkpoint 分别执行 Decay，而不需要从头重新训练。这使得 Chinchilla 式的 data scaling 分析几乎可以在\textbf{一次训练}的成本内完成。
+\end{importantbox}
+
+\subsection{WSD 训练曲线特征}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-013.jpg}
+\caption{WSD 训练曲线（深色线）vs Cosine 训练曲线（浅色线）：WSD 在 Decay 阶段 loss 急剧下降\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第14页。}
+
+WSD 的训练曲线看起来有些``不正常''——在 Stable 阶段，loss 缓慢下降；一旦进入 Decay 阶段，loss 会\textbf{急剧下降}，直到达到终点。这种急剧下降是正常现象，不必担忧。
+
+\begin{knowledgebox}{Cool-down 阶段的重要性}
+实验表明，大部分 loss 的降低发生在 Decay（Cool-down）阶段。如果不执行 Cool-down，会导致巨大的 loss 损失。这揭示了优化器学习率设计的核心权衡：高学习率帮助模型远离初始化点进行探索，而 Cool-down 则让模型在好的区域精细收敛（退火）。
+\end{knowledgebox}
+
+\subsection{Chinchilla 复现与 Token-Parameter 比例}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-015.jpg}
+\caption{MiniCPM 的 Chinchilla 复现：使用方法一（下包络线）和方法三（联合曲线拟合）\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第16页。}
+
+MiniCPM 使用 WSD 学习率调度后，利用方法一和方法三复现了 Chinchilla 分析。他们得到了极高的 token/parameter 比例——\textbf{192:1}。
+
+\begin{warningbox}{192:1 比例的可信度存疑}
+讲者对 MiniCPM 的 192:1 token/parameter 比例持保留态度——这远高于其他任何复现结果。Chinchilla 原始论文得到 20:1，Llama 3 得到约 39:1，Hunyuan 得到 96:1。MiniCPM 团队认为 LLaMA 风格架构和更好的数据质量可以支撑更高的比例，但这一数字仍是一个显著的异常值。
+\end{warningbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-016.jpg}
+\caption{MiniCPM 的 Scaling Law 拟合：code 和 English 的 perplexity 随模型规模和数据量的变化\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第17页。}
+
+\begin{importantbox}{核心 Takeaway：20:1 只是起点}
+Chinchilla 的 20 token/parameter 比例只是一个起点，实际可以远远超越。Llama 3 等现代模型的训练比例远超 20:1，且并没有出现严重的收益递减。不同架构、不同数据质量、不同优化策略都会影响这一最优比例。
+\end{importantbox}
+
+\subsection{本章小结}
+
+MiniCPM 的核心贡献包括：（1）推广了 WSD 学习率调度，使 Chinchilla 式分析的计算成本大幅降低；（2）通过 MuP 实现了学习率的跨规模迁移；（3）展示了超越 Chinchilla 比例的可能性。WSD 现已被广泛采用。
+
+%% ========== Part 4: DeepSeek LLM ==========
+

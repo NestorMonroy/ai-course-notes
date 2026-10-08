@@ -1,0 +1,236 @@
+\section{数据并行：按 batch 切分}
+
+数据并行是最直接的并行方式：\textbf{每个 rank 都持有完整模型，但只处理一部分 batch。} 前向和反向都在本地完成，然后在反向结束后对梯度做 all-reduce，同步所有 worker 的参数更新。
+
+\subsection{工作方式}
+
+\begin{enumerate}
+    \item 将 batch 沿 batch 维度切成多份。
+    \item 每个 rank 拿到自己的本地数据片段。
+    \item 每个 rank 维护一份完整模型副本。
+    \item 本地完成前向、损失和反向。
+    \item 对每层 \texttt{param.grad} 做 all-reduce 平均。
+    \item 各自执行 optimizer step。
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[every node/.style={font=\small, align=center}]
+\node[draw, rounded corners, fill=green!10, minimum width=9cm, minimum height=1cm] (batch) at (0,0) {batch 被切开：rank 0, 1, 2, 3 各自拿到一段};
+\node[draw, rounded corners, fill=green!16, minimum width=9cm, minimum height=1cm, below=0.8cm of batch] (model) {模型完整复制：每个 rank 都有相同的参数副本};
+\draw[->, thick] (-3.5,0) -- (-1.1,0);
+\draw[->, thick] (-1.1,0) -- (1.3,0);
+\draw[->, thick] (1.3,0) -- (3.7,0);
+\draw[->, thick] (3.7,0) -- (6.1,0);
+\end{tikzpicture}
+\caption{数据并行的切分方式：数据分片，模型复制}
+\end{figure}
+
+\begin{importantbox}{DDP 的本质}
+数据并行里，\textbf{参数是复制的，数据是切分的，梯度是同步的。}  
+从优化器视角看，像是每个 rank 都在跑 SGD，但梯度会在每步被强制对齐。
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[every node/.style={font=\small, align=center}]
+\node[draw, rounded corners, fill=blue!8, minimum width=3cm, minimum height=0.8cm] (fwd) at (0,0) {forward\\本地 batch};
+\node[draw, rounded corners, fill=blue!16, minimum width=3cm, minimum height=0.8cm] (bwd) at (4,0) {backward\\本地梯度};
+\node[draw, rounded corners, fill=blue!24, minimum width=3cm, minimum height=0.8cm] (ar) at (8,0) {all-reduce\\梯度平均};
+\node[draw, rounded corners, fill=blue!32, minimum width=3cm, minimum height=0.8cm] (opt) at (12,0) {optimizer\\参数更新};
+\draw[->, thick] (fwd) -- (bwd);
+\draw[->, thick] (bwd) -- (ar);
+\draw[->, thick] (ar) -- (opt);
+\end{tikzpicture}
+\caption{DDP 的关键步骤：本地前向反向之后，只同步梯度}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[every node/.style={font=\small, align=center}]
+\node[draw, rounded corners, fill=red!10, minimum width=3.6cm, minimum height=0.9cm] (loss) at (0,0) {本地 loss 可能不同\\因为看见的 batch 不同};
+\node[draw, rounded corners, fill=red!16, minimum width=3.6cm, minimum height=0.9cm] (sync) at (5,0) {all-reduce 后梯度一致\\参数更新就一致};
+\node[draw, rounded corners, fill=red!22, minimum width=3.6cm, minimum height=0.9cm] (same) at (10,0) {不同 rank 的模型副本\\会继续保持同形};
+\end{tikzpicture}
+\caption{为什么 loss 可以不同，但参数仍一致}
+\end{figure}
+
+\subsection{DDP 的代价与边界}
+
+DDP 的优点是实现简单、计算清晰、适用面广。缺点也很明显：\textbf{模型和优化器状态都要完整复制到每个 GPU 上}。当模型太大时，单纯的数据并行就不够用了。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{3cm}p{4.2cm}p{4.2cm}}
+\toprule
+\textbf{优点} & \textbf{缺点} & \textbf{适用场景} \\
+\midrule
+实现最简单，语义最直观 & 参数和 optimizer state 全复制 & 模型能放进单卡，但 batch 很大 \\
+梯度同步只发生一次/step & 模型越大越吃显存 & 先从 DDP 开始最稳妥 \\
+工程生态成熟 & 不解决超大模型的单卡存储问题 & 训练任务比较常规时 \\
+\bottomrule
+\end{tabular}
+\caption{数据并行的工程权衡}
+\end{table}
+
+\begin{warningbox}{一个需要注意的边界条件}
+如果模型里有依赖整个 batch 统计量的层，比如某些 batch norm 变体，就需要额外考虑跨 rank 的统计同步。讲里这门课主要用的是 MLP 和 transformer 语境，所以经常更接近 layer norm，但工程里这个细节仍然要盯住。
+\end{warningbox}
+
+\subsection{为什么 DDP 不是“把单卡训练复制四份”就结束}
+
+表面上看，DDP 像是每张卡都在独立训练，然后最后把梯度平均一下。但真正的代价还在 \textbf{优化器状态} 和 \textbf{参数副本} 上。以 Adam 为例，除了参数本身，你还要保存一阶、二阶动量；模型一大，这部分显存开销就会很快吃掉空间。
+
+\begin{knowledgebox}{DDP 的隐含成本}
+DDP 省的是“实现复杂度”，不是“模型总内存”。如果参数、梯度、优化器状态加起来已经逼近单卡上限，DDP 只能帮你并行算，不会帮你凭空消失这些状态。
+\end{knowledgebox}
+
+\subsection{内存账本：DDP 到底在占什么}
+
+如果只看参数大小，DDP 似乎很轻松；真正把显存吃掉的，通常是 \textbf{梯度}、\textbf{优化器状态} 和 \textbf{激活}。对于一个参数总量为 $P$ 的模型，在混合精度下一个常见的粗略账本是：
+\[
+M_{\text{DDP}} \approx M_{\text{params}} + M_{\text{grads}} + M_{\text{master}} + M_{\text{Adam}} + M_{\text{act}}.
+\]
+如果参数和梯度用 fp16，各占 $2P$ bytes；master 权重用 fp32，占 $4P$ bytes；Adam 的一阶、二阶动量各用 fp32，占 $8P$ bytes，那么仅静态训练状态就已经接近
+\[
+16P \text{ bytes / parameter}.
+\]
+这也是为什么“模型参数看起来不算离谱”，但一跑训练就爆显存的情况非常常见。
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{3.4cm}p{3.6cm}p{4.4cm}}
+\toprule
+\textbf{状态} & \textbf{每参数占用} & \textbf{谁最容易忽略} \\
+\midrule
+fp16 参数 & 2 bytes & 初学者常只看这个 \\
+fp16 梯度 & 2 bytes & 反向之后会短暂同时存在 \\
+fp32 master weight & 4 bytes & 混合精度训练常见 \\
+Adam m / v & 8 bytes & 真正的大头之一 \\
+activation & 依赖 batch 和层数 & 通常随 microbatch 变化 \\
+\bottomrule
+\end{tabular}
+\caption{训练显存的常见账本}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[font=\small]
+\draw[fill=blue!12] (0,0) rectangle (2.2,0.55) node[midway] {params};
+\draw[fill=blue!22] (0,0.55) rectangle (2.2,1.1) node[midway] {grads};
+\draw[fill=blue!32] (0,1.1) rectangle (2.2,2.2) node[midway] {master};
+\draw[fill=blue!42] (0,2.2) rectangle (2.2,3.3) node[midway] {Adam m/v};
+\node[anchor=west] at (2.55,0.28) {复制到每个 rank};
+\node[anchor=west] at (2.55,0.83) {反向期短暂存在};
+\node[anchor=west] at (2.55,1.65) {混合精度常驻};
+\node[anchor=west] at (2.55,2.75) {最容易吃满显存};
+\end{tikzpicture}
+\caption{DDP 的静态显存构成：看起来是“复制模型”，实际上复制的是整套训练状态}
+\end{figure}
+
+\begin{knowledgebox}{为什么激活也不能忘}
+激活的大小通常跟 local batch、sequence length、隐藏宽度成正比。DDP 只是在数据维度上切开 batch，但如果 local batch 仍然不小，激活一样会把显存顶满。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[every node/.style={font=\small, align=center}]
+\node[draw, rounded corners, fill=blue!10, minimum width=3.5cm, minimum height=1cm] (p) at (0,0) {参数\\每卡一份};
+\node[draw, rounded corners, fill=blue!18, minimum width=3.5cm, minimum height=1cm] (g) at (4.6,0) {梯度\\每步同步};
+\node[draw, rounded corners, fill=blue!26, minimum width=3.5cm, minimum height=1cm] (o) at (9.2,0) {优化器状态\\通常也要复制};
+\draw[->, thick] (p) -- (g);
+\draw[->, thick] (g) -- (o);
+\end{tikzpicture}
+\caption{DDP 不只是同步梯度，背后还要承担参数和优化器状态的常驻内存}
+\end{figure}
+
+\begin{knowledgebox}{为什么数据并行仍然是默认起点}
+因为它最接近“把单卡训练复制 N 份再同步”的直觉，最容易调试，也最容易验证正确性。很多复杂并行策略最终仍会回到数据并行作为外层骨架。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={数据并行的极简理解},label={lst:ddp}]
+x = local_batch
+for W in params:
+    x = gelu(x @ W)
+loss = x.square().mean()
+loss.backward()
+for W in params:
+    dist.all_reduce(W.grad, op=AVG)
+optimizer.step()
+\end{lstlisting}
+
+\subsection{一个 DDP 的数值化判断}
+
+假设模型总参数量是 $200\,\text{M}$，那么仅静态训练状态大约就是
+\[
+200\,\text{M} \times 16 \text{ bytes} \approx 3.2\,\text{GiB}.
+\]
+如果再加上中间激活、通信缓冲区和框架开销，单卡显存很容易被迅速吃满。这个算式的意义不是精确到最后一位，而是帮助你判断：\textbf{当模型已经接近单卡极限时，DDP 只是把问题复制了多份，并没有把问题消掉。}
+
+\begin{warningbox}{DDP 的一个常见误判}
+很多人会把”每卡只看 local batch”误解成”显存会很省”。实际上 local batch 小了以后，激活会下降，但参数、梯度和 Adam 状态没有因此变少，所以 DDP 的总显存仍然可能很高。
+\end{warningbox}
+
+\subsection{Worked Example：Llama 2 13B 的 DDP 通信开销}
+
+为了建立对真实模型通信代价的直觉，我们用 Llama 2 13B 作为算例：
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{4cm}p{3cm}p{5cm}}
+\toprule
+\textbf{参数} & \textbf{数值} & \textbf{说明} \\
+\midrule
+总参数量 & 13B & 130 亿参数 \\
+参数精度 & fp16 (2 bytes) & 混合精度训练 \\
+梯度大小 & $13\text{B} \times 2 = 26\,\text{GB}$ & 每个参数一个梯度 \\
+GPU 数 & 4 & 同一节点，NVLink 连接 \\
+互联带宽 & 450 GB/s (有效) & NVLink 4.0 单向有效带宽 \\
+\bottomrule
+\end{tabular}
+\caption{Llama 2 13B DDP 通信开销计算的基本参数}
+\end{table}
+
+每步训练需要做一次梯度 all-reduce。Ring all-reduce 下，每个 rank 的通信量为：
+\[
+V_{\text{comm}} = 2 \cdot \frac{p-1}{p} \cdot S = 2 \times \frac{3}{4} \times 26\,\text{GB} = 39\,\text{GB}
+\]
+
+通信耗时估算：
+\[
+T_{\text{comm}} = \frac{V_{\text{comm}}}{B_{\text{eff}}} = \frac{39\,\text{GB}}{450\,\text{GB/s}} \approx 87\,\text{ms}
+\]
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{4.5cm}p{3cm}p{4.5cm}}
+\toprule
+\textbf{项目} & \textbf{估算值} & \textbf{占比分析} \\
+\midrule
+单步前向 + 反向 (A100) & $\sim$200--400 ms & 计算主体 \\
+梯度 all-reduce (NVLink) & $\sim$87 ms & 通信可与反向重叠 \\
+梯度 all-reduce (InfiniBand) & $\sim$975 ms & 跨节点会严重拖慢训练 \\
+梯度 all-reduce (100G Ethernet) & $\sim$3900 ms & 基本不可用 \\
+\bottomrule
+\end{tabular}
+\caption{Llama 2 13B 在不同互联下的通信开销对比}
+\end{table}
+
+\begin{importantbox}{DDP 的通信可以与计算重叠}
+PyTorch DDP 的一个关键优化是：不必等所有层的反向都结束再做 all-reduce。当最后一层的梯度算完，就可以立即开始该层的 all-reduce，同时继续计算倒数第二层的梯度。这种 \textbf{bucket gradient all-reduce} 让通信和计算在时间上重叠，实际的额外延迟远小于 87 ms。但这要求通信带宽足够高——如果通信比计算还慢，重叠也无法完全隐藏延迟。
+\end{importantbox}
+
+\begin{knowledgebox}{DDP 的显存账单}
+Llama 2 13B 在 DDP 下，每张卡需要存储：
+\begin{itemize}
+    \item fp16 参数：$13\text{B} \times 2 = 26\,\text{GB}$
+    \item fp16 梯度：$26\,\text{GB}$
+    \item fp32 master 权重：$13\text{B} \times 4 = 52\,\text{GB}$
+    \item Adam 一阶/二阶动量：$13\text{B} \times 8 = 104\,\text{GB}$
+\end{itemize}
+仅静态状态就需要 $\sim$208 GB，远超单张 A100 (80 GB) 或 H100 (80 GB) 的显存。这就是为什么 13B 及以上模型几乎不可能用纯 DDP 训练——必须引入 ZeRO 或模型并行。
+\end{knowledgebox}
+

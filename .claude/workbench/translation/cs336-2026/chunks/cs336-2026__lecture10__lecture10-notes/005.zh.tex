@@ -1,0 +1,29 @@
+\section{Handling dynamic workloads：continuous batching}
+
+前面的 shortcut 都假设已经有一个 batch，但在线服务中的请求会持续到达、长度不同、结束时间也不同。本部分把优化对象从单条序列提升到调度器：系统必须在每个 decoding step 重新选择活跃请求，让已完成序列立即退出、新请求及时加入，并控制 cache 与公平性。
+
+真实推理流量不是训练中的矩形 batch。请求到达时间不同、prompt 长度不同、生成长度不同，还可能共享 system prompt 或要求多样本生成。静态 batching 会让早到请求等待，也会因 padding 浪费大量计算。
+
+\begin{knowledgebox}{课堂提示：动态流量先变成 ragged array，再拆算子 batching}
+老师把训练与推理的形状差异概括为 dense block 对 ragged array。Iteration-level scheduling 每个 decode step 加入新请求、移除完成请求；selective batching 再区分算子：attention 按各自长度分别处理，non-attention 部分把 \([3,H],[9,H],[5,H]\) 拼成 \([17,H]\) 做大矩阵计算。动态 batching 不是把所有张量硬 pad 成同一长度。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{continuous-batching-static.png}
+\caption{静态 batching 的问题：请求长度和到达时间不同，等待和 padding 都会浪费。}
+\figsource{Orca/continuous batching diagram，本地化后供 CS336 Lecture 10 使用。}
+\end{figure}
+
+\begin{knowledgebox}{读图：continuous batching 解决哪个问题}
+图中不同请求像长度不一的条带。训练可以把 \(B\times S\times H\) 看成稠密矩形；推理则是 ragged array。Iteration-level scheduling 每个 decode step 都可以加入新请求、移除完成请求，让 GPU 更持续地工作。
+\end{knowledgebox}
+
+\begin{importantbox}{selective batching 的核心}
+Attention 需要按 sequence 单独处理，因为每个请求历史长度不同；non-attention MLP 等操作可以把所有 active tokens concatenate 成 \([3+9+5,H]\) 这样的矩阵统一计算。服务系统要在“保持语义正确”和“形成大矩阵乘”之间拆算子。
+\end{importantbox}
+
+\begin{knowledgebox}{讲义提醒：动态 batching 的难点是 tail，不是平均值}
+平均 token 长度会掩盖少量超长请求对显存和排队的影响。调度器需要关注 p95/p99 latency、请求取消、优先级、prefill/generation 混排和 cache eviction；只在固定长度 synthetic benchmark 上测吞吐，很容易高估线上收益。
+\end{knowledgebox}
+

@@ -1,0 +1,102 @@
+\section{Tokenization：语言模型的输入接口}
+
+从模型发展历史回到 Assignment 1 的可实现对象，本节先处理最前端接口。语言模型不直接操作 Python string，而是操作整数 token 序列；tokenizer 在 raw text/bytes 和 token IDs 之间转换，并决定序列长度、词表覆盖、未知字符处理和每个训练样本实际消耗的 compute。
+
+\begin{knowledgebox}{课堂提示：tokenizer 不是可随意替换的预处理器}
+老师强调，token IDs 决定 embedding lookup 和训练序列边界。更换 tokenizer 会改变平均 tokens/byte、长文本长度、代码与多语言表示，甚至让已有 checkpoint 无法直接复用；因此 tokenizer vocabulary 和 normalization 规则都属于模型规格的一部分。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{tokenized-example.png}
+\caption{Tokenizer 把原始字符串切成 token，并把每个 token 映射为整数 ID。}
+\figsource{CS336 Spring 2026 Lecture 1 官方可执行讲义，\texttt{basics()}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：tokenized example 说明什么}
+图中同一段文本被切成不同 token。Token 不一定是词：可能包含前导空格、词片段、标点、emoji 或多字节字符。同一句文本用不同 tokenizer 会得到不同长度和 ID 序列，因此 tokenizer 是模型 API 的一部分。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Tokenizer 抽象接口}]
+class Tokenizer:
+    def encode(self, string: str) -> list[int]:
+        raise NotImplementedError
+
+    def decode(self, indices: list[int]) -> str:
+        raise NotImplementedError
+\end{lstlisting}
+
+\subsection{三种朴素 tokenizer}
+
+\begin{longtable}{p{0.15\textwidth}p{0.23\textwidth}p{0.23\textwidth}p{0.25\textwidth}}
+\toprule
+\textbf{方案} & \textbf{机制} & \textbf{优点} & \textbf{失败点} \\
+\midrule
+Character & Unicode code point & 直观，可 round-trip & 词表大，稀有字符浪费容量，压缩率低。 \\
+Byte & UTF-8 bytes，0--255 & 小固定词表，永不 OOV & 序列长，attention 成本高。 \\
+Word & regex/空格切词 & token 有语义，压缩率好 & 词表无限，稀有词多，需要 UNK。 \\
+\bottomrule
+\end{longtable}
+
+\begin{warningbox}{UNK token 为什么麻烦}
+Word tokenizer 遇到未见词会映射成 UNK。不同未知词被压成同一个符号，模型无法区分，perplexity 也会被扭曲。现代 LLM 更偏向 byte-level 或 subword 方法，因为它们至少能表示任意字符串。
+\end{warningbox}
+
+\subsection{BPE：从 bytes 到常见片段}
+
+Byte Pair Encoding 从 byte token 开始，反复合并最常见的相邻 token pair。常见片段变成短 token，稀有片段仍由多个 byte/subword 表示。
+
+\begin{lstlisting}[caption={BPE merge 的核心逻辑}]
+def merge(indices, pair, new_index):
+    new_indices = []
+    i = 0
+    while i < len(indices):
+        if i + 1 < len(indices) and (indices[i], indices[i+1]) == pair:
+            new_indices.append(new_index)
+            i += 2
+        else:
+            new_indices.append(indices[i])
+            i += 1
+    return new_indices
+\end{lstlisting}
+
+\begin{longtable}{p{0.18\textwidth}p{0.34\textwidth}p{0.38\textwidth}}
+\toprule
+\textbf{步骤} & \textbf{做什么} & \textbf{为什么重要} \\
+\midrule
+初始化 & 词表为 256 个 bytes & 能表示任意 UTF-8 字符串，不需要 UNK。 \\
+统计 pair & 统计相邻 token pair 出现次数 & 找出最值得压缩的局部片段。 \\
+merge & 把最高频 pair 替换为新 token & 缩短序列长度，降低 attention 成本。 \\
+重复 & 执行固定次数 merge & 在词表大小和压缩率之间折中。 \\
+encode/decode & 用 learned merges 编码，再按 vocab 还原 bytes & 让 tokenizer 成为可复用协议。 \\
+\bottomrule
+\end{longtable}
+
+\begin{importantbox}{BPE 为什么是强 baseline}
+BPE 比 byte tokenizer 短得多，比 word tokenizer 更开放，训练简单，部署稳定。它不是最终答案，但在有限 context 和有限 compute 下非常实用。
+\end{importantbox}
+
+\begin{warningbox}{BPE 的 off-by-one 风险}
+合并一个 pair 后，指针必须跳过两个旧 token。否则会重复使用已经合并的 token，得到错误 tokenization。这类细节正是 assignment 1 要学生亲手实现的原因。
+\end{warningbox}
+
+\subsection{Assignment 1}
+
+Assignment 1 要求实现 BPE tokenizer、Transformer、cross-entropy loss、AdamW optimizer、training loop，并在 TinyStories 与 OpenWebText 上训练。Leaderboard 要在固定 B200 时间预算内最小化 OpenWebText perplexity。
+
+\begin{importantbox}{Assignment 1 的真正目标}
+它不是让你“跑一个模型”，而是让你第一次把 tokenizer、architecture、loss、optimizer、training loop 和 resource accounting 连接起来。后续所有单元都建立在这条链上。
+\end{importantbox}
+
+\begin{knowledgebox}{Training 超参数导读}
+第一讲列出的 optimizer、initialization scale、learning-rate schedule、regularization、batch size、MoE load balancing 都会在后续拆开。这里先给直觉：optimizer 决定梯度如何变成参数更新；initialization 决定训练开始时信号尺度是否健康；learning-rate schedule 决定不同阶段的更新强度；batch size 影响梯度噪声和硬件利用率；MoE load balancing 防止 router 把所有 token 都送到少数 experts。它们共同服务于三件事：expressivity、stability、efficiency。
+\end{knowledgebox}
+
+\begin{warningbox}{perplexity leaderboard 不等于模型全能力}
+Assignment 1 的 leaderboard 用 OpenWebText perplexity，是因为它能稳定衡量 next-token prediction 的基本能力，也便于在固定时间预算下比较 recipe。但 PPL 低不代表模型更会推理、更会对话或更安全。后续 evaluation 和 alignment 单元会把“语言建模指标”和“真实任务质量”区分开。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Tokenization 是语言模型的输入协议。Character、byte、word tokenizer 都有明显失败点；BPE 用数据驱动的 merge 在开放词表和序列长度之间取得折中。它看似预处理，却直接影响训练效率和模型行为。
+

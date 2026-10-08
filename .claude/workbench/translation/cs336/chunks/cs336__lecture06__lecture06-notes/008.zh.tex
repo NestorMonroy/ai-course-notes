@@ -1,0 +1,133 @@
+\section{Triton 内核编写}
+
+\subsection{Triton 简介}
+
+Triton 由 OpenAI 于 2021 年发布，目标是让 GPU 编程更易上手：
+
+\begin{itemize}
+    \item \textbf{用 Python 编写}——无需 C++
+    \item \textbf{以 Block 为思考单位}——而非线程
+    \item 编译器自动处理许多底层细节
+\end{itemize}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{职责} & \textbf{CUDA} & \textbf{Triton} \\
+\midrule
+内存合并（Coalescing） & 手动 & 自动 \\
+共享内存管理 & 手动 & 自动 \\
+SM 内线程调度 & 手动 & 自动 \\
+跨 SM 调度 & 手动 & 手动 \\
+\bottomrule
+\end{tabular}
+\caption{CUDA vs Triton 的职责划分}
+\end{table}
+
+\begin{importantbox}{Triton 的定位}
+Triton 在 CUDA 和 PyTorch 之间找到了一个甜蜜点：比 PyTorch 更底层（可以实现自定义融合内核），比 CUDA 更高层（编译器处理内存合并和共享内存）。对于许多操作，Triton 的性能可以\textbf{超越} PyTorch 内置实现。
+\end{importantbox}
+
+\subsection{GeLU 的 Triton 实现}
+
+\subsubsection{包装器函数（CPU 端）}
+
+\begin{lstlisting}[caption={Triton GeLU 包装器}]
+def triton_gelu(x: torch.Tensor):
+    assert x.is_cuda
+    assert x.is_contiguous()
+
+    y = torch.empty_like(x)  # 分配输出
+
+    num_elements = x.numel()
+    block_size = 1024         # 每个 Block 处理的元素数
+    num_blocks = triton.cdiv(num_elements, block_size)
+
+    # 启动内核
+    triton_gelu_kernel[(num_blocks,)](
+        x, y, num_elements, BLOCK_SIZE=block_size
+    )
+    return y
+\end{lstlisting}
+
+\subsubsection{内核函数（GPU 端）}
+
+\begin{lstlisting}[caption={Triton GeLU 内核}]
+@triton.jit
+def triton_gelu_kernel(x_ptr, y_ptr, num_elements,
+                       BLOCK_SIZE: tl.constexpr):
+    # 计算当前 Block 的起始位置
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+
+    # 当前 Block 负责的元素索引（向量！）
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+
+    # 边界掩码
+    mask = offsets < num_elements
+
+    # 读取数据
+    x = tl.load(x_ptr + offsets, mask=mask)
+
+    # 计算 GeLU（用 exp 实现 tanh）
+    a = 0.79788456 * (x + 0.044715 * x * x * x)
+    exp = tl.exp(2 * a)
+    tanh = (exp - 1) / (exp + 1)
+    y = 0.5 * x * (1 + tanh)
+
+    # 写回结果
+    tl.store(y_ptr + offsets, y, mask=mask)
+\end{lstlisting}
+
+\begin{importantbox}{Triton vs CUDA 的关键区别}
+\begin{itemize}
+    \item \textbf{CUDA}：每个线程处理\textbf{一个}元素，索引 $i$ 是\textbf{标量}
+    \item \textbf{Triton}：每个 Block 处理\textbf{一组}元素，\texttt{offsets} 是\textbf{向量}
+\end{itemize}
+Triton 让你在 Block 层面思考，编译器自动决定如何将向量操作映射到线程。这使得编译器可以执行更多优化（如 thread coarsening）。
+\end{importantbox}
+
+\subsection{PTX：查看 GPU ``汇编''代码}
+
+PTX（Parallel Thread Execution）是 NVIDIA GPU 的虚拟指令集，类似于 CPU 的汇编语言。Triton 编译后生成 PTX 代码，我们可以检查它来理解 GPU 实际执行的操作：
+
+\begin{knowledgebox}{PTX 代码的关键特征}
+\begin{itemize}
+    \item \texttt{ld.global.*}：从全局内存读取
+    \item \texttt{st.global.*}：写入全局内存
+    \item \texttt{\%ctaid.x}：Block 索引（对应 \texttt{blockIdx.x}）
+    \item \texttt{\%tid.x}：线程索引（对应 \texttt{threadIdx.x}）
+    \item \texttt{\%f*}：浮点寄存器，\texttt{\%r*}：整数寄存器
+\end{itemize}
+一个重要发现：\textbf{一个线程同时处理 8 个元素}（thread coarsening）——这是 Triton 编译器自动执行的优化，在 CUDA 中需要手动实现。
+\end{knowledgebox}
+
+\subsection{GeLU 五种实现的完整对比}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcccl}
+\toprule
+\textbf{实现} & \textbf{耗时 (ms)} & \textbf{语言} & \textbf{融合} & \textbf{说明} \\
+\midrule
+Manual & $\sim$8.1 & Python & 否 & 多个 CUDA 内核 \\
+CUDA & $\sim$1.8 & C++ & 是 & 单内核，手动编写 \\
+Triton & $\sim$1.5 & Python & 是 & 单内核，编译器优化 \\
+torch.compile & $\sim$1.47 & Python & 是 & 自动生成 Triton 代码 \\
+PyTorch & $\sim$1.1 & C++ & 是 & 高度手工优化 \\
+\bottomrule
+\end{tabular}
+\caption{GeLU 五种实现的完整性能对比（$16384 \times 16384$ 矩阵）}
+\end{table}
+
+\begin{knowledgebox}{Triton 实际上比我们的 CUDA 实现更快}
+虽然 CUDA 给了你``完全控制''，但 Triton 编译器可以执行 thread coarsening、自动内存合并等优化。对于简单内核，编译器的优化往往比手写的天真 CUDA 代码更好。当然，精心优化的 CUDA 代码可以更快，但开发成本高得多。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+Triton 提供了 CUDA 级别的性能和 Python 级别的开发体验。它以 Block 为编程单元，编译器自动处理内存合并和共享内存管理。对于逐元素操作，Triton 代码的结构与 CUDA 非常相似，但用 Python 编写且更易调试。
+
+%% ========== Section 8: torch.compile ==========
+

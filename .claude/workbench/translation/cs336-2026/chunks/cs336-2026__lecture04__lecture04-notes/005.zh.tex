@@ -1,0 +1,152 @@
+\section{Routing：token 如何选择 experts}
+
+本节解释 routing function、top-k routing、token-choice、shared experts、fine-grained experts 和近期模型配置。
+
+
+\begin{knowledgebox}{术语消化：router、top-k、shared experts、fine-grained experts}
+Router 为每个 token 产生 expert scores；top-k routing 选择分数最高的 k 个 experts；shared experts 总是被激活，提供公共容量；fine-grained experts 把专家切得更小更多，提高组合灵活性但增加路由和通信复杂度。
+\end{knowledgebox}
+\[
+\mathrm{MoE}(x)=\sum_{e\in \mathrm{TopK}(r(x))} g_e(x)E_e(x),
+\]
+其中 \(r(x)\) 是 router logits，\(g_e(x)\) 是路由权重，\(E_e\) 是第 \(e\) 个 expert。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-024.jpg}
+\caption{Slide 25: What MoEs generally look like}
+\figsource{CS336 Spring 2026 Lecture 4 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}Typical: replace MLP with MoE layer   Less common: MoE for attention heads
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-025.jpg}
+\caption{Slide 26: MoE – what varies?}
+\figsource{CS336 Spring 2026 Lecture 4 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{读图说明：}“What varies”不是列名词，而是在定义 MoE 的设计空间：router 输入用什么表示、每个 token 选择几个 experts、是否共享 expert、capacity factor 多大、溢出 token 如何处理、是否加入 load-balancing loss，以及 experts 如何跨设备放置。两个模型都叫 MoE，不代表它们的训练稳定性、通信量和推理延迟可直接比较。
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-026.jpg}
+\caption{Slide 27: Routing function - overview}
+\figsource{CS336 Spring 2026 Lecture 4 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{读图说明：}Router 通常把 token hidden state $x$ 映射为 expert logits $r(x)$，再执行 top-$k$ 选择与归一化。真正困难的不只是“选最大值”：top-$k$ 是离散操作，负载可能集中到少数 experts；归一化范围、噪声、capacity 限制与 auxiliary loss 都会改变梯度。读图应同时追踪 routing quality 和每张设备实际收到的 token 数。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-027.jpg}
+\caption{Slide 28：Routing types；token-choice、expert-choice 与 learned routing 的关系。}
+\figsource{CS336 Spring 2026 Lecture 4 官方幻灯片。}
+\end{figure}
+
+
+
+\noindent\textbf{读图说明：}Token-choice routing 让每个 token 选择 experts，实现简单且最常见；expert-choice routing 则让每个 expert 从 token 池中挑选固定数量样本，更容易控制负载，却可能让某些 token 无 expert 或被多个 experts 重复选择。两者优化对象不同：前者优先保证 token 获得计算，后者优先保证设备工作量均衡，不能只按最终 loss 比较。
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-028.jpg}
+\caption{Slide 29: Common routing variants in detail}
+\figsource{CS336 Spring 2026 Lecture 4 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{读图说明：}常见 top-$k$ 变体围绕三个约束变化：是否在 top-$k$ 前加入噪声促进探索，是否设置 per-expert capacity 并丢弃/旁路溢出 token，以及是否用额外损失逼近均匀负载。图中的流程应从 token 到 router、dispatch、expert compute、combine 依次阅读；任何一步都可能引入 all-to-all 通信或动态 shape，决定真实吞吐。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-029.jpg}
+\caption{Slide 30：其他 routing 方法及其约束方式。}
+\figsource{CS336 Spring 2026 Lecture 4 官方幻灯片。}
+\end{figure}
+
+
+
+\noindent\textbf{展开说明：}RL to learn routes              Used in some of the earliest work
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-030.jpg}
+\caption{Slide 31: Top-K routing in detail.}
+\figsource{CS336 Spring 2026 Lecture 4 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}Most papers do the old and classic top-k routing. How does this work?
+
+\begin{knowledgebox}{读图：Slide 31 应该怎么看}
+这页是机制或证据页。先看它比较的是 compute、参数量、routing、负载均衡还是通信；再看结论支持的是质量提升、训练速度、推理成本还是系统复杂度。MoE 和 attention alternatives 的图常把模型结构和系统代价混在一起，读图时要分清“算法机制”和“硬件执行成本”。
+\end{knowledgebox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-031.jpg}
+\caption{Slide 32: Recent variations from DeepSeek and other Chinese LMs}
+\figsource{CS336 Spring 2026 Lecture 4 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}Smaller, larger number of experts + a few shared experts that are always on.
+
+\begin{knowledgebox}{读图：Slide 32 应该怎么看}
+这页是机制或证据页。先看它比较的是 compute、参数量、routing、负载均衡还是通信；再看结论支持的是质量提升、训练速度、推理成本还是系统复杂度。MoE 和 attention alternatives 的图常把模型结构和系统代价混在一起，读图时要分清“算法机制”和“硬件执行成本”。
+\end{knowledgebox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-032.jpg}
+\caption{Slide 33: Various ablations from the DeepSeek paper}
+\figsource{CS336 Spring 2026 Lecture 4 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}More experts, shared experts all seem to generally help
+
+\begin{knowledgebox}{读图：Slide 33 应该怎么看}
+这页是机制或证据页。先看它比较的是 compute、参数量、routing、负载均衡还是通信；再看结论支持的是质量提升、训练速度、推理成本还是系统复杂度。MoE 和 attention alternatives 的图常把模型结构和系统代价混在一起，读图时要分清“算法机制”和“硬件执行成本”。
+\end{knowledgebox}
+
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-033.jpg}
+\caption{Slide 34：fine-grained experts 与 shared experts 的消融结果。}
+\figsource{CS336 Spring 2026 Lecture 4 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}Gains from fine-grained experts, none from shared experts. 这页提醒读者不要把 architecture diagram 当作因果证据：更多小 experts 可能提高组合空间，而 shared experts 的收益会依赖数据、路由和容量配置。正确做法是在相同 active FLOPs、相同总参数和相同 routing budget 下分别消融。
+
+\begin{knowledgebox}{Routing 的三层失败模式}
+算法层可能出现 router collapse，让多数 token 选择少数 experts；统计层可能出现某些 experts 只学习高频模式，长尾 token 得不到容量；系统层则表现为 device load imbalance、capacity overflow 和 all-to-all 尾延迟。Auxiliary loss、bias adjustment、expert-choice 和 stochastic routing 分别针对不同层，不能互相替代。
+\end{knowledgebox}
+
+\begin{knowledgebox}{讲义补充：源 Slide 34 应该怎么看}
+这页是机制或证据页。先看它比较的是 compute、参数量、routing、负载均衡还是通信；再看结论支持的是质量提升、训练速度、推理成本还是系统复杂度。MoE 和 attention alternatives 的图常把模型结构和系统代价混在一起，读图时要分清“算法机制”和“硬件执行成本”。
+\end{knowledgebox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-034.jpg}
+\caption{Slide 35: Expert routing setups for recent MoEs}
+\figsource{CS336 Spring 2026 Lecture 4 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}Model                Routed   Active   Shared   Fine-grained ratio
+
+\begin{knowledgebox}{读图：Slide 35 应该怎么看}
+这页是机制或证据页。先看它比较的是 compute、参数量、routing、负载均衡还是通信；再看结论支持的是质量提升、训练速度、推理成本还是系统复杂度。MoE 和 attention alternatives 的图常把模型结构和系统代价混在一起，读图时要分清“算法机制”和“硬件执行成本”。
+\end{knowledgebox}
+
+\subsection{本章小结}
+本节的共同线索是 selective computation：通过结构选择让 token 不必总是访问所有历史或所有参数。但选择性越强，越需要额外机制保证信息流、负载均衡和训练稳定。
+

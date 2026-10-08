@@ -1,0 +1,138 @@
+\subsection{朴素推理与 KV Cache}
+
+\textbf{朴素推理}：生成每个 token 时，将整个历史序列送入 Transformer。生成 $T$ 个 token 需要 $O(T^3)$ FLOPs（每次前向传播 $O(T^2)$）。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    token/.style={draw, minimum width=0.8cm, minimum height=0.8cm, align=center, font=\footnotesize},
+    trans/.style={draw, fill=blue!10, minimum width=1cm, minimum height=0.6cm, align=center, font=\footnotesize},
+    arrow/.style={->, thick, >=stealth}
+]
+% Step 1
+\node[font=\small\bfseries] at (0, 2.5) {Step 1};
+\node[token, fill=gray!20] (p1a) at (-0.8, 1.5) {A};
+\node[token, fill=gray!20] (p1b) at (0, 1.5) {B};
+\node[token, fill=gray!20] (p1c) at (0.8, 1.5) {C};
+\node[trans] (t1) at (0, 0.5) {Transformer};
+\node[token, fill=green!20] (o1) at (0, -0.3) {D};
+\draw[arrow] (0, 1.1) -- (t1);
+\draw[arrow] (t1) -- (o1);
+
+% Step 2
+\node[font=\small\bfseries] at (3.5, 2.5) {Step 2};
+\node[token, fill=gray!20] (p2a) at (2.3, 1.5) {A};
+\node[token, fill=gray!20] (p2b) at (3.1, 1.5) {B};
+\node[token, fill=gray!20] (p2c) at (3.9, 1.5) {C};
+\node[token, fill=green!20] (p2d) at (4.7, 1.5) {D};
+\node[trans] (t2) at (3.5, 0.5) {Transformer};
+\node[token, fill=green!20] (o2) at (3.5, -0.3) {E};
+\draw[arrow] (3.5, 1.1) -- (t2);
+\draw[arrow] (t2) -- (o2);
+
+% Step 3
+\node[font=\small\bfseries] at (7.5, 2.5) {Step 3};
+\node[token, fill=gray!20] (p3a) at (5.9, 1.5) {A};
+\node[token, fill=gray!20] (p3b) at (6.7, 1.5) {B};
+\node[token, fill=gray!20] (p3c) at (7.5, 1.5) {C};
+\node[token, fill=green!20] (p3d) at (8.3, 1.5) {D};
+\node[token, fill=green!20] (p3e) at (9.1, 1.5) {E};
+\node[trans] (t3) at (7.5, 0.5) {Transformer};
+\node[token, fill=green!20] (o3) at (7.5, -0.3) {F};
+\draw[arrow] (7.5, 1.1) -- (t3);
+\draw[arrow] (t3) -- (o3);
+
+% Annotation
+\draw[red, thick, decorate, decoration={brace, amplitude=5pt, mirror}] (2.3, 1.0) -- (3.9, 1.0) node[midway, below=6pt, font=\footnotesize, red]{重复计算!};
+\draw[red, thick, decorate, decoration={brace, amplitude=5pt, mirror}] (5.9, 1.0) -- (8.3, 1.0) node[midway, below=6pt, font=\footnotesize, red]{重复计算!};
+\end{tikzpicture}
+\caption{朴素推理：每步都重新处理整个序列，灰色为 prompt，绿色为已生成 token。前缀部分的计算完全冗余。}
+\end{figure}
+
+\begin{knowledgebox}{观察：前缀计算的冗余}
+在因果（自回归）Transformer 中，由于 causal mask 的存在，生成第 $t$ 个 token 时，前 $t-1$ 个 token 的中间表示与之前完全相同。这些计算是完全冗余的。注意：这一性质仅对单向（causal）Transformer 成立。对于双向 Transformer（如 BERT），新增 token 会改变所有位置的表示。
+\end{knowledgebox}
+
+\textbf{解决方案}：\textbf{KV Cache}——将每一层注意力计算中的 Key 和 Value 向量缓存在 HBM 中，后续生成时直接复用。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    token/.style={draw, minimum width=0.8cm, minimum height=0.8cm, align=center, font=\footnotesize},
+    cache/.style={draw, fill=orange!15, minimum width=0.8cm, minimum height=0.8cm, align=center, font=\footnotesize},
+    trans/.style={draw, fill=blue!10, minimum width=1cm, minimum height=0.6cm, align=center, font=\footnotesize},
+    arrow/.style={->, thick, >=stealth}
+]
+% Prefill
+\node[font=\small\bfseries] at (0, 3) {Prefill};
+\node[token, fill=gray!20] at (-0.8, 2) {A};
+\node[token, fill=gray!20] at (0, 2) {B};
+\node[token, fill=gray!20] at (0.8, 2) {C};
+\node[trans] (tp) at (0, 1) {Transformer};
+\draw[arrow] (0, 1.6) -- (tp);
+
+\node[cache] at (-0.8, -0.2) {$k_A$};
+\node[cache] at (0, -0.2) {$k_B$};
+\node[cache] at (0.8, -0.2) {$k_C$};
+\draw[arrow] (tp) -- (0, -0.2+0.4);
+\node[font=\footnotesize] at (0, -0.9) {KV Cache};
+
+\node[token, fill=green!20] at (0, 1) {};
+\node[font=\footnotesize] at (2.2, 1) {$\rightarrow$ D};
+
+% Generate step 1
+\node[font=\small\bfseries] at (5, 3) {Generate 1};
+\node[token, fill=green!20] at (5, 2) {D};
+\node[trans] (tg1) at (5, 1) {Transformer};
+\draw[arrow] (5, 1.6) -- (tg1);
+
+\node[cache] at (3.8, -0.2) {$k_A$};
+\node[cache] at (4.6, -0.2) {$k_B$};
+\node[cache] at (5.4, -0.2) {$k_C$};
+\node[cache, fill=green!10] at (6.2, -0.2) {$k_D$};
+\draw[arrow, dashed] (tg1) -- (5, -0.2+0.4);
+\node[font=\footnotesize] at (5, -0.9) {KV Cache（扩展）};
+
+\node[font=\footnotesize] at (7.2, 1) {$\rightarrow$ E};
+
+% Generate step 2
+\node[font=\small\bfseries] at (10, 3) {Generate 2};
+\node[token, fill=green!20] at (10, 2) {E};
+\node[trans] (tg2) at (10, 1) {Transformer};
+\draw[arrow] (10, 1.6) -- (tg2);
+
+\node[cache] at (8.4, -0.2) {$k_A$};
+\node[cache] at (9.2, -0.2) {$k_B$};
+\node[cache] at (10, -0.2) {$k_C$};
+\node[cache, fill=green!10] at (10.8, -0.2) {$k_D$};
+\node[cache, fill=green!10] at (11.6, -0.2) {$k_E$};
+\draw[arrow, dashed] (tg2) -- (10, -0.2+0.4);
+\node[font=\footnotesize] at (10, -0.9) {KV Cache（扩展）};
+\end{tikzpicture}
+\caption{KV Cache 推理：Prefill 阶段并行处理 prompt 并建立缓存，Generation 阶段每步只处理一个新 token，复用缓存中的 K/V 向量。}
+\end{figure}
+
+KV Cache 的大小：对于每个序列、每个 token、每一层、每个 KV 头，存储一个 $H$ 维向量：
+
+$$\text{KV Cache 大小（每序列）} = S \times K \times H \times L \times 2 \times 2 \text{ 字节}$$
+
+其中第一个 $\times 2$ 是 Key + Value，第二个 $\times 2$ 是 bf16 的字节数。
+
+\begin{knowledgebox}{Worked Example：Llama 2 70B 的 KV Cache 大小}
+Llama 2 70B 参数：$K=8$（GQA），$H=128$，$L=80$，$S=4096$。
+
+\textbf{单序列 KV Cache}：
+$$4096 \times 8 \times 128 \times 80 \times 2 \times 2 = 671{,}088{,}640 \text{ 字节} \approx 640 \text{ MB}$$
+
+\textbf{不同批大小下的总 KV Cache}：
+\begin{itemize}
+    \item $B=1$：640 MB
+    \item $B=16$：$640 \times 16 = 10{,}240$ MB $\approx$ 10 GB
+    \item $B=128$：$640 \times 128 = 81{,}920$ MB $\approx$ 80 GB（已占满 H100 的全部 HBM！）
+\end{itemize}
+
+加上模型参数本身约 140 GB（bf16），$B=128$ 时总内存需求约 220 GB，需要至少 3 张 H100。可见 KV Cache 是推理内存的主要瓶颈之一。
+\end{knowledgebox}
+
+使用 KV Cache 后，生成 $T$ 个 token 的复杂度从 $O(T^3)$ 降低到 $O(T^2)$——每步只需要 $O(T)$ 的计算（与缓存中的所有 Key 做点积）。
+

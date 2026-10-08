@@ -1,0 +1,103 @@
+\section{逐节点补充：源码中的资源核算细节}
+
+\subsection{motivating questions 的完整推导}
+
+第一个问题“70B on 15T tokens on 1024 H100s”可以拆成三层：模型计算量、硬件有效速度、训练天数。
+
+\[
+C = 6ND = 6\times 70\times 10^9\times 15\times 10^{12}=6.3\times 10^{24}.
+\]
+
+H100 dense bf16 峰值按 \(1979/2\) TFLOP/s 估算，乘以 MFU 0.5 和 1024 张卡：
+
+\[
+\text{effective FLOP/s}=1024\times 0.5\times 989.5\times 10^{12}.
+\]
+
+训练天数为：
+
+\[
+\frac{6.3\times 10^{24}}{1024\times 0.5\times 989.5\times 10^{12}\times 86400}\approx 144\text{ days}.
+\]
+
+\begin{warningbox}{这个 144 天不是承诺排期}
+它没有算 dataloader、checkpoint、通信、故障恢复、验证、warmup、重启、调参和集群排队。它只是告诉你：这个训练不是“几天跑完”的量级，必须靠 scaling law 和小实验减少盲试。
+\end{warningbox}
+
+第二个问题“8 H100 using AdamW 最大模型”同样要拆开：
+
+\begin{longtable}{p{0.22\textwidth}p{0.24\textwidth}p{0.44\textwidth}}
+\toprule
+\textbf{状态} & \textbf{每参数字节} & \textbf{说明} \\
+\midrule
+参数 & 2 & bf16 参数。 \\
+梯度 & 2 & 训练时 backward 产生，常用 bf16。 \\
+Adam 一阶动量 & 4 & fp32 \(m\)。 \\
+Adam 二阶动量 & 4 & fp32 \(v\)。 \\
+\bottomrule
+\end{longtable}
+
+总计 12 bytes/parameter。8 张 80GB H100 总共 640GB，除以 12 得到约 53B 参数。但这只是参数相关状态，不含 activations，所以真实可训练规模更小。
+
+\subsection{dtype 数值范围为什么影响训练稳定性}
+
+fp16 的问题不是“精度少一点”这么简单，而是 exponent 位数少导致动态范围窄。比如 \(10^{-8}\) 这类小数可能在 fp16 下直接 underflow 成 0；如果梯度或 optimizer 统计出现类似情况，训练会不稳定。bf16 牺牲 mantissa 精度，保留 fp32 的 exponent 宽度，所以更适合大模型训练。
+
+\begin{knowledgebox}{AMP 的实用直觉}
+Automatic Mixed Precision 并不是把所有操作都换成低精度。矩阵乘法、卷积等通常能安全使用 bf16/fp16；softmax、exp、optimizer state、某些 reduction 更需要高精度。AMP 的价值是把这些选择自动化，但理解背后的 dtype 账本仍然重要。
+\end{knowledgebox}
+
+\subsection{FLOPs 计数里的“乘加各一次”}
+
+前面的 $2BDK$ 近似来自一个容易被忽略的约定：乘法和加法各计 1 FLOP，而 fused multiply-add 虽可能由一条硬件指令完成，仍计作 2 FLOPs。矩阵乘法 \(Y=XW\) 的输出元素为：
+
+\[
+Y_{ik}=\sum_{j=1}^{D}X_{ij}W_{jk}.
+\]
+
+对每个 \((i,k)\)，需要 \(D\) 次乘法和约 \(D\) 次加法，所以近似 \(2D\) FLOPs。输出共有 \(B\times K\) 个元素，因此：
+
+\[
+\mathrm{FLOPs}(XW)\approx 2BDK.
+\]
+
+\begin{importantbox}{为什么 FLOPs 计数要保留近似意识}
+严格说加法是 \(D-1\) 次，不是 \(D\) 次；但大模型资源估算关注数量级，\(2BDK\) 的近似足够好。真正危险的是漏掉 backward 或 optimizer state，而不是纠结 \(-1\) 项。
+\end{importantbox}
+
+\subsection{从 arithmetic intensity 到 kernel 优化策略}
+
+如果一个操作 memory-bound，提高 peak FLOP/s 不一定有帮助，因为计算单元在等数据。常见优化方向是：
+
+\begin{itemize}
+    \item \textbf{fusion}：把多个小 kernel 合并，减少中间结果写回 HBM。
+    \item \textbf{tiling}：让数据块进入 SRAM/cache 后被多次复用。
+    \item \textbf{layout change}：改变 tensor 排布，让访问连续、coalesced。
+    \item \textbf{batching}：增大矩阵维度，提高权重复用。
+\end{itemize}
+
+\begin{knowledgebox}{first-use glossary：HBM、SRAM 和 fusion}
+HBM 是 High Bandwidth Memory，GPU 上的大容量高带宽显存；SRAM 是 Static Random-Access Memory，通常指芯片内部更小但更快的片上存储/cache。Fused kernel 的目标是让数据从 HBM 读入后，在片上连续完成多个操作，最后只写回一次，从而减少 HBM 往返。
+\end{knowledgebox}
+
+\subsection{Activation checkpointing 与 model checkpointing 的区别}
+
+这两个词都叫 checkpoint，但意思完全不同：
+
+\begin{longtable}{p{0.25\textwidth}p{0.35\textwidth}p{0.30\textwidth}}
+\toprule
+\textbf{术语} & \textbf{保存什么} & \textbf{目的} \\
+\midrule
+Model checkpointing & 参数、optimizer state、训练步数等写到磁盘 & 故障恢复、保存模型版本。 \\
+Activation checkpointing & forward 中只保存部分中间 activations & 用重算换显存，支持更深模型/更大 batch。 \\
+\bottomrule
+\end{longtable}
+
+\begin{warningbox}{不要把两种 checkpoint 混为一谈}
+Model checkpointing 面向训练任务生命周期；activation checkpointing 面向单次 forward/backward 内部的显存峰值。前者通常增加 I/O，后者通常增加 compute。
+\end{warningbox}
+
+\begin{knowledgebox}{讲义提醒：名字相近，但优化对象完全不同}
+Activation checkpointing 是训练期显存优化：少存中间激活、反向时重算；model checkpointing 是持久化参数与 optimizer state，用于恢复训练或部署。把两者混淆会导致错误的 I/O、显存和故障恢复预算。
+\end{knowledgebox}
+

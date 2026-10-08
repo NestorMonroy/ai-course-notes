@@ -1,0 +1,90 @@
+\section{序列并行与激活内存}
+
+数据并行和模型并行可以有效地分片参数和优化器状态，但\textbf{激活内存}是另一个必须解决的瓶颈。
+
+\subsection{激活内存的分析}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-044.jpg}
+\caption{训练过程中的内存动态：激活内存在前向传播中持续增长\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第45页。}
+
+在前向传播过程中，每一层的激活值需要保存以供反向传播使用。对于 Transformer，每层的激活内存为：
+
+$$\text{Act. Memory/Layer} = SBH \cdot \left(34 + 5\frac{AS}{H}\right)$$
+
+其中 $S$ = 序列长度，$B$ = 批次大小，$H$ = 隐藏维度，$A$ = 注意力头数。
+
+\begin{knowledgebox}{激活内存公式解读}
+\begin{itemize}
+    \item \textbf{左项 $34 \cdot SBH$}：来自 MLP 和逐元素操作（LayerNorm、Dropout、残差连接等），与 $H$ 成正比
+    \item \textbf{右项 $5AS^2B$}：来自注意力矩阵（$QK^\top$ 和 Softmax），与 $S^2$ 成正比——使用 FlashAttention 可通过重计算大幅减少此项
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{张量并行对激活内存的影响}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-046.jpg}
+\caption{张量并行可以减少 MatMul 相关的激活内存，但逐元素操作的部分无法减少\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第47页。}
+
+应用张量并行后，每层激活内存变为：
+
+$$\frac{SBH}{T} \cdot 24 + SBH \cdot 10 + \frac{5AS^2B}{T}$$
+
+其中 $T$ 为张量并行度。注意 $10 \cdot SBH$ 项\textbf{无法被张量并行减少}——这些对应 LayerNorm、Dropout 等逐元素操作，它们在张量并行中仍然是全量复制的。
+
+\subsection{序列并行：解决逐元素操作的激活冗余}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-047.jpg}
+\caption{序列并行示意：将逐元素操作（LayerNorm、Dropout）沿序列维度切分\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第48页。}
+
+\begin{importantbox}{序列并行的核心思想}
+LayerNorm 和 Dropout 等操作在不同序列位置之间\textbf{完全独立}（不存在跨位置的依赖）。因此可以将序列维度平均分配到 $T$ 个 GPU 上：
+\begin{itemize}
+    \item 每个 GPU 只处理 $S/T$ 个位置的 LayerNorm 和 Dropout
+    \item 进入 MatMul 前需要 All-Gather 恢复完整序列
+    \item 退出 MatMul 后需要 Reduce-Scatter 重新分片
+\end{itemize}
+前向传播中的同步点变为 All-Gather + Reduce-Scatter（代替原来的复制 + All-Reduce），总通信量不变。
+\end{importantbox}
+
+\subsection{激活内存的最终优化}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-048.jpg}
+\caption{从无并行到张量+序列并行+重计算的激活内存逐步优化\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第49页。}
+
+逐步优化路径：
+
+\begin{enumerate}
+    \item \textbf{无并行}：$SBH \cdot (34 + 5AS/H)$
+    \item \textbf{张量并行}：MatMul 相关项除以 $T$，但逐元素项 $10 \cdot SBH$ 不变
+    \item \textbf{+ 序列并行}：逐元素项也除以 $T$
+    \item \textbf{+ 激活重计算}（FlashAttention）：消除 $5AS^2B/T$ 项
+\end{enumerate}
+
+最终每层激活内存的实用下界为：
+
+$$\frac{34 \cdot SBH}{T}$$
+
+这也是社区中广泛使用的"$34SBH/T$"公式的来源。
+
+\subsection{本章小结}
+
+激活内存是大模型训练的重要瓶颈。张量并行可以减少 MatMul 相关的激活，序列并行通过沿序列维度分片来减少逐元素操作的激活。配合 FlashAttention 的激活重计算，可以将每层激活内存降至 $34SBH/T$。
+
+%% ========== Part 7: 其他并行策略 ==========
+

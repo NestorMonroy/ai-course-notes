@@ -1,0 +1,56 @@
+\section{GPU recap：从硬件到编程模型}
+
+Source coverage: \texttt{review\_of\_gpus}. 本节覆盖的核心概念包括：SM/warp/block/shared memory/bank conflict/coalescing/occupancy。
+
+\subsection{Hardware：容量、带宽与可见层级}
+
+GPU 不是一块均匀的“快内存”。本节先对照 SM 数量、register、shared memory/L1、L2 与 HBM 的容量和带宽，建立 kernel 能实际使用的硬件账本；离计算单元越近的存储通常越快但越小，优化的本质是让高复用数据尽量停留在片上。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{gpu-hardware.png}
+\caption{gpu hardware.png}
+\figsource{CS336 Spring 2026 Lecture 6 官方可执行讲义。}
+\end{figure}
+\begin{knowledgebox}{读图：gpu hardware.png}
+这张图用于把抽象的 kernel 代码连接到硬件执行。读图时先看数据位于 HBM、shared memory 还是 registers，再看线程/blocks 如何映射到 SM。性能优化的关键是让数据在更靠近计算单元的位置被复用，减少慢速 HBM 往返。
+\end{knowledgebox}
+
+\subsection{Programming model：grid、CTA 与 thread}
+
+硬件层级需要一个可编程抽象。CUDA/PTX 把一次 kernel launch 组织为 grid，grid 由多个 thread blocks（也叫 CTA）组成，每个 block 再包含 threads；block 内线程共享同一块 shared memory，并作为整体被调度到一个 SM。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{cuda-grid.png}
+\caption{cuda grid.png}
+\figsource{CS336 Spring 2026 Lecture 6 官方可执行讲义。}
+\end{figure}
+\begin{knowledgebox}{读图：cuda grid.png}
+这张图用于把抽象的 kernel 代码连接到硬件执行。读图时先看数据位于 HBM、shared memory 还是 registers，再看线程/blocks 如何映射到 SM。性能优化的关键是让数据在更靠近计算单元的位置被复用，减少慢速 HBM 往返。
+\end{knowledgebox}
+
+\begin{knowledgebox}{老师强调：为什么非逐元素算子需要 thread block}
+课程先用 GeLU 说明 elementwise 工作可自然地“一线程处理一个元素”，随后转向 softmax 与 matmul：这些算子中的 threads 必须交换局部结果，而 HBM 读写太慢。Thread block 的意义正是让一组 threads 共享同一块片上 shared memory；因此一个 block 会被调度到单个 SM，Triton 也选择把 block/program 作为原生思考单位。
+\end{knowledgebox}
+
+\subsection{Interaction between programming model and hardware}
+
+Programming model 足以描述正确结果，却不会自动保证高性能。同一份正确 kernel 会因为 warp divergence、register pressure、shared-memory bank conflict、HBM coalescing 与 block wave 切分而出现数量级差异；因此接下来要把抽象对象逐一映射回硬件限制。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{block-occupancy.png}
+\caption{block occupancy.png}
+\figsource{CS336 Spring 2026 Lecture 6 官方可执行讲义。}
+\end{figure}
+\begin{knowledgebox}{读图：block occupancy.png}
+这张图用于把抽象的 kernel 代码连接到硬件执行。读图时先看数据位于 HBM、shared memory 还是 registers，再看线程/blocks 如何映射到 SM。性能优化的关键是让数据在更靠近计算单元的位置被复用，减少慢速 HBM 往返。
+\end{knowledgebox}
+
+\begin{knowledgebox}{课堂提示：occupancy 不是越高越好，tail 也要单独看}
+老师一方面提醒 register 用得越多，可同时驻留的 threads/warps 越少，但 low occupancy 不一定坏：thread coarsening 可能让每个 thread 做更多有效工作。另一方面，block occupancy 还受 wave quantization 影响；例如 148 个 SM 执行 160 个 blocks 时，第二波只有 12 个 blocks，大量 SM 空闲。性能判断必须同时看单 block 资源与跨 SM 的 waves，不能只追一个 occupancy 百分比。
+\end{knowledgebox}
+\subsection{本章小结}
+本节说明了一个 kernel optimization 的共同模式：先确认语义正确，再测时间，再看 profiler，最后用 block、shared memory、tiling、fusion 或 layout 调整降低数据移动。
+

@@ -1,0 +1,70 @@
+\section{Pipeline Parallelism：沿 depth 维切分}
+
+\subsection{基本策略}
+
+Pipeline parallelism 沿层深度切分模型：前几层放在 rank 0，中间层放在 rank 1，后几层放在后续 rank。每个 rank 只保存自己的 layers，forward 时把激活从前一 stage 发送到后一 stage。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.58\textwidth]{pipeline-parallelism.png}
+\caption{Pipeline parallelism：切分 layer depth，不同 rank 保存不同层段。}
+\figsource{CS336 Spring 2026 Lecture 7 官方可执行讲义图像。}
+\end{figure}
+
+\begin{knowledgebox}{读图：pipeline parallel 图里的 stage 和 bubble}
+图中每张卡负责连续层段，数据像流水线一样从前向后流动。优点是通信只发生在 stage 边界，频率低于 tensor parallel；缺点是流水线刚开始和结束时部分 stage 空闲，这就是 bubble。microbatch 的作用是把一个大 batch 切小，让不同 microbatch 同时处在不同 stage，从而填满流水线。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Lecture 7 的 pipeline 前向：microbatch + send/recv}]
+micro_batch_size = batch_size // num_micro_batches
+if rank == 0:
+    micro_batches = data.chunk(chunks=num_micro_batches, dim=0)
+else:
+    micro_batches = [
+        torch.empty(micro_batch_size, num_dim, device=device)
+        for _ in range(num_micro_batches)
+    ]
+
+for x in micro_batches:
+    if rank - 1 >= 0:
+        dist.recv(tensor=x, src=rank - 1)
+
+    for param in local_params:
+        x = F.gelu(x @ param)
+
+    if rank + 1 < world_size:
+        dist.send(tensor=x, dst=rank + 1)
+\end{lstlisting}
+
+\subsection{bubble 的直觉公式}
+
+若有 \(P\) 个 pipeline stages 和 \(M\) 个 microbatches，最简单 GPipe 式调度的前向 bubble 比例近似为：
+
+\[
+\rho_{\text{bubble}}
+    \approx
+\frac{P-1}{M+P-1}.
+\]
+
+其中 \(P-1\) 是填满流水线需要等待的 stage 数，\(M\) 是实际输入的 microbatch 数。增加 \(M\) 可以降低 bubble，但 microbatch 太小会降低 kernel efficiency，也会增加调度和通信次数。
+
+\begin{importantbox}{Pipeline 的核心瓶颈是调度，而不只是带宽}
+Pipeline parallel 的通信对象通常是 stage 边界激活，频率低于 tensor parallel。但它引入调度问题：stage 时间不均、forward/backward 依赖、microbatch 数、activation 保存或重算策略，都会影响吞吐。
+\end{importantbox}
+
+\begin{knowledgebox}{课堂提示：最小实现故意保留了生产系统要消除的 bubble}
+官方 pipeline 代码在末尾明确写出尚未处理 communication/computation overlap，课程总结也提醒必须设法减少 pipeline bubbles。因而这段程序的价值是暴露 stage、microbatch、send/recv 和 bubble 的最小机制，而不是提供可直接用于生产的调度器。真实系统还要安排 forward/backward 交错、激活生命周期和跨 stage overlap。
+\end{knowledgebox}
+
+\subsection{为什么 pipeline 能跨较慢链路}
+
+Pipeline stage 之间的通信发生在层段边界，粒度较粗。如果每个 stage 内部有足够多层和足够大计算，通信可以被较长的 compute window 吸收。因此 pipeline parallel 更可能跨节点使用。但这要求模型切分均衡：每个 stage 的参数量、计算量、激活大小和 backward 时间都要接近。
+
+\begin{warningbox}{Pipeline parallel 不自动负载均衡}
+如果某个 stage 包含更重的 attention 或更宽的 MLP，它会成为全局吞吐瓶颈。真实系统常需要按 profiling 结果手工或自动调整层分配，而不是简单平均层数。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Pipeline parallelism 解决深层模型容量和跨节点放置问题。它通信频率较低，但要付出 bubble、调度复杂度和 stage imbalance 的代价。
+

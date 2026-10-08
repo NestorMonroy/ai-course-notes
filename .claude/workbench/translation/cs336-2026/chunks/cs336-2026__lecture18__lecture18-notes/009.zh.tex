@@ -1,0 +1,59 @@
+\section{问答中的系统设计原则}
+
+课程最后十分钟的问答把前面分散的结论连接起来：参数复用为什么可能改善推理、硬件怎样约束模型、agentic workload 与 batch workload 为什么需要不同 architecture，以及 megakernel 在多 GPU 上会遇到什么边界。
+
+\subsection{预训练模型能不能直接多跑几层}
+
+有学生问 Parcae 是否必须从头训练。讲者提到已有非正式实验把预训练模型的少数层重复执行，在部分数学任务上出现提升，但机制并不清楚，不能当作稳定可复现的方法。
+
+\begin{dialoguebox}{问答：预训练后再 loop（01:00:46--01:01:58）}
+学生：能否不从头训练，直接让现有模型的部分层重复执行？\par
+Dan Fu：有早期现象显示少量 looping 可能提升某些任务，但原因尚未解释，需要检查 activation 与权重，而不是把偶然 leaderboard 结果当成结论。
+\end{dialoguebox}
+
+\subsection{较少参数为什么可能带来非线性推理收益}
+
+回到推理系统，较少权重不只是节省模型文件：它可能让更多 KV cache 留在 GPU、减少模型跨卡切分、降低通信，还可能让 recurrent block 整体驻留在片上或更近的 memory tier。若跨过某个容量阈值，收益会突然出现，而不是随参数量线性变化。
+
+\begin{dialoguebox}{问答：looped model 的推理意义（01:01:58--01:03:25）}
+学生：固定计算预算下，循环对 inference memory 有什么影响？\par
+Dan Fu：更少参数可以换更多 KV cache 和更少跨 GPU 通信；若 recurrent block 足够小，甚至可能把循环做成高速 megakernel，不过当前 block 还不够小。
+\end{dialoguebox}
+
+\subsection{Hardware/model co-design 从 memory 开始}
+
+进一步，若模型明确部署在特定 wafer-scale accelerator、GPU 或 LPU 上，首先要问能否把权重和足够 KV state 放进可用 memory。其次再看硬件原生支持的量化格式、通信拓扑、tensor core shape 和软件栈。模型维度、attention 形式与 quantization 不再只是训练选择，也是部署选择。
+
+\begin{dialoguebox}{问答：已知部署硬件时怎样设计模型（01:04:47--01:06:14）}
+学生：若已知模型将服务在特定新硬件上，架构应该怎样改变？\par
+Dan Fu：先按可用 memory 设计模型与 KV 余量，再考虑硬件支持的数值格式和算子；不同 GPU 生态支持的 FP4 格式与最佳选择可能不同。
+\end{dialoguebox}
+
+\teachervoice{课堂提示：Hardware/model co-design 从 memory capacity 开始。先保证权重与足够 KV cache 能驻留，再谈 tensor core、量化格式和 kernel；否则算力再高也会被状态搬运或跨设备切分吞掉。}
+
+\subsection{Agentic workload 把 hot KV 变成核心资产}
+
+Agent loop 会反复调用模型、工具和环境，并持续追加同一会话；因此 cache locality、KV 压缩和恢复策略非常重要。一次性 batch processing 则可能只访问每个文档一次，KV reuse 的价值低得多。DeepSeek MLA、低比特 KV 和 causal/non-causal attention 的价值都要放回 workload 判断。
+
+\begin{dialoguebox}{问答：agent 与 batch 是否需要不同模型（01:07:56--01:09:59）}
+学生：coding agent 和批处理任务的最优架构差异是什么？\par
+Dan Fu：agentic workflow 更依赖热 KV cache；一次性文档处理不一定需要同样的缓存。是否需要持续 decode、是否能用双向 attention，也会改变最佳架构。
+\end{dialoguebox}
+
+\teachervoice{课堂提示：Agentic workflow 的核心资产是 hot KV state。相同模型若用于一次性翻译，缓存复用价值很低；用于多轮 coding agent，则 MLA、低比特 KV、稳定路由和会话恢复都会直接改变系统最优点。}
+
+\subsection{Megakernel 能否融合多 GPU 通信}
+
+本节最后把范围扩到多 GPU。理论上可以把 NCCL/NVLink communication 也纳入 megakernel schedule，让通信与局部计算重叠。但若瓶颈就是 collective latency，fusion 不能消除物理延迟。更现实的形态可能是“局部 megakernel”：只融合一个 MoE layer、attention block 或 recurrent core，而不是强求整个多 GPU 模型都进入单一 kernel。
+
+\begin{dialoguebox}{问答：多 GPU megakernel（01:10:27--01:11:28）}
+学生：当模型包含跨 GPU 通信时，megakernel 怎么工作？\par
+Dan Fu：通信调用可以被融合，但未必存在 whole-model killer use case；未来更常见的可能是为某个计算片段写专用 megakernel。
+\end{dialoguebox}
+
+\teachervoice{课堂提示：把 NCCL call 融进 megakernel 可以增加 overlap，却不能消除 collective 的物理 latency。实际落地更可能是 MoE layer、attention block 或 recurrent core 的局部 megakernel，而不是一个覆盖所有 GPU 的万能 kernel。}
+
+\subsection{本章小结}
+
+问答给出四个可复用原则：不要把未经解释的 post-hoc looping 当结论；容量阈值会带来非线性收益；模型设计应从目标硬件和 workload 出发；megakernel 更可能以局部、专用形式扩散。
+

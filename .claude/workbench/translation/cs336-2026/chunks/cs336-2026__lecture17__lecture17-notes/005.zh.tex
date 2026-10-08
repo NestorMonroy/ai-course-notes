@@ -1,0 +1,122 @@
+\section{Qwen-VL 系列：dynamic resolution、MRoPE 与深层视觉注入}
+
+本节用三代 Qwen-VL 观察 VLM architecture 的渐进演化。主框架没有被推翻，但 visual tokens、position encoding、context length 和 cross-layer fusion 持续改进。
+
+\subsection{Qwen-VL：固定视觉压缩与三阶段训练}
+
+本节先看第一代固定接口。Qwen-VL 使用 OpenCLIP ViT-bigG，cross-attention adaptor 将视觉 features 压缩到固定 256 tokens，并引入 \texttt{<img>}、\texttt{<box>}、\texttt{<ref>} 等 special tokens 支持 grounding。固定长度便于控制成本，但不同分辨率都被压到同一预算，细节保真度受限。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{qwen-vl-stages.png}
+\caption{Qwen-VL 三阶段训练：视觉对齐、高质量任务学习、instruction tuning。}
+\figsource{Stanford CS336 2026 Lecture 17 官方可执行讲义，\texttt{images/qwen-vl-stages.png}。}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.8\textwidth]{qwen-vl-stage1.png}
+\caption{Qwen-VL Stage 1：大规模 image-text 数据对齐，冻结 LM，训练 vision encoder 与 adaptor。}
+\figsource{Stanford CS336 2026 Lecture 17 官方可执行讲义，\texttt{images/qwen-vl-stage1.png}。}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{qwen-vl-stage2.png}
+\caption{Qwen-VL Stage 2：更高质量、任务化的数据与更高分辨率输入，全参数联合训练。}
+\figsource{Stanford CS336 2026 Lecture 17 官方可执行讲义，\texttt{images/qwen-vl-stage2.png}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：freeze schedule 决定谁适应谁}
+阶段 1 冻结 LM，让 vision encoder/adaptor 适应语言空间；阶段 2 全参数训练高质量任务；阶段 3 冻结视觉 encoder，主要调整 adaptor 与 LM 的 instruction behavior。Freeze schedule 是稳定性与 compute 的折中。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{qwen-vl-examples.png}
+\caption{Qwen-VL capability examples：多语对话、代码/OCR、grounding、细粒度描述与视觉推理。}
+\figsource{Stanford CS336 2026 Lecture 17 官方可执行讲义，\texttt{images/qwen-vl-examples.png}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：能力拼图更像 data coverage map}
+示例覆盖人脸/物体问答、网页与代码阅读、grounding、密集图像描述和多语交互。它们说明 special tokens 与 task-specific data 能把同一 backbone 引导到不同输出格式；但 showcase 只证明存在成功案例，不给出失败率、分布外鲁棒性或 OCR 最小字号。评估时仍需按 capability slice 建独立测试集。
+\end{knowledgebox}
+
+\subsection{Qwen2-VL：dynamic resolution 与 MRoPE}
+
+进一步，Qwen2-VL 不再把所有图压成固定 token 数。图像按原分辨率切 patch，再做 $2\times2$ merge；视频按时间采样。Dynamic resolution 让文档和细节图获得更多 tokens，简单图则更省，也把 token budget 从常数变成与输入复杂度相关的调度问题。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{qwen2-vl-architecture.png}
+\caption{Qwen2-VL architecture：更大 ViT、dynamic resolution 与 visual token merge。}
+\figsource{Stanford CS336 2026 Lecture 17 官方可执行讲义。}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{qwen2-vl-mrope.png}
+\caption{MRoPE：把 temporal、height、width 三个坐标编码进 rotary position。}
+\figsource{Stanford CS336 2026 Lecture 17 官方可执行讲义，\texttt{images/qwen2-vl-mrope.png}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：MRoPE 为什么不是普通 1D position}
+文本只需 sequence order；图像有 $(h,w)$，视频有 $(t,h,w)$。MRoPE 将 rotary dimensions 分配给多个轴，使 attention score 同时感知时间和空间相对位置，而不是把二维/三维结构完全压成任意扫描顺序。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.94\textwidth]{qwen2-vl-capabilities.png}
+\caption{Qwen2-VL 能力版图：general chat、video、grounding、OCR、long document、math/code 与 UI interaction。}
+\figsource{Stanford CS336 2026 Lecture 17 官方可执行讲义，\texttt{images/qwen2-vl-capabilities.png}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：dynamic resolution 的收益最终要落到任务上}
+图中能力从低分辨率自然图像扩展到视频帧、长文档、公式、表格和 GUI。它们共同需要按输入复杂度分配 visual tokens，但瓶颈并不相同：OCR 受细节保真影响，视频受 temporal sampling 影响，UI interaction 还依赖 grounding 与动作格式。能力图只能作为覆盖清单，不能替代逐项 benchmark 与 latency/token-cost 报告。
+\end{knowledgebox}
+
+\subsection{Qwen3-VL：long context、interleaved MRoPE 与 DeepStack}
+
+接下来，Qwen3-VL 把容量和融合深度继续扩大：它使用 Qwen3 dense/MoE LMs、SigLIP-2 vision encoder、最长 256K context，并把 temporal/width/height 频率交错分配。DeepStack 还将视觉信息注入多个 LM layers，而不只是在输入层拼接一次。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{qwen3-vl.png}
+\caption{Qwen3-VL：大规模 LM、视觉 encoder、adapter 与长上下文。}
+\figsource{Stanford CS336 2026 Lecture 17 官方可执行讲义，\texttt{images/qwen3-vl.png}。}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{qwen3-vl-pretraining.png}
+\caption{Qwen3-VL 多阶段 pretraining：逐步增加参数解冻与 context length。}
+\figsource{Stanford CS336 2026 Lecture 17 官方可执行讲义。}
+\end{figure}
+
+\begin{knowledgebox}{读图：四阶段不是简单“多训几轮”}
+先看 S0 只训练 merger/adaptor，让视觉接口进入 LM 表示空间；S1 在 8K context 上做全参数 multimodal pretraining；S2 继续保持约 1T token，但把 context 扩到 32K；S3 才用较少 token 适配 256K 超长上下文。这个顺序把接口对齐、通用能力和长上下文稳定性拆开，避免一开始就为极长序列支付全部 compute。图仍不能说明各阶段数据配比与质量，因此不能只凭 token budget 复现结果。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.72\textwidth]{qwen3-vl-results.png}
+\caption{Qwen3-VL benchmark results：不同规模模型与闭源/开源基线在多类视觉任务上的比较。}
+\figsource{Stanford CS336 2026 Lecture 17 官方可执行讲义，\texttt{images/qwen3-vl-results.png}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：先按任务族读结果，再谈“全面领先”}
+表格把 general VQA、OCR/document、spatial reasoning、video、agent/UI 等任务混在一起。应先在同一任务族内比较相近规模与相同输入条件，再检查是否使用 test-time CoT、工具或更长 context。结果支持 Qwen3-VL 是强模型，却不能单独归因于 DeepStack、MRoPE 或 scaling，因为训练数据细节、分辨率预算和 post-training recipe 同时变化。
+\end{knowledgebox}
+
+\begin{warningbox}{多模态 loss balance}
+视频样本 token 很长，若简单按 token 平均，会在 batch loss 中占据过大权重。Qwen3-VL 使用 per-token loss normalization 等技巧平衡 text/image/video；任何 mixture 都必须同时看样本级和 token-level 权重。
+\end{warningbox}
+
+\begin{knowledgebox}{Nota de clase}
+课程对 Qwen3-VL 的判断很克制：性能很强，但公开材料仍显示“大量数据工作、少量关键 architecture improvements、继续 scaling”。不要只从模型图中寻找全部答案。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+Qwen-VL 系列展示了现代 VLM 的演进方向：从固定视觉压缩到 dynamic tokens，从 1D order 到时空 position encoding，从单层拼接到跨层融合，并持续扩大数据和 context。
+

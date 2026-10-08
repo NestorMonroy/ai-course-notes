@@ -1,0 +1,123 @@
+\subsection{ZeRO：把 data parallel 的重复状态分片}
+
+Naive DP 的根因是训练状态重复，而不是 batch 切分本身。ZeRO 因此沿 data-parallel ranks 逐级分片 optimizer state、gradients 与 parameters，并用 reduce-scatter/all-gather 在需要时恢复语义；stage 越高，单卡显存越低，但通信越靠近每层计算的关键路径。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-018.jpg}
+\caption{Slide 18：ZeRO 的核心想法，把 expensive state 分片，并利用 reduce-scatter 等价关系。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{术语消化：ZeRO stage 1/2/3}
+\begin{tabular}{L{0.16\textwidth}L{0.26\textwidth}L{0.22\textwidth}L{0.18\textwidth}}
+\toprule
+阶段 & 分片对象 & 仍复制什么 & 代价 \\
+\midrule
+ZeRO-1 & optimizer state，如 Adam 的 \(m,v\)。 & 参数和梯度。 & 通信几乎不比 DDP 更贵。 \\
+ZeRO-2 & optimizer state 加 gradients。 & 参数。 & 梯度生命周期更复杂。 \\
+ZeRO-3/FSDP & optimizer state、gradients、parameters 全部分片。 & 只在需要时临时 gather。 & 前向/反向中频繁 all-gather。 \\
+\bottomrule
+\end{tabular}
+\end{importantbox}
+
+
+\singleslide{slides-images/slide-019.jpg}{ZeRO Stage 1：只分片 optimizer state，每张卡仍保留完整 parameters 与 gradients。}{19}
+
+Adam 的一阶/二阶动量与 master weights 通常比 BF16 参数更占显存，因此 Stage 1 先切最“肥”的状态。每个 rank 负责更新一段参数，随后通过 all-gather 让所有 rank 得到一致的新参数；数学上仍是 data parallel，改变的是状态所有权。
+
+\begin{knowledgebox}{讲义补充：源 Slide 19 为什么说 ZeRO-1 先切 optimizer state}
+每个 worker 仍有完整参数和完整梯度，但只负责一部分参数的 optimizer update，因此只需要保存这部分参数对应的 Adam 状态。因为 optimizer state 很大，ZeRO-1 的显存收益明显；又因为参数和梯度仍完整，训练流程相对容易保持。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-020.jpg}
+\caption{Slide 20：ZeRO stage 1 的运行步骤：完整梯度、reduce-scatter、局部更新、all-gather 参数。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 20 的四步生命周期}
+第一，每个 rank 对自己的 batch slice 计算完整梯度。第二，用 reduce-scatter 把梯度归约并发送到负责对应参数 shard 的 rank。第三，每个 rank 用本地 optimizer state 更新自己负责的参数 shard。第四，用 all-gather 收集更新后的参数，让所有 rank 继续拥有完整参数副本。
+\end{knowledgebox}
+
+
+\singleslide{slides-images/slide-021.jpg}{ZeRO-1 与 naive DDP 对比：通信量级相同，optimizer memory 从 $K$ 降到 $K/N$。}{21}
+
+表中 DDP 的 gradient all-reduce 可以等价改写为 reduce-scatter + all-gather。ZeRO-1 恰好让 reduce-scatter 的结果停留在各自 owner 上完成更新，再 all-gather 参数；总通信仍约为两倍参数量。因此在带宽主导区间，显存收益几乎不额外增加通信字节。
+
+\begin{knowledgebox}{讲义补充：源 Slide 21 为什么说 ZeRO-1 近似免费}
+DDP 的梯度 all-reduce 可以看成 reduce-scatter 加 all-gather；ZeRO-1 正是用这两个阶段分别完成梯度归约和参数收集。因此总通信量仍约为 \(2\times\#\text{params}\)，但 optimizer state 不再每卡复制。所谓“free”指通信账本相近，不是实现没有复杂度。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-022.jpg}
+\caption{Slide 22：ZeRO stage 2 继续把 gradients 也保持为分片状态。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 22 的简单扩展为何有效}
+ZeRO-2 的想法是：既然 reduce-scatter 后每个 rank 已经拿到归约梯度的一片，就不必再让每张卡长期保存完整梯度。这样进一步节省显存，尤其在大模型和小 batch 的设置下，梯度存储也可能成为压力源。
+\end{knowledgebox}
+
+
+\singleslide{slides-images/slide-023.jpg}{ZeRO Stage 2 生命周期：逐层反向、立即 reduce-scatter gradients、释放局部梯度、更新并 all-gather 参数。}{23}
+
+Slide 23 强调 Stage 2 的收益依赖及时释放。每层梯度一产生就归约到 owner，非 owner 不再保存完整 gradient；若框架等到反向全部结束才通信，峰值显存仍然存在。实现需要让 autograd hooks、communication buckets 与 parameter update 的生命周期精确对齐。
+
+\begin{knowledgebox}{讲义补充：源 Slide 23 的难点是“生命周期”}
+ZeRO-2 不是等 backward 完成后一次性处理所有梯度，而是某层梯度一产生就可以 reduce-scatter 到负责 rank，并释放不再需要的完整梯度。这样能降低峰值显存，但需要精确管理梯度产生、通信、释放和 optimizer update 的顺序。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-024.jpg}
+\caption{Slide 24：ZeRO stage 3，也就是 FSDP，连 parameters 也分片。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 24 为什么叫 shard everything}
+ZeRO-3/FSDP 不再让每张卡常驻完整参数。参数也被分片存储，某一层 forward 前再 all-gather 该层需要的完整参数；用完后释放。反向传播时同理，在需要参数和梯度时临时恢复局部完整视图，再 reduce-scatter 回分片。
+\end{knowledgebox}
+
+
+\singleslide{slides-images/slide-025.jpg}{ZeRO Stage 3/FSDP：参数也分片，模块计算前 all-gather，反向后 reduce-scatter。}{25}
+
+Stage 3 让长期参数内存也接近 $1/N$，代价是 forward 与 backward 都要按模块 materialize 参数。总通信包含两次 parameter all-gather 与一次 gradient reduce-scatter；除总 bytes 外，模块粒度还决定消息数量、峰值 buffer、prefetch 机会和通信计算重叠。
+
+\begin{warningbox}{讲义补充：源 Slide 25 的成本不能只看总 byte}
+ZeRO-3 的通信量级可接受，但通信被插入到每层 forward/backward 的关键路径中。是否快，取决于 prefetch、overlap、模块粒度、bucket 大小和网络拓扑。它解决显存，不保证自动提高吞吐。
+\end{warningbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-026.jpg}
+\caption{Slide 26：FSDP/ZeRO-3 的真实图景，参数和梯度被请求、发送、释放，形成增量通信。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 26 应该跟踪三条时间线}
+第一条是 forward/backward 计算时间线；第二条是参数 all-gather 和梯度 reduce-scatter 的通信时间线；第三条是 HBM 中参数 shard、临时完整参数、梯度 buffer 的生命周期。高质量 FSDP 实现要让通信尽量提前或重叠，同时及时释放临时完整参数以降低峰值显存。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-027.jpg}
+\caption{Slide 27：总结 DDP 和 ZeRO 的通信成本，ZeRO-1/2 几乎免费，ZeRO-3 更贵但解决参数显存。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{读图：Slide 27 的结论如何使用}
+若模型能放下但 optimizer state 太重，ZeRO-1 往往是低风险选择。若梯度显存也成问题，ZeRO-2 有收益。若参数本身放不下，必须上 ZeRO-3/FSDP 或其他模型并行。这里的“free”都以通信量级为口径，实际速度仍要看 overlap 和实现。
+\end{importantbox}
+
+
+\singleslide{slides-images/slide-028.jpg}{ZeRO 显存算例：在 8×A100 80GB 上，不同 stage 对可容纳参数量的影响。}{28}
+
+Slide 28 用 pure-BF16/Kahan 的近似账本展示 stage scaling：baseline 每参数约 12 bytes，ZeRO-1 只分 optimizer 部分，ZeRO-2 再分 gradients，ZeRO-3 才把全部状态除以 8。表中 6.66B、16B、24.62B、53.33B 是假设下的容量上限，不包含 activation 与碎片，不能直接当作可训练模型尺寸。
+
+\begin{knowledgebox}{讲义补充：源 Slide 28 不是死记数字，而是学会算账}
+每参数 bytes 会随精度、optimizer、master weight、gradient accumulation、activation checkpointing 改变。读这页要关注方法：先估计每卡 HBM，再扣除 activation 和 buffer，再按 data-parallel world size 估计分片状态能容纳多少参数。显存预算永远要留余量，因为通信 buffer 和碎片化会吃掉空间。
+\end{knowledgebox}
+

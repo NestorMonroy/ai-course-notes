@@ -1,0 +1,189 @@
+\section{基于人类反馈的强化学习（RLHF）}
+
+\subsection{核心动机：直接优化人类偏好}
+
+指令微调仍然在做 token 级的预测任务，而我们真正想做的是\textbf{直接优化人类偏好}。RLHF（Reinforcement Learning from Human Feedback）正是为此而生。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-045.jpg}
+\caption{RLHF 的三步流程：SFT $\rightarrow$ 奖励模型训练 $\rightarrow$ RL 优化\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第46页。}
+
+\begin{importantbox}{RLHF 的完整流程}
+\begin{enumerate}
+    \item \textbf{Step 1: 指令微调（SFT）}——从预训练模型出发，用指令-回答对微调，得到一个初始的助手模型
+    \item \textbf{Step 2: 训练奖励模型}——收集人类偏好数据（哪个回答更好），训练一个预测人类偏好的奖励模型
+    \item \textbf{Step 3: RL 优化}——用强化学习算法（如 PPO）优化语言模型，使其生成奖励模型评分更高的回答
+\end{enumerate}
+\end{importantbox}
+
+\subsection{问题形式化}
+
+假设我们有一个\textbf{奖励函数} $r(x, y)$，它能评价对于输入 $x$，回答 $y$ 的质量。我们的目标是：
+
+$$\max_\theta \; \mathbb{E}_{x \sim \mathcal{D}, \, y \sim p_\theta(\cdot|x)} \left[ r(x, y) \right]$$
+
+其中：
+\begin{itemize}
+    \item $p_\theta(y|x)$：我们正在优化的语言模型
+    \item $r(x, y)$：奖励函数
+    \item $\mathcal{D}$：指令分布
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-047.jpg}
+\caption{奖励优化目标：对摘要任务的具体示例，不同摘要获得不同的奖励分数\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第48页。}
+
+\begin{knowledgebox}{与之前方法的根本区别}
+注意目标函数中 $y \sim p_\theta(\cdot|x)$——我们是从\textbf{模型自身}采样的！这与预训练和 SFT 截然不同：
+\begin{itemize}
+    \item 预训练/SFT：数据来自外部（互联网/人类标注），优化 token 级对数似然
+    \item RLHF：数据来自模型自身的采样，优化一个（可能不可微的）奖励函数
+\end{itemize}
+这种``on-policy''的训练方式使得模型可以探索并学会生成比训练数据更好的回答。
+\end{knowledgebox}
+
+\subsection{Step 2: 训练奖励模型}
+
+\subsubsection{为什么需要奖励模型？}
+
+直接让人类为每个模型输出打分是不可行的——我们需要在数百万条回答上评估，而人类标注的速度远远不够。解决方案：训练一个\textbf{奖励模型}来\textbf{预测}人类会给出什么评价。
+
+\subsubsection{为什么用排序而非评分？}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-052.jpg}
+\caption{人类评分 vs 排序：绝对评分在不同标注者之间极度不一致，而排序则稳定得多\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第53页。}
+
+让人类给一个回答打绝对分数（如 1-10 分）是\textbf{极其不可靠}的：
+\begin{itemize}
+    \item 不同人对同一回答可能给出完全不同的分数（4.1 vs 6.6）
+    \item 同一个人在不同日子给出的分数也会不同
+    \item 没有统一的评分标准可以消除这种主观性
+\end{itemize}
+
+但让人类\textbf{比较两个回答哪个更好}则容易得多，且一致性更高。这就是为什么 RLHF 使用\textbf{偏好排序数据}而非绝对评分。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-053.jpg}
+\caption{偏好数据收集：给定一个输入，让人类对多个模型回答进行排序\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第54页。}
+
+\subsubsection{Bradley-Terry 模型}
+
+如何从排序数据中学到一个能输出分数的奖励模型？\textbf{Bradley-Terry 模型}提供了数学框架。它假设人类选择回答 $y_1$ 优于 $y_2$ 的概率为：
+
+$$p(y_1 \succ y_2 \mid x) = \sigma\left(r(x, y_1) - r(x, y_2)\right)$$
+
+其中 $\sigma$ 是 sigmoid 函数。直觉很清晰：两个回答的奖励\textbf{差值}越大，人类选择较好回答的概率越高。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-055.jpg}
+\caption{Bradley-Terry 模型：将偏好排序转化为奖励分数差的 sigmoid\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第56页。}
+
+奖励模型的训练目标就是\textbf{最大化}以下对数似然：
+
+$$\mathcal{L}_{\text{RM}}(\phi) = \mathbb{E}_{(x, y_w, y_l) \sim \mathcal{D}} \left[ \log \sigma\left(r_\phi(x, y_w) - r_\phi(x, y_l)\right) \right]$$
+
+其中 $y_w$ 是人类偏好的``赢''的回答，$y_l$ 是``输''的回答。
+
+\begin{importantbox}{奖励模型的实现}
+奖励模型通常直接从\textbf{预训练语言模型}初始化，然后在其输出端添加一个标量头（scalar head）来预测分数。这样做的好处是奖励模型能够理解文本的语义，从而更准确地预测人类偏好。输入 $(x, y)$ 被拼接后送入模型，模型输出一个标量分数。
+\end{importantbox}
+
+\subsection{Step 3: RL 优化与 KL 约束}
+
+有了奖励模型后，我们可以优化语言模型。但直接最大化奖励存在严重的\textbf{奖励模型黑客}（Reward Hacking）问题。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-059.jpg}
+\caption{Reward Hacking 问题：学习到的奖励（绿色）持续上升，但真实质量（蓝色）先升后降\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第60页。}
+
+\begin{warningbox}{Reward Hacking：优化学到的指标的危险}
+奖励模型是一个\textbf{学到的近似}，它不可避免地存在误差。当我们过度优化这个近似的奖励模型时，语言模型会学会利用奖励模型的``漏洞''——生成一些奖励模型给高分但实际质量很差的输出（例如重复的短语、无意义的文本）。这是一个普遍的机器学习原则：\textbf{永远不要无限度地优化一个学到的指标}。
+\end{warningbox}
+
+解决方案是添加\textbf{KL 散度约束}，防止优化后的模型偏离初始模型太远：
+
+$$\max_\theta \; \mathbb{E}_{x \sim \mathcal{D}, \, y \sim p_\theta(\cdot|x)} \left[ r_\phi(x, y) - \beta \log \frac{p_\theta(y|x)}{p_{\text{ref}}(y|x)} \right]$$
+
+其中：
+\begin{itemize}
+    \item $r_\phi(x, y)$：学到的奖励模型
+    \item $p_{\text{ref}}(y|x)$：参考模型（通常是 SFT 模型）
+    \item $\beta$：控制约束强度的超参数
+    \item $\beta \log \frac{p_\theta(y|x)}{p_{\text{ref}}(y|x)}$：KL 散度惩罚项
+\end{itemize}
+
+\begin{knowledgebox}{KL 约束的两层含义}
+KL 约束不仅仅是一个正则化技巧，它有深刻的动机：
+\begin{enumerate}
+    \item \textbf{防止 reward hacking}：限制模型不能偏离初始分布太远，因为奖励模型只在初始分布附近是可靠的
+    \item \textbf{保持语言能力}：初始模型是一个好的语言模型，过度优化可能破坏其语言生成能力
+\end{enumerate}
+\end{knowledgebox}
+
+\subsection{RLHF 的惊人效果}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-062.jpg}
+\caption{RLHF 在摘要任务上的效果：即使是小模型，经过 RLHF 训练后也能超越人类摘要\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第63页。}
+
+RLHF 的一个标志性结果是：即使是\textbf{很小的模型}，经过 RLHF 训练后，其生成的摘要也能被人类评为\textbf{优于人类撰写的摘要}。这是 SFT 做不到的——SFT 的性能受限于训练数据的质量（即人类标注者的水平），而 RLHF 可以\textbf{超越}数据中的人类水平。
+
+\begin{importantbox}{RLHF 为什么能超越人类数据？}
+在 SFT 中，模型试图模仿人类标注者的回答，因此其上限是标注者的水平。而在 RLHF 中，人类只需要\textbf{判断哪个更好}（这比\textbf{写出}好答案容易得多），模型则通过探索和优化来发现比现有回答更好的生成方式。这就是为什么 RLHF 能让模型超越人类水平的关键所在。
+\end{importantbox}
+
+\subsection{RLHF 的复杂性}
+
+尽管效果显著，RLHF 的实现极其复杂：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-064.jpg}
+\caption{RLHF 的实现复杂度：需要维护多个模型、调节大量超参数\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第65页。}
+
+\begin{itemize}
+    \item 需要同时维护\textbf{四个}模型：策略模型、参考模型、奖励模型、价值函数
+    \item PPO 算法对超参数极其敏感
+    \item 需要大量的采样和计算
+    \item 训练不稳定，调试困难
+    \item 长期以来仅限于计算资源充足的大公司使用
+\end{itemize}
+
+这些问题促使研究者寻找更简单的替代方案——这就是 DPO 的动机。
+
+\subsection{本章小结}
+
+\begin{itemize}
+    \item RLHF 通过直接优化人类偏好来对齐语言模型，克服了 SFT 的目标函数不匹配问题
+    \item 使用偏好排序而非绝对评分来收集人类反馈，通过 Bradley-Terry 模型转化为奖励分数
+    \item KL 约束防止模型过度优化学到的奖励模型（reward hacking）
+    \item RLHF 能让模型超越人类数据的质量上限
+    \item 但实现极其复杂，推动了 DPO 等更简单方法的发展
+\end{itemize}
+
+%% ========== Part 5: DPO ==========
+

@@ -1,0 +1,35 @@
+\section{GeLU case study：naive、builtin、compiled}
+
+Source coverage: \texttt{naive\_vs\_builtin\_vs\_compiled\_gelu}. 本节覆盖的核心概念包括：kernel fusion, torch.compile, HBM reads/writes。
+
+
+\begin{lstlisting}[caption={naive GeLU 的问题：多个小操作导致多次 HBM 往返}]
+def naive_gelu(x):
+    return 0.5 * x * (1 + torch.tanh(0.79788456 * (x + 0.044715 * x * x * x)))
+\end{lstlisting}
+
+\subsection{Variant comparison：naive\_gelu、builtin\_gelu 与 compiled\_gelu}
+
+三个版本计算同一个近似 GeLU，区别不在数学公式，而在最终生成多少 kernels、产生多少中间 tensors，以及每个中间结果是否必须往返 HBM。比较时必须固定输入 shape、dtype、device 与 steady-state 测量方法，再用 profiler 验证 kernel 数。
+
+Executable source 中对应的两个基线标签是 \verb|builtin_gelu| 与 \verb|compiled_gelu|；保留这些原名，便于从 profiler 结果回查源码函数与 profile 节点。
+
+\begin{longtable}{p{0.25\textwidth}p{0.30\textwidth}p{0.35\textwidth}}
+\toprule
+\textbf{Variant} & \textbf{典型执行形态} & \textbf{性能含义} \\
+\midrule
+\texttt{naive\_gelu} & 多个 primitive pointwise kernels & 中间值多次写回和读回 HBM，没有 fusion。 \\
+\texttt{builtin\_gelu} & 框架提供的专用实现 & 通常合并为更少 kernels，减少 memory traffic。 \\
+\texttt{compiled\_gelu} & \texttt{torch.compile} 生成 Triton kernel & 常把整段表达式 fusion 成一个 kernel，一次读、一次写。 \\
+\bottomrule
+\end{longtable}
+\begin{importantbox}{为什么 builtin/compiled GeLU 更快}
+Naive PyTorch 写法会拆成多个 primitive kernels，中间结果反复写回 HBM。Builtin GeLU 或 \texttt{torch.compile} 后的 Triton kernel 能把多个 pointwise 操作融合成一次读、一次写，减少 HBM traffic。
+\end{importantbox}
+
+\begin{knowledgebox}{老师强调：快的是执行图，不是 Python 写法更短}
+课上先观测 builtin 与 compiled 显著更快，再回到 profiler 解释原因：naive 版本产生多个 kernels 和多次 HBM 读写，而 builtin/compiled 版本只有一个 fused kernel；compiled 版本具体生成 Triton kernel。这个顺序很重要——先有 timing 证据，再用执行图归因，不能看到 \texttt{torch.compile} 就预设它一定更快。
+\end{knowledgebox}
+\subsection{本章小结}
+本节说明了一个 kernel optimization 的共同模式：先确认语义正确，再测时间，再看 profiler，最后用 block、shared memory、tiling、fusion 或 layout 调整降低数据移动。
+

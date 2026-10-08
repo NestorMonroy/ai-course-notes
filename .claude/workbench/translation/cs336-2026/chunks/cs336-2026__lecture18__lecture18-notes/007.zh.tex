@@ -1,0 +1,121 @@
+\section{Parcae：用循环复用参数，而不是只扩大模型}
+
+前半讲讨论怎样更好地服务既有模型，后半讲进一步问：系统瓶颈能否启发一种更适合推理的架构？Parcae 的答案是 looped language model：让中间 block 重复执行，用更多 FLOPs 换质量，但不同比例增加参数和权重内存。
+
+\teachervoice{课堂提示：Looping 提供的是独立缩放旋钮。参数量固定后仍可增加 recurrence 和 FLOPs，但朴素重复层会放大 residual dynamics；因此 Parcae 的重点不是“多跑几遍”，而是先让循环在谱意义上稳定。}
+
+\subsection{Looped model 提供一个新的缩放旋钮}
+
+回到模型架构，固定深度 Transformer 主要通过增加参数 $N$ 或数据 $D$ 扩大训练 FLOPs。Looped model 引入 recurrence $T$：同一组参数重复处理 activation。这样可以在参数量近似固定时增加计算，也可能以较小权重 footprint 获得更高质量。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.91\textwidth]{00-42-45-parcae-overview.jpg}
+\caption{Parcae 的两个问题：怎样稳定循环，以及 recurrence 应怎样随训练规模增长。}
+\figsource{课堂视频 00:41:50--00:43:28；术语与结论由 Parcae 论文交叉核验。}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{00-44-30-why-loop.jpg}
+\caption{Looped model 将 activation 多次送回同一 recurrent block。}
+\figsource{课堂视频 00:43:28--00:44:36。}
+\end{figure}
+
+\begin{importantbox}{参数、计算与内存不再被绑死}
+增加 recurrence 会增加训练和推理计算，却不必线性增加权重参数。对于受权重内存、模型切分或通信约束的服务，这提供了不同于“做更宽/更深模型”的设计点。
+\end{importantbox}
+
+\subsection{朴素循环为什么容易爆炸}
+
+问题是，已有 recurrent-depth model 对 learning rate 和 normalization 很敏感：小幅超参数变化就可能产生 NaN、loss spike 或 residual norm 爆炸。简单地在每层加 norm 可能压住 activation 大小，却没有消除系统内部“想放大”和“被强制缩回”的冲突。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{00-46-00-loop-instability.jpg}
+\caption{朴素 looped model 对 learning rate 高度敏感，容易出现 loss spike。}
+\figsource{课堂视频 00:45:38--00:46:38。}
+\end{figure}
+
+\subsection{把 residual stream 写成动力系统}
+
+为了找到可分析的根因，Parcae 不直接解析 attention、softmax、RoPE 和 MLP 的全部非线性，而是先观察每次循环对 residual 的增量。论文把 recurrent update 写成：
+
+\[
+e=\operatorname{LN}(P(s)),\qquad
+h_{t+1}=A h_t+B e+\mathcal{R}(h_t,e),
+\]
+
+其中：
+
+\begin{itemize}
+  \item $s$ 是输入 token sequence，$P$ 是进入循环前的 prelude blocks；
+  \item $e$ 是注入 recurrent core 的输入表示；
+  \item $h_t\in\mathbb{R}^{d_h}$ 是第 $t$ 次循环的 residual state；
+  \item $A$ 控制历史 state 怎样进入下一步，$B$ 控制输入 $e$ 怎样被注入；
+  \item $\mathcal{R}$ 汇总 attention 与 feed-forward 等非线性 Transformer blocks。
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{00-48-00-residual-dynamics.jpg}
+\caption{把复杂 recurrent Transformer 抽象成 residual 上的动力系统。}
+\figsource{课堂视频 00:46:38--00:49:17。}
+\end{figure}
+
+\subsection{线性近似暴露 spectral radius}
+
+下面用线性近似隔离重复相乘的部分。若先忽略 $\mathcal{R}$ 的高阶影响，得到 $h_{t+1}\approx \bar A h_t+\bar B e$。展开 $T$ 步：
+
+\[
+h_T=\bar A^T h_0+\sum_{i=0}^{T-1}\bar A^i\bar B e.
+\]
+
+长期行为由 $\bar A^i$ 主导。若 spectral radius $\rho(\bar A)>1$，某些方向会随循环次数指数放大；标量类比就是 $2^{16}$。若 $\rho(\bar A)<1$，历史影响衰减，系统更容易保持稳定。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{00-50-30-spectral-radius.jpg}
+\caption{线性化后的闭式解把稳定性问题归约到 $\bar A$ 的 spectral radius。}
+\figsource{课堂视频 00:49:17--00:51:10；公式按 Parcae 论文记号整理。}
+\end{figure}
+
+\begin{warningbox}{Spectral radius 不是“另一种 norm”}
+课堂为直觉简化了术语。严格地说，spectral radius 是特征值绝对值的最大值；operator norm 与它相关但不恒等。对非正规矩阵，短期 transient growth 也可能在 $\rho(A)<1$ 时出现。因此论文选择结构化参数化，而不是只在训练后测一个数。
+\end{warningbox}
+
+\subsection{Parcae 怎样强制稳定}
+
+因此，Parcae 不等待训练后再修补爆炸，而是在参数化阶段限制动力系统。它在连续参数空间中令 $A_c=-\operatorname{Diag}(\exp(a))$，使其特征值为负；再通过离散化得到 $\bar A=\exp(\Delta A_c)$，从而把离散系统的特征值约束在单位圆内。输入注入 $B e$ 还配合 normalization，降低尺度漂移。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{00-51-45-parcae-constraints.jpg}
+\caption{Parcae 的稳定参数化：负对角连续系统、离散化与输入归一化。}
+\figsource{课堂视频 00:51:13--00:51:55；具体参数化由 Parcae 论文第 4 节核验。}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{00-52-15-stable-loss.jpg}
+\caption{稳定约束后，Parcae 的 recurrent state norm 和训练 loss 更可控。}
+\figsource{课堂视频 00:51:55--00:53:26。}
+\end{figure}
+
+这里的关键不是“再加一个 norm”，而是先从动力系统找出会被重复相乘的结构，再让参数化从定义上满足稳定条件。它把训练经验问题转化为可分析的 architecture constraint。
+
+\subsection{稳定之后，质量是否值得这笔计算}
+
+稳定只是必要条件，接下来还要验证额外 FLOPs 是否换来质量。这里的 perplexity（PPL）是 token 交叉熵取 $\exp$ 后的困惑度，越低通常表示语言建模预测更好。课堂结果显示，Parcae 相比既有 recurrent-depth models 和强 Transformer baseline 获得更好 PPL/下游质量。论文报告在部分设置下相对既有大规模 looped model 最多降低 $6.3\%$ validation perplexity，并在固定参数与数据预算下提升多个 downstream aggregate。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{00-54-00-quality-table.jpg}
+\caption{Parcae 与既有 looped model、强 Transformer baseline 的质量比较。}
+\figsource{课堂视频 00:53:26--00:54:13；精确指标应回到 Parcae 论文表格与实验设置。}
+\end{figure}
+
+\subsection{本章小结}
+
+Parcae 通过复用中间 block，把 recurrence 变成独立缩放维度。它的核心贡献不是“把层多跑几次”，而是用 residual dynamical system 找到不稳定根因，再用结构化参数化约束 spectral radius。
+

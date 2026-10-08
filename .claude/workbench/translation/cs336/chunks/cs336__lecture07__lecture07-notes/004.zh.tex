@@ -1,0 +1,128 @@
+\section{模型并行（Model Parallelism）}
+
+当数据并行无法满足内存需求或批次大小限制时，我们需要\textbf{将模型本身切分到不同 GPU 上}。模型并行有两种主要形式：流水线并行（Pipeline Parallelism）和张量并行（Tensor Parallelism）。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-029.jpg}
+\caption{模型并行的动机：分割参数并只传递激活\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第30页。}
+
+与数据并行不同，模型并行中 GPU 之间传递的是\textbf{激活值}而非参数。当激活值远小于参数时，这是非常有利的。
+
+\subsection{流水线并行}
+
+\subsubsection{基本思想}
+
+流水线并行是最直观的模型切分方式：按\textbf{层}切分。每个 GPU 负责模型的若干连续层，前一个 GPU 的输出激活传递给下一个 GPU。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-030.jpg}
+\caption{流水线并行：每个 GPU 负责不同的层，通过点对点通信传递激活\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第31页。}
+
+\subsubsection{气泡问题}
+
+朴素的流水线并行存在严重的\textbf{气泡}（bubble）问题：大部分时间里，大部分 GPU 处于空闲状态。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-031.jpg}
+\caption{朴素流水线并行的气泡问题：4 个 GPU 中大部分时间只有 1 个在工作\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第32页。}
+
+\begin{warningbox}{朴素流水线 = 用 4 个 GPU 获得 1 个 GPU 的吞吐}
+如果只有一个样本流经流水线，那么 $N$ 个 GPU 的利用率只有 $1/N$。这是因为前向和反向传播的层间依赖导致 GPU 必须等待前一阶段完成。
+\end{warningbox}
+
+\subsubsection{微批次流水线}
+
+通过将批次拆分为多个\textbf{微批次}（micro-batch），可以显著减少气泡大小。当一个微批次在 GPU 2 上处理时，GPU 1 可以开始处理下一个微批次。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-032.jpg}
+\caption{微批次流水线：通过增加微批次数量来减小气泡\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第33页。}
+
+气泡比例公式：
+$$\text{bubble ratio} = \frac{P - 1}{M}$$
+
+其中 $P$ 是流水线阶段数（GPU 数），$M$ 是微批次数。增大微批次数可以降低气泡比例，但这需要更大的批次大小。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-033.jpg}
+\caption{不同批次大小和流水线深度下的 GPU 利用率\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第34页。来自 NVIDIA Megatron-LM 论文。}
+
+\subsubsection{零气泡流水线（Zero Bubble Pipeline / DualPipe）}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-035.jpg}
+\caption{零气泡流水线的核心思想：分离反向传播中的激活梯度计算（B）和权重梯度计算（W）\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第36页。}
+
+这是一个非常巧妙的优化。观察到反向传播可以分解为两个子操作：
+
+\begin{enumerate}
+    \item \textbf{B（Backward activation）}：计算关于输入激活的梯度——这部分有\textbf{串行依赖}，必须按层顺序执行
+    \item \textbf{W（Weight gradient）}：计算关于权重的梯度——这部分\textbf{没有依赖}，可以在任意时刻执行
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-036.jpg}
+\caption{将权重梯度计算（W）调度到原本的气泡位置，实现近乎零气泡\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第37页。}
+
+\begin{importantbox}{零气泡的关键洞察}
+反向传播中，激活梯度（$\frac{\partial \mathcal{L}}{\partial x}$）需要立即传递给前一层（串行依赖），但权重梯度（$\frac{\partial \mathcal{L}}{\partial W}$）可以延后计算。将 W 调度到流水线气泡位置，即可接近 100\% 利用率。DeepSeek 的 DualPipe 正是基于此思想。
+\end{importantbox}
+
+\begin{knowledgebox}{流水线并行的工程复杂度}
+实现高效的流水线并行需要干预自动微分系统、维护复杂的调度队列。Tatsu 引用了一个轶事：某前沿实验室中只有两人理解流水线并行的实现，其中一人已离职，导致只剩一个"承重人"维护整个训练基础设施。
+\end{knowledgebox}
+
+\subsubsection{流水线并行的优劣势}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-034.jpg}
+\caption{流水线并行的应用场景与权衡\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第35页。}
+
+\textbf{优势}：
+\begin{itemize}
+    \item 通信量小：仅传递激活值，且为点对点通信（非集合通信）
+    \item 内存扩展：参数和激活都被分到不同 GPU
+    \item 适合慢速链路：跨节点、跨机架时的首选
+\end{itemize}
+
+\textbf{劣势}：
+\begin{itemize}
+    \item 气泡浪费：即使优化后仍有一定开销
+    \item 消耗批次大小：需要足够多的微批次来填充流水线
+    \item 实现极其复杂
+\end{itemize}
+
+\begin{knowledgebox}{Google TPU 团队的观点}
+Google 工程师表示，TPU 的环面网格网络使他们\textbf{不需要}大量使用流水线并行——因为没有 GPU 世界中 256 GPU 之后带宽骤降的问题。这使得 TPU 训练框架更加简洁。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+流水线并行通过按层切分模型来减少内存需求，适用于慢速跨节点链路。气泡是核心挑战，可通过增大微批次和零气泡调度来缓解。但其实现复杂度很高，在实践中应尽可能用其他方式替代。
+
+%% ========== Part 5: 张量并行 ==========
+

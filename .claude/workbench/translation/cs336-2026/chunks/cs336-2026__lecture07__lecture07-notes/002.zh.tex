@@ -1,0 +1,175 @@
+\section{Collective Operations：分布式训练的通信积木}
+
+\subsection{rank、world size 与 process group}
+
+分布式程序通常让每张 GPU 对应一个进程。每个进程有一个 \textbf{rank}，表示它在通信组里的编号；\textbf{world size} 是通信组里的 rank 总数；\textbf{process group} 是一组共同参与通信的 rank。一个模型可能同时有 data-parallel group、tensor-parallel group、pipeline group，因此 rank 的“全局编号”和“某个 group 内编号”要区分清楚。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{ranks.png}
+\caption{四个 rank 构成一个 world size 为 4 的通信世界。}
+\figsource{CS336 Spring 2026 Lecture 7 官方可执行讲义图像。}
+\end{figure}
+
+\begin{knowledgebox}{读图：rank 图在说明什么}
+图中每个方块代表一个参与通信的进程或 GPU。rank 不是“机器号”，也不是“模型层号”，而是 collective API 里用来指定参与者身份的编号。world size 是这个通信世界有多少参与者。读这张图时要注意：同一个物理 GPU 在不同 process group 里可能有不同的局部 rank，因此真实训练框架里常常要同时维护 global rank、local rank、data parallel rank、tensor parallel rank。
+\end{knowledgebox}
+
+\begin{importantbox}{collective 的执行约束}
+collective operation 是所有参与 rank 共同执行的通信模式。所有 rank 必须以相同顺序进入同一个 collective，并且张量 shape、dtype、op 语义要匹配。某个 rank 少调用一次 \code{all\_reduce}，其他 rank 就可能永久等待。
+\end{importantbox}
+
+\subsection{术语消化：从基础原语到工作马}
+
+\begin{longtable}{L{0.16\textwidth}L{0.26\textwidth}L{0.26\textwidth}L{0.16\textwidth}}
+\toprule
+Collective & 做什么 & 典型用途 & 记忆方式 \\
+\midrule
+\endhead
+broadcast & 一个 rank 的完整张量复制给所有 rank。 & rank 0 读取 checkpoint 后同步初始权重。 & 一人发，全员收。 \\
+scatter & 一个 rank 的张量切成多份，分别发给各 rank。 & 理解 reduce-scatter 的基础。 & 切开再分发。 \\
+gather & 各 rank 的分片收集到一个 rank。 & 诊断、评估、单点聚合。 & scatter 的反向。 \\
+reduce & 各 rank 张量按 sum/min/max 等归约到一个 rank。 & 指标聚合、小规模统计。 & 先算再收。 \\
+all-gather & gather 的结果给到所有 rank。 & 参数分片前向前拼回完整参数。 & gather 到所有人。 \\
+reduce-scatter & 先 reduce，再把结果分片给各 rank。 & ZeRO/FSDP 梯度同步后只保留本 rank 分片。 & all-reduce 的前半段。 \\
+all-reduce & reduce 后所有 rank 都拿到完整结果。 & DDP 梯度同步。 & reduce-scatter + all-gather。 \\
+all-to-all & 每个 rank 都给每个 rank 发送一部分。 & MoE token routing、expert parallelism。 & 分布式矩阵转置。 \\
+\bottomrule
+\end{longtable}
+
+\begin{knowledgebox}{课堂提示：基础原语是为了构造训练工作马}
+官方源明确把 broadcast、scatter、gather、reduce 称为 foundations，把 all-gather、reduce-scatter、all-reduce 称为 workhorse，并把 all-to-all 指向 MoE。这个顺序不是历史知识清单：基础原语先训练输入输出布局直觉，工作马再把这些布局组合成参数重建、梯度分片和梯度复制。
+\end{knowledgebox}
+
+\subsection{broadcast、scatter、gather、reduce}
+
+前面的点对点通信只能描述一对 ranks，本节开始建立集合通信的基本字母表。Broadcast 从一个源复制数据，scatter 把不同分片发给各 rank，gather 反向收集分片，reduce 则在聚合时执行求和等运算；四者的输入输出归属不同，必须所有 ranks 以相同顺序参与。
+
+\begin{knowledgebox}{讲义提醒：collective 是全体协议，不是普通函数调用}
+只要某个 rank 漏掉 collective、调用顺序不同或 tensor shape 不一致，其他 ranks 就可能永久等待。调试 distributed deadlock 时先对齐每个 rank 的控制流与日志，再检查网络；“单卡代码能跑”不能证明多卡协议正确。这是根据 collective 协议约束给出的调试建议，不冒充源文件中的课堂原话。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.78\textwidth]{broadcast.png}
+\caption{broadcast：源 rank 的数据复制到所有 rank。}
+\figsource{PyTorch distributed collective diagram，供 CS336 Lecture 7 配套解释使用。}
+\end{figure}
+
+\begin{knowledgebox}{读图：broadcast 的含义}
+图中只有一个 rank 拥有完整输入，通信后所有 rank 都得到相同副本。这种模式适合“小而关键”的同步，例如初始化权重、广播配置、广播随机种子。它不是训练主路径里最高频的原语，因为频繁广播大张量意味着每一步都在复制状态。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.78\textwidth]{scatter.png}
+\caption{scatter：源 rank 把张量切片后分发给不同 rank。}
+\figsource{PyTorch distributed collective diagram，供 CS336 Lecture 7 配套解释使用。}
+\end{figure}
+
+\begin{knowledgebox}{读图：scatter 的含义}
+scatter 的输出不是每个 rank 拿到完整数据，而是每个 rank 拿到自己的切片。它最重要的教学价值是帮我们理解“分片后的所有权”：切片一旦分发出去，后续计算就应该尽量在拥有该切片的 rank 上发生，否则会重新引入通信。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.78\textwidth]{gather.png}
+\caption{gather：各 rank 的分片汇总到一个 rank。}
+\figsource{PyTorch distributed collective diagram，供 CS336 Lecture 7 配套解释使用。}
+\end{figure}
+
+\begin{knowledgebox}{读图：gather 的含义}
+gather 是 scatter 的反向。图中多个 rank 各自持有一片数据，通信后某个目标 rank 拿到完整拼接结果。它在训练主循环中要谨慎使用，因为单个目标 rank 会成为内存和带宽热点；all-gather 则把这个完整结果复制给所有 rank。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.78\textwidth]{reduce.png}
+\caption{reduce：各 rank 的数据按某个操作聚合到一个 rank。}
+\figsource{PyTorch distributed collective diagram，供 CS336 Lecture 7 配套解释使用。}
+\end{figure}
+
+\begin{knowledgebox}{读图：reduce 的含义}
+reduce 不是简单拼接，而是对对应位置做 sum、min、max 等结合律/交换律操作。训练里最常见的是对梯度求和或平均。若只把结果放到 rank 0，rank 0 后续会成为单点；因此大规模训练更常用 all-reduce 或 reduce-scatter。
+\end{knowledgebox}
+
+\begin{warningbox}{基础 collective 的常见误解}
+broadcast 和 gather 都会产生完整副本，但语义不同：broadcast 是一份输入复制到多人，gather 是多人输入汇总到一人。scatter 和 reduce-scatter 都让每个 rank 得到分片，但 reduce-scatter 在分片前还做了跨 rank 归约。
+\end{warningbox}
+
+\subsection{all-gather、reduce-scatter、all-reduce}
+
+在基础原语之上，本节讨论训练系统最常见的三种组合：all gather 把分片恢复成完整张量，reduce scatter 聚合后只保留各 rank 对应分片，all reduce 则让所有 ranks 获得相同聚合结果。理解它们的数据量和结果布局，是后续 DDP、ZeRO/FSDP 与 tensor parallel 的前提。
+
+\begin{knowledgebox}{讲义提醒：先画每个 rank 最终持有什么}
+比较 collectives 时不要只背名字。先画输入分片、运算和输出归属，再计算每个 rank 发送/接收的 bytes；all-reduce 可分解为 reduce-scatter 加 all-gather，正是 ZeRO 在保持数学等价时避免完整状态复制的基础。这是讲义把官方输入输出示例提炼成的分析步骤。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.78\textwidth]{all-gather.png}
+\caption{all-gather：每个 rank 的分片被拼接，并且完整结果分发给所有 rank。}
+\figsource{PyTorch distributed collective diagram，供 CS336 Lecture 7 配套解释使用。}
+\end{figure}
+
+\begin{knowledgebox}{读图：all-gather 为什么是参数分片的关键}
+如果每个 rank 只保存参数的一部分，那么某一层 forward 可能需要临时看到完整权重。all-gather 的作用就是把各 rank 的参数 shard 拼回来，并让每个 rank 都得到完整参数。它节省的是长期存储，不是通信：每次需要完整参数时，通信仍然会发生。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.78\textwidth]{reduce-scatter.png}
+\caption{reduce-scatter：先跨 rank 归约，再把归约结果切片分发。}
+\figsource{PyTorch distributed collective diagram，供 CS336 Lecture 7 配套解释使用。}
+\end{figure}
+
+\begin{knowledgebox}{读图：reduce-scatter 在 ZeRO/FSDP 中做什么}
+图中每个 rank 起初都有一组向量，通信后每个 rank 只拿到归约结果的一片。把这个逻辑放到训练里：每个 data shard 产生梯度，梯度需要跨 rank 求和；但如果参数或 optimizer state 已经分片，就没有必要让每张卡都保存完整梯度。reduce-scatter 正好把“同步”和“分片保存”合成一步。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.78\textwidth]{all-reduce.png}
+\caption{all-reduce：归约结果最终复制到所有 rank。}
+\figsource{PyTorch distributed collective diagram，供 CS336 Lecture 7 配套解释使用。}
+\end{figure}
+
+\begin{knowledgebox}{读图：all-reduce 是 DDP 的心脏}
+在 data parallelism 中，每个 rank 使用不同 batch slice 做 forward/backward，因此梯度一开始不同。all-reduce 把所有 rank 的梯度求和或平均后，再把同一份结果交给所有 rank。于是每个 rank 虽然看过不同数据，但参数更新保持一致。
+\end{knowledgebox}
+
+\begin{importantbox}{核心恒等式}
+\[
+\text{all-reduce}
+    =
+\text{reduce-scatter}
+    +
+\text{all-gather}.
+\]
+左边的语义是“所有人得到完整归约结果”。右边先让每个人得到归约结果的一片，再把这些片重新拼给所有人。这个拆分是从 DDP 走向 ZeRO/FSDP 的关键：如果后续并不需要每个人长期保存完整结果，就可以停在 reduce-scatter，省掉复制状态。
+\end{importantbox}
+
+\subsection{all-to-all：MoE 的通信核心}
+
+all-to-all 是最一般的 collective：每个 rank 都向每个 rank 发送一段张量。官方讲义强调它对 MoE 很重要，因为 expert parallelism 中，每个 rank 可能持有一部分 experts；token 先在本地 batch 中产生，然后必须被路由到拥有对应 expert 的 rank 上。
+
+\begin{knowledgebox}{术语消化：all-to-all 与 MoE}
+\begin{tabular}{L{0.22\textwidth}L{0.33\textwidth}L{0.35\textwidth}}
+\toprule
+术语 & 机制 & 为什么影响训练系统 \\
+\midrule
+expert parallelism & 不同 rank 保存不同 experts，token 根据 router 分发。 & 参数容量增加，但 token routing 触发 all-to-all。 \\
+balanced split & 每个 rank 发出/接收的数据量接近。 & all-to-all 更像规则矩阵转置，通信更可预测。 \\
+unbalanced split & 某些 expert 热门，部分 rank 接收过多 token。 & 慢 rank 决定 step time，load balancing 变成系统问题。 \\
+\bottomrule
+\end{tabular}
+\end{knowledgebox}
+
+\begin{warningbox}{all-to-all 不只是“通信量大”}
+all-to-all 的难点还包括负载不均、变长 token dispatch、buffer 管理、跨节点拥塞和反向传播中的路由一致性。MoE 的 router 如果只优化模型 loss，不控制负载，系统吞吐会被少数热门 experts 拖垮。
+\end{warningbox}
+
+\subsection{本章小结}
+
+Collectives 是分布式训练的基础语言。读懂本讲后，看到 DDP、FSDP、tensor parallel、pipeline parallel、MoE 时，不应只记名字，而应追问：这个策略使用了哪些 collective，通信对象是什么，结果是复制还是分片。
+

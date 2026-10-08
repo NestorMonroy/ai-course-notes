@@ -1,0 +1,70 @@
+\section{本讲主线：resource accounting 是训练前的账本}
+
+Lecture 2 的目标是把“训练一个模型”拆成可估算的资源账本。语言模型训练不是只写 \texttt{forward}，而是在 compute、memory、bandwidth、dtype、optimizer state、activation 和 wall-clock time 之间做取舍。第一讲说核心目标是 efficiency；第二讲给出 efficiency 的基本单位。
+
+\begin{knowledgebox}{课堂提示：本讲要带走 mechanics、mindset 与 intuitions}
+老师在开场把学习目标拆成三层：mechanics 是能按 PyTorch tensor 语义算 shape、bytes 与 FLOPs；mindset 是每次设计训练方案都主动做 resource accounting；intuitions 是看到参数量、batch、dtype 和硬件规格时，能迅速判断资源花在哪里。本讲没有“ML magic”，重点是建立以后每一讲都会复用的工程反射。
+\end{knowledgebox}
+
+课程开场提到 Marin 的 \(10^{23}\) FLOPs run 已完成并匹配 forecasts。这不是新闻八卦，而是一个工程信号：scaling forecast 只有在 compute 和 memory 账本可靠时才可信。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.78\textwidth]{marin-forecast-result.jpg}
+\caption{Marin 1e23 FLOPs run 与预测曲线对照。}
+\figsource{CS336 Spring 2026 Lecture 2 官方可执行讲义，\texttt{main()}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Marin 结果图为什么放在 Lecture 2 开头}
+这张图展示的是“训练前预测”和“训练后观测”的闭环。要让这件事有意义，必须知道训练到底用了多少 FLOPs、硬件给了多少有效 FLOP/s、模型和 optimizer state 是否能放进显存、训练中是否有通信和 checkpoint 开销。Lecture 2 就是为这种预测能力补上底层账本。
+\end{knowledgebox}
+
+\subsection{两个 motivating questions}
+
+本讲先用两个问题训练数量级直觉。
+
+\[
+C_{\text{train}}\approx 6ND.
+\]
+
+这里 \(N\) 是参数量，\(D\) 是训练 token 数，系数 6 来自 forward 约 \(2ND\) FLOPs、backward 约 \(4ND\) FLOPs 的粗略估计。70B 参数、15T token 的训练计算量约为：
+
+\[
+6\times 70\times 10^9\times 15\times 10^{12}
+=6.3\times 10^{24}\ \text{FLOPs}.
+\]
+
+若用 1024 张 H100，dense bf16 峰值约 \(989.5\) TFLOP/s，假设 MFU 为 0.5，则训练约需 140 多天量级。这不是精确排期，而是训练前判断可行性的 napkin math。
+
+\begin{importantbox}{first-use glossary：FLOPs、FLOP/s、MFU}
+FLOPs 是 floating-point operations，表示总计算量；FLOP/s 是每秒浮点运算数，表示速度。MFU 是 model FLOPs utilization，即实际模型 FLOP/s 除以硬件承诺峰值 FLOP/s。训练时间约等于总 FLOPs 除以有效 FLOP/s。
+\end{importantbox}
+
+第二个问题是 8 张 H100 用 AdamW 能训练多大模型。H100 每张约 80GB，8 张总 640GB。若每个参数需要 bf16 参数 2 bytes、bf16 gradient 2 bytes、AdamW 一阶动量 4 bytes、二阶动量 4 bytes，那么仅参数相关状态就要：
+
+\[
+2 + 2 + 4 + 4 = 12\ \text{bytes/parameter}.
+\]
+
+640GB / 12 约为 53B 参数。这还没算 activation memory、temporary buffers、CUDA workspace 和 fragmentation，所以是乐观上界。
+
+\begin{warningbox}{参数上界不是可训练模型大小}
+如果不考虑 activations，你会系统性高估能训练的模型规模。大 batch、长 sequence、深层网络都会让 activation memory 迅速变成主要瓶颈。
+\end{warningbox}
+
+\begin{knowledgebox}{老师强调：先做 napkin math，再谈精确排期}
+源码把这两个问题明确称为 rough back-of-the-envelope calculation。它们的价值不是给出最后一位小数，而是尽早发现数量级错误：若理想化估算已经需要数月或参数状态已经超过总显存，后续 profiler、kernel tuning 和分布式实现都不可能把方案变成可行。反过来，粗算通过也只代表值得继续做更细的 activation、通信与容错预算。
+\end{knowledgebox}
+
+\begin{knowledgebox}{first-use glossary：optimizer state}
+Optimizer state 是优化器为每个参数额外维护的状态。Adam/AdamW 通常维护 \(m\) 和 \(v\)：\(m\) 是梯度的一阶动量，\(v\) 是梯度平方的二阶动量。它们从零初始化，每步由新 gradient 更新。因为 \(m\) 和 \(v\) 通常用 fp32 存储，Adam 的 optimizer state 显存常常是参数本身的 4 倍（两个 fp32 state vs 一个 bf16 参数）。
+\end{knowledgebox}
+
+\begin{knowledgebox}{first-use glossary：sharding 与 ZeRO}
+Sharding 是分片：原本每张 GPU 都保存完整对象，分片后每张 GPU 只保存一部分。ZeRO 是 Zero Redundancy Optimizer，在 data parallel 框架内把 optimizer state、gradients、parameters 分阶段切分。ZeRO-1 切 optimizer state，ZeRO-2 再切 gradients，ZeRO-3 连 parameters 也切。越省显存，通信越多。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+Resource accounting 的第一步是把模糊问题改写为数量级问题：需要多少 FLOPs？硬件有效速度是多少？哪些状态占显存？activation 是否被漏算？这些问题答不出来，就不应该启动大训练。
+

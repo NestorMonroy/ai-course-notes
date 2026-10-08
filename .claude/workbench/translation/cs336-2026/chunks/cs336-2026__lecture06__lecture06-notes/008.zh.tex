@@ -1,0 +1,41 @@
+\section{Triton matmul + ReLU：tiling and fusion}
+
+Row reduction 只沿一个轴累加，本节进一步处理二维矩阵乘。源码中的 matmul + ReLU 示例用 $M\times N$ 输出 tile、沿 $K$ 轴循环的 A/B tiles、\texttt{tl.dot} accumulator 和 fused ReLU 展示 shared-memory reuse；核心目标是每次从 HBM 取入的数据参与尽可能多的乘加。
+
+\begin{knowledgebox}{讲义提醒：tile shape 同时受语义和硬件约束}
+\texttt{BLOCK\_M/N/K} 不是越大越好。更大 tile 提高复用，却消耗更多 registers/shared memory，可能降低 occupancy；维度还要对齐 tensor-core 支持的 shape。正确流程是先过 correctness，再 sweep 配置并用 profiler 解释结果。
+\end{knowledgebox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{gemm_tiled.png}
+\caption{gemm tiled.png}
+\figsource{CS336 Spring 2026 Lecture 6 官方可执行讲义。}
+\end{figure}
+\begin{knowledgebox}{读图：gemm tiled.png}
+这张图用于把抽象的 kernel 代码连接到硬件执行。读图时先看数据位于 HBM、shared memory 还是 registers，再看线程/blocks 如何映射到 SM。性能优化的关键是让数据在更靠近计算单元的位置被复用，减少慢速 HBM 往返。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Tiled matmul kernel 的核心循环}]
+for k in range(0, K, BLOCK_K):
+    a = tl.load(a_ptrs, mask=...)
+    b = tl.load(b_ptrs, mask=...)
+    acc += tl.dot(a, b)
+    a_ptrs += BLOCK_K * stride_ak
+    b_ptrs += BLOCK_K * stride_bk
+acc = tl.maximum(acc, 0.0)  # fused ReLU
+\end{lstlisting}
+\begin{importantbox}{Matmul + ReLU fusion}
+如果下一步马上做 ReLU，就没有必要先把 matmul 输出写回 HBM，再读出来做 ReLU。把 ReLU 放在 matmul kernel 尾部，就是典型 fusion。
+\end{importantbox}
+
+\begin{knowledgebox}{课堂提示：fusion 的收益要用省掉的 HBM traffic 解释}
+老师强调，融合 ReLU 的价值不是少写一行 PyTorch，而是避免把 matmul 输出完整写回 HBM、再由第二个 kernel 读回。若中间结果本来就在 registers，逐元素 activation 几乎是顺手完成；这也是判断哪些算子值得 fusion 的通用方法。
+\end{knowledgebox}
+\subsection{本章小结}
+本节说明了一个 kernel optimization 的共同模式：先确认语义正确，再测时间，再看 profiler，最后用 block、shared memory、tiling、fusion 或 layout 调整降低数据移动。
+
+
+
+

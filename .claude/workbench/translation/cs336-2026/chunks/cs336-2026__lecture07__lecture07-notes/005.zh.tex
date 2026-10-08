@@ -1,0 +1,64 @@
+\section{通信 Benchmark：测的是带宽，也是算法}
+
+\subsection{为什么要单独测 collective}
+
+官方讲义的 benchmark 不是为了得到一个漂亮数字，而是训练读者形成判断：某个集群上 all-reduce、reduce-scatter 的实际速度是多少，是否足以支持当前并行策略。若 benchmark 已经显示通信占比过高，继续调学习率或 batch size 都解决不了根因。
+
+\begin{knowledgebox}{课堂提示：计时边界本身就是 benchmark 的一部分}
+可执行示例先 warmup，再调用 \code{torch.cuda.synchronize()} 等待 GPU kernel，随后用 barrier 对齐 ranks，最后才读取 wall-clock duration。少掉其中任一步，数字都可能只反映 kernel launch、某个 rank 的局部时间或冷启动开销。老师用代码强调：通信 benchmark 的第一项结果不是 GB/s，而是“你究竟测到了什么”。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={all-reduce benchmark 的关键步骤}]
+data = torch.randn(num_elements, device=cuda_if_available(rank))
+dist.all_reduce(tensor=data, op=dist.ReduceOp.SUM, async_op=False)
+torch.cuda.synchronize()
+dist.barrier()
+
+start_time = time.time()
+dist.all_reduce(tensor=data, op=dist.ReduceOp.SUM, async_op=False)
+torch.cuda.synchronize()
+dist.barrier()
+duration = time.time() - start_time
+\end{lstlisting}
+
+\subsection{带宽估算公式}
+
+官方代码用一个环形通信直觉估算 all-reduce 的有效带宽：
+
+\[
+B_{\text{all-reduce}}
+    =
+\frac{2S(N-1)}{N T},
+\]
+
+其中 \(S\) 是单 rank 张量大小，\(N\) 是 world size，\(T\) 是一次 all-reduce 的 wall-clock duration。分子里的 \(2\) 来自 ring all-reduce 中 reduce-scatter 与 all-gather 两段都要传输数据；\((N-1)\) 表示每个 rank 需要参与多个传输步；分母的 \(N T\) 是把全局传输工作量归一到整体通信时间上的一种有效带宽口径。
+
+reduce-scatter 的估算少一个 \(2\)：
+
+\[
+B_{\text{reduce-scatter}}
+    =
+\frac{S_{\text{input}}(N-1)}{N T}.
+\]
+
+这里 \(S_{\text{input}}\) 是每个 rank 输入矩阵的总字节数。两者带宽可能相近，因为 all-reduce 可以看成 reduce-scatter 加 all-gather：通信量和时间都约翻倍，带宽口径未必翻倍。
+
+\begin{importantbox}{不要只看 duration}
+同一个 collective 的 duration 会随 tensor size、world size、拓扑、NCCL 算法、warmup、同步方式变化。报告性能时至少要同时给出 bytes、world size、dtype、硬件拓扑和有效带宽。
+\end{importantbox}
+
+\subsection{常见测量陷阱}
+
+\begin{warningbox}{benchmark 的四个坑}
+\begin{enumerate}
+    \item 没有 warmup：第一次通信可能包含初始化、连接建立、kernel 编译或缓存效应。
+    \item 没有 \code{torch.cuda.synchronize()}：CUDA 异步执行会让计时只测到 launch time。
+    \item 没有 barrier：不同 rank 开始/结束时间不一致，测出来的不是集体通信。
+    \item 只测一个 tensor size：小消息看 latency，大消息看 bandwidth，两个区间结论不同。
+\end{enumerate}
+\end{warningbox}
+
+\subsection{本章小结}
+
+通信 benchmark 是并行策略选择的输入。它回答的问题不是“这台机器快不快”，而是“这个 collective 在这个张量大小和拓扑上是否足够快，能否放进训练 step 的关键路径”。
+

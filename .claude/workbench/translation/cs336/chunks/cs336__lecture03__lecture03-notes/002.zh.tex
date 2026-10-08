@@ -1,0 +1,125 @@
+\section{归一化：Pre-norm、RMS Norm 与偏置项}
+
+\subsection{Pre-norm vs Post-norm}
+
+这是架构设计中共识最强的一个选择——几乎所有现代语言模型都使用 Pre-norm。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-007.jpg}
+\caption{Post-norm（左）vs Pre-norm（右）：Pre-norm 将 LayerNorm 移到残差分支的前端，保持残差流的``纯净性''\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第8页。}
+
+\begin{importantbox}{Pre-norm 的核心优势}
+\begin{itemize}
+    \item \textbf{更稳定的训练}：残差流保持为恒等连接，梯度可以无障碍地从网络顶部传播到底部
+    \item \textbf{无需学习率预热}：Post-norm 需要精心设计的 warm-up 策略，Pre-norm 则不需要
+    \item \textbf{更少的 loss spike}：实验表明 Pre-norm 训练过程中梯度范数更平稳
+\end{itemize}
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-008.jpg}
+\caption{Pre-norm 改善训练稳定性的证据：Pre-norm（蓝色）的梯度范数比 Post-norm 更平稳，loss spike 更少\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第9页。来自 Xiong et al. 2020 和 Shleifer \& Ott 的工作。}
+
+\begin{warningbox}{为什么 LayerNorm 不应出现在残差流中？}
+残差流提供了一条从网络顶部到底部的\textbf{恒等连接}（identity connection），这使得梯度传播非常容易。如果在残差流中插入 LayerNorm，就破坏了这个恒等映射，可能导致梯度衰减或放大，使深层网络难以训练。这也是为什么 ResNet 比普通深度网络更容易训练的核心原因之一。
+\end{warningbox}
+
+\subsection{``双重归一化''：最新的创新}
+
+最近出现了一种新的归一化放置方式——在残差分支的\textbf{前后都放置} LayerNorm：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-009.jpg}
+\caption{三种归一化放置方式对比：Post-norm、Pre-norm、Double-norm（前后都有归一化）\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第10页。}
+
+Grok、Gemma 2 采用了这种``双重归一化''方式，OLMo 2 也在注意力和 FFN 之后加入了额外的归一化层。初步评估表明这种方式在大模型上可以进一步提升训练稳定性。
+
+\subsection{RMS Norm 取代 LayerNorm}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-010.jpg}
+\caption{LayerNorm vs RMS Norm：RMS Norm 省去了均值减除和偏置项\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第11页。}
+
+标准 LayerNorm 的公式：
+$$\text{LayerNorm}(x) = \gamma \cdot \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} + \beta$$
+
+\begin{itemize}
+    \item $\mu$：激活值的均值
+    \item $\sigma^2$：激活值的方差
+    \item $\gamma$：可学习的缩放参数
+    \item $\beta$：可学习的偏移参数
+    \item $\epsilon$：数值稳定性的小常数
+\end{itemize}
+
+RMS Norm 的简化公式：
+$$\text{RMSNorm}(x) = \gamma \cdot \frac{x}{\sqrt{\frac{1}{d}\sum_{i=1}^{d} x_i^2 + \epsilon}}$$
+
+RMS Norm 去掉了两个操作：（1）不减去均值 $\mu$；（2）不加偏移项 $\beta$。
+
+\begin{knowledgebox}{为什么 RMS Norm 更好？}
+\begin{itemize}
+    \item \textbf{性能不降}：实验表明 RMS Norm 的模型质量与 LayerNorm 相当
+    \item \textbf{速度更快}：更少的计算操作（不需要计算均值），更少的参数需要从内存加载
+    \item \textbf{关键洞察}：归一化操作虽然只占总 FLOP 的 0.17\%，但由于内存移动开销，它占了总运行时间的约 \textbf{25\%}！因此优化归一化操作对实际速度有重要影响
+\end{itemize}
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-012.jpg}
+\caption{Transformer 各组件的 FLOP 占比 vs 运行时间占比：归一化操作占 0.17\% 的 FLOP 但 25\% 的运行时间\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第13页。来自 Ivanov et al. 2023，``Data Movement Is All You Need''。}
+
+\begin{warningbox}{不要只看 FLOP}
+架构设计不能只关注 FLOP。在现代 GPU 上，\textbf{内存移动}（memory movement）往往是更大的瓶颈。归一化操作只有 0.17\% 的 FLOP，但因为涉及大量内存读写，它消耗了 25\% 的运行时间。RMS Norm 之所以更快，正是因为减少了内存移动，而非减少了计算量。
+\end{warningbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-013.jpg}
+\caption{RMS Norm 的消融实验：RMS Norm 在步/秒（3.68 vs 3.50）和最终 loss 上都优于标准 LayerNorm\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第14页。来自 Narang et al. 2020。}
+
+\subsection{移除偏置项}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-014.jpg}
+\caption{原始 FFN（含偏置项）vs 现代 FFN（无偏置项）：去掉偏置后性能不降反升\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第15页。}
+
+现代 Transformer 普遍去掉了所有线性层中的偏置项 $b$。原因与 RMS Norm 类似：
+
+\begin{itemize}
+    \item 偏置项对模型质量的贡献可以忽略不计
+    \item 去掉偏置减少了内存移动开销
+    \item 去掉偏置有助于训练稳定性——这一点虽然理论解释不完善，但经验证据非常清晰
+\end{itemize}
+
+\subsection{本章小结}
+
+\begin{importantbox}{归一化层设计的三条铁则}
+\begin{enumerate}
+    \item \textbf{Pre-norm 是基本共识}：LayerNorm 必须放在残差分支的外部（不在残差流中）
+    \item \textbf{RMS Norm 是默认选择}：更快、更简洁、性能不降
+    \item \textbf{去掉偏置项}：在线性层和归一化层中都去掉偏置，提升速度和稳定性
+\end{enumerate}
+\end{importantbox}
+
+%% ========== Part 3: 激活函数与门控单元 ==========
+

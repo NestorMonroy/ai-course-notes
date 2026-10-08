@@ -1,0 +1,56 @@
+\section{导言：多 GPU 训练到底在和什么作战}
+
+这节课的主题不是“多开几张卡”，而是更根本的问题：\textbf{当模型、batch、状态和激活都在膨胀时，如何把训练系统重新切分成多个设备可以协同执行的形状。} 讲者一开始就把核心矛盾说得很直白：计算离数据总是有距离，而性能优化的关键，就是尽量减少数据搬运，把大部分工作放在离数据最近的地方完成。\footnote{根据字幕 00:00:05--00:02:04，讲者用“上一讲单 GPU 内并行”过渡到“这一讲多 GPU / 多节点并行”，并明确强调避免 data transfer bottlenecks。}
+
+\begin{importantbox}{本讲的统一主题}
+\begin{enumerate}
+    \item 上一讲在单 GPU 内通过 fusion 和 tiling 减少 HBM 往返。
+    \item 这一讲在多 GPU / 多节点内通过 replication、sharding 和 collective 减少跨设备搬运。
+    \item 两讲本质相同：都在想办法提高算术强度，避免让搬数据压倒算数据。
+\end{enumerate}
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[every node/.style={font=\small, align=center}]
+\node[draw, rounded corners, fill=blue!8, minimum width=3cm, minimum height=1cm] (l1) at (0,0) {L1 / shared memory\\极快、容量小};
+\node[draw, rounded corners, fill=blue!14, minimum width=3cm, minimum height=1cm] (hbm) at (4.0,0) {HBM / DRAM\\容量大、仍然偏慢};
+\node[draw, rounded corners, fill=blue!20, minimum width=3cm, minimum height=1cm] (nvlink) at (8.0,0) {NVLink\\同节点 GPU 互联};
+\node[draw, rounded corners, fill=blue!26, minimum width=3cm, minimum height=1cm] (nvswitch) at (12.0,0) {NVSwitch\\更大规模互联};
+\draw[->, thick] (l1) -- (hbm);
+\draw[->, thick] (hbm) -- (nvlink);
+\draw[->, thick] (nvlink) -- (nvswitch);
+\node[draw, rounded corners, fill=yellow!10, minimum width=11.0cm, minimum height=1cm, below=1.1cm of hbm] (msg) {越靠近算子执行位置，越快；越依赖主机中转，越慢。};
+\end{tikzpicture}
+\caption{从单机层次到跨设备层次：多 GPU 训练只是把内存层次扩展到了更远的通信层次}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[every node/.style={font=\small, align=center}]
+\node[draw, rounded corners, fill=green!10, minimum width=5cm, minimum height=1cm] (last) at (0,0) {上一讲\\单 GPU 内部并行\\fusion / tiling / locality};
+\node[draw, rounded corners, fill=orange!14, minimum width=5cm, minimum height=1cm] (this) at (6,0) {这一讲\\多 GPU / 多节点并行\\collective / sharding / replication};
+\draw[->, thick] (last) -- (this);
+\end{tikzpicture}
+\caption{从单卡局部优化过渡到跨设备全局优化}
+\end{figure}
+
+\begin{knowledgebox}{一句话记忆}
+如果数据已经在本地缓存里，计算就快；如果数据要穿过别的 GPU 或别的节点，通信就会成为瓶颈。分布式训练的核心，不是“多加机器”，而是“让每次通信都物有所值”。
+\end{knowledgebox}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{层次} & \textbf{典型位置} & \textbf{主要矛盾} \\
+\midrule
+L1 / shared memory & 单 GPU 内部 & 容量小但速度快 \\
+HBM / DRAM & 单 GPU 内部 & 容量大但比片上慢 \\
+NVLink / NVSwitch & 多 GPU / 多节点 & 带宽高，但仍然稀缺 \\
+Ethernet / 主机中转 & 跨节点 & 延迟和带宽都不理想 \\
+\bottomrule
+\end{tabular}
+\caption{分布式系统里的层次矛盾：越远越慢，越慢越要避免频繁访问}
+\end{table}
+

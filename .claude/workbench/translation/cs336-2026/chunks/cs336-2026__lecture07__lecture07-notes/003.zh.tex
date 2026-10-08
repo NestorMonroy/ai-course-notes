@@ -1,0 +1,78 @@
+\section{硬件互连：拓扑决定可承受的通信频率}
+
+\subsection{从家用拓扑到数据中心拓扑}
+
+官方讲义先给出一个“classic in the home”的对比：同一台机器里的 GPU 通过 PCIe 连接，不同机器通过普通 Ethernet 连接。这个图不是为了讲家庭装机，而是为了强调：如果跨机器通信还要经过 CPU 网络栈，训练系统很快会被数据搬运拖死。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.78\textwidth]{classic-home-topology.png}
+\caption{传统服务器/网络拓扑示意：设备通过 PCIe 和网络层层连接。}
+\figsource{CS336 Lecture 7 官方源引用的 Springernature 图；本地化文件名保留原始标识 \nolinkurl{42774_2021_98_Fig1_HTML.png?as=webp}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：为什么普通拓扑不够训练大模型}
+这张图的重点是“路径”。GPU 到 GPU 的数据若必须先过 PCIe、CPU 内存、内核网络栈、NIC，再穿过以太网到另一台机器，路径中的每一层都会增加延迟并消耗带宽。大模型训练的同步张量动辄 GB 级，普通网络设计主要服务通用 I/O，不是为每个训练 step 高频搬运梯度和激活而生。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{gpu-node-overview.png}
+\caption{数据中心 GPU 节点：NVLink/NVSwitch、HCA/NIC、InfiniBand/RoCE 形成层次化互连。}
+\figsource{CS336 Spring 2026 Lecture 7 官方可执行讲义图像。}
+\end{figure}
+
+\begin{knowledgebox}{读图：现代拓扑如何支持不同并行策略}
+图中蓝色 GPU 域适合高频通信，因为 NVLink/NVSwitch 的带宽远高于跨节点链路。节点间通过 HCA/NIC 接入 InfiniBand 或 RoCE，适合 data parallel 的梯度同步、pipeline stage 边界传激活等相对粗粒度通信。读这张图时应把每种并行策略放到拓扑上：tensor parallel 的每层 all-gather/all-reduce 尽量留在节点内，pipeline parallel 的 stage 边界才更可能跨节点。
+\end{knowledgebox}
+
+\subsection{带宽数量级和路径差异}
+
+官方源给出的数量级是：PCIe 7.0 x16 约 \(242\) GB/s，B200 的 NVLink 5.0 节点内可达 TB/s 量级，HBM 约 \(8\) TB/s，而跨节点 InfiniBand 链路可能只有 \(0.05\) TB/s 量级。具体硬件会变化，但排序稳定：片上/本卡最快，节点内互连其次，跨节点最慢。
+
+\begin{knowledgebox}{课堂提示：不要把不同层级统称为“网络”}
+官方可执行讲义把 HBM、NVLink/NVSwitch、InfiniBand 和 Ethernet 排成一条速度层次，并进一步解释普通 Ethernet 的 CPU copy 路径与 RDMA 的设备直达路径。这里的教学重点不是背某一代硬件数字，而是先问通信究竟经过本卡显存、节点内交换还是跨节点 fabric；同样大小的 tensor 走不同层级，代价不是一个常数倍关系。
+\end{knowledgebox}
+
+\[
+T_{\text{comm}} \approx \alpha + \frac{S}{B_{\text{effective}}},
+\]
+
+其中 \(T_{\text{comm}}\) 是一次通信时间，\(\alpha\) 是启动延迟和同步开销，\(S\) 是需要移动的数据量，\(B_{\text{effective}}\) 是实际有效带宽。小张量通信常被 \(\alpha\) 主导，大张量通信常被带宽主导。
+
+\begin{warningbox}{不要把规格表带宽当成训练吞吐}
+规格表数字通常是单链路或理想条件下的峰值。训练中还有拓扑竞争、协议开销、NCCL algorithm 选择、张量大小、同步点、反向传播依赖等因素。并行策略选择必须用实际 benchmark 校准。
+\end{warningbox}
+
+\subsection{RDMA、InfiniBand 与 RoCE}
+
+RDMA 是 Remote Direct Memory Access，意思是一台机器可以在较少 CPU 介入的情况下直接读写另一台机器的内存或 GPU 相关 buffer。InfiniBand 原生支持 RDMA；RoCE 是 RDMA over Converged Ethernet，在以太网上提供类似能力，但部署和拥塞控制复杂度不同。对训练来说，绕过 CPU 的价值在于减少数据拷贝和内核网络栈开销，让 GPU 间同步更接近“设备到设备”的路径。
+
+\begin{importantbox}{硬件抽象的边界}
+NCCL 和 PyTorch 可以隐藏 API 细节，但不能消除物理层级。一个每层都通信的 tensor-parallel 模型放到慢跨节点链路上，仍然会慢；一个 pipeline stage 切得不均匀，即使网络很快，也会被最慢 stage 决定吞吐。
+\end{importantbox}
+
+\subsection{NVIDIA Collective Communication Library (NCCL)}
+
+NCCL，即 \textbf{NVIDIA Collective Communication Library (NCCL)}，把 all-reduce、all-gather、reduce-scatter 等 collective 映射到底层 GPU 通信路径。它会检测拓扑，选择 ring/tree 等算法，启动 GPU kernel 来收发数据。PyTorch 的 \code{torch.distributed} 在 GPU 场景下常用 NCCL backend。
+
+\begin{knowledgebox}{课堂提示：NCCL 不只是一个 API wrapper}
+官方源把 NCCL 的工作拆成三步：检测节点、交换机和 NVLink/PCIe 拓扑，优化 GPU 间路径，再启动 GPU kernel 收发数据。因此同一个 \code{all\_reduce} 在不同机器上可能选择不同执行计划；但 NCCL 只能优化既定 collective，不能替模型消除同步语义或决定应该采用哪种 sharding。
+\end{knowledgebox}
+
+\begin{knowledgebox}{术语消化：NCCL 负责什么，不负责什么}
+\begin{tabular}{L{0.22\textwidth}L{0.34\textwidth}L{0.34\textwidth}}
+\toprule
+层次 & NCCL 能做 & NCCL 不能替你做 \\
+\midrule
+拓扑感知 & 识别 GPU、NVLink、PCIe、NIC 的连接关系。 & 改变硬件带宽或跨节点物理距离。 \\
+算法选择 & 为 collective 选择 ring、tree 等通信算法。 & 减少模型本身要求的同步语义。 \\
+执行路径 & 用 GPU kernel 发送/接收数据，减少 CPU 干预。 & 自动决定模型应该怎么 sharding。 \\
+\bottomrule
+\end{tabular}
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+并行策略不是抽象数学题，而是拓扑选择题。通信频率越高，越要靠近高速互连；通信越粗粒度，越能跨慢链路。硬件决定“哪些策略值得尝试”，benchmark 决定“具体怎么切”。
+

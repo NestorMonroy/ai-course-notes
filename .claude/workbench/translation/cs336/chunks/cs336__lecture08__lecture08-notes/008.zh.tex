@@ -1,0 +1,63 @@
+\section{一个四卡算例：同一模型的三种切法}
+
+为了把前面的公式落到实处，考虑一个玩具但够用的例子：一个 $12$ 层的 MLP，隐藏宽度 $d=4096$，batch size $B=128$，使用 fp16 训练，设备数 $p=4$。这个例子不是为了模仿某个真实模型，而是为了把 DDP、TP、PP 的代价放在同一个坐标系里。
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{3.1cm}p{3.7cm}p{4.2cm}}
+\toprule
+\textbf{设定} & \textbf{数值} & \textbf{说明} \\
+\midrule
+层数 & 12 & 便于做 pipeline 划分 \\
+隐藏宽度 & 4096 & 足够大，能看出通信成本 \\
+batch size & 128 & 不算极端的大 batch \\
+GPU 数 & 4 & 便于直接比较三种切法 \\
+\bottomrule
+\end{tabular}
+\caption{四卡算例的基本设定}
+\end{table}
+
+在这个设定下，单层权重矩阵大约有 $4096\times4096 \approx 16.8$M 参数，也就是 fp16 下约 $32$ MiB。12 层总参数量接近 $201$M，静态训练状态在 DDP 里大约是
+\[
+201\text{M} \times 16 \text{ bytes} \approx 3.2\text{ GiB},
+\]
+还没算激活和缓冲区。另一方面，一个 batch 的激活大小约为
+\[
+128 \times 4096 \times 2 \text{ bytes} = 1\text{ MiB}.
+\]
+这意味着：\textbf{DDP 的主要痛点是状态复制，TP 的主要痛点是按层通信，PP 的主要痛点是 bubble。}
+
+\begin{table}[H]
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{p{2.7cm}p{3.5cm}p{3.9cm}p{3.3cm}p{3.3cm}}
+\toprule
+\textbf{方案} & \textbf{单卡持有内容} & \textbf{每步/每层通信} & \textbf{第一感觉} & \textbf{典型风险} \\
+\midrule
+DDP & 完整模型 + 完整 optimizer state & 每步一次梯度 all-reduce & 最容易跑通 & 状态太大，显存压力高 \\
+TP & 约 $\frac{1}{4}$ 的宽度切片 & 每层 all-gather / reduce-scatter & 模型能切更细 & 互联带宽不够会拖死 \\
+PP & 约 $\frac{1}{4}$ 的层堆栈 & stage 间 send / recv & stage 化更自然 & bubble 和负载不均 \\
+\bottomrule
+\end{tabular}
+}
+\caption{同一个模型在三种切法下的直观代价}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[font=\small, align=center]
+\node[draw, rounded corners, fill=blue!10, minimum width=2.7cm, minimum height=1cm] (a) at (0,0) {DDP\\复制状态};
+\node[draw, rounded corners, fill=orange!14, minimum width=2.7cm, minimum height=1cm] (b) at (4.1,0) {TP\\切宽度};
+\node[draw, rounded corners, fill=green!14, minimum width=2.7cm, minimum height=1cm] (c) at (8.2,0) {PP\\切深度};
+\draw[->, thick] (a) -- node[above]{更省改动} (b);
+\draw[->, thick] (b) -- node[above]{更吃链路} (c);
+\end{tikzpicture}
+\caption{同一模型在不同切分维度上的权衡}
+\end{figure}
+
+\begin{knowledgebox}{这个算例想让你看到什么}
+同一个模型，换一种切法，瓶颈位置就完全变了。DDP 的关键是状态大小，TP 的关键是每层通信，PP 的关键是调度空档。并行策略不是”哪个更高级”，而是”哪个瓶颈更像你的真实约束”。
+\end{knowledgebox}
+

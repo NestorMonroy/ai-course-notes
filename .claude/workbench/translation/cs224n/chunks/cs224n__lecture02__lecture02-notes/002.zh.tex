@@ -1,0 +1,160 @@
+\section{Word2Vec 回顾与深入}
+
+\subsection{Word2Vec 的核心思想回顾}
+
+Word2Vec 的 Skip-gram 模型的核心思想非常简单：
+
+\begin{enumerate}
+    \item 为词表中的每个词随机初始化一个向量
+    \item 遍历语料中的每个位置，用当前的中心词（center word）预测周围的上下文词（context words）
+    \item 根据预测误差更新词向量，使其逐渐学会捕捉词与词之间的语义关系
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-006.jpg}
+\caption{Word2Vec 核心思想：以 banking 为中心词，预测上下文词 problems、turning、into、crises 等的概率\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第7页。}
+
+预测概率使用 softmax 函数：
+
+$$P(o|c) = \frac{\exp(u_o^T v_c)}{\sum_{w \in V} \exp(u_w^T v_c)}$$
+
+\begin{itemize}
+    \item $v_c$：中心词 $c$ 的词向量
+    \item $u_o$：上下文词 $o$ 的词向量
+    \item $V$：整个词表
+\end{itemize}
+
+\begin{knowledgebox}{为什么使用两套词向量？}
+Word2Vec 为每个词维护两个向量：中心词向量 $v$ 和上下文词向量 $u$，这\textbf{不是}为了提升性能，而是为了\textbf{简化数学推导}。如果只用一套向量，当中心词自身出现在归一化求和中时，会产生一个 $x^2$ 项，使梯度计算变得更复杂。实际上使用一套向量效果略好，但通常的做法是分别训练两套向量，最后取平均。
+\end{knowledgebox}
+
+\subsection{Word2Vec 参数与计算}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-007.jpg}
+\caption{Word2Vec 的参数矩阵 $U$（outside）和 $V$（center），以及计算过程：通过点积和 softmax 得到概率分布\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第8页。}
+
+Word2Vec 是一个\textbf{词袋模型}（Bag of Words）：它不区分上下文词在左边还是右边，对窗口内所有位置预测相同的概率分布。虽然这看起来是一个很强的简化假设，但仅凭这一点就足以学到非常有用的词向量。
+
+\subsection{Word2Vec 算法族}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-009.jpg}
+\caption{Word2Vec 将语义相近的词映射到向量空间中相近的位置\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第9页。Word2Vec 可视化，使用 t-SNE 降维展示。}
+
+Mikolov 等人（2013）的论文中描述了一族算法：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-011.jpg}
+\caption{Word2Vec 算法族：两种模型架构（Skip-gram 和 CBOW）与多种损失函数（Na\"ive softmax、Hierarchical softmax、Negative sampling）\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第10页。}
+
+\begin{importantbox}{Word2Vec 的两种模型与三种损失函数}
+\textbf{模型架构}：
+\begin{enumerate}
+    \item \textbf{Skip-gram（SG）}：给定中心词，预测上下文词（本课主要介绍的版本）
+    \item \textbf{Continuous Bag of Words（CBOW）}：给定上下文词，预测中心词
+\end{enumerate}
+\textbf{损失函数}：
+\begin{enumerate}
+    \item Na\"ive softmax：简单但计算代价高
+    \item Hierarchical softmax：用二叉树加速
+    \item Negative sampling：最常用的高效替代方案
+\end{enumerate}
+\end{importantbox}
+
+\subsection{负采样（Negative Sampling）}
+
+Na\"ive softmax 的分母需要对词表中\textbf{所有}词求和，当词表有 40 万词时，这个计算量很大。负采样提供了一种高效的替代方案。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-010.jpg}
+\caption{Softmax 的归一化项需要对整个词表求和，计算量极大\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第11页。}
+
+负采样的目标函数为：
+
+$$J_{\text{neg-sample}}(u_o, v_c, U) = -\log \sigma(u_o^T v_c) - \sum_{k \in \{K \text{ sampled}\}} \log \sigma(-u_k^T v_c)$$
+
+\begin{itemize}
+    \item $\sigma(x) = \frac{1}{1 + e^{-x}}$：logistic/sigmoid 函数
+    \item 第一项：希望真实上下文词的点积概率\textbf{尽量高}
+    \item 第二项：随机采样 $K$ 个``噪声''词，希望它们的点积概率\textbf{尽量低}
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-012.jpg}
+\caption{Skip-gram 负采样的完整目标函数与 sigmoid 函数\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第12页。}
+
+\begin{knowledgebox}{负样本的采样策略}
+负样本不是从均匀分布中采样，而是使用\textbf{调整过的 unigram 分布}：
+$$P(w) = \frac{U(w)^{3/4}}{Z}$$
+将词频的 $3/4$ 次方作为采样权重。这个指数使得\textbf{低频词被采样的概率相对增加}，介于均匀分布（指数为 0）和按频率采样（指数为 1）之间。实验表明这种``中间''策略效果最好。通常只采样 $K = 5 \sim 10$ 个负样本。
+\end{knowledgebox}
+
+\subsection{梯度的稀疏性}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{slides-images/slide-013.jpg}
+\caption{负采样下的梯度极其稀疏：在 $\mathbb{R}^{2dV}$ 维梯度向量中，只有窗口内出现的少数几个词对应的梯度非零\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第13页。}
+
+使用负采样后，每个窗口只涉及 $2m + 1$ 个窗口词加 $2km$ 个负样本，因此梯度向量\textbf{极其稀疏}——绝大多数词的梯度为零。这意味着：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{slides-images/slide-014.jpg}
+\caption{稀疏更新：只需更新实际出现的词的词向量行，避免发送巨大的稠密梯度\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第14页。}
+
+\begin{warningbox}{稀疏更新的实现细节}
+在分布式训练中，梯度的稀疏性非常重要：我们只需更新出现在当前窗口中的少数词向量，而不是整个嵌入矩阵。在实际的深度学习框架中，词嵌入矩阵通常按\textbf{行}存储（而非列），每行对应一个词的向量。
+\end{warningbox}
+
+\subsection{词向量的``魔力''：类比关系}
+
+训练好的词向量展现出令人惊叹的语义属性。最著名的发现是\textbf{向量类比}（vector analogies）：
+
+$$\text{king} - \text{man} + \text{woman} \approx \text{queen}$$
+
+这意味着向量空间中的\textbf{方向}对应于语义关系：``man $\to$ king'' 的方向与 ``woman $\to$ queen'' 的方向近似平行，编码了``统治者''这一语义成分。
+
+Chris Manning 在课堂上演示了多个类比示例：
+
+\begin{itemize}
+    \item \textbf{性别类比}：man : king :: woman : \textbf{queen}
+    \item \textbf{文化知识}：Australia : beer :: Russia : \textbf{vodka}
+    \item \textbf{工具-动作}：pencil : sketching :: camera : \textbf{photographing}
+    \item \textbf{政治}：Obama : Clinton :: Reagan : \textbf{Nixon}
+    \item \textbf{语法}：tall : tallest :: long : \textbf{longest}
+\end{itemize}
+
+\begin{importantbox}{词向量类比的深层含义}
+仅仅通过``预测上下文词''这一简单任务，在大量文本上训练，就能自动习得丰富的语义知识——这在词向量刚被发现时几乎被视为``魔法''。虽然现在有了更强大的 ChatGPT 等模型，但词向量所揭示的\textbf{分布式语义表示}原理，仍然是现代 NLP 的基石。
+\end{importantbox}
+
+\subsection{本章小结}
+
+Word2Vec 通过极其简单的``预测上下文''任务，在大规模语料上学习到的词向量，能够：（1）将语义相近的词映射到空间中相近的位置；（2）通过向量运算执行语义类比。负采样是实际训练中最常用的高效技巧，它用少量二分类（真实对 vs 噪声对）替代了对整个词表的 softmax 归一化。
+
+%% ========== Part 3: 基于计数的词向量方法 ==========
+

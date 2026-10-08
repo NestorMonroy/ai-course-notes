@@ -1,0 +1,87 @@
+\section{系统优化与推理}
+
+MoE 模型的系统实现涉及独特的挑战和优化机会。
+
+\subsection{Expert Parallelism}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-037.jpg}
+\caption{Expert Parallelism：每个 expert 放在不同设备上，通过 All-to-All 通信分发和收集 token\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第38页。}
+
+Expert Parallelism 是 MoE 特有的并行化方式：
+
+\begin{enumerate}
+    \item 每个 expert（或一组 expert）放在不同设备上
+    \item 路由器决定 token 的 expert 分配后，通过 \textbf{All-to-All 通信}将 token 发送到对应设备
+    \item 各设备独立计算 FFN
+    \item 再通过 All-to-All 通信将结果收集回来
+\end{enumerate}
+
+\begin{knowledgebox}{Expert Parallelism 是 MoE 流行的系统原因}
+当模型大到必须分布在多个设备上时，Expert Parallelism 提供了一种非常自然的切分方式。与 Tensor Parallelism（需要在每步都同步）不同，Expert Parallelism 只在路由点和聚合点需要通信。它与 Data Parallelism、Pipeline Parallelism、Tensor Parallelism 可以自由组合，为大规模训练提供了更多灵活性。
+\end{knowledgebox}
+
+\subsection{Grouped GEMM：设备级稀疏计算}
+
+当多个 expert 位于同一设备上时，可以利用 \textbf{Grouped GEMM}（分组矩阵乘法）来高效处理稀疏的 expert 计算。现代库（如 Meta 的 Megablocks）可以将多个小矩阵乘法合并为一个大的 grouped operation，避免浪费 GPU 计算资源。
+
+\subsection{MoE 的推理特性}
+
+MoE 在推理时有独特的优势和挑战：
+
+\begin{importantbox}{MoE 推理的核心特性}
+\begin{itemize}
+    \item \textbf{优势}：每个 token 只需要激活部分 expert 的参数，FLOPs 远低于等效 Dense 模型
+    \item \textbf{挑战}：所有 expert 的参数都需要存储在内存中，内存需求远高于激活参数暗示的水平
+    \item \textbf{权衡}：MoE 是``用内存换 FLOPs''的典型例子——更多参数、更少计算
+\end{itemize}
+\end{importantbox}
+
+\subsection{MoE 与后训练（Post-Training）}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-041.jpg}
+\caption{MoE 模型在后训练（SFT/RLHF）中可能面临过拟合风险\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第42页。}
+
+MoE 模型在微调（SFT）和 RLHF 阶段面临特殊挑战：
+
+\begin{warningbox}{MoE 更容易在后训练中过拟合}
+MoE 的总参数量远大于激活参数量。在后训练数据量有限的情况下，大量未充分训练的参数容易导致过拟合。DeepSeek 的解决方案很务实：使用大量 SFT 数据（1.4M 样本）来缓解过拟合问题。
+\end{warningbox}
+
+\subsection{Upcycling：从 Dense 到 MoE 的低成本转换}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-043.jpg}
+\caption{Upcycling：将 Dense 模型的 MLP 复制多份（加少量扰动），添加随机初始化的路由器，继续训练\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第44页。}
+
+Upcycling 是一种将现有 Dense 模型转换为 MoE 模型的技巧：
+
+\begin{enumerate}
+    \item 取 Dense 模型的 MLP 权重
+    \item 复制多份（每份加少量随机扰动）
+    \item 随机初始化路由器
+    \item 以 MoE 模式继续预训练
+\end{enumerate}
+
+成功案例：
+\begin{itemize}
+    \item \textbf{MiniCPM}：Dense $\rightarrow$ MoE upcycling，显著提升性能
+    \item \textbf{Qwen 1.5 MoE}：从 Qwen 1.5 Dense 模型 upcycle，2.7B 激活参数达到 7B Dense 模型水平
+\end{itemize}
+
+\subsection{本章小结}
+
+MoE 的系统实现需要精心设计的 Expert Parallelism、高效的 Grouped GEMM、以及多种并行策略的组合。推理时 MoE 用内存换 FLOPs，后训练时需注意过拟合。Upcycling 提供了一条从 Dense 到 MoE 的低成本升级路径。
+
+%% ========== Part 6: DeepSeek 架构演进 ==========
+

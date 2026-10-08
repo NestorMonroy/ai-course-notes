@@ -1,0 +1,95 @@
+\section{综合应用：拆解 FlashAttention}
+
+现在我们用前面学到的所有知识来理解 FlashAttention——一个将前述优化技巧融会贯通的经典算法。
+
+\subsection{Attention 计算回顾}
+
+标准 Attention 计算包含三次矩阵乘法，中间夹一个 softmax：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-047.jpg}
+\caption{Attention 计算流程：$Q \cdot K^T$ 得到 $n \times n$ 的注意力分数矩阵，经 softmax 后与 $V$ 相乘得到输出\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第48页。}
+
+$$\text{Output} = \text{softmax}\left(\frac{QK^T}{\sqrt{d}}\right) V$$
+
+矩阵乘法部分可以直接应用 Tiling 技巧。\textbf{真正的难点在于 softmax}——它是一个\textbf{全局操作}，需要对整行求和和求最大值，这似乎要求所有数据必须同时可用。
+
+\subsection{FlashAttention 的核心思想}
+
+FlashAttention 的关键贡献：通过 Tiling + Recomputation + Online Softmax，实现\textbf{亚二次方的 HBM 访问量}（$O(N^2 d^2 M^{-1})$ vs 标准实现的 $O(N^2 d + N^2)$），同时保持精确计算（非近似）。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-046.jpg}
+\caption{FlashAttention 性能：标准实现 HBM 读写 40.3 GB，FlashAttention 仅 4.4 GB，运行时间从 41.7ms 降到 7.3ms\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第47页。}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-048.jpg}
+\caption{FlashAttention 的 Tiling 策略：K 和 V 的 tile 被复制到 SRAM，Q 的 tile 在内层循环中逐块处理，结果输出到 HBM\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第49页。FlashAttention Figure 1，Dao et al.}
+
+\subsection{Online Softmax：tile-by-tile 计算全局 softmax}
+
+标准 softmax 需要三次遍历数据：（1）求最大值 $m$，（2）计算 $\sum e^{x_i - m}$，（3）归一化。Online softmax（Milakov \& Gimelshein 2018）将这些步骤融合，只需一次遍历：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-049.jpg}
+\caption{Normal softmax（左，Algorithm 2）vs Online softmax（右，Algorithm 3）：通过增量更新 $m_j$ 和 $d_j$，实现 tile-by-tile 的 softmax 计算\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第50页。来自 Milakov and Gimelshein 2018。}
+
+Online softmax 的核心在于维护两个运行变量：
+\begin{itemize}
+    \item $m_j = \max(m_{j-1}, x_j)$：当前已见过的最大值
+    \item $d_j = d_{j-1} \times e^{m_{j-1} - m_j} + e^{x_j - m_j}$：``伸缩求和''——每次更新最大值时，用乘法修正之前的累计量
+\end{itemize}
+
+这使得 softmax 可以\textbf{逐 tile 增量计算}，不需要等到所有数据就绪。
+
+\subsection{FlashAttention Forward Pass 全貌}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-050.jpg}
+\caption{FlashAttention 前向传播全流程：$S^{(1)} = Q(K^{(1)})^T$，$S^{(2)} = Q(K^{(2)})^T$，然后 tile-wise 计算 softmax 并修正归一化因子，最终得到精确输出\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第51页。来自 Dao 2023。}
+
+FlashAttention 综合了本课所有优化技巧：
+
+\begin{enumerate}
+    \item \textbf{Tiling}：对 KQV 矩阵乘法进行 tile-wise 计算，最小化 HBM 访问
+    \item \textbf{Fusion}：将指数运算与矩阵乘法融合在同一个 kernel 中
+    \item \textbf{Online Softmax}：通过伸缩求和实现 tile-by-tile 的精确 softmax
+    \item \textbf{Recomputation}（反向传播中）：不存储 $N^2$ 大小的注意力矩阵，在反向传播时 tile-by-tile 重新计算
+\end{enumerate}
+
+\begin{importantbox}{FlashAttention = Tiling + Fusion + Online Softmax + Recomputation}
+FlashAttention 不是一个全新的算法，而是将 GPU 性能优化的所有经典技巧\textbf{巧妙组合}的结果。理解了本课介绍的每一种优化手段，你就能理解 FlashAttention 的每一个设计决策。
+\end{importantbox}
+
+\subsection{本章小结}
+
+FlashAttention 通过 tiling 将 attention 的 HBM 读写从 40.3 GB 减少到 4.4 GB，运行时间减少 5.7x。它的成功完全建立在对 GPU 内存层次的深刻理解之上：将数据保持在 SRAM 中，通过 online softmax 避免全局同步，通过 recomputation 避免存储 $N^2$ 中间矩阵。
+
+\subsection{拓展阅读}
+
+\begin{itemize}
+    \item Horace He's Blog: \url{https://horace.io/brrr_intro.html} —— GPU 性能优化入门必读
+    \item ``What shapes do matrix multiplications'': \url{https://www.thonking.ai/p/what-shapes-do-matrix-multiplications} —— 矩阵维度对性能的影响
+    \item CUDA Mode Group: \url{https://github.com/cuda-mode} —— CUDA 学习社区
+    \item Dao et al., FlashAttention: \url{https://arxiv.org/abs/2205.14135}
+    \item Dao, FlashAttention-2: \url{https://arxiv.org/abs/2307.08691}
+    \item Milakov \& Gimelshein, Online Softmax: \url{https://arxiv.org/abs/1805.02867}
+\end{itemize}
+
+%% ========== 总结与延伸 ==========
+

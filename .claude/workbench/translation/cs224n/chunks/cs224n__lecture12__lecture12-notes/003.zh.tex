@@ -1,0 +1,148 @@
+\section{混合精度训练}
+
+\subsection{初步方案：FP32 主权重 + FP16 计算}
+
+既然纯 FP16 有问题，一个自然的想法是：\textbf{保留一份 FP32 的模型副本（Master Weights），但在前向和反向传播中使用 FP16 计算}。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-012.jpg}
+\caption{混合精度训练流程（Sharang et al. 2018）：前向和反向传播在 FP16 中进行，权重更新在 FP32 中进行\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第13页。}
+
+具体步骤：
+\begin{enumerate}
+    \item 维护 FP32 格式的模型参数副本（Master Weights）
+    \item 将 Master Weights 转换为 FP16，执行前向传播
+    \item 在 FP16 中计算梯度（反向传播）
+    \item 将 FP16 梯度上转为 FP32
+    \item 用 FP32 梯度更新 Master Weights
+    \item 将更新后的 Master Weights 复制回 FP16 版本
+\end{enumerate}
+
+\begin{warningbox}{梯度下溢问题仍未解决}
+虽然权重更新的精度问题通过 FP32 Master Weights 解决了，但反向传播中计算的\textbf{梯度本身仍然是 FP16 的}。那些极小的梯度值仍然会在 FP16 中下溢为零，丢失重要的学习信号。
+\end{warningbox}
+
+\subsection{Loss Scaling：解决梯度下溢}
+
+为了避免 FP16 下的梯度下溢，引入 \textbf{Loss Scaling} 技巧：在计算梯度之前，将损失函数乘以一个较大的常数（如1000），使得梯度也被等比放大。放大后的梯度值更大，不容易下溢为零。在 FP32 中更新权重之前，再将梯度除以该常数。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-015.jpg}
+\caption{完整的混合精度训练方案（含 Loss Scaling）：第3步将损失乘以大常数，第5步在 FP32 中除以该常数\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第16页。}
+
+\begin{importantbox}{混合精度训练完整方案（FP16 + Loss Scaling）}
+\begin{enumerate}
+    \item 维护 FP32 格式的 Master Weights
+    \item 在 FP16 中执行前向传播
+    \item \textbf{将损失乘以一个大常数}（Loss Scaling），人为放大梯度
+    \item 在 FP16 中计算梯度（此时梯度已被放大，不容易下溢）
+    \item 将梯度转为 FP32 后\textbf{除以 Scaling Factor}
+    \item 用 FP32 更新 Master Weights
+    \item 复制回 FP16 版本
+\end{enumerate}
+\end{importantbox}
+
+在 PyTorch 中，使用 \texttt{torch.cuda.amp.GradScaler} 和 \texttt{torch.cuda.amp.autocast} 可以方便地实现此方案：
+
+\begin{lstlisting}[caption={PyTorch 中的 FP16 混合精度训练（含 GradScaler）}]
+scaler = torch.cuda.amp.GradScaler()
+
+for input, target in data:
+    optimizer.zero_grad()
+    with torch.cuda.amp.autocast():
+        output = model(input)
+        loss = loss_fn(output, target)
+    scaler.scale(loss).backward()
+    scaler.step(optimizer)
+    scaler.update()
+\end{lstlisting}
+
+\begin{warningbox}{Loss Scaling 的局限性}
+Loss Scaling 的常数需要精心选择：太小则梯度仍然下溢，太大则梯度上溢为 NaN。\texttt{GradScaler} 通过动态调整 Scaling Factor 来应对不同训练阶段的梯度分布变化，但这增加了训练的复杂性。
+\end{warningbox}
+
+\subsection{BFloat16：更优雅的解决方案}
+
+Loss Scaling 的根本原因是 FP16 的动态范围不足（仅5位指数）。\textbf{BFloat16}（Brain Float 16，由 Google Brain 提出）提供了一个更根本的解决方案：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-018.jpg}
+\caption{BF16 的核心思想：保持与 FP32 相同的8位指数（相同动态范围），牺牲尾数精度（7位 vs FP32的23位）\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第19页。}
+
+BF16 的设计理念：
+
+\begin{itemize}
+    \item \textbf{8位指数}：与 FP32 \textbf{完全相同}的动态范围，彻底消除下溢问题
+    \item \textbf{7位尾数}：精度比 FP16（10位）更低，但实验表明对神经网络训练影响极小
+    \item \textbf{无需 Loss Scaling}：因为动态范围足够，不再需要人为放大梯度
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-019.jpg}
+\caption{BF16 格式：1位符号 + 8位指数 + 7位尾数，与 FP32 有相同的动态范围\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第20页。}
+
+使用 BF16 的代码极其简洁：
+
+\begin{lstlisting}[caption={PyTorch 中的 BF16 混合精度训练（无需 GradScaler）}]
+# Creates model and optimizer in default precision
+model = Net().cuda()
+optimizer = optim.SGD(model.parameters(), ...)
+
+for input, target in data:
+    optimizer.zero_grad()
+    # Enables autocasting for the forward pass
+    with torch.autocast(device_type="cuda"):
+        output = model(input)
+        loss = loss_fn(output, target)
+    # No GradScaler needed!
+    loss.backward()
+    optimizer.step()
+\end{lstlisting}
+
+\begin{importantbox}{BF16 是当前最佳实践}
+如果你的 GPU 支持 BF16（Ampere 架构及更新：A100、H100、A6000 等），\textbf{始终使用 BF16 而非 FP16}。BF16 无需 Loss Scaling，代码更简洁，训练更稳定。可通过 \texttt{torch.cuda.is\_bf16\_supported()} 检查支持情况。
+\end{importantbox}
+
+\subsection{混合精度训练的实际效果}
+
+以在单块 A100 上微调 DistilBERT 进行情感分类为例：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{数据类型} & \textbf{训练时间} & \textbf{准确率} & \textbf{显存占用} \\
+\midrule
+Float64      & $\sim$25 min & 高 & 最大 \\
+Float32      & 基准     & 基准 & 基准 \\
+Mixed (BF16) & \textbf{减少约1/3} & \textbf{略有提升} & \textbf{显著减少} \\
+\bottomrule
+\end{tabular}
+\caption{不同精度下 DistilBERT 微调的性能对比}
+\end{table}
+
+BF16 混合精度训练不仅节省了约 1/3 的训练时间和大量显存，准确率甚至略有提升——这是因为低精度表示具有一定的\textbf{正则化效果}。训练加速的根本原因是：半精度矩阵乘法在现代 GPU 的 Tensor Core 上速度更快。
+
+\subsection{本章小结}
+
+\begin{itemize}
+    \item FP16 节省内存但存在梯度下溢和精度问题，需要 Loss Scaling
+    \item BF16 保留 FP32 的动态范围，牺牲精度，无需 Loss Scaling
+    \item \textbf{混合精度训练应始终启用}：几乎不影响模型质量，显著节省时间和内存
+    \item 新架构 GPU 优先使用 BF16，旧架构使用 FP16 + GradScaler
+\end{itemize}
+
+%% ========== Part 2: 多GPU训练 ==========
+

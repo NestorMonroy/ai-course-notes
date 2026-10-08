@@ -1,0 +1,240 @@
+\section{数据并行（Data Parallelism）}
+
+数据并行是最直观、最常用的并行策略。核心思想很简单：\textbf{每个 GPU 拥有模型的完整副本，但处理不同的数据子集}。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-010.jpg}
+\caption{三种并行策略概览：数据并行、模型并行、激活并行\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第11页。}
+
+\subsection{朴素数据并行}
+
+给定总批次大小 $B$ 和 $M$ 个 GPU，每个 GPU 处理 $B/M$ 个样本。各 GPU 独立计算梯度，然后通过 \textbf{All-Reduce} 同步梯度，最后各自更新参数。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-011.jpg}
+\caption{朴素数据并行：SGD 公式与并行化分解\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第12页。}
+
+$$\theta_{t+1} = \theta_t - \eta \cdot \frac{1}{B} \sum_{i=1}^{B} \nabla_\theta \mathcal{L}(x_i; \theta_t)$$
+
+其中求和 $\sum_{i=1}^{B}$ 可以分配到 $M$ 个 GPU 上，每个 GPU 计算 $B/M$ 个样本的梯度，然后通过 All-Reduce 汇总。
+
+\begin{importantbox}{朴素数据并行的特性}
+\begin{itemize}
+    \item \textbf{计算扩展}：每个 GPU 处理 $B/M$ 个样本——只要 $B$ 足够大，每个 GPU 都能充分利用算力
+    \item \textbf{通信开销}：每个批次需要一次 All-Reduce，通信量为 $2 \times |\theta|$（参数数量）
+    \item \textbf{内存扩展}：\textcolor{red}{无}——每个 GPU 必须存储完整的参数、梯度和优化器状态
+\end{itemize}
+\end{importantbox}
+
+\subsection{训练内存的详细分析}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-012.jpg}
+\caption{训练时每个参数的内存占用分析（假设混合精度训练）\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第13页。}
+
+以使用 AdamW 优化器的混合精度训练为例，每个参数需要存储：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{组件} & \textbf{精度} & \textbf{字节数/参数} \\
+\midrule
+模型参数（BF16） & FP16 & 2 \\
+梯度（BF16） & FP16 & 2 \\
+主权重副本（FP32） & FP32 & 4 \\
+Adam 一阶矩 & FP32 & 4 \\
+Adam 二阶矩 & FP32 & 4 \\
+\midrule
+\textbf{合计} & & \textbf{16} \\
+\bottomrule
+\end{tabular}
+\caption{每个参数的内存开销：共需 16 字节，其中优化器状态占 12 字节（75\%）}
+\end{table}
+
+\begin{warningbox}{优化器状态是内存的主要消耗者}
+在混合精度训练中，优化器状态（主权重 + Adam 一阶矩 + Adam 二阶矩）占据了\textbf{每参数 12 字节}，是参数本身（2 字节）的 6 倍。这意味着即使参数量看起来"不大"，实际训练内存可能远超预期。
+\end{warningbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-013.jpg}
+\caption{内存占用可视化：优化器状态（绿色）占据大部分内存\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第14页。}
+
+以 7.5B 参数模型在 64 个加速器上的朴素数据并行为例，每个 GPU 需要约 120 GB 内存——远超 80 GB 的 A100。这引出了 ZeRO 优化的核心动机。
+
+\subsection{ZeRO 优化器：分级内存分片}
+
+ZeRO（Zero Redundancy Optimizer）通过三个阶段逐步减少数据并行中的内存冗余。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-014.jpg}
+\caption{ZeRO 三阶段对比：从完全冗余到完全分片\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第15页。}
+
+\subsubsection{ZeRO Stage 1：优化器状态分片}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-015.jpg}
+\caption{ZeRO Stage 1 详解：分片优化器状态\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第16页。}
+
+核心思想：每个 GPU 仍然拥有完整的参数和梯度，但只负责\textbf{一部分}优化器状态。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-016.jpg}
+\caption{ZeRO Stage 1 工作流程：Reduce-Scatter 梯度 $\rightarrow$ 局部参数更新 $\rightarrow$ All-Gather 参数\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第17页。}
+
+具体步骤：
+\begin{enumerate}
+    \item 每个 GPU 在自己的数据上计算完整梯度
+    \item \textbf{Reduce-Scatter}：将梯度按参数分片归约——GPU $i$ 收到第 $i$ 分片的汇总梯度
+    \item 每个 GPU 用自己持有的优化器状态更新第 $i$ 分片的参数
+    \item \textbf{All-Gather}：将更新后的参数分片广播给所有 GPU
+\end{enumerate}
+
+\begin{importantbox}{ZeRO Stage 1 的"零额外开销"性质}
+朴素数据并行需要一次 All-Reduce（通信量 $2|\theta|$），而 ZeRO Stage 1 需要一次 Reduce-Scatter + 一次 All-Gather（通信量也是 $2|\theta|$）。根据 All-Reduce = Reduce-Scatter + All-Gather 恒等式，\textbf{Stage 1 的通信量与朴素数据并行完全相同}，但优化器状态内存减少为 $1/M$。
+\end{importantbox}
+
+\subsubsection{ZeRO Stage 2：梯度分片}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-018.jpg}
+\caption{ZeRO Stage 2：在反向传播过程中增量式地分发梯度\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第19页。}
+
+Stage 2 在 Stage 1 的基础上进一步分片梯度。关键约束：不能在内存中实例化完整的梯度向量。
+
+具体做法：在反向传播过程中，每计算完一层的梯度，就立即通过 Reduce 操作将该层的梯度发送到负责它的 GPU，然后释放本地梯度内存。这样，峰值内存使用被限制在"完整参数 + 分片梯度 + 分片优化器状态"。
+
+\begin{knowledgebox}{逐层梯度传输}
+Stage 2 的关键技巧是在反向传播过程中\textbf{逐层}执行 Reduce 操作，而非等所有梯度计算完毕后一次性通信。这避免了在任何时刻实例化完整梯度向量，总通信量仍为 $2|\theta|$，但引入了轻微的同步开销。
+\end{knowledgebox}
+
+\subsubsection{ZeRO Stage 3 / FSDP：完全分片}
+
+ZeRO Stage 3 是最激进的版本——参数、梯度和优化器状态\textbf{全部分片}。PyTorch 中的 \texttt{FSDP}（Fully Sharded Data Parallel）正是 Stage 3 的实现。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-020.jpg}
+\caption{FSDP 工作流程概览\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第21页。}
+
+由于没有任何 GPU 拥有完整参数，前向和反向传播都需要按需请求参数：
+
+\begin{enumerate}
+    \item \textbf{前向传播}：处理第 $l$ 层时，All-Gather 该层的参数 $\rightarrow$ 计算 $\rightarrow$ 释放参数
+    \item \textbf{反向传播}：All-Gather 参数 $\rightarrow$ 计算梯度 $\rightarrow$ Reduce-Scatter 梯度 $\rightarrow$ 释放参数和非本地梯度
+    \item \textbf{参数更新}：每个 GPU 用本地的分片梯度和分片优化器状态更新分片参数
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-021.jpg}
+\caption{FSDP 通信与计算的重叠调度\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第22页。}
+
+\begin{importantbox}{FSDP 的通信开销与效率}
+FSDP 总通信量为 $3|\theta|$：前向 All-Gather + 反向 All-Gather + 反向 Reduce-Scatter。相比朴素数据并行的 $2|\theta|$，仅增加 50\%。通过\textbf{预取}（prefetching）——在计算当前层时预加载下一层参数——可以有效隐藏通信延迟，使 GPU 大部分时间保持在计算状态。
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-023.jpg}
+\caption{FSDP 前向传播的时序图：通信（蓝色）和计算（绿色）高度重叠，气泡很小\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第24页。}
+
+\subsection{ZeRO 三阶段对比总结}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-024.jpg}
+\caption{ZeRO 三阶段的通信开销与内存节省对比\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第25页。}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{策略} & \textbf{通信量} & \textbf{内存/GPU} & \textbf{实现复杂度} \\
+\midrule
+朴素 DP & $2|\theta|$ & 全量 & 最低 \\
+ZeRO Stage 1 & $2|\theta|$ & OS 分片 & 低 \\
+ZeRO Stage 2 & $2|\theta|$ & OS+G 分片 & 中 \\
+ZeRO Stage 3 (FSDP) & $3|\theta|$ & 全分片 & 高 \\
+\bottomrule
+\end{tabular}
+\caption{ZeRO 各阶段对比。OS = 优化器状态，G = 梯度。Stage 1 是"免费午餐"，应始终使用。}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-025.jpg}
+\caption{不同 ZeRO 阶段下可训练的最大模型规模（8$\times$A100 80GB 节点）\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第26页。}
+
+\subsection{批次大小是一种有限资源}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-027.jpg}
+\caption{批次大小是并行训练中的关键资源\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第28页。}
+
+\begin{warningbox}{批次大小的限制}
+数据并行的并行度不能超过批次大小——每个 GPU 至少需要处理一个样本。此外，批次大小存在\textbf{临界批次大小}（critical batch size）：超过该值后，增加批次大小的优化收益急剧递减。这意味着数据并行无法无限扩展。
+\end{warningbox}
+
+OpenAI 的研究表明，训练效率与批次大小之间存在一个"甜蜜点"：低于临界批次大小时，更大批次可以显著降低梯度噪声；超过后则受限于梯度步数不足。批次大小在数据并行、流水线并行等策略之间需要合理分配。
+
+\subsection{数据并行的剩余问题}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-028.jpg}
+\caption{数据并行的局限：ZeRO Stage 1/2 不减少内存，Stage 3 不减少激活内存\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第29页。}
+
+即使使用 FSDP（ZeRO Stage 3），数据并行仍有两个重要局限：
+\begin{enumerate}
+    \item FSDP 可能较慢，因为需要频繁的参数请求和释放
+    \item \textbf{不减少激活内存}——每个 GPU 仍然需要存储完整的前向传播激活值
+\end{enumerate}
+
+这些局限引出了模型并行的需求。
+
+\subsection{本章小结}
+
+数据并行是最基础的并行策略。ZeRO 优化器通过三个阶段逐步消除内存冗余，其中 Stage 1 是"免费午餐"（通信量不变但内存减少），Stage 3（FSDP）实现完全分片但有 50\% 的通信量增加。关键限制是批次大小的有限性和激活内存无法分片。
+
+%% ========== Part 4: 模型并行——流水线并行 ==========
+

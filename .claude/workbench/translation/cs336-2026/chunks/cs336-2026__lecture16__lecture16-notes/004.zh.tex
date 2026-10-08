@@ -1,0 +1,123 @@
+\section{DeepSeek R1：从 R1-Zero 到完整 post-training pipeline}
+
+本节从算法转向案例。DeepSeek R1 的影响不仅是 benchmark performance，还在于公开了相对简洁的 RLVR recipe，削弱了“必须依赖复杂 MCTS 或 process reward model”的猜测。
+
+\slidepair{slide-26.jpg}{slide-27.jpg}{R1 的公开意义，以及它从 DeepSeekMath GRPO 继承但不使用 process supervision 的算法选择。}{26--27}
+
+Slide 26 强调 R1 的影响来自三件事：达到接近或超过 o1 的公开结果、给出相对简单的训练路线、并展示 reasoning SFT/蒸馏的可迁移性。Slide 27 把算法谱系接回 DeepSeekMath：R1 继续使用 GRPO，却在主要 reasoning RL 中放弃 process reward model。于是“必须逐步标注推理过程”从前提变成可检验选择。
+
+\begin{knowledgebox}{读案例时先分离四类证据}
+Benchmark 证明最终系统有效；公开 objective 说明梯度大致如何计算；数据与系统披露决定可复现性；单条 trajectory 只能提供行为例子。R1 四类证据的公开程度不同，不能用最终分数反推所有未披露 recipe 都不重要。
+\end{knowledgebox}
+
+\subsection{R1-Zero：只用 verifiable reward 会发生什么}
+
+R1-Zero 从 base model 直接做 GRPO，reward 主要包括 answer correctness 与 format compliance。这里的 ``Zero'' 表示没有先做 reasoning SFT，与分布式训练中的 ZeRO（Zero Redundancy Optimizer，把 optimizer state、gradient 或 parameter 分片到多张 GPU）无关。训练中出现更长 chain-of-thought 和所谓 ``aha moment''，但课程提醒不要过度叙事：base model 已有 reasoning patterns，biased objective 也可能推动 length growth。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{slide-28.jpg}
+\caption{R1-Zero 的受控设定：accuracy reward、format reward 与私有训练题。}
+\figsource{CS336 Spring 2026 Lecture 16，Slide 28。}
+\end{figure}
+
+Slide 28 中的“受控”是相对完整 R1 而言：base model 直接用 accuracy 与 thinking-tag format reward 做 RL，没有 reasoning SFT 初始化。它仍不是完全透明实验，因为训练题不公开，DeepSeek-V3 base 的先验能力也很强。Format reward 还会把“按标签输出长 CoT”写进目标，因此观察到的行为变化不能只归因于 correctness signal。
+
+\singleslide{slide-29.jpg}{R1-Zero 训练中的两个著名现象：CoT 逐渐变长，以及样例中的自我反思“aha moment”。}{29}
+
+Slide 29 应先当作待解释现象：平均生成长度随训练增长，某条轨迹出现“等等，让我重新检查”的自我修正。可能解释包括 policy 学到更长搜索、长度归一化带来的 objective bias、base model 原有自省模式被提高概率，或采样偶然性。只有分布级统计与 ablation 才能区分这些机制。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{slide-30.jpg}
+\caption{对“aha moment”的后续分析：长度增长未必代表突然涌现新算法。}
+\figsource{CS336 Spring 2026 Lecture 16，Slide 30。}
+\end{figure}
+
+老师在这里直接削弱了流行叙事：后续 Dr. GRPO 分析表明，长度增长可能部分来自 biased objective，而类似 self-reflection 在 base model 中已经存在。更谨慎的结论是 RL 改变了这些行为的频率与条件，而不是凭一条示例证明训练中突然发明了全新推理算法。
+
+\begin{warningbox}{不要从单条 trajectory 推断 emergence}
+展示一个突然自我反思的样本很有吸引力，但它不能区分 base-model prior、sampling luck、reward shaping 和真正的 distribution-level change。应查看 length、accuracy、strategy diversity 和 controlled ablations。
+\end{warningbox}
+
+\subsection{R1：SFT initialization、RLVR、再 SFT/RLHF}
+
+完整 R1 pipeline 加入 long-CoT SFT initialization、language-consistency reward、第二阶段非可验证数据和最终 general-purpose alignment。换句话说，RLVR 不是孤立阶段，而是夹在 data bootstrapping、distillation 和 RLHF 之间。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{slide-31.jpg}
+\caption{R1 相对 R1-Zero 的关键变化：SFT 起点、语言一致性和多阶段后训练。}
+\figsource{CS336 Spring 2026 Lecture 16，Slide 31。}
+\end{figure}
+
+Slide 31 给出的关键不是“R1 比 R1-Zero 多几个步骤”，而是每一步修复不同缺陷：long-CoT SFT 改善可读初始化，reasoning RL 提升可验证任务，language-consistency reward 抑制混语，后续 SFT/RLHF 再补非可验证任务和通用助手行为。最终模型是 stage composition 的产物，不能把全部能力归给中间 GRPO。
+
+\singleslide{slide-32.jpg}{Reasoning SFT initialization：从长 CoT demonstrations 启动，但数据来源与验证细节披露有限。}{32}
+
+Slide 32 把“cold start data”描述为普通 long CoT，再加可能的 verification。它的直接好处是让 policy 在 RL 前已经会生成可读、分段且符合格式的 reasoning，减少 verifier 只看到格式错误的冷启动阶段。需要保留的 caveat 是数据 provenance 不够清楚，因此不能精确判断增益来自人写、模型蒸馏还是过滤强度。
+
+\singleslide{slide-33.jpg}{少量 reasoning SFT 的启动效应：约 1K 数学/科学问题配合强模型长 CoT 即可显著迁移行为。}{33}
+
+这页补充了样本效率证据：若 base model 已有数学知识，少量高质量长 CoT 可以把潜在能力组织成稳定格式。老师据此强调 RL 与 distillation/SFT 不是互斥路线；一旦强 generator 存在，大量 reasoning 行为可以廉价迁移，on-policy RL 的价值则转向超出 teacher support 的探索。
+
+\singleslide{slide-34.jpg}{R1 reasoning RL：基本 GRPO 路线不变，额外加入语言一致性约束以减少混语。}{34}
+
+Slide 34 展示一个典型 multi-objective 修补：accuracy verifier 只关心答案对错，不在意 CoT 是否突然切换语言，因此 policy 可能利用训练分布产生混语。加入 language-consistency reward 把可读性写入目标，却也可能压制本来有用的跨语言表示。每加一个 reward term 都需要独立检查能力与行为 trade-off。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{slide-35.jpg}
+\caption{RLVR 后继续 SFT/RLHF，使 reasoning model 恢复通用交互能力。}
+\figsource{CS336 Spring 2026 Lecture 16，Slide 35。}
+\end{figure}
+
+Slide 35 进一步说明最终 alignment 的数据构成：可验证 reasoning 之外，还用强模型 judge 生成/筛选约 600K 非可验证 reasoning 样本，并混入约 200K 通用 SFT 数据；随后 reasoning 与 general tasks 都继续 RLHF。所谓 R1 recipe 因而同时包含 verifier reward 与 learned preference signal。
+
+\begin{knowledgebox}{读图：为什么最后还要 general-purpose alignment}
+只在数学/代码 verifier 上优化会收窄分布，模型可能变得冗长、语言混杂或对非可验证任务退化。后续 SFT/RLHF 把模型重新拉回通用 assistant distribution，但也可能轻微损伤 math/STEM 指标。
+\end{knowledgebox}
+
+\singleslide{slide-36.jpg}{R1 的最终效果页：公开 benchmark 证明组合 recipe 有效，但不能单独识别各阶段贡献。}{36}
+
+结果页最重要的读法是区分“系统有效”与“因果归因”。R1 在多项 reasoning benchmark 上表现强，证明 pipeline 的总体可行性；但若没有逐阶段 checkpoint、等算力 baseline 和数据消融，就无法仅凭最终表格断言 GRPO、cold-start SFT、语言奖励或 general alignment 各贡献多少。
+
+\subsection{Distillation：把昂贵 policy 的轨迹变成离线数据}
+
+回到模型压缩与迁移，R1 生成大量 reasoning traces，再用 SFT 训练较小 Qwen models。Distillation 省去 student 的 on-policy exploration，能快速迁移 style 和策略；但 student 只看到 teacher support，无法通过自己的失败发现新策略。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{slide-37.jpg}
+\caption{R1 distillation：teacher 生成约 800K traces，student 通过 SFT 学习 reasoning。}
+\figsource{CS336 Spring 2026 Lecture 16，Slide 37。}
+\end{figure}
+
+Slide 37 展示了约 800K teacher traces 的迁移规模。Student 训练不再需要自己生成同等数量的昂贵 rollout，只需在离线 CoT 上做 SFT；代价是学习到的策略受 teacher 采样分布和过滤规则限制。课堂据此指出，long-CoT 能力中相当一部分一旦被强模型发现，就可以通过 distillation 传播。
+
+\singleslide{slide-38.jpg}{R1 报告中的失败尝试：process reward models 与 MCTS 并未成为最终必要组件。}{38}
+
+失败尝试页为因果理解提供了少见的负证据。PRM 需要可靠的中间步骤标签，错误 credit 可能奖励看似合理但无助于答案的推理；MCTS 在语言 action space 中又面临 branching、value estimation 与巨大 inference 成本。它们并非原则上无效，而是在 R1 的数据、模型和预算下没有证明比简单 outcome-RL recipe 更划算。
+
+\begin{importantbox}{R1 案例的真正 lesson}
+成功 recipe 是 data + SFT bootstrap + RLVR + distillation + general alignment 的组合。把结果全部归因于 GRPO，会忽略最关键的训练分布设计。
+\end{importantbox}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{L{0.2\textwidth}L{0.31\textwidth}L{0.39\textwidth}}
+\toprule
+路线 & 优点 & 边界 \\
+\midrule
+Teacher distillation & 稳定、便宜、可复用离线 traces & 受 teacher support 限制，难发现新策略 \\
+Student on-policy RLVR & 能围绕自身失败探索并适应 verifier & rollout 昂贵，训练更不稳定 \\
+先蒸馏再 RLVR & 先获得强初始化，再主动探索 & 需要防止 style imitation 掩盖真实能力 \\
+\bottomrule
+\end{tabular}
+\caption{Distillation 与 on-policy RLVR 的互补关系。}
+\end{table}
+
+\subsection{本章小结}
+
+DeepSeek R1 证明了简单 outcome reward 可以扩展 reasoning，但也显示纯 RLVR 不够：可读性、语言一致性、通用性和小模型迁移都依赖额外阶段。
+

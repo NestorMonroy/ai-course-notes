@@ -1,0 +1,87 @@
+\section{一个可训练的 toy problem}
+
+\subsection{排序任务}
+
+为了能在本地跑通，讲义脚本构造了一个很小的 RL 任务：给定一组数字，模型要输出排序后的序列。
+
+\begin{itemize}
+    \item Prompt：一组数字；
+    \item Response：希望是排序后的数字；
+    \item Reward：衡量 response 和排序答案接近的程度。
+\end{itemize}
+
+这里故意不直接用 “完全正确 = 1，否则 0” 的极端奖励，而是设计了两个版本：
+\begin{enumerate}
+    \item \textbf{位置匹配奖励}：response 与 ground truth 在多少位置上一致；
+    \item \textbf{inclusion + ordering 奖励}：既看 token 是否出现，也看局部顺序是否合理。
+\end{enumerate}
+
+\begin{importantbox}{为什么要给 partial credit}
+如果只给 0/1 奖励，大量样本都没有学习信号。给 partial credit 可以让模型在“还没完全做对”时也能得到有用反馈。
+\end{importantbox}
+
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{函数} & \textbf{直觉} & \textbf{作用} \\
+\midrule
+\texttt{sort\_distance\_reward} & 距离 ground truth 多近 & 给连续一点的反馈 \\
+\texttt{sort\_inclusion\_ordering\_reward} & 是否包含正确元素且顺序合理 & 更像真实排序任务 \\
+\bottomrule
+\end{tabular}
+\caption{脚本里两种 reward 的教学意图：一个更连续，一个更接近排序语义}
+\end{table}
+
+\begin{lstlisting}[caption={toy reward pseudocode}]
+def reward(prompt, response):
+    sorted_gt = sorted(prompt)
+    score_match = how_many_positions_match(response, sorted_gt)
+    score_order = how_well_ordered(response, sorted_gt)
+    return score_match + 0.5 * score_order
+\end{lstlisting}
+
+这个 toy reward 的目标不是严格复刻真实排序，而是让训练信号足够连续。因为如果 reward 只有“全对才给 1 分”，那模型在早期几乎看不到梯度；而当一个 response 已经接近正确时，partial credit 可以继续推动它往正确方向移动。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}p{3.4cm}p{4.8cm}p{3.6cm}p{2.2cm}@{}}
+\toprule
+\textbf{prompt} & \textbf{response} & \textbf{现象} & \textbf{分数趋势} \\
+\midrule
+{[}3,1,0,2{]} & {[}0,1,2,3{]} & 完全排序正确 & 高 \\
+{[}3,1,0,2{]} & {[}0,3,1,2{]} & 元素都在，但顺序差 & 中 \\
+{[}3,1,0,2{]} & {[}7,2,2,5{]} & 元素错且顺序也差 & 低 \\
+\bottomrule
+\end{tabular}
+\caption{课程脚本里的两个 reward 函数都想表达同一件事：不要只有“对/错”，还要能区分“差一点”和“差很多”}
+\end{table}
+
+\begin{importantbox}{为什么这些样例很重要}
+toy task 的价值在于，你能把 reward 函数、采样、baseline 和 policy update 放在同一张表里看它们如何相互影响。真实模型里这些细节被 transformer 和大规模数据掩盖了，但机制是同一套。
+\end{importantbox}
+
+\subsection{模型结构}
+
+脚本里的 toy model 很小，但足够展示 policy gradient 的机制：
+\begin{itemize}
+    \item prompt 和 response 长度固定；
+    \item 每个位置有独立的 encode/decode 参数；
+\item 最后通过 embedding weight 生成 logits。
+\end{itemize}
+
+这不是一个真实的 transformer，而是一个便于分析的最简模型。
+
+
+\subsection{采样和打分}
+
+训练流程大致如下：
+\begin{enumerate}
+    \item 输入 prompt；
+    \item 从当前模型采样多个 responses；
+    \item 用 reward function 对每条 response 打分；
+    \item 根据 delta 形式构造更新信号；
+    \item 用 policy gradient 更新模型。
+\end{enumerate}
+

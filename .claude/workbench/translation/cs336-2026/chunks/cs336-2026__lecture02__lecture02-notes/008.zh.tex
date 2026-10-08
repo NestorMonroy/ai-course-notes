@@ -1,0 +1,110 @@
+\section{补充推导：把本讲公式真正用起来}
+
+\subsection{从 dtype 到显存：三个数量级例子}
+
+下面三个例子把 dtype 账本落到真实 LLM 场景。
+
+\begin{longtable}{p{0.22\textwidth}p{0.30\textwidth}p{0.38\textwidth}}
+\toprule
+\textbf{对象} & \textbf{估算} & \textbf{含义} \\
+\midrule
+单个 GPT-3 FFN 矩阵 & \(12288\times 4\cdot 12288\) 个参数，bf16 约 1.2GB，fp32 约 2.4GB & 单层矩阵已经是 GB 级，不能把权重读写当成免费。 \\
+70B bf16 参数 & \(70\text{B}\times 2\approx 140\)GB & 只存参数就超过单张 80GB H100。 \\
+70B AdamW 状态 & 参数 140GB + 梯度 140GB + Adam state 560GB & 不 sharding 时，训练状态远大于参数本身。 \\
+\bottomrule
+\end{longtable}
+
+\begin{knowledgebox}{为什么 optimizer state 经常比模型更吓人}
+很多人第一次估算显存只算参数，这是错误的。AdamW 的两个 fp32 state 各自和参数数量一样大：\(m\) 记录梯度方向的一阶指数平均，\(v\) 记录梯度平方的二阶指数平均。若参数是 bf16，两个 fp32 state 合计是参数显存的 4 倍。
+\end{knowledgebox}
+
+\subsection{Einops worked examples：维度如何决定算子语义}
+
+\begin{lstlisting}[caption={einsum 明确说明 contracting dimension}]
+# x: [batch, seq1, hidden]
+# y: [batch, seq2, hidden]
+# hidden appears on the left but not the right, so it is summed over.
+z = einsum(x, y, "batch seq1 hidden, batch seq2 hidden -> batch seq1 seq2")
+\end{lstlisting}
+
+\begin{lstlisting}[caption={rearrange 把一个维度拆成 heads 和 hidden}]
+# x: [seq, total_hidden], total_hidden = heads * hidden1
+x = rearrange(x, "seq (heads hidden1) -> seq heads hidden1", heads=2)
+x = einsum(x, w, "seq heads hidden1, hidden1 hidden2 -> seq heads hidden2")
+x = rearrange(x, "seq heads hidden2 -> seq (heads hidden2)")
+\end{lstlisting}
+
+\begin{warningbox}{Einops 不是语法糖这么简单}
+命名维度让你在写代码时显式声明哪些维度被求和、哪些维度被保留、哪些维度被拆分。这正是后续 attention、tensor parallelism、sequence parallelism 的语言。
+\end{warningbox}
+
+\subsection{Arithmetic intensity worked examples}
+
+为了把 Roofline 从概念变成估算工具，本节比较 elementwise、matrix-vector 与 matrix-matrix 三种形态。对 bf16 ReLU，读 \(x\) 和写 \(y\) 各 2 bytes，计算约 1 FLOP/element，因此无论 GPU 峰值算力多高，它通常都受内存带宽限制：
+
+\[
+I_{\mathrm{ReLU}}\approx \frac{n}{4n}=0.25\ \text{FLOPs/byte}.
+\]
+
+对 bf16 matrix-vector product，\(x\in\mathbb{R}^n\)、\(W\in\mathbb{R}^{n\times n}\)：
+
+\[
+I_{\mathrm{matvec}}
+\approx
+\frac{2n^2}{2n^2+4n}
+\approx 1.
+\]
+
+对 bf16 matrix-matrix multiplication，\(X,W\in\mathbb{R}^{n\times n}\)：
+
+\[
+I_{\mathrm{matmul}}
+\approx
+\frac{2n^3}{6n^2}
+=\frac{n}{3}.
+\]
+
+\begin{importantbox}{为什么 matmul 是训练的朋友，matvec 是推理的麻烦}
+Matrix-matrix 让同一块权重被许多 batch/sequence 位置复用，\(I\) 随 \(n\) 增长；matrix-vector 每次只服务少量 token，读完整权重却复用很少。这就是训练 prefill 容易 compute-bound，而 autoregressive decode 容易 memory-bound 的根源。
+\end{importantbox}
+
+\subsection{训练状态生命周期图}
+
+\begin{center}
+\begin{tabular}{p{0.18\textwidth}p{0.68\textwidth}}
+\toprule
+\textbf{阶段} & \textbf{状态变化} \\
+\midrule
+Get batch & data 从 CPU/dataloader 进入 GPU。 \\
+Forward & 读取 parameters，写 activations，产生 logits/loss。 \\
+Backward & 读取 activations 和 parameters，写 gradients；部分 activations 可逐层释放。 \\
+Optimizer step & 读取 gradients 和 optimizer state，更新 parameters、\(m\)、\(v\)。 \\
+Zero grad & 清理 gradients，准备下一步；若不清理会累积。 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{knowledgebox}{生命周期比总量更重要}
+峰值显存取决于哪些 tensor 同时存在。Parameters 和 optimizer state 常驻；activations 在 backward 中逐渐释放；temporary buffers 只在 kernel 调用期间存在。Profiler 看到的是生命周期重叠后的峰值，而不是简单加总。
+\end{knowledgebox}
+
+\subsection{ZeRO、checkpointing、accumulation 如何组合}
+
+\begin{longtable}{p{0.22\textwidth}p{0.30\textwidth}p{0.38\textwidth}}
+\toprule
+\textbf{技术} & \textbf{主要省什么} & \textbf{主要代价} \\
+\midrule
+Gradient accumulation & 降低每个 micro-batch 的 activation 峰值 & 多次 forward/backward 才更新一次参数。 \\
+Activation checkpointing & 少存中间 activations & backward 时重算 forward 片段。 \\
+ZeRO-1 & optimizer state & optimizer step 需要跨卡协调。 \\
+ZeRO-2 & optimizer state + gradients & 梯度 reduce-scatter 等通信增加。 \\
+ZeRO-3 & optimizer state + gradients + parameters & forward/backward 前后需要 all-gather 参数，通信更多。 \\
+\bottomrule
+\end{longtable}
+
+\begin{warningbox}{不要把 ZeRO 当成 tensor parallelism}
+ZeRO 是 data parallel 框架里的状态分片技术，核心是减少重复存储；tensor parallelism 是把单层矩阵计算切到多卡上，核心是拆计算。两者经常组合，但解决的问题不同。
+\end{warningbox}
+
+
+

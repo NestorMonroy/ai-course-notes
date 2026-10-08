@@ -1,0 +1,160 @@
+\section{Roofline 与低精度：让 ML workload 跑快}
+
+前一节已经说明 GPU 的峰值计算增长快于 memory bandwidth；本节把这个硬件事实转成 workload 性能模型。我们先用 roofline 判断算子是 compute-bound 还是 memory-bound，再区分 divergence、低并行度与 memory traffic，最后检查 FP8、MXFP8、MXFP4 如何同时改变 bytes moved、tensor-core throughput 和数值误差。读后续曲线时应先定位瓶颈，再讨论某种 dtype 或 kernel 是否真的解决了它。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-020.jpg}
+\caption{Slide 20：进入 workload performance；即使方阵乘法也会出现复杂的性能曲线。}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{为什么简单 matmul 也不平滑}
+同样的 $n^3$ FLOPs 不会带来平滑 runtime：矩阵维度会影响 tile 对齐、可并发 thread blocks、wave 数量、cache 行为与 tensor core kernel 选择。性能曲线中的锯齿或周期性通常不是测量噪声，而是离散硬件资源被整除或留下尾部 wave；后面的 matrix mystery 会用 tiling 与 wave quantization 解释。
+\end{knowledgebox}
+
+
+\begin{importantbox}{性能公式：roofline 心智模型}
+\[
+\text{arithmetic intensity}
+=
+\frac{\text{FLOPs}}{\text{bytes moved}},
+\]
+\[
+\text{attainable FLOP/s}
+\le
+\min(\text{peak FLOP/s},\text{bandwidth}\times I).
+\]
+低精度减少 bytes moved，也可能启用 tensor cores，因此同时影响 memory traffic 和 peak compute。
+\end{importantbox}
+
+
+\noindent\textbf{展开说明：} GPUs are massively parallel – same instructions
+
+
+
+\noindent\textbf{展开说明：}Performance on a GPU can be complex, even for something as simple as a square matmul
+
+\begin{knowledgebox}{讲义补充：源 Slide 20 应该怎么看}
+这页是硬件机制或性能证据页。先看数据从哪里来、在哪里复用、是否写回 HBM；再判断瓶颈是 compute、memory bandwidth、thread scheduling 还是 alignment。GPU 优化不是让公式更漂亮，而是让数据在正确层级停留更久、让 tensor cores 少等数据。
+\end{knowledgebox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-021.jpg}
+\caption{Slide 21: What makes ML workloads fast?}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}The roofline model
+
+\begin{knowledgebox}{读图：Slide 21 应该怎么看}
+这页是硬件机制或性能证据页。先看数据从哪里来、在哪里复用、是否写回 HBM；再判断瓶颈是 compute、memory bandwidth、thread scheduling 还是 alignment。GPU 优化不是让公式更漂亮，而是让数据在正确层级停留更久、让 tensor cores 少等数据。
+\end{knowledgebox}
+
+Roofline 给出统一上限后，Slide 22 把优化手段列成六项：控制 divergence、低精度、operator fusion、recomputation、coalescing 与 tiling。列表本身不是按固定优先级执行的 recipe，而是 bottleneck 到动作的映射：divergence 修复执行单元空转；低精度同时减少 byte 并提高 tensor-core 峰值；其余四项主要减少或重排 memory traffic。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-022.jpg}
+\caption{Slide 22：让 GPU 变快的六类手段及其 bottleneck 分类。}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{先测瓶颈，再选技巧}
+Memory-bound elementwise chain 优先 fusion；重复读取大张量可考虑 recomputation；跨 thread 的连续访问不佳时检查 coalescing；矩阵数据不能在片上复用时做 tiling；warp 内分支不同才处理 divergence。若 kernel 已 compute-bound，继续减少 HBM 访问可能没有收益，此时应看 precision、tensor-core tile 和 occupancy。
+\end{knowledgebox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-023.jpg}
+\caption{Slide 23: Control divergence (not a memory issue)}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}GPUs operate in a SIMT model – every thread in a warp is executing the same instruction
+
+\begin{knowledgebox}{读图：Slide 23 应该怎么看}
+这页是硬件机制或性能证据页。先看数据从哪里来、在哪里复用、是否写回 HBM；再判断瓶颈是 compute、memory bandwidth、thread scheduling 还是 alignment。GPU 优化不是让公式更漂亮，而是让数据在正确层级停留更久、让 tensor cores 少等数据。
+\end{knowledgebox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-024.jpg}
+\caption{Slide 24: Trick 1: Low precision computation}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}If you have fewer bits, you have fewer bits to move
+
+\begin{knowledgebox}{读图：Slide 24 应该怎么看}
+这页是硬件机制或性能证据页。先看数据从哪里来、在哪里复用、是否写回 HBM；再判断瓶颈是 compute、memory bandwidth、thread scheduling 还是 alignment。GPU 优化不是让公式更漂亮，而是让数据在正确层级停留更久、让 tensor cores 少等数据。
+\end{knowledgebox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-025.jpg}
+\caption{Slide 25: Low precision improves arithmetic intensity}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}Example: elementwise ReLU ($x$ = max(0, $x$)) on a vector of size $n$.
+
+\begin{knowledgebox}{读图：Slide 25 应该怎么看}
+这页是硬件机制或性能证据页。先看数据从哪里来、在哪里复用、是否写回 HBM；再判断瓶颈是 compute、memory bandwidth、thread scheduling 还是 alignment。GPU 优化不是让公式更漂亮，而是让数据在正确层级停留更久、让 tensor cores 少等数据。
+\end{knowledgebox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-026.jpg}
+\caption{Slide 26: Low precision drives faster matrix multiplies}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}Lots of operations in modern GPUs are accelerated via low / mixed precision operations
+
+\begin{knowledgebox}{读图：Slide 26 应该怎么看}
+这页是硬件机制或性能证据页。先看数据从哪里来、在哪里复用、是否写回 HBM；再判断瓶颈是 compute、memory bandwidth、thread scheduling 还是 alignment。GPU 优化不是让公式更漂亮，而是让数据在正确层级停留更久、让 tensor cores 少等数据。
+\end{knowledgebox}
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-027.jpg}
+\caption{Slide 27: Frontiers in low precision}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}Very low precision (FP8) with different tradeoffs                 Multiple scaling factors MXFP8 (Blackwell)
+
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-028.jpg}
+\caption{Slide 28: MXFP8 training in practice}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\noindent\textbf{展开说明：}Notice – not all weights in MXFP8, transposes also separately quantized
+
+低精度部分最后进入 MXFP4。Slide 29 直接展示 4-bit 格式可表示的离散值与每组 scaling factor：位数减少提高吞吐与 arithmetic intensity，却让 dynamic range 和量化误差更敏感。分组 scale 越细，表示更准确，但 scale metadata、转换 kernel 与布局复杂度也更高；训练 recipe 还需要决定哪些权重、activation、gradient 或 transpose 保留更高精度。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\textwidth]{slide-029.jpg}
+\caption{Slide 29：MXFP4 的离散可表示值、分组 scaling 与精度边界。}
+\figsource{CS336 Spring 2026 Lecture 5 官方幻灯片。}
+\end{figure}
+
+\begin{warningbox}{低精度收益不能只看 bit 数}
+FP4 相比 FP8 理论上进一步减半 bytes，但实际速度还取决于硬件原生支持、scale 读取、quantize/dequantize、accumulator precision 和矩阵 shape。若额外转换或 fallback kernel 主导，4-bit 可能比成熟 FP8 路径更慢；若 scale 过粗，又可能用更多训练 step 才达到同一 loss。验收必须同时报告吞吐、收敛曲线和溢出/饱和统计。
+\end{warningbox}
+
+\subsection{本章小结}
+本节的共同问题是如何减少昂贵的数据移动并提高硬件利用率。GPU 的速度来自海量并行和专用矩阵硬件，但只有当 memory access、shape、precision 和 kernel 组织匹配时，这些速度才会真正出现。
+

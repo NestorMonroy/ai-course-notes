@@ -1,0 +1,89 @@
+\section{扩展讲解：从源码到性能判断}
+
+\subsection{为什么 GeLU 是第一个好例子}
+
+GeLU 是 elementwise operation，数学上不复杂，却非常适合说明 kernel fusion。因为 naive GeLU 由乘法、加法、立方、tanh、再乘法组成，如果框架把它拆成多个 kernels，每个中间 tensor 都要写回 HBM 再读出。
+
+\begin{longtable}{p{0.25\textwidth}p{0.35\textwidth}p{0.30\textwidth}}
+\toprule
+\textbf{版本} & \textbf{执行方式} & \textbf{资源结果} \\
+\midrule
+naive PyTorch & 多个 pointwise kernels & launch 多，HBM 往返多。 \\
+builtin GeLU & 手写/库内 fused kernel & 读一次、算完、写一次。 \\
+compiled GeLU & \texttt{torch.compile} 生成 Triton kernel & 保持 Python 表达，获得 fusion。 \\
+\bottomrule
+\end{longtable}
+
+\begin{importantbox}{elementwise kernel 的核心瓶颈}
+Elementwise 操作的 FLOPs 很少，bytes moved 却和 tensor 大小成正比。单独执行时通常 memory-bound。Fusion 的目标不是减少数学 FLOPs，而是减少中间结果在 HBM 中来回搬运。
+\end{importantbox}
+
+\subsection{Profiler 表应该怎么看}
+
+当 profiler 显示很多小 kernel 时，通常有三种解释：
+
+\begin{enumerate}
+    \item Python/PyTorch 代码被拆成多个 primitive operations。
+    \item 每个 primitive operation 都 launch 一个独立 CUDA kernel。
+    \item 中间结果 materialize 到 HBM，形成额外 memory traffic。
+\end{enumerate}
+
+若 profiler 显示一个长名字的 CUTLASS/Triton kernel，则要读名字里的线索：架构代号、dtype、tile shape、layout alignment。这些信息帮助判断是不是 tensor core kernel、tile 是否过小、是否有 alignment 问题。
+
+\begin{knowledgebox}{profile 后怎么行动}
+如果瓶颈是许多小 pointwise kernels，优先考虑 fusion；如果瓶颈是 GEMM 但 MFU 低，检查 shape、dtype、layout、tile；如果瓶颈是 memory copy 或 communication，优化 kernel 本身可能无效。
+\end{knowledgebox}
+
+\subsection{Triton masks 的必要性}
+
+很多 tensor 长度不能被 block size 整除。例如 \(N=10{,}000\)，\(\texttt{BLOCK\_SIZE}=1024\)，最后一个 block 会越界。Triton 用 mask 防止读写越界：
+
+\begin{lstlisting}[caption={mask 保护尾部 block}]
+offsets = start + tl.arange(0, BLOCK_SIZE)
+mask = offsets < num_elements
+x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+tl.store(y_ptr + offsets, y, mask=mask)
+\end{lstlisting}
+
+\begin{warningbox}{mask 是 correctness 条件，不只是性能细节}
+没有 mask，最后一个 block 可能读到非法地址或写坏输出。很多 Triton kernel 的第一类 bug 就来自 tail block 没处理好。
+\end{warningbox}
+
+\subsection{Softmax 的读写账本}
+
+Naive row softmax 至少经历这些阶段：row max、subtract max、exp、row sum、divide。若每步都是独立 kernel，读写次数近似为多次 \(MN\)。Fused row-wise softmax 则把一整行放进 block 中，局部完成 reduction 和 normalize。
+
+\begin{longtable}{p{0.24\textwidth}p{0.34\textwidth}p{0.32\textwidth}}
+\toprule
+\textbf{阶段} & \textbf{naive 实现} & \textbf{fused Triton 实现} \\
+\midrule
+max & 读整行，写 max & block 内 reduction。 \\
+subtract/exp & 再读整行，写中间结果 & registers/shared memory 中完成。 \\
+sum & 再读 numerator，写 denominator & block 内 reduction。 \\
+divide & 再读 numerator/denominator，写输出 & 只写最终输出。 \\
+\bottomrule
+\end{longtable}
+
+\subsection{Matmul tiling 的指针结构}
+
+Triton matmul kernel 不是直接写三重 for loop，而是构造指针矩阵：
+
+\begin{itemize}
+    \item \texttt{indices\_m} 选择 C tile 的行。
+    \item \texttt{indices\_n} 选择 C tile 的列。
+    \item \texttt{indices\_k} 选择当前 K tile。
+    \item \texttt{a\_ptrs} 和 \texttt{b\_ptrs} 指向当前要加载的 A/B tile。
+\end{itemize}
+
+每轮 K tile 做一次 \texttt{tl.dot(a,b)}，累加到 \texttt{acc}。循环结束后可以在 \texttt{acc} 上做 ReLU，再写回 C。
+
+\begin{importantbox}{Tiled matmul 的统一解释}
+Tiling 把 HBM 里的大矩阵切成可放入片上存储的小块，让一个 tile 内的数据服务多个输出元素。Fusion 则把 matmul 后的 ReLU 放在写回前完成。两者都在减少 HBM 访问。
+\end{importantbox}
+
+\subsection{本章小结}
+
+源码中的每个 kernel example 都在回答同一个问题：如何把高层 tensor expression 改写成更少 HBM traffic、更高片上复用、更适合 SM/warp/block 执行的程序。Triton 的价值在于让这种改写比 CUDA 更接近数学表达，但仍保留 block-level 控制。
+
+
+

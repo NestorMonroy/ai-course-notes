@@ -1,0 +1,179 @@
+\section{Scaling laws for model engineering}
+
+
+\singleslide{slides-images/slide-028.jpg}{Scaling laws for model engineering：在巨大预算前比较 architecture、optimizer、model size 与 token allocation。}{28}
+
+Slide 28 回到开场的一万张 GPU 场景。Scaling studies 通过小模型实验回答 LSTM vs Transformer、Adam vs SGD、训练更久 vs 模型更大、数据 vs compute 等选择；关键不是寻找永恒赢家，而是在目标预算附近拟合可外推差异。
+
+\begin{knowledgebox}{讲义补充：源 Slide 28 的工程问题}
+大模型设计不是只问“多大最好”，还包括 LSTM vs Transformer、Adam vs SGD、深度/宽度、batch size、learning rate 等选择。Scaling law 实验的目标是用小模型筛掉明显差的方向，再把预算集中到最有希望的设计。
+\end{knowledgebox}
+
+
+\singleslide{slides-images/slide-029.jpg}{Kaplan 风格 hyperparameter checklist：architecture、optimizer、aspect ratio/depth 与 batch size。}{29}
+
+这页把“模型规模”拆成多个可干预变量。实验应一次改变一个设计维度，跨多个 parameter/compute scales 观察排序是否稳定，并避免只在小模型上调出局部最优。若相对性能随规模反转，超参数就不能直接 transfer。
+
+\begin{knowledgebox}{讲义补充：源 Slide 29 是超参数实验 checklist}
+这页列出的不是独立小问题，而是训练 recipe 的关键轴。每个轴都可以通过小规模 sweep 建立性能曲线，然后判断哪个选择在大规模下仍有优势。关键是比较曲线，而不是比较某个小模型点。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Scaling-law based design loop 的伪代码}]
+for config in candidate_configs:
+    runs = train_small_models(config, budgets=[1e18, 3e18, 1e19])
+    curve = fit_scaling_law(runs)
+    predicted_loss = curve.predict(target_budget)
+select_config_with_lowest_predicted_loss()
+\end{lstlisting}
+
+\subsection{Architecture、optimizer、depth/width}
+
+数据 scaling 说明更多数据通常带来可预测收益，接下来要问模型设计选择能否用同样方法提前比较。本节通过架构、优化器、深宽比、embedding 与 MoE 参数等案例说明：曲线的 slope、offset 和有效参数定义可能不同，因此比较必须在同一 compute 与训练质量下进行。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-030.jpg}
+\caption{Slide 30：用 scaling law 比较 Transformers 和 LSTMs，而不是花巨资训练 LSTM GPT-3。}
+\figsource{CS336 Spring 2026 Lecture 9 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{读图：Slide 30 的架构比较方法}
+比较架构要比较同等 compute 或同等参数预算下的 scaling curve。如果 Transformer 曲线整体低于 LSTM，且外推稳定，那么不需要在最大规模上训练 LSTM 才能判断方向。Scaling law 是降低架构搜索成本的工具。
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-031.jpg}
+\caption{Slide 31：Tay et al. 2022 的跨架构 scaling，展示 many architectures 的比较。}
+\figsource{CS336 Spring 2026 Lecture 9 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 31 应看曲线族而非单点排名}
+不同架构可能在小规模交叉，在大规模排序改变。图中多条曲线的相对 slope 和 offset 都重要：offset 低代表当前规模好，slope 更陡代表继续 scale 更有潜力。工程上要选择目标预算附近预测最优的架构。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-032.jpg}
+\caption{Slide 32：Adam vs SGD 的 optimizer choice scaling，对 2017 年 pre-transformer 模型的比较。}
+\figsource{CS336 Spring 2026 Lecture 9 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 32 的 optimizer 结论要带上下文}
+这页数据来自 pre-transformer 时代和特定模型族。它说明 optimizer choice 可以通过 scaling 实验比较，但不能直接把旧结论搬到现代 Transformer。读图时要区分“方法论可迁移”和“具体最优选择可迁移”。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-033.jpg}
+\caption{Slide 33：深度和宽度选择，1 vs 2 layers 差异大，更多层在小参数区间收益递减。}
+\figsource{CS336 Spring 2026 Lecture 9 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 33 的 depth/width 信息}
+浅层到两层可能带来结构性收益，但继续加深会遇到边际收益递减。对 Transformer 来说，depth/width 还影响并行切分、激活显存和推理延迟，因此 scaling law 的架构选择要同时考虑系统成本。
+\end{knowledgebox}
+
+
+\singleslide{slides-images/slide-034.jpg}{Depth/width 与其他 Transformer hypers：最佳 aspect ratio 是否随 scale 改变。}{34}
+
+固定参数量时，更深网络增加串行层数与表示组合，更宽网络增大单层 matmul 与 activation。Slide 34 要求测试的是 scale invariance：若不同 depth/width 的 loss 曲线近似平行，可以选硬件更高效的形状；若斜率不同，大规模最优形状会与小模型不同。
+
+\begin{knowledgebox}{讲义补充：源 Slide 34 的 aspect ratio 问题}
+Aspect ratio 指 depth、width、heads、MLP expansion 等比例关系。若最优比例随 scale 变化，小模型 tuning 就不能直接复制到大模型。Scaling experiment 要检查这些超参数的最优区间是否稳定。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-035.jpg}
+\caption{Slide 35：不是所有参数都等价，embedding layer parameters 与其他参数行为不同。}
+\figsource{CS336 Spring 2026 Lecture 9 官方幻灯片。}
+\end{figure}
+
+\begin{warningbox}{读图：Slide 35 的参数计数陷阱}
+Scaling law 常用 parameter count \(N\)，但 embedding、attention、MLP、MoE inactive parameters 的“价值”不同。若把所有参数粗暴相加，可能错误估计模型能力和 compute-optimal 配置。MoE 模型尤其需要区分 total parameters 和 active parameters。
+\end{warningbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-036.jpg}
+\caption{Slide 36：MoE 中 parameters 的价值会改变，parameter scaling 不能照搬 dense 模型。}
+\figsource{CS336 Spring 2026 Lecture 9 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 36 的 MoE 参数价值}
+MoE 增加 total parameters，但每个 token 只激活部分 experts。其 scaling 可能更接近 active compute 和 routing quality，而不是 total parameter count。评估 MoE scaling 时必须记录 active parameters、expert count、routing、负载均衡和通信成本。
+\end{knowledgebox}
+
+\subsection{Batch size、critical batch size 与 muP}
+
+前面的架构比较默认每个规模都被合理优化，但 batch size 与 learning rate 本身会随 scale 改变。本节用 critical batch size 描述并行增大 batch 的收益边界，再引入 muP 这类 scale-aware parameterization，解释为什么“直接复制小模型超参”会让大模型曲线看起来比实际更差。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-037.jpg}
+\caption{Slide 37：critical batch size，batch size 超过某点后收益强烈递减。}
+\figsource{CS336 Spring 2026 Lecture 9 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 37 的 critical batch 定义直觉}
+Critical batch 是在达到某个目标 loss 时，继续增大 batch 开始明显降低样本效率的区域。小 batch 需要更多 wall-clock step，但样本效率高；大 batch 并行度高，但可能浪费样本或需要学习率调整。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-038.jpg}
+\caption{Slide 38：critical batch size 的更精确定义，固定 target loss 后扫 batch，拟合 steps 和 examples 曲线。}
+\figsource{CS336 Spring 2026 Lecture 9 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{读图：Slide 38 的两个量}
+固定目标 loss，训练多个 batch size。记录达到目标 loss 所需 steps \(S\) 和 examples \(E\)。小 batch 区域 \(E\) 接近最优但 \(S\) 大；大 batch 区域 \(S\) 接近最小但 \(E\) 增大。critical batch 大致是两种成本开始折中的点。
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-039.jpg}
+\caption{Slide 39：目标 loss 越小，critical batch size 越大。}
+\figsource{CS336 Spring 2026 Lecture 9 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 39 的训练阶段含义}
+训练早期 loss 高，critical batch 较小；训练后期目标 loss 更低，可以使用更大 batch 而不那么浪费样本。这也是 batch size schedule、gradient accumulation 和并行规模选择会随训练阶段变化的原因。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-040.jpg}
+\caption{Slide 40：muP 和 scale-aware learning rate，朴素放大模型会让最优学习率依赖 scale。}
+\figsource{CS336 Spring 2026 Lecture 9 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{术语消化：muP 的工程价值}
+muP（maximal update parameterization）是一套让不同宽度模型在训练动力学上更可比的参数化和学习率规则。目标是让小模型上调出的 learning rate、初始化和超参数更可靠地迁移到大模型。它解决的不是 loss curve 拟合，而是让“用小模型预测大模型”这件事的实验条件更一致。
+\end{importantbox}
+
+
+\singleslide{slides-images/slide-041.jpg}{Downstream scaling caveat：pretraining loss 可预测，不代表每个下游任务都平滑、单调或同指数扩展。}{41}
+
+Slide 41 是防止过度外推的边界。下游指标可能有阈值、数据污染、prompt sensitivity、离散评分和能力组合要求，因此曲线会出现跳变或高方差。可靠流程应先用 pretraining loss 做主预测，再为目标下游任务单独拟合或至少保留多 checkpoint 评测。
+
+\begin{warningbox}{讲义补充：源 Slide 41 的 downstream caveat}
+预训练 loss 往往平滑，但下游任务、能力阈值、prompting、评测噪声和数据污染会让曲线更乱。Scaling law 可以预测平均 loss，不保证所有能力指标单调、平滑或按相同 exponent 改善。
+\end{warningbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-042.jpg}
+\caption{Slide 42：一些令人惊讶的结论：optimizer、depth、architecture 等大模型选择可在训练前预测。}
+\figsource{CS336 Spring 2026 Lecture 9 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 42 的 scaling-law design procedure}
+流程是：训练若干小模型，建立 scaling law，外推后选择大模型配置。关键不是“少训几个模型就够了”，而是要覆盖足够尺度、控制变量、评估拟合残差，并在目标规模前做 sanity check。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+模型工程 scaling 把架构、优化器、depth/width、batch size、learning rate 等选择变成曲线比较问题。它能大幅降低设计成本，但依赖实验设计质量和外推范围，不能替代最终大规模验证。
+

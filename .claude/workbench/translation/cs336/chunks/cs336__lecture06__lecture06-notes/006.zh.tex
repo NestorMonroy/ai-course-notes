@@ -1,0 +1,107 @@
+\section{内核融合（Kernel Fusion）动机}
+
+\subsection{仓库-工厂类比}
+
+Horace He 的经典博客文章 \emph{Making Deep Learning Go Brrrr} 用工厂比喻解释了内存瓶颈：
+
+\begin{itemize}
+    \item \textbf{仓库（Warehouse）}= DRAM（全局内存）——大、慢
+    \item \textbf{工厂（Factory）}= SRAM（片上计算）——小、快
+\end{itemize}
+
+如果每完成一步加工就把半成品运回仓库，再从仓库取出来做下一步，搬运成本远超加工成本。如果我们把多步加工\textbf{融合}在工厂内一次完成，只需要一次搬运。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    box/.style={draw, rounded corners, minimum width=2cm, minimum height=0.7cm, font=\small},
+    arr/.style={->, >=stealth, thick}
+]
+% Naive version
+\node[font=\bfseries] at (-3.5, 2.5) {朴素执行};
+\node[box, fill=gray!15] (mem1) at (-3.5, 1.5) {DRAM};
+\node[box, fill=orange!20] (op1) at (-5.5, 0) {Op 1};
+\node[box, fill=orange!20] (op2) at (-3.5, 0) {Op 2};
+\node[box, fill=orange!20] (op3) at (-1.5, 0) {Op 3};
+\draw[arr, red] (mem1) -- (op1) node[midway, left, font=\tiny] {读};
+\draw[arr, red] (op1) -- (mem1) node[midway, left, font=\tiny] {写};
+\draw[arr, red] (mem1) -- (op2);
+\draw[arr, red] (op2) -- (mem1);
+\draw[arr, red] (mem1) -- (op3);
+\draw[arr, red] (op3) -- (mem1);
+
+% Fused version
+\node[font=\bfseries] at (4.5, 2.5) {融合执行};
+\node[box, fill=gray!15] (mem2) at (4.5, 1.5) {DRAM};
+\node[box, fill=green!20, minimum width=5cm] (fused) at (4.5, 0) {Op 1 + Op 2 + Op 3};
+\draw[arr, green!60!black] (mem2) -- (fused) node[midway, right, font=\tiny] {读 1 次};
+\draw[arr, green!60!black] (fused) -- (mem2) node[midway, left, font=\tiny] {写 1 次};
+\end{tikzpicture}
+\caption{内核融合的核心思想：减少全局内存读写次数}
+\end{figure}
+
+\begin{importantbox}{核心原则：组织计算以最小化读写}
+GPU 性能优化的首要原则是\textbf{减少全局内存的读写次数}。内核融合是实现这一目标的主要手段——将多个操作合并为一个 CUDA 内核，中间结果保留在寄存器或 Shared Memory 中。
+\end{importantbox}
+
+\subsection{GeLU：融合效果的完美案例}
+
+GeLU（Gaussian Error Linear Unit）是 Transformer 中广泛使用的激活函数。其 tanh 近似版本为：
+
+$$\text{GeLU}(x) = 0.5 \cdot x \cdot \left(1 + \tanh\left(\sqrt{\frac{2}{\pi}} \cdot (x + 0.044715 \cdot x^3)\right)\right)$$
+
+\begin{itemize}
+    \item $x$：输入值
+    \item $0.79788456 \approx \sqrt{2/\pi}$：常数系数
+    \item $0.044715$：近似修正系数
+\end{itemize}
+
+\textbf{手写实现}（未融合）：
+
+\begin{lstlisting}[caption={手写 GeLU（多个独立 CUDA 内核）}]
+def manual_gelu(x):
+    return 0.5 * x * (1 + torch.tanh(
+        0.79788456 * (x + 0.044715 * x * x * x)
+    ))
+\end{lstlisting}
+
+\textbf{PyTorch 内置实现}（已融合）：
+
+\begin{lstlisting}[caption={PyTorch 内置 GeLU（单个 CUDA 内核）}]
+def pytorch_gelu(x):
+    return torch.nn.functional.gelu(x, approximate="tanh")
+\end{lstlisting}
+
+\subsection{GeLU 性能对比}
+
+基准测试结果（$16384 \times 16384$ 矩阵）：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{实现} & \textbf{耗时 (ms)} & \textbf{相对于 PyTorch} \\
+\midrule
+Manual GeLU（手写） & $\sim$8.1 & 7.4x 慢 \\
+PyTorch GeLU（内置） & $\sim$1.1 & 1.0x（基线）\\
+\bottomrule
+\end{tabular}
+\caption{GeLU 融合 vs 未融合的性能差异}
+\end{table}
+
+Profiling 证实了原因：
+\begin{itemize}
+    \item \textbf{Manual GeLU}：启动多个 CUDA 内核（乘法 $\times 3$、加法、tanh），每个内核都要从全局内存读写
+    \item \textbf{PyTorch GeLU}：只启动\textbf{一个} CUDA 内核，所有计算在内核内部完成
+\end{itemize}
+
+\begin{warningbox}{8 倍差距仅来自内存读写开销}
+手写 GeLU 和 PyTorch GeLU 计算的 FLOPs 完全相同，8 倍的性能差距\textbf{完全来自多余的全局内存读写}。这是 memory-bound 操作的典型特征。
+\end{warningbox}
+
+\subsection{本章小结}
+
+内核融合是 GPU 性能优化的核心技术之一。对于 memory-bound 操作（如 GeLU），将多个操作融合为一个 CUDA 内核可以带来数倍的加速。PyTorch 内置函数通常已做了融合，但自定义操作需要手动融合。
+
+%% ========== Section 6: CUDA Kernels ==========
+

@@ -1,0 +1,195 @@
+\section{Joint data-model scaling 与 compute-optimal training}
+
+前面分别讨论了数据量和模型设计，本部分把参数量 $N$、数据量 $D$ 与训练 compute $C$ 放进同一个预算约束。工程目标不再是单独让模型更大或数据更多，而是在给定 FLOPs 下找到 loss 最低的组合，并诚实表达拟合误差、实验区间和外推不确定性。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-043.jpg}
+\caption{Slide 43：重要问题：给定资源时需要更多数据还是更大模型，联合 scaling law 描述两者关系。}
+\figsource{CS336 Spring 2026 Lecture 9 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{读公式：Slide 43 的联合 scaling}
+一种简化形式是
+\[
+\text{Error}(n,m)=A n^{-\alpha}+B m^{-\beta}+C,
+\]
+其中 \(n\) 是数据量，\(m\) 是模型大小，\(\alpha,\beta\) 分别表示数据和模型 scaling exponent，\(C\) 是 offset。工程问题是在 compute budget 下选择 \(n,m\)，而不是单独最大化某一个。
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-044.jpg}
+\caption{Slide 44：Rosenfeld 的 joint scaling 能用小数据、小模型拟合 exponent，并预测其他区域。}
+\figsource{CS336 Spring 2026 Lecture 9 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 44 的 trade-off 曲面}
+把 data size 和 model size 放到同一张图上，就能看到等 loss 或等 compute 的 trade-off。若模型太小，大量数据会被浪费；若数据太少，大模型会过拟合或欠训练。联合 scaling 的价值是找到预算下的平衡点。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={联合 scaling law 的最小拟合流程}]
+def predict_loss(N, D, params):
+    A, alpha, B, beta, C = params
+    return A * N ** (-alpha) + B * D ** (-beta) + C
+
+params = fit_least_squares(observed_runs)
+best = argmin_over_budget(lambda N, D: predict_loss(N, D, params))
+\end{lstlisting}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-045.jpg}
+\caption{Slide 45：Kaplan 和 Chinchilla 对 optimal compute/data tradeoff 给出不同结论。}
+\figsource{CS336 Spring 2026 Lecture 9 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{读图：Slide 45 的 Kaplan vs Chinchilla}
+Kaplan 结论中 \(N_{\text{opt}}\) 随 compute \(C\) 增长更快，\(D_{\text{opt}}\) 增长较慢，tokens per parameter 随 \(C\) 下降。Chinchilla 则认为大模型通常训练 token 不够，compute-optimal 应该用更小模型、更多数据。这个差异直接改变大模型训练预算分配。
+\end{importantbox}
+
+
+\singleslide{slides-images/slide-046.jpg}{Chinchilla 的三种拟合方法：training-curve envelope、IsoFLOPS minima 与 joint data-model fit。}{46}
+
+Slide 46 提醒“compute-optimal exponent”不是直接读一个点，而是从多组训练 runs 中拟合。Method 1/2 先对固定 compute 找最优模型，Method 3 直接拟合 $L(N,D)$；前两种给出相近常数，第三种对函数形式与参数口径更敏感。方法一致性是结果可信度的重要证据。
+
+\begin{knowledgebox}{讲义补充：源 Slide 46 的方法地图}
+三种方法分别从训练曲线最小点、IsoFLOPS sweep、joint grid fit 估计 compute-optimal 关系。它们使用相同实验事实的不同投影，因此结果接近时更可信；结果分歧时要检查数据、参数计数和训练 recipe。
+\end{knowledgebox}
+
+
+\singleslide{slides-images/slide-047.jpg}{Method 1：对所有 training curves 取 compute-budget 下的最低 loss，envelope 本身呈 power law。}{47}
+
+每条训练曲线对应一个 model size 随 tokens 前进的轨迹；固定 FLOPs 切过多条曲线，取最小 loss 得到 compute-optimal envelope。Slide 47 的优点是直观，缺点是受 run grid 稀疏、训练未充分和噪声影响，minimum 还会有选择偏差。
+
+\begin{knowledgebox}{讲义补充：源 Slide 47 的 minimum-over-runs}
+对每个 compute budget，看所有训练 run 中谁达到最低 loss。把这些 envelope minima 连起来，得到 compute vs loss 的 power law。优点是直观，缺点是依赖实验覆盖是否足够密集。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-048.jpg}
+\caption{Slide 48：Method 2，IsoFLOPS：固定 FLOP budgets，扫参数量，取每条凸曲线的最小点。}
+\figsource{CS336 Spring 2026 Lecture 9 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{读图：Slide 48 的 IsoFLOPS}
+IsoFLOPS 固定训练计算量 \(C\)，改变模型大小 \(N\) 和训练数据 \(D\)。每个 \(C\) 下 loss 对 \(N\) 往往呈 U 形或凸形：模型太小会欠容量，模型太大会欠训练。每条曲线的最小点给出该 compute 下的 \(N_{\text{opt}}\)。
+\end{importantbox}
+
+\begin{lstlisting}[caption={IsoFLOP sweep 的伪代码}]
+for C in flops_budgets:
+    losses = []
+    for N in model_sizes:
+        D = C / (6 * N)  # rough dense Transformer training FLOPs
+        losses.append(train_and_eval(N=N, tokens=D))
+    record_argmin(C, model_sizes, losses)
+\end{lstlisting}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-049.jpg}
+\caption{Slide 49：Method 3，joint fits，在 size-data grid 上训练模型，用 least squares 拟合联合 law。}
+\figsource{CS336 Spring 2026 Lecture 9 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 49 的 joint fit}
+Joint fit 直接拟合 \(N,D\) 到 loss 的曲面。优点是利用所有点，能同时估计数据和模型 exponent；风险是函数形式、权重、异常点和数据覆盖会强烈影响结果。后面关于 Chinchilla method 3 的争议正与此有关。
+\end{knowledgebox}
+
+\subsection{Kaplan 与 Chinchilla 差异的解释}
+
+两项著名工作给出的 compute-optimal data/model 配比明显不同，因此本节不把它们当成互斥口号，而是回到参数计数、warmup、compute range、最小点提取和联合拟合方法。结论对这些细节高度敏感，说明 scaling law 结果必须连同数据处理与拟合流程一起发布。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-050.jpg}
+\caption{Slide 50：为什么 Kaplan 和 Chinchilla 结论差这么多，即使都拟合 joint scaling laws？}
+\figsource{CS336 Spring 2026 Lecture 9 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 50 的问题意识}
+当两个 scaling law 都看似拟合数据，却给出不同 compute-optimal recipe，真正要查的是实验设计：参数计数、学习率 schedule、warmup、数据范围、模型范围、拟合方法和训练稳定性。Scaling law 的可信度来自可解释的数据生成过程。
+\end{knowledgebox}
+
+
+\singleslide{slides-images/slide-051.jpg}{Kaplan 与 Chinchilla 差异解释一：参数计数口径、过长 warmup 与小 compute runs 的优化偏差。}{51}
+
+Slide 51 说明 scaling exponent 会被实验 protocol 污染。Kaplan 排除最后一层参数，使 $N$ 与总 FLOPs 的对应改变；小预算 run 若 warmup 占比过高，会让小模型看起来训练不足。学习率 decay 本身未必是主因，只要 batch/LR 与训练长度正确调优。
+
+\begin{knowledgebox}{讲义补充：源 Slide 51 的参数和 warmup 细节}
+参数计数是否包含 embedding/最后层会改变 \(N\)；小 compute budget 下 warmup 比例过高会让训练效率失真。Scaling law 拟合对这些 seemingly boring 的工程细节很敏感，因为它们改变了曲线低规模区域。
+\end{knowledgebox}
+
+
+\singleslide{slides-images/slide-052.jpg}{差异解释二：non-embedding vs total parameters 与小幅非线性会显著改变拟合指数。}{52}
+
+当 embedding 占比随模型规模变化时，用 non-embedding $N$ 或 total $N$ 会改变 log-log 横轴，有限区间内的小曲率也会被线性 fit 吸收到 exponent。Slide 52 的教训是必须公开参数定义、FLOPs 公式、run range 与 residual；只有同口径曲线才能比较 compute-optimal 配比。
+
+\begin{warningbox}{讲义补充：源 Slide 52 的计数口径风险}
+同一个模型可以按 total params、non-embedding params、active params、训练 FLOPs 等多种口径记录。口径不一致会让 scaling exponent 不能比较。做实验时必须把参数计数、token 计数、FLOPs 估算和 loss 计算写清楚。
+\end{warningbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-053.jpg}
+\caption{Slide 53：Chinchilla method 3 可能存在错误，后续数据取证重做 fit 得到更接近方法 1/2 的结果。}
+\figsource{CS336 Spring 2026 Lecture 9 官方幻灯片。}
+\end{figure}
+
+\begin{warningbox}{读图：Slide 53 的方法论教训}
+Scaling law 不是因为曲线漂亮就可靠。需要公开原始 run、拟合代码、过滤规则和参数口径。若一个方法的结论与其他方法冲突，要优先检查数据和拟合流程，而不是只引用最终 exponent。
+\end{warningbox}
+
+\subsection{train-optimal 与 deployment-optimal}
+
+最后进一步把训练之外的推理成本纳入目标。Train-optimal 只最小化一次预训练的 compute，而在线服务会为每个请求重复支付参数读取、KV cache 和生成成本；因此高调用量场景可能值得训练更小但使用更多 token 的模型，即所谓 overtraining，相同 loss 下换取更低长期推理成本。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-054.jpg}
+\caption{Slide 54：Chinchilla 的 train-optimal 不一定是部署最优，真实部署中 inference compute 可能占大头。}
+\figsource{CS336 Spring 2026 Lecture 9 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{读图：Slide 54 的 overtraining 经济学}
+Chinchilla 目标是固定训练 compute 下 loss 最优。但部署时，模型会被调用很多次，推理成本可能远超训练成本。更小模型训练更多 tokens（overtrain）可能训练上不是最优，但推理更便宜，总拥有成本更低。GPT-3、Llama 等例子都体现了这一点。
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-055.jpg}
+\caption{Slide 55：IsoFLOPS 方法容易执行且干净，也被用于 diffusion 和 MoE 等领域。}
+\figsource{CS336 Spring 2026 Lecture 9 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 55 的跨领域价值}
+IsoFLOPS 的核心是固定预算扫模型规模，找每个预算的最优点。这种实验设计不依赖语言模型特有结构，因此可扩展到 diffusion、MoE 等模型族。它是一种通用资源分配实验，而不只是 Chinchilla 论文技巧。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-056.jpg}
+\caption{Slide 56：log-linearity 扩展到模型参数和 compute，可用于选择 optimizer、architecture、model sizes 和资源 trade-off。}
+\figsource{CS336 Spring 2026 Lecture 9 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{读图：Slide 56 的工程总结}
+Scaling laws 的最大价值是把昂贵训练决策前置：先在小规模比较 optimizer、architecture、model sizes，再用曲线做资源 trade-off。它不能保证万无一失，但能显著减少盲目训练巨型模型的风险。
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-057.jpg}
+\caption{Slide 57：全讲 recap，scaling laws 令人惊讶且实用：数据 scaling、模型 scaling、prediction。}
+\figsource{CS336 Spring 2026 Lecture 9 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{读图：Slide 57 的最终信息}
+Scaling laws 帮我们理解数据如何影响模型，显著降低模型工程成本，并预测哪些问题可以靠 scale brute force。它们最适合用于资源分配、设计筛选和风险控制；最不适合被当成脱离数据质量、优化细节和部署成本的“万能定律”。
+\end{importantbox}
+
+\subsection{本章小结}
+
+Joint scaling 把模型大小、数据量和 compute 放进同一张账本。Kaplan、Chinchilla 和 IsoFLOPS 的核心差异不是谁更“有名”，而是拟合方法、参数口径和目标函数不同。工程上还要区分 train-optimal 与 deployment-optimal。
+

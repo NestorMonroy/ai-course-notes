@@ -1,0 +1,119 @@
+\section{编写 CUDA 内核}
+
+\subsection{CUDA 编程基础}
+
+CUDA 是 NVIDIA 的 C/C++ API，用于编程 GPU。核心思想很简单：写一个函数 $f$，CUDA 对所有元素并行执行 $f$。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    block/.style={draw, minimum width=1.8cm, minimum height=0.6cm, font=\small},
+]
+\node[block, fill=blue!10] (b00) at (0,0) {Block (0,0)};
+\node[block, fill=blue!10] (b01) at (2.2,0) {Block (0,1)};
+\node[block, fill=blue!10] (b02) at (4.4,0) {Block (0,2)};
+\node[block, fill=green!10] (b10) at (0,-0.9) {Block (1,0)};
+\node[block, fill=green!10] (b11) at (2.2,-0.9) {Block (1,1)};
+\node[block, fill=green!10] (b12) at (4.4,-0.9) {Block (1,2)};
+\node[font=\small, above=0.2cm of b01] {Grid: numBlocks = (2, 3)};
+\node[font=\scriptsize, below=0.2cm of b11, text width=5cm, align=center] {每个 Block 包含 blockDim 个线程\\每个线程由 (blockIdx, threadIdx) 唯一标识};
+\end{tikzpicture}
+\caption{CUDA Grid-Block-Thread 组织结构}
+\end{figure}
+
+关键概念：
+\begin{itemize}
+    \item \texttt{blockIdx}：当前 Block 在 Grid 中的索引
+    \item \texttt{blockDim}：每个 Block 的线程数
+    \item \texttt{threadIdx}：当前线程在 Block 中的索引
+    \item 全局线程索引：$i = \text{blockIdx.x} \times \text{blockDim.x} + \text{threadIdx.x}$
+\end{itemize}
+
+\subsection{GeLU 的 CUDA 实现}
+
+\begin{lstlisting}[caption={GeLU CUDA 内核（gelu.cu）},language=C]
+__global__ void gelu_kernel(
+    const float* in, float* out, int num_elements
+) {
+    // 计算全局线程索引
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // 边界检查
+    if (i < num_elements) {
+        float x = in[i];
+        float a = 0.79788456f * (x + 0.044715f * x * x * x);
+        float tanh_a = tanhf(a);
+        out[i] = 0.5f * x * (1.0f + tanh_a);
+    }
+}
+\end{lstlisting}
+
+\begin{knowledgebox}{CUDA 内核的关键模式}
+几乎所有 CUDA 内核都遵循以下模式：
+\begin{enumerate}
+    \item 计算全局索引 $i$：\texttt{blockIdx.x * blockDim.x + threadIdx.x}
+    \item 边界检查：\texttt{if (i < num\_elements)}——因为最后一个 Block 可能有多余的线程
+    \item 执行计算：从输入指针读取、计算、写入输出指针
+\end{enumerate}
+\texttt{\_\_global\_\_} 关键字标识该函数为 CUDA 内核函数。
+\end{knowledgebox}
+
+\subsection{Python 端启动 CUDA 内核}
+
+PyTorch 提供了 \texttt{load\_inline} 工具，可以在 Python 中直接编译和调用 CUDA 代码：
+
+\begin{lstlisting}[caption={在 Python 中编译和使用 CUDA 代码}]
+from torch.utils.cpp_extension import load_inline
+
+# CUDA 源码（字符串形式）
+cuda_src = open("gelu.cu").read()
+cpp_src = "torch::Tensor gelu(torch::Tensor x);"
+
+# 编译为 Python 模块
+module = load_inline(
+    cuda_sources=[cuda_src],
+    cpp_sources=[cpp_src],
+    functions=["gelu"],
+    extra_cflags=["-O2"],
+    name="inline_gelu",
+)
+
+cuda_gelu = module.gelu  # 现在可以像普通函数一样调用
+\end{lstlisting}
+
+\subsection{CUDA GeLU 性能}
+
+Profiling CUDA GeLU 的结果显示，我们的自写内核确实只启动了\textbf{一个 CUDA 内核}（名为 \texttt{gelu\_kernel}），所有计算在内核内部完成。与 PyTorch 的差距来自于：
+
+\begin{itemize}
+    \item PyTorch 使用了更高效的数学库函数（如 \texttt{tanhf} 的向量化版本）
+    \item PyTorch 的内核做了更细致的\textbf{向量化加载}——一次从内存读取多个连续元素
+    \item PyTorch 内核可能使用了\textbf{更优的线程配置}和\textbf{寄存器分配}策略
+\end{itemize}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{实现} & \textbf{耗时 (ms)} & \textbf{说明} \\
+\midrule
+Manual（手写 PyTorch） & $\sim$8.1 & 多个内核，未融合 \\
+CUDA（自写内核） & $\sim$1.8 & 单内核，已融合 \\
+PyTorch（内置） & $\sim$1.1 & 单内核，高度优化 \\
+\bottomrule
+\end{tabular}
+\caption{GeLU 三种实现的性能对比}
+\end{table}
+
+我们的 CUDA 实现已经比手写 PyTorch 快了 4.5 倍，但仍不如 PyTorch 内置版本。PyTorch 的实现做了更多底层优化（如向量化加载、更优的数学库函数）。
+
+\begin{warningbox}{逐元素操作在 CUDA 中很简单，但...}
+GeLU 是逐元素（elementwise）操作——每个输出元素只依赖一个输入元素，因此 CUDA 实现很直接。但大多数有趣的操作（矩阵乘法、softmax、RMSNorm）需要读取多个值，涉及\textbf{共享内存管理}、\textbf{线程同步}等复杂问题。
+\end{warningbox}
+
+\subsection{本章小结}
+
+CUDA 让你直接控制 GPU 上的每个线程，实现内核融合。对于逐元素操作，CUDA 编程相对简单，主要是坐标计算和边界检查。但对于需要线程间通信的操作，CUDA 编程的复杂度会急剧上升——这正是 Triton 出现的原因。
+
+%% ========== Section 7: Triton ==========
+

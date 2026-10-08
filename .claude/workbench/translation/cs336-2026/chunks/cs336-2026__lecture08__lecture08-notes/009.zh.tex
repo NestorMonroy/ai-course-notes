@@ -1,0 +1,66 @@
+\subsection{activation memory 与 sequence parallelism}
+
+前面的静态状态账本还没有覆盖随 batch、sequence length 和层数增长的 activation。这里的问题是，TP 虽能切分部分 matmul 中间量，却不会自动切开 LayerNorm、dropout 等点操作的激活；sequence parallelism 进一步沿 token 轴分片这些状态，才能让 activation memory 更接近线性下降。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-044.jpg}
+\caption{Slide 44：memory 是动态的，activation memory 不能只用静态参数账本解释。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 44 为什么转向 activation}
+前面 ZeRO 和 model parallel 主要围绕参数、梯度、optimizer state，但训练峰值显存常被 activations 推高。长序列、高 batch、深层网络都会让 activation memory 成为新的瓶颈，尤其在需要保存中间结果给 backward 时。
+\end{knowledgebox}
+
+
+\singleslide{slides-images/slide-045.jpg}{参数分片之后的下一堵墙：activation memory 不会自动随 tensor/pipeline parallel 线性下降。}{45}
+
+Slide 45 将显存账本从 parameters 转向 activations。训练必须保存 attention/MLP 中间值用于 backward，其规模随 sequence length、microbatch 与 hidden size 增长；即使模型权重已经切开，未分片的 LayerNorm、dropout 和 residual activations 仍可能成为峰值显存主项。
+
+\begin{warningbox}{讲义补充：源 Slide 45 的隐藏提醒}
+模型参数被切开，不代表所有 activation 自动被切开。某些 LayerNorm、dropout、attention input/output 仍按完整 sequence 或 hidden 保存在每个 rank 上。要让 memory 真正随设备数线性扩展，必须显式处理 activation 的切分和重算。
+\end{warningbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-046.jpg}
+\caption{Slide 46：每层 activation memory 的分解，包含 attention 的二次项和若干 \(sbh\) 项。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{读公式：Slide 46 的符号和含义}
+这里 \(s\) 表示 sequence length，\(b\) 表示 microbatch size，\(h\) 表示 hidden dimension，\(a\) 可理解为 attention heads 或相关维度。二次 attention 项随 \(s^2\) 增长，FlashAttention 类方法可减少显式存储；剩余 \(sbh\) 项来自 LayerNorm、dropout、attention/MLP 输入等点操作或中间张量。
+\end{importantbox}
+
+
+\singleslide{slides-images/slide-047.jpg}{Tensor parallel 下仍复制的 activation 项：LayerNorm、dropout 与 attention/MLP 输入形成约 $10sbh$ 下界。}{47}
+
+Slide 47 把 activation 公式拆成可随 TP 切分的 matmul 中间值和无法直接切分的复制项。随着 TP degree 提高，前者下降，后者保持不变，最终限制线性 scaling。Sequence parallel 正是把这些按 token 独立的 LayerNorm/dropout activation 沿 sequence 轴分片。
+
+\begin{knowledgebox}{讲义补充：源 Slide 47 的剩余 10sbh 项是什么}
+TP 切分了 attention 和 MLP 中的大矩阵乘法，但 LayerNorm、dropout 和某些输入张量仍是按完整 hidden 或 sequence 存放的点操作张量。这些项不会随 TP size 自动降低，因此需要 sequence parallel 把 sequence dimension 也切开。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-048.jpg}
+\caption{Slide 48：sequence parallel 把 LayerNorm/dropout 等点操作沿 sequence axis 分片。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{术语消化：sequence parallel 的机制}
+Sequence parallelism 沿 sequence dimension 分片 activation。对 LayerNorm、dropout 这类逐 token 或逐元素操作，按 sequence 切分不改变数学语义；但某些需要完整序列交互的操作仍要通信。它的角色通常是补足 TP 后 activation memory 没有线性下降的部分。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-049.jpg}
+\caption{Slide 49：组合 tensor parallel 和 sequence parallel 后，activation memory 才更接近随机器数线性下降。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 49 的“fully scale”是什么意思}
+这页不是说 activation memory 完全免费，而是说通过 TP 切矩阵乘法相关张量，通过 SP 切点操作相关张量，剩余 activation 才更接近随 parallel size 线性下降。它体现了本讲方法论：看到未被分片的状态，就引入对应维度的 sharding。
+\end{knowledgebox}
+

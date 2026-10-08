@@ -1,0 +1,113 @@
+\section{PPO in Language Models：完整系统比一条 loss 更重要}
+
+本节从上一讲的 PPO 公式继续。语言模型把 prompt 和已生成 token 视为 state，把下一个 token 视为 action；大部分 task reward 在序列结尾才出现，因此 credit assignment、sequence length 和 KL shaping 成为核心问题。
+
+\subsection{Policy gradient 与 ratio clipping}
+
+本节先从最小 policy-gradient 对象开始，再解释 PPO clipping。最基础的 REINFORCE gradient 是：
+
+$$
+\nabla_\theta J(\theta)
+=\mathbb{E}_{y\sim\pi_\theta}\left[(R(y)-b)\nabla_\theta\log\pi_\theta(y\mid x)\right].
+$$
+
+其中 $R(y)$ 表示 trajectory reward，$b$ 是不依赖当前 action 的 baseline，$\theta$ 是 policy 参数。Baseline 不改变期望梯度，但可以显著降低 variance；PPO 随后用新旧 policy probability ratio 限制一次 update 的幅度。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{slide-05.jpg}
+\caption{PPO 理论回顾：policy gradient、TRPO 与 clipped objective。}
+\figsource{CS336 Spring 2026 Lecture 16，Slide 5。}
+\end{figure}
+
+\begin{knowledgebox}{读图：PPO 的三次妥协}
+Policy gradient 无约束更新方差大；TRPO 用 trust region 限制新旧 policy 距离，但二阶优化复杂；PPO 用 ratio clipping 近似 trust region。它是经验上有效的工程折中，而不是对全局最优的保证。
+\end{knowledgebox}
+
+\slidepair{slide-06.jpg}{slide-07.jpg}{PPO 从传统控制任务中的成功案例，到概念层面简洁的 clipped surrogate objective。}{6--7}
+
+Slide 6 用机器人控制与 OpenAI Five 强调 PPO 原本面向会与环境持续交互的 policy；Slide 7 则显示其概念核心确实可以写在一页公式里：采样旧 policy 数据，计算 advantage，再限制新旧 action probability ratio。问题在于语言模型的 action space 是词表、trajectory 很长、policy 本身巨大，公式之外的状态管理与吞吐成本被急剧放大。
+
+\singleslide{slide-08.jpg}{PPO 的实践复杂度：真正的实现往往需要大量稳定化选择与系统性调试。}{8}
+
+这页故意用难读的博客截图制造反差：概念目标很短，实际 recipe 却包含 reward scaling、advantage whitening、KL controller、clip ranges、value warmup、mask、microbatch 和 rollout freshness。老师提醒，PPO 的 value model 可能与 policy 一样大，且稳定化技巧常依赖具体环境；因此“复现 loss”远不等于“复现训练”。
+
+\begin{warningbox}{老师强调：PPO recipe 不是一个可移植常数表}
+课堂在 00:08 与 00:11 两次指出，value model 带来接近另一份大模型的显存与调参成本，实际实现还常需要环境特定的 stabilization hacks。超参数应与 reward scale、序列长度、batch freshness 和 model size 联合审计，不能机械复制。
+\end{warningbox}
+
+\subsection{LM formulation：terminal reward 如何变成 token advantages}
+
+接下来把 trajectory objective 展开到 token。LM 中的概率分解为 $\pi(y\mid x)=\prod_t\pi(y_t\mid x,y_{<t})$。若 verifier 只给 final reward，可以把同一个 outcome signal 分配到各 token，再加入 per-token KL penalty：
+
+$$
+r_t^{\mathrm{shaped}}
+=-\beta\log\frac{\pi_\theta(y_t\mid s_t)}{\pi_{\mathrm{ref}}(y_t\mid s_t)}
++\mathbb{1}[t=T]R(y).
+$$
+
+其中 $\beta$ 表示 KL penalty 强度，$T$ 是最后一个 token，$s_t=(x,y_{<t})$ 表示当前语言模型状态。Value model 估计 expected return，GAE 将 temporal-difference errors 组合为低方差 advantage。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{slide-09.jpg}
+\caption{PPO 在语言模型中的理想化表示：token actions 与序列终点 reward。}
+\figsource{CS336 Spring 2026 Lecture 16，Slide 9。}
+\end{figure}
+
+Slide 9 的 idealization 把整段回答视为 trajectory：每个 token 是 action，大部分 task reward 只在结尾出现。它看起来仍像标准 RL，但实际状态数等于生成长度，任何 truncation、stop condition 或 chat-template 差异都会改变 trajectory。下一组代码页因此从“公式像什么”转向“训练器到底做什么”。
+
+\singleslide{slide-10.jpg}{AlpacaFarm PPO：课程选取的可运行语言模型实现入口。}{10}
+
+Slide 10 选择 AlpacaFarm，不是因为它代表唯一现代 recipe，而是因为它曾被多个项目复用、代码足够完整，能把论文名词映射到实际模块。阅读实现时应先画调用图：谁负责 rollout、谁缓存 old log-prob 与 values、何时调用 reward model、一个 rollout batch 被重复优化多少 epoch，以及 policy 更新后哪些缓存必须失效。
+
+\slidepair{slide-11.jpg}{slide-12.jpg}{PPO outer loop 与 loss computation：rollout 批次、ratio clipping、value loss 和多轮 minibatch update。}{11--12}
+
+Slide 11 的 outer loop 先生成一批 on-policy trajectories，再进入 inner optimization loop；Slide 12 展开 policy/value losses 与 cliprange。核心审计点是数据版本：$\pi_{\mathrm{old}}$ 必须对应生成该 batch 的 policy，若 inner epochs 太多或 rollout 队列过旧，ratio 会偏离 1，clip fraction 上升，算法从近端更新退化成对陈旧数据的强行拟合。
+
+\singleslide{slide-13.jpg}{PPO rollout 代码路径：变长生成、旧策略统计量与 reward/value 输入的组装。}{13}
+
+Rollout 页把最容易出错的张量对齐暴露出来：prompt tokens 不应被当作 policy actions，padding 位置必须 mask，生成停止后不能继续累计 KL，old log-probs、reference log-probs、values 与 rewards 还要对齐到同一 token index。很多看似“训练不稳定”的问题，根因其实是这类 sequence bookkeeping 错误。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{slide-14.jpg}
+\caption{Reward shaping：per-token KL penalty 加 final task reward。}
+\figsource{CS336 Spring 2026 Lecture 16，Slide 14。}
+\end{figure}
+
+Slide 14 显示常见 shaping：每个生成 token 承担相对 reference 的 KL 代价，最终 token 再接收完整 task reward。课件还提到对某些 KL 方向做 clipping 的实现细节，用于阻止 divergence；这类 heuristic 会改变优化目标，却常不会出现在简化公式中，因此训练报告应明确记录。
+
+\singleslide{slide-15.jpg}{Generalized Advantage Estimation：把 terminal reward、value predictions 与 token-level returns 连接起来。}{15}
+
+在一次性回答任务中，环境没有中途外部状态转移，因而常取 $\gamma=\lambda=1$；但 value model 仍需为每个 prefix 估计最终 return。GAE 将相邻 temporal-difference errors 累积为 advantage，降低纯 Monte Carlo return 的方差。若 value mask、terminal index 或 reward placement 错一位，所有 token 都会获得错误 credit。
+
+\begin{warningbox}{Bandit-like 不等于实现简单}
+Outcome reward 看起来像 contextual bandit，但序列仍有成千上万 token，value/advantage 计算、padding、mask、truncation 和 variable-length batching 都会影响梯度。把 $\gamma=\lambda=1$ 当作“没有 credit assignment 问题”是不准确的。
+\end{warningbox}
+
+\subsection{为什么 PPO 很难做快}
+
+本节进一步从公式转向系统。PPO 需要 rollout policy、reference policy、reward model、value model 和 trainer；生成是 autoregressive inference，训练是大 batch forward/backward，两者最佳并行布局不同。Policy 更新后，旧 rollouts 又会迅速 stale。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{slide-16.jpg}
+\caption{PPO 训练中 reward、KL 与 value-related curves 的典型形态。}
+\figsource{CS336 Spring 2026 Lecture 16，Slide 16。}
+\end{figure}
+
+\begin{knowledgebox}{术语消化：PPO 系统里的四个模型}
+\textbf{Policy} 生成并被更新；\textbf{reference} 提供 KL anchor；\textbf{reward model/verifier} 评价完整输出；\textbf{value model} 预测 return 以降低方差。RLVR 可以用 deterministic verifier 替换 reward model，但其余系统负担仍然存在。
+\end{knowledgebox}
+
+Slide 16 的训练曲线提供了最基本的 sanity check：task/reward-model 分数应提高，KL reward 通常为负且随 policy 漂移变化，value-related 指标不应爆炸。但“曲线平滑”只证明实现内部自洽，不能证明 verifier 没有漏洞；还要在独立题集上执行答案、运行 tests，并检查生成长度与格式是否成为 shortcut。
+
+\singleslide{slide-17.jpg}{为什么需要 GRPO：PPO 的 value-model 与实现负担，以及 pairwise/offline DPO 与 RLVR 数据形态的不匹配。}{17}
+
+Slide 17 明确了算法选择的约束。PPO 能处理 scalar outcome reward，却要维护昂贵的 value model；DPO 实现简单，但原始数据并非天然的 Bradley--Terry pairs，而且静态 pair 会迅速落后于在线提升的 policy。老师同时提醒，“DPO 是 offline”并非绝对：可以不断重新采样并迭代 DPO。真正差别是每一轮怎样构造学习信号，而不是算法名字决定整个数据循环。
+
+\subsection{本章小结}
+
+PPO 的能力来自直接优化 reward，成本来自 on-policy rollout、value estimation 和多模型协同。GRPO 的主要吸引力正是去掉 value model，并用组内相对 reward 构造 advantage。
+

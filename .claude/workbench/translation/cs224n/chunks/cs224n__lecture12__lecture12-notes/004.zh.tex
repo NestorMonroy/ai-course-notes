@@ -1,0 +1,210 @@
+\section{多GPU训练：DDP 与 ZeRO}
+
+\subsection{GPU 显存占用分析}
+
+在讨论多GPU训练之前，需要理解单GPU上的显存都用在了哪里。以混合精度训练为例，每个参数的显存开销为：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-024.jpg}
+\caption{单GPU训练时的显存结构：模型（FP16）、优化器（Adam 的 Master Weights + 动量 + 方差，均为 FP32）\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第25页。}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{llc}
+\toprule
+\textbf{组件} & \textbf{精度} & \textbf{每参数字节数} \\
+\midrule
+模型参数     & FP16 & 2 \\
+梯度        & FP16 & 2 \\
+Master Weights（FP32 副本） & FP32 & 4 \\
+Adam 动量（momentum）       & FP32 & 4 \\
+Adam 方差（variance）       & FP32 & 4 \\
+\midrule
+\textbf{合计} & & \textbf{16} \\
+\bottomrule
+\end{tabular}
+\caption{混合精度 + Adam 优化器的每参数显存开销}
+\end{table}
+
+\begin{knowledgebox}{优化器状态的显存开销}
+很多人第一次了解到优化器也需要大量显存时会感到惊讶。使用 Adam 优化器时，每个参数需要额外存储动量（momentum）和方差（variance），各占 4 字节（FP32）。加上 FP32 Master Weights，仅优化器状态就需要 \textbf{12字节/参数}——是模型参数本身（2字节）的 6 倍！
+\end{knowledgebox}
+
+\subsection{分布式数据并行（DDP）}
+
+\textbf{Distributed Data Parallel (DDP)} 是最基本的多GPU训练策略。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-025.jpg}
+\caption{DDP 基本架构：每个 GPU 持有完整的模型和优化器副本，接收不同的数据切片\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第26页。}
+
+DDP 的工作流程：
+\begin{enumerate}
+    \item 将数据集均匀分割到 $N$ 个 GPU 上（每个 GPU 处理 $1/N$ 的数据）
+    \item 每个 GPU 维护\textbf{完整的}模型副本和优化器状态
+    \item 每个 GPU 独立执行前向传播和反向传播，得到各自的梯度
+    \item 通过 \textbf{All-Reduce} 操作同步梯度：汇总所有 GPU 的梯度并分发给所有 GPU
+    \item 每个 GPU 用汇总后的梯度更新自己的模型，保持同步
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-026.jpg}
+\caption{DDP 中的 All-Reduce 操作：四个 GPU 各有不同梯度，All-Reduce 将它们汇总并分发\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第27页。}
+
+\begin{importantbox}{All-Reduce：DDP 的核心原语}
+\textbf{All-Reduce} 是一个 MPI（消息传递接口）原语，它将所有 GPU 上的数据进行归约（如求和），然后将结果广播到每个 GPU。在 DDP 中，All-Reduce 用于汇总梯度。通信开销为每参数 2 字节（FP16 梯度）。
+\end{importantbox}
+
+\subsection{DDP 的内存问题}
+
+DDP 虽然简单有效，但存在严重的\textbf{内存冗余}问题：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-030.jpg}
+\caption{DDP 的内存问题：每个 GPU 都存储完整的参数、梯度、优化器状态。以7.5B参数模型为例，每个 GPU 需要 120GB\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第31页。}
+
+以一个 7.5B 参数的模型（$\Psi = 7.5\text{B}$）为例，使用 Adam + 混合精度：
+
+$$\text{每GPU显存} = (2 + 2 + K) \times \Psi = (2 + 2 + 12) \times 7.5\text{B} = 120 \text{GB}$$
+
+其中 $K = 12$（FP32 Master Weights 4B + Adam momentum 4B + Adam variance 4B）。A100 有 80GB 显存，\textbf{连一块卡都放不下}。而且，每个 GPU 上的优化器状态完全相同——这是巨大的浪费。
+
+\begin{warningbox}{DDP 无法解决大模型问题}
+DDP 不减少任何单GPU的显存占用——它只是通过数据并行来加速训练。如果单个GPU放不下模型+优化器状态，DDP 无能为力。我们需要更聪明的策略来\textbf{分摊}显存开销。
+\end{warningbox}
+
+\subsection{ZeRO Stage 1：分片优化器状态}
+
+\textbf{ZeRO}（Zero Redundancy Optimizer）由微软 DeepSpeed 项目提出，核心思想是将冗余的状态\textbf{分片（shard）}存储到不同 GPU 上。
+
+ZeRO Stage 1 只分片\textbf{优化器状态}（绿色部分）：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-032.jpg}
+\caption{ZeRO Stage 1：优化器状态被分片到不同 GPU，每个 GPU 只维护 $1/N$ 的优化器状态\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第33页。}
+
+Stage 1 的工作流程：
+\begin{enumerate}
+    \item 每个 GPU 持有完整的模型参数（FP16）和完整的梯度
+    \item 但只持有 $1/N$ 的优化器状态
+    \item 反向传播后，通过 \textbf{Reduce-Scatter} 操作，每个 GPU 只接收自己负责的参数分片的汇总梯度
+    \item 每个 GPU 用本地优化器状态更新自己负责的参数分片
+    \item 通过 \textbf{All-Gather} 操作，收集所有 GPU 更新后的参数，恢复完整模型
+\end{enumerate}
+
+\begin{importantbox}{ZeRO Stage 1 是免费的午餐}
+关键洞察：\textbf{All-Reduce = Reduce-Scatter + All-Gather}。DDP 需要执行一次 All-Reduce，而 ZeRO Stage 1 执行 Reduce-Scatter + All-Gather，通信量完全相同。因此，ZeRO Stage 1 在\textbf{不增加任何通信开销}的情况下节省了优化器状态的显存——你应该始终使用它。
+\end{importantbox}
+
+\begin{knowledgebox}{三个 MPI 原语}
+\begin{itemize}
+    \item \textbf{All-Reduce}：所有 GPU 的数据归约后广播到所有 GPU（用于 DDP）
+    \item \textbf{Reduce-Scatter}：所有 GPU 的数据归约后，结果的不同分片散发到不同 GPU
+    \item \textbf{All-Gather}：收集所有 GPU 的分片，拼接成完整数据广播到所有 GPU
+\end{itemize}
+核心恒等式：All-Reduce $\equiv$ Reduce-Scatter + All-Gather
+\end{knowledgebox}
+
+\subsection{ZeRO Stage 2：分片梯度}
+
+Stage 2 在 Stage 1 的基础上，进一步分片\textbf{梯度}。
+
+核心技巧：\textbf{永远不实例化完整的梯度向量}。反向传播是逐层进行的——当计算完第 $j$ 层的梯度后，立即通过 Reduce 操作将该层梯度发送给负责该层的 GPU，然后释放本地的临时梯度内存。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-037.jpg}
+\caption{ZeRO Stage 2 流程：反向传播时逐层计算梯度、发送给负责的 GPU、立即释放内存\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第38页。}
+
+Stage 2 的通信量也与 DDP 相当（Reduce + All-Gather $\approx$ All-Reduce），因此也是\textbf{基本免费的}显存优化。
+
+\begin{importantbox}{ZeRO Stage 1 和 2 应始终启用}
+ZeRO Stage 1（分片优化器状态）和 Stage 2（分片梯度）都不增加显著的通信开销，却能大幅减少每GPU的显存占用。在多GPU训练中，\textbf{没有理由不使用它们}。
+\end{importantbox}
+
+\subsection{ZeRO Stage 3 / FSDP：分片模型参数}
+
+当模型大到连参数本身都放不进单个 GPU 时，就需要 \textbf{ZeRO Stage 3}，也称为 \textbf{FSDP（Fully Sharded Data Parallel）}。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-040.jpg}
+\caption{ZeRO 三个阶段的显存对比：Baseline 120GB $\rightarrow$ Stage 1（$P_{os}$）31.4GB $\rightarrow$ Stage 2（$P_{os+g}$）16.6GB $\rightarrow$ Stage 3（$P_{os+g+p}$）1.9GB\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第41页。}
+
+Stage 3 连模型参数也进行分片：
+\begin{enumerate}
+    \item 将模型划分为多个 \textbf{FSDP 单元}
+    \item 将每个单元的参数展平（Flat Parameter），分配到不同 GPU
+    \item \textbf{前向传播时}：在计算某层之前，通过 All-Gather 临时收集该层的完整参数；计算完成后丢弃非本地分片
+    \item \textbf{反向传播时}：再次 All-Gather 获取完整参数，计算梯度后通过 Reduce-Scatter 分发梯度
+    \item 每个 GPU 用本地优化器状态更新本地参数分片
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-042.jpg}
+\caption{FSDP 将模型参数展平并分配到不同 GPU，每个 GPU 只永久持有一小部分参数\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第43页。}
+
+\begin{warningbox}{Stage 3 有额外的通信开销}
+与 Stage 1/2 不同，Stage 3 需要在前向传播和反向传播中都执行 All-Gather（分别收集参数），加上反向传播中的 Reduce-Scatter。总通信量为 \textbf{2次 All-Gather + 1次 Reduce-Scatter}，显著高于 DDP。但如果模型放不进单个 GPU，这是唯一的选择。
+\end{warningbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-047.jpg}
+\caption{FSDP 通信可以与计算重叠（overlap）：当模型足够大时，前向传播某层的时间足以预取下一层的参数\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第48页。}
+
+好消息是：当模型足够大时，前向传播一层的计算时间足以\textbf{预取}（prefetch）下一层的参数。PyTorch 的 FSDP 默认启用这种计算-通信重叠，使得通信开销在实际中被大幅隐藏。
+
+\subsection{GPU 显存中被忽视的部分：模型激活值}
+
+在前面的分析中，我们忽略了一个重要的显存占用来源：\textbf{模型激活值}（Activations）。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-049.jpg}
+\caption{完整的 GPU 显存组成：模型参数 + 梯度 + 优化器状态 + 模型激活值（随 batch size 线性增长）\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第50页。}
+
+反向传播需要保存前向传播中每一层的激活值，其显存占用与 \textbf{batch size 线性相关}。这解释了为什么增大 batch size 时容易遇到 OOM 错误。ZeRO 的三个阶段都\textbf{不处理}激活值分片——要解决激活值的显存问题，需要使用 \textbf{Activation Checkpointing}（梯度检查点）技术。
+
+\begin{knowledgebox}{Activation Checkpointing}
+Activation Checkpointing（也叫 Gradient Checkpointing）的核心思想：不保存所有层的激活值，只保存部分``检查点''层的激活值。反向传播到某层时，从最近的检查点重新计算中间激活值。这是用\textbf{额外的计算时间}换取\textbf{更少的显存占用}。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+\begin{itemize}
+    \item \textbf{DDP}：数据并行，每个 GPU 维护完整的模型/梯度/优化器状态，通过 All-Reduce 同步梯度
+    \item \textbf{ZeRO Stage 1}：分片优化器状态，通信量与 DDP 相同（免费优化）
+    \item \textbf{ZeRO Stage 2}：分片优化器状态 + 梯度，通信量与 DDP 相当（基本免费）
+    \item \textbf{ZeRO Stage 3 / FSDP}：分片一切（参数+梯度+优化器状态），有额外通信开销，但支持超大模型
+    \item 模型激活值的显存与 batch size 线性相关，需要 Activation Checkpointing 另行处理
+\end{itemize}
+
+%% ========== Part 3: 参数高效微调 ==========
+

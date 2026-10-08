@@ -1,0 +1,106 @@
+\section{注意力头变体}
+
+\subsection{推理时的 KV Cache 与内存瓶颈}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-058.jpg}
+\caption{训练时的 attention 计算：所有 token 并行处理，算术强度高\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第59页。}
+
+在\textbf{训练时}，attention 的算术强度很高——大量的矩阵乘法让 GPU 保持高利用率。但在\textbf{推理时}，模型必须逐 token 生成，每次只计算 attention 矩阵的一行：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-060.jpg}
+\caption{推理时的 KV Cache：逐 token 生成，需要缓存所有过去的 key 和 value\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第61页。}
+
+\begin{warningbox}{推理时的算术强度急剧下降}
+训练时的算术强度（计算/内存访问比）$\propto D$，推理时变为 $\propto \frac{1}{N/D + 1/B}$。
+
+这意味着：推理时需要很短的序列长度 $N$ 或很大的隐藏维度 $D$ 才能保持高利用率。KV cache 的大小为 $2 \times n_\text{layers} \times n_\text{heads} \times d_\text{head} \times N$，对于长序列这是一个巨大的内存开销。
+\end{warningbox}
+
+\subsection{Multi-Query Attention（MQA）}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-062.jpg}
+\caption{Multi-Head Attention vs Multi-Query Attention vs Grouped-Query Attention\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第63页。}
+
+MQA（Multi-Query Attention）的核心思想：\textbf{所有 query 头共享同一组 key 和 value}。
+
+\begin{itemize}
+    \item \textbf{Multi-Head Attention}（MHA）：$H$ 个 query 头，$H$ 个 KV 头
+    \item \textbf{Multi-Query Attention}（MQA）：$H$ 个 query 头，\textbf{1 个} KV 头
+    \item \textbf{Grouped-Query Attention}（GQA）：$H$ 个 query 头，$G$ 个 KV 头（$1 < G < H$）
+\end{itemize}
+
+GQA 是 MHA 和 MQA 之间的折中，让若干个 query 头共享一组 KV，既减少了 KV cache 的大小，又保留了一定的表达能力。
+
+\begin{importantbox}{GQA/MQA 的收益}
+\begin{itemize}
+    \item \textbf{KV cache 大小}：MQA 减少 $H$ 倍，GQA 减少 $H/G$ 倍
+    \item \textbf{推理吞吐量}：大幅提升，因为减少了内存访问
+    \item \textbf{训练时质量}：GQA 几乎不损失模型质量，MQA 可能略有下降
+\end{itemize}
+LLaMA 2/3、Gemma、Mistral 等现代模型普遍使用 GQA。
+\end{importantbox}
+
+\subsection{稀疏注意力与滑动窗口}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-064.jpg}
+\caption{稀疏注意力模式（OpenAI 2019）：局部窗口 + 对角线条纹实现长距离信息传播\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第65页。来自 Child et al. 2019。}
+
+为了支持更长的上下文，几种技术被组合使用：
+
+\begin{itemize}
+    \item \textbf{滑动窗口注意力}（Sliding Window Attention）：每层只关注位置周围的局部窗口。有效感受野 = 窗口大小 $\times$ 层数
+    \item \textbf{稀疏注意力}（Sparse Attention）：用结构化的稀疏模式（如对角线）在减少计算量的同时保持长程依赖
+\end{itemize}
+
+\subsection{混合注意力模式：支撑超长上下文}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-067.jpg}
+\caption{现代混合注意力模式：大部分层使用滑动窗口 + RoPE，少数层使用全注意力（无位置编码）\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第68页。}
+
+最近的模型（LLaMA 4、Gemma、Command A）采用了一种巧妙的混合策略：
+
+\begin{importantbox}{混合注意力架构}
+在每 4 个 Transformer 块中：
+\begin{itemize}
+    \item \textbf{3 个块}使用\textbf{滑动窗口注意力 + RoPE}：高效处理局部上下文
+    \item \textbf{1 个块}使用\textbf{全注意力，无位置编码}：处理任意长度的全局信息
+\end{itemize}
+这种设计的精妙之处在于：
+\begin{enumerate}
+    \item 全注意力只在少数层中出现，控制了计算开销
+    \item 全注意力层\textbf{不使用位置编码}，因此不受上下文长度限制
+    \item RoPE 只在局部窗口中使用，不需要长程外推
+\end{enumerate}
+这就是 LLaMA 4 声称支持 1000 万 token 上下文的技术基础。
+\end{importantbox}
+
+\subsection{本章小结}
+
+\begin{itemize}
+    \item \textbf{GQA} 已成为大型模型的标配，在几乎不损失质量的前提下大幅减少推理时的 KV cache 开销
+    \item \textbf{滑动窗口注意力}配合少量全注意力层，实现了系统效率与超长上下文的平衡
+    \item 注意力模式的设计日益受到推理成本的驱动——训练时的表达能力不再是唯一考量
+\end{itemize}
+
+%% ========== 总结与延伸 ==========
+

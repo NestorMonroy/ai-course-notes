@@ -1,0 +1,99 @@
+\section{Filtering：把“好数据”写成一个可计算的目标}
+
+Transformation 只回答“能否读出来”，接下来 Filtering 才回答“是否值得进入训练分布”。过滤问题可以抽象为：给定少量 target data $T$ 和海量 raw data $R$，找到 $R$ 的子集 $T'$，使它在某种意义上与 $T$ 相似，同时仍保持足够多样性。这个抽象统一了语言识别、质量过滤、toxicity filtering、数学/代码 domain selection 等任务，也揭示了一个关键事实：所谓质量从来不是数据自身携带的天然标签，而是由目标样本和评测方式共同定义的。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.72\textwidth]{raw-target-schema.png}
+\caption{Target-vs-raw filtering：从目标样本学习打分函数，再筛选海量候选。}
+\figsource{Stanford CS336 2026 Lecture 14 官方可执行讲义，\texttt{images/raw-target-schema.png}。}
+\end{figure}
+
+图中的关键不是“训练一个 classifier”这么简单，而是 target data 决定了模型认为的“好”。若 $T$ 只包含 Wikipedia 风格，分类器就可能把百科语气当成质量；若 $T$ 来自某个 benchmark，它可能学到 benchmark 模板而非真正能力。
+
+\begin{knowledgebox}{读图：三条箭头分别代表三种责任}
+先看 raw pool 到 score 的箭头，它对应模型能否在海量数据上稳定、低成本推理；再看 target data 到 scorer 的箭头，它对应标签定义与价值偏差；最后看 score 到 selected subset 的箭头，它对应 threshold、sampling 和 token budget。图中没有自动保证“被选中就更真实”，它只保证样本更符合已编码进 scorer 的目标。
+\end{knowledgebox}
+
+\subsection{两类常见 score}
+
+为了理解过滤器究竟在优化什么，本节把常见 score 分成生成式与判别式两类。二者都不是直接测量真理：生成式 score 测量文本对目标域模型是否自然，判别式 score 测量文本是否容易被区分为 target-like；选择哪一类，决定了过滤器更容易学习语言分布还是标签边界。
+
+第一类是生成式 score：训练目标域语言模型 $p_T$，用
+
+$$
+s_{\mathrm{gen}}(x)=\frac{1}{|x|}\log p_T(x)
+$$
+
+衡量文档 $x$ 在目标域下的平均对数似然。$|x|$ 是 token 数，长度归一化避免长文档天然获得更低总概率。KenLM perplexity filtering 属于这一类。Perplexity（PPL，困惑度）通常写成 $\exp(H)$，其中 $H$ 是平均交叉熵；直觉上，它表示模型在每个 token 位置面对的“有效选项数”。PPL 越低只说明文本更符合该模型学到的分布，不等于事实更正确、内容更安全或推理更有价值。
+
+第二类是判别式 score：把 target sample 标为正类、raw sample 标为负类，训练
+
+$$
+s_{\mathrm{disc}}(x)=p(y=1\mid x).
+$$
+
+fastText、线性 classifier、embedding + random forest 都可以实现。实际保留策略既可以是硬阈值 $s(x)\ge \tau$，也可以按 $s(x)$ 做随机采样，从而保留一部分边界样本。
+
+\begin{importantbox}{阈值不是纯技术参数}
+$\tau$ 越高，平均质量通常越高，但数据量、多样性和长尾覆盖会下降。阈值选择应绑定最终模型指标、domain coverage 和风险预算，而不是只看 classifier AUROC。
+\end{importantbox}
+
+\subsection{语言、质量与 toxicity 是三种不同目标}
+
+前面的统一公式容易让人误以为所有过滤都只是换一个 classifier；本节必须把目标拆开。语言识别的正负类相对明确，但 code-switching、公式和短文本仍会让模型不确定。质量过滤没有统一定义：GPT-3 用 Wikipedia、WebText2、Books 作为正例；LLaMA/RedPajama 使用被 Wikipedia 引用的网页；phi-1 则用 pretrained code model embedding 训练 random forest，寻找“像教材”的代码数据。Toxicity filtering 又涉及价值判断：过滤攻击性内容可能提高部署安全，却也可能删除研究仇恨言论、少数群体 reclaimed language 或安全评测所需样本。因此三个 score 应独立记录，不能压成一个无法解释的“总质量分”。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{data-filtering-scale.png}
+\caption{过滤器从规则、轻量模型到大模型打分时的规模与成本权衡。}
+\figsource{Stanford CS336 2026 Lecture 14 官方可执行讲义，\texttt{images/data-filtering-scale.png}。}
+\end{figure}
+
+读这张图时要同时看两条轴：更强模型可能给出更细致的判断，但 raw corpus 的规模要求 scoring 极快。一个每文档多花 100 ms 的 filter，在十亿文档上就是数年的单机时间。因此工程上常用 cascade：便宜规则先删明显垃圾，轻量 classifier 处理中间区域，昂贵模型只复核少量边界样本。
+
+\begin{knowledgebox}{读图：成本轴决定模型应该放在哪一层}
+先比较横向的处理规模，再比较纵向的判断能力。最昂贵的 judge 不应直接覆盖全部 raw corpus，而应只处理前级规则与轻量模型无法确定的灰区。图支持的是“分层 cascade”而不是“永远用最便宜模型”；如果边界样本恰好决定稀有语言或专业 domain 是否被保留，复核预算必须向这些 slice 倾斜。
+\end{knowledgebox}
+
+\begin{knowledgebox}{Worked example：为什么“小而好”可能胜过“大而杂”}
+课程用 phi-1 风格案例说明：1.3B 模型在 The Stack Python 子集上训练 96K steps，HumanEval 约 12.19；在更小但经过质量过滤的数据上训练 36K steps，结果约 17.68。这个案例不能证明“数据越少越好”，但证明 token count 不是唯一的有效规模；梯度携带的信息密度同样关键。
+\end{knowledgebox}
+
+\subsection{过滤器的三类 shortcut}
+
+当 scorer 在离线指标上很好、训练结果却退化时，首先要怀疑它学到了 shortcut。下面三类 shortcut 都能在随机验证集上取得高分，却在 corpus 分布、网站模板或语言比例变化后失效；因此审计必须查看被删除样本，而不能只看被保留样本。
+
+\begin{enumerate}
+\item \textbf{Style shortcut}：把长度、标点、模板或网站 CSS 痕迹当作质量。
+\item \textbf{Source shortcut}：把某些 domain 全部判成低质，导致知识覆盖收缩。
+\item \textbf{Label shortcut}：target data 的偏差被模型放大，例如把 benchmark-like wording 当作正确性。
+\end{enumerate}
+
+\begin{warningbox}{过滤器也需要 evaluation set}
+必须为 filter 建立独立人工审计集，按语言、domain、长度、来源和风险类型分层抽样。只看整体 precision/recall 会掩盖某些群体或 domain 被系统性删除。
+\end{warningbox}
+
+\subsection{Worked example：阈值如何同时改变 precision、recall 与预算}
+
+为了把阈值从抽象超参数变成可审计决策，假设人工标注的 1,000 篇文档中有 300 篇真正满足目标。阈值 $\tau=0.6$ 时，模型保留 260 篇，其中 210 篇为真阳性；提高到 $\tau=0.8$ 后，只保留 150 篇，其中 135 篇为真阳性。对应账本如下：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{L{0.15\textwidth}L{0.14\textwidth}L{0.14\textwidth}L{0.13\textwidth}L{0.24\textwidth}}
+\toprule
+阈值 & Precision & Recall & 保留量 & 工程含义 \\
+\midrule
+$0.6$ & $210/260=80.8\%$ & $210/300=70.0\%$ & 260 & 覆盖更广，但每 260 篇约有 50 篇误保留 \\
+$0.8$ & $135/150=90.0\%$ & $135/300=45.0\%$ & 150 & 平均更纯，但丢掉超过一半真正有价值文档 \\
+\bottomrule
+\end{tabular}
+\caption{同一个 scorer 在不同阈值下产生不同训练分布。}
+\end{table}
+
+因此不能脱离 token budget 讨论 precision/recall。若原始池极大且训练预算固定，提高 precision 可能值得；若目标是保住低资源语言或稀有专业知识，recall 与 slice coverage 更重要。实践中还可以对高分样本全保留、对中分样本按概率采样、对低分样本只保留少量审计样本，从而避免硬阈值把边界一次性切断。
+
+\subsection{本章小结}
+
+Filtering 的本质是把模糊的“质量”外化为 target、score、threshold 和 audit。更强的 filter 不一定产生更强的模型；关键是它保留了什么、删除了什么，以及这些取舍是否与训练目标一致。
+

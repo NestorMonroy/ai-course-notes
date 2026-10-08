@@ -1,0 +1,144 @@
+\section{引言：从概览走向实现}
+
+上一讲先概览了语言模型、tokenization 以及从零构建模型的动机。本讲进入真正的实现层面，目标不是再讲 Transformer 的整体结构，而是把训练模型所需要的 \textbf{PyTorch 原语} 一层层搭起来。
+
+\begin{importantbox}{本讲的三件事}
+\begin{enumerate}
+    \item 从张量开始，搞清楚模型参数、梯度、优化器状态和数据到底如何占用内存。
+    \item 从矩阵乘法开始，学会对 FLOPs 和 FLOP/s 做资源核算。
+    \item 从 `nn.Parameter`、`nn.Module`、优化器和训练循环出发，搭出一个最小但完整的训练系统。
+\end{enumerate}
+\end{importantbox}
+
+讲义里的核心方法很朴素：\textbf{先算账，再写代码}。如果不知道一个张量有多少字节、一次矩阵乘法有多少 FLOPs、一次训练步会额外产生多少梯度和优化器状态，就很难判断模型为什么慢，也很难知道什么时候该换数据类型、换实现方式或者换训练策略。
+
+\subsection{这一讲的阅读方式}
+
+这一讲最值得反复看的不是某一段代码，而是背后的判断方式：
+\begin{itemize}
+    \item \textbf{定义}：这个对象是什么，PyTorch 里对应什么类型。
+    \item \textbf{直觉}：为什么它会占内存，为什么它会花算力。
+    \item \textbf{机制}：PyTorch / CUDA / autograd 实际怎么做。
+    \item \textbf{应用}：这个原语在训练系统里被怎么使用。
+    \item \textbf{局限}：这个近似或实现在哪里会失效。
+\end{itemize}
+
+阅读顺序建议：\textbf{Definition $\to$ Intuition $\to$ Mechanism $\to$ Application $\to$ Limitations}。
+
+\begin{knowledgebox}{两类资源}
+本讲只盯住两种资源：
+\begin{itemize}
+    \item \textbf{内存}：参数、梯度、激活值、优化器状态都要装得下。
+    \item \textbf{计算}：训练和推理的成本通常都能归结成 FLOPs。
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{一个先算清楚的 napkin math}
+
+先看两个典型估算。
+
+\begin{enumerate}
+    \item 训练一个 70B 参数模型，在 15T tokens 上，用 1024 张 H100，大概需要多久？
+    \item 如果只看显存，8 张 80GB H100 上，使用朴素 AdamW，最多能训练多大的 dense 模型？
+\end{enumerate}
+
+\begin{importantbox}{6ND 规则——训练 FLOPs 的万能近似}
+对于密集 Transformer，训练的总 FLOPs 可以用一个极其简洁的公式近似：
+$$
+C \approx 6 \times N \times D
+$$
+其中 $N$ 是模型参数量，$D$ 是训练 token 数。这里的 6 来自前向传播（$\approx 2ND$）加反向传播（$\approx 4ND$）。
+
+这个公式忽略了 embedding 层、attention mask 计算、layernorm 等非矩阵乘法操作，但在规模估算时误差通常不超过 10\%--20\%。它是做训练预算时最重要的单个公式。
+\end{importantbox}
+
+\subsubsection{Worked Example: 70B 模型在 1024 张 H100 上训练多久}
+
+我们把上面的估算展开为一步一步的计算：
+
+\textbf{Step 1: 计算总 FLOPs}
+
+模型参数量 $N = 70 \times 10^9$，训练数据量 $D = 15 \times 10^{12}$ tokens。由 6ND 公式：
+$$
+C = 6 \times 70 \times 10^9 \times 15 \times 10^{12} = 6.3 \times 10^{24} \text{ FLOPs}
+$$
+
+\textbf{Step 2: 计算集群有效算力}
+
+H100 SXM 在 bfloat16 下的峰值算力约为 $989.5 \times 10^{12}$ FLOP/s $\approx 10^{15}$ FLOP/s。假设 MFU = 0.5（即有效利用率 50\%），则单卡有效算力为：
+$$
+\text{单卡有效} = 10^{15} \times 0.5 = 5 \times 10^{14} \text{ FLOP/s}
+$$
+
+1024 张卡的集群每天提供的 FLOPs：
+$$
+\text{日 FLOPs} = 1024 \times 5 \times 10^{14} \times 86400 = 4.42 \times 10^{22} \text{ FLOPs/day}
+$$
+
+\textbf{Step 3: 换算训练天数}
+$$
+\text{训练天数} = \frac{6.3 \times 10^{24}}{4.42 \times 10^{22}} \approx 143 \text{ 天}
+$$
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.28\textwidth}p{0.25\textwidth}p{0.30\textwidth}}
+\toprule
+\textbf{参数} & \textbf{数值} & \textbf{来源} \\
+\midrule
+模型参数量 $N$ & $70 \times 10^9$ & 模型架构定义 \\
+训练 token 数 $D$ & $15 \times 10^{12}$ & 训练数据量 \\
+总 FLOPs $C = 6ND$ & $6.3 \times 10^{24}$ & 6ND 公式 \\
+H100 bf16 峰值 & $\sim 10^{15}$ FLOP/s & NVIDIA 规格表 \\
+假设 MFU & 0.5 & 经验估计 \\
+GPU 数量 & 1024 & 集群规模 \\
+训练天数 & $\sim$143 天 & 总 FLOPs / 日 FLOPs \\
+\bottomrule
+\end{tabular}
+\caption{70B 模型训练时间估算的完整参数表}
+\end{table}
+
+\begin{warningbox}{MFU 的敏感性}
+上面的计算中 MFU 设为 0.5，但实际 MFU 可能在 0.3--0.6 之间波动。如果 MFU 从 0.5 降到 0.35，训练时间就会从 143 天变成 204 天——差出两个月。因此 MFU 的微小变化会导致训练成本的巨大波动，这也是工程优化的核心目标之一。
+\end{warningbox}
+
+\subsubsection{Worked Example: AdamW 训练 7B 模型的内存分解}
+
+以一个 7B 参数模型为例，详细分解使用 AdamW 优化器时的 GPU 显存占用。
+
+\textbf{假设}：使用混合精度训练，参数和梯度为 bf16（2 bytes），优化器状态中的主权重（master weights）和一阶/二阶矩为 fp32（4 bytes）。
+
+$$
+N = 7 \times 10^9 \text{ 个参数}
+$$
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.28\textwidth}p{0.14\textwidth}p{0.15\textwidth}p{0.28\textwidth}}
+\toprule
+\textbf{组件} & \textbf{dtype} & \textbf{每参数字节} & \textbf{7B 模型内存} \\
+\midrule
+模型参数（训练副本） & bf16 & 2 & 14 GB \\
+梯度 & bf16 & 2 & 14 GB \\
+主权重（master weights） & fp32 & 4 & 28 GB \\
+一阶矩 $m_t$ & fp32 & 4 & 28 GB \\
+二阶矩 $v_t$ & fp32 & 4 & 28 GB \\
+\midrule
+\textbf{静态总计} & & \textbf{16} & \textbf{112 GB} \\
+\bottomrule
+\end{tabular}
+\caption{AdamW 混合精度训练 7B 模型的内存分解（不含激活值）}
+\end{table}
+
+这意味着仅模型参数和优化器状态就需要 112 GB 显存，还没有算激活值。以 80 GB 的 H100 来算，\textbf{至少需要 2 张卡}才能装下静态状态，实际上考虑激活值可能需要 4 张或更多。
+
+如果用纯 fp32 训练（不做混合精度），每个参数需要：
+$$
+4\;(\text{参数}) + 4\;(\text{梯度}) + 4\;(m_t) + 4\;(v_t) = 16 \text{ bytes}
+$$
+7B 模型静态内存为 $7 \times 10^9 \times 16 = 112$ GB，和混合精度的总量恰好相同——但混合精度的优势在于前向/反向计算速度更快、激活值更小。
+
+\begin{knowledgebox}{为什么混合精度还要存 fp32 主权重}
+混合精度训练的核心思想是：用低精度做前向和反向计算以加速，但用 fp32 精度累积梯度更新。如果直接在 bf16 参数上做梯度更新，微小的更新（如 $\eta \cdot g \ll 1$）会因为 bf16 的有限精度被截断为零，导致训练停滞。fp32 主权重保证了累积更新的精度。
+\end{knowledgebox}
+

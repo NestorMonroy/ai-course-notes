@@ -1,0 +1,93 @@
+\section{Data Mixing：比例决定模型把容量花在哪里}
+
+经过 transformation、filtering、deduplication 后，候选数据已经相对干净，但“干净”不等于“比例正确”。现在仍然要决定 web、code、math、books、multilingual、scientific text 各采多少。混合不是把所有 corpus concatenate；它是在固定 token budget 下分配训练机会，因此会直接决定模型把有限参数和更新步数花在哪些能力上。
+
+课程先展示两个真实 mixture 视图，因为抽象权重之前必须看清每个 source 的原始规模、类别和平均文档长度。Marin 的 token viewer 强调现代训练池可包含 web、多语、数学、代码与 specialized data；The Pile 表则同时列出 raw size、weight、epochs 与 effective size，直接暴露“小而高权重”的 source 会被重复多少次。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.96\textwidth]{marin-token-viewer.png}
+\caption{Marin 数据池按 dataset 展示 token 数与 web、multilingual、math、code、specialized 类别。}
+\figsource{Stanford CS336 2026 Lecture 14 官方可执行讲义，\texttt{images/marin-token-viewer.png}。}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.74\textwidth]{the-pile.png}
+\caption{The Pile mixture：raw size、weight、epochs 与 effective size 共同定义实际训练暴露。}
+\figsource{Stanford CS336 2026 Lecture 14 官方可执行讲义引用的 CS324 图，本地化为 \texttt{images/the-pile.png}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：不要只读 weight 一列}
+Marin 图先比较横向 token 规模和颜色类别，观察 web sources 通常占据最大绝对体量，但多语、代码和数学仍需要显式预算。The Pile 表则应把 Weight 与 Epochs 联读：一个 raw size 很小的 component 即使权重不高，也可能因重复多轮获得很大的 effective size。混合表因此至少要同时报告唯一 token、采样权重、预期 epoch 数和有效训练 token；只给百分比会隐藏过拟合与算力浪费。
+\end{knowledgebox}
+
+\begin{knowledgebox}{课堂提示：把 mixture weight 换算成实际 epochs}
+老师在问答中反复追问“每个 source 最终重复了多少次”：若高质量池只有 10B unique tokens，却要贡献 500B 训练 token，就会在不知不觉中做 50 epochs。最好的情况只是浪费 compute，最坏的情况是过拟合。因此 mixture 不能只看分布百分比，必须把权重、source size 与总 token budget 联立计算。
+\end{knowledgebox}
+
+设有 $K$ 个 domain，权重 $w_k\ge 0$ 且 $\sum_k w_k=1$。训练时先采样 domain $k\sim w$，再从 $\mathcal{D}_k$ 采样样本。于是优化目标近似为：
+
+$$
+\mathcal{L}(\theta;w)=\sum_{k=1}^{K} w_k\,\mathbb{E}_{x\sim\mathcal{D}_k}\left[\ell(x;\theta)\right].
+$$
+
+$w_k$ 不只是数据 loader 参数，而是显式定义了哪些梯度更常出现。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{data-mixing-methods.png}
+\caption{数据混合方法：规则比例、temperature sampling、small-scale search 与 learned mixing。}
+\figsource{Stanford CS336 2026 Lecture 14 官方可执行讲义，\texttt{images/data-mixing-methods.png}。}
+\end{figure}
+
+这组方法可以按“需要多少实验”排序。Rule-based mixture 依赖经验；temperature sampling 根据 corpus size 平滑长尾；small-scale search 在多个候选比例上训练 proxy model；learned mixing 则试图从 loss/gradient 信号估计最优权重。实验越复杂，不代表外推越可靠，因为小模型和大模型可能对 domain 的边际收益不同。
+
+\begin{knowledgebox}{读图：先分清“如何产生权重”与“如何验证权重”}
+图中每种方法都输出 mixture weights，但证据来源不同：规则法依赖先验，temperature sampling 依赖 corpus size，proxy search 依赖小模型实验，learned mixing 依赖拟合出的 loss 或 gradient 信号。比较时先问权重从哪里来，再问它是否在目标规模、目标评测和目标 token budget 上被复验；不能因为方法名更复杂就默认更可信。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{regmix.png}
+\caption{RegMix：先在小规模 mixture experiments 上拟合回归模型，再预测更优配比。}
+\figsource{Stanford CS336 2026 Lecture 14 官方可执行讲义，\texttt{images/regmix.png}。}
+\end{figure}
+
+RegMix 的直觉是把昂贵的 full-scale training 转成 design-of-experiments：采样多个 $w$，训练小模型，记录各 eval domain 的 loss，再拟合 $\hat{f}(w)$ 预测候选 mixture。它节省 compute，但依赖两个假设：proxy scale 能保留 mixture ordering；评测集合能代表最终用途。
+
+\begin{knowledgebox}{读图：RegMix 的回归模型不是最终语言模型}
+先看多个散点或实验组合，它们代表不同 mixture 上训练出的 proxy run；再看拟合器如何从这些 run 预测未尝试配比的评测表现。关键比较不是某个点的绝对 loss，而是候选配比的相对排序是否能从小规模迁移到大规模。图不能证明这种排序永远稳定，所以最终候选仍需在更大 scale 做确认实验。
+\end{knowledgebox}
+
+\begin{warningbox}{Proxy mismatch}
+如果 small model 还没有学会 code reasoning，增加 code data 的收益可能被低估；如果 eval benchmark 与真实部署不同，优化 mixture 会变成 benchmark overfitting。混合实验必须同时看 per-domain loss、cross-domain transfer 和真实 workload。
+\end{warningbox}
+
+\subsection{Worked example：100B token 预算不是百分比表，而是能力账本}
+
+为了把 $w_k$ 变成实际训练决策，假设总预算为 100B tokens，并采用下表中的候选 mixture。百分比一旦乘上总预算，就能暴露很多在配比表里看不见的问题：某个小 domain 是否会被重复采样几十个 epoch、某种语言是否连稳定梯度都不足、代码占比是否会挤压自然语言基础能力。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{L{0.19\textwidth}L{0.13\textwidth}L{0.17\textwidth}L{0.35\textwidth}}
+\toprule
+Domain & 权重 & 实际 token & 必须核对的工程问题 \\
+\midrule
+通用 Web & $45\%$ & 45B & 质量与多样性是否随规模下降，是否被少数站点支配 \\
+代码 & $20\%$ & 20B & repository 去重后唯一 token 是否足够，测试与文档是否保留 \\
+数学/科学 & $12\%$ & 12B & PDF 转换错误是否被放大，公式与解答是否污染评测 \\
+书籍/长文本 & $10\%$ & 10B & license、长上下文切分和同书重复版本 \\
+多语言 & $10\%$ & 10B & 语言内部再分配是否让低资源语言只得到极少 token \\
+高质量 synthetic & $3\%$ & 3B & verifier 通过率、任务多样性和 generator 自我模仿 \\
+\bottomrule
+\end{tabular}
+\caption{100B-token mixture 的数值账本。}
+\end{table}
+
+若多语言 10B 中英语以外有 20 种语言，均分仅有每种 0.5B；真实策略通常还要按资源与目标能力再加权。若 synthetic 候选池只有 0.5B 唯一 token，却在训练中采样 3B，就相当于平均重复六次，必须重新检查 memorization 与 verifier shortcut。由此可见，mixture audit 至少同时记录权重、唯一 token 数、预计重复次数与每个 domain 的 held-out loss。
+
+\subsection{本章小结}
+
+Data mixing 是训练目标设计。权重 $w$ 把有限 token budget 分配给不同能力，因此需要 small-scale experiment、外推假设和持续 eval，而不能只按 corpus 大小归一化。
+

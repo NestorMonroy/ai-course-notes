@@ -1,0 +1,63 @@
+\section{\texorpdfstring{\code{torch.distributed}}{torch.distributed}：把 collective 写成代码}
+
+\subsection{初始化和 process group}
+
+官方讲义用 \code{torch.multiprocessing.spawn} 启动多个进程，每个进程运行同一个函数，但传入不同 \code{rank}。然后用 \code{dist.init\_process\_group} 建立通信环境。若有 GPU，就用 NCCL；否则用 Gloo。
+
+\begin{lstlisting}[caption={Lecture 7 中分布式初始化的最小结构}]
+def setup(rank: int, world_size: int):
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "15623"
+
+    if torch.cuda.is_available():
+        dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    else:
+        dist.init_process_group("gloo", rank=rank, world_size=world_size)
+\end{lstlisting}
+
+\begin{knowledgebox}{一个 rank 通常对应一个进程}
+在 PyTorch DDP 风格中，常见做法是 one process per GPU。这样每个进程只管理一张卡，CUDA context、随机种子、通信 rank 都更清晰。多机训练时还要区分 local rank 和 global rank：local rank 决定本机第几张 GPU，global rank 决定全局通信身份。
+\end{knowledgebox}
+
+\subsection{all-reduce 示例}
+
+官方代码中，每个 rank 先构造一个不同的向量：
+
+\begin{lstlisting}[caption={all-reduce 会原地修改每个 rank 的 tensor}]
+data = tensor([0., 1, 2, 3], device=cuda_if_available(rank)) + rank
+dist.all_reduce(tensor=data, op=dist.ReduceOp.SUM, async_op=False)
+\end{lstlisting}
+
+若 world size 为 4，四个输入分别是 \([0,1,2,3]\)、\([1,2,3,4]\)、\([2,3,4,5]\)、\([3,4,5,6]\)，sum all-reduce 后每个 rank 都得到 \([6,10,14,18]\)。这正是 DDP 梯度同步的形状：每张卡最初有自己的梯度，通信后每张卡有相同平均梯度。
+
+\subsection{reduce-scatter + all-gather 示例}
+
+\begin{lstlisting}[caption={reduce-scatter 后接 all-gather 复原 all-reduce 语义}]
+input = torch.arange(world_size, dtype=torch.float32,
+                     device=cuda_if_available(rank)) + rank
+output = torch.empty(1, device=cuda_if_available(rank))
+dist.reduce_scatter_tensor(output=output, input=input,
+                           op=dist.ReduceOp.SUM, async_op=False)
+
+input = output
+output = torch.empty(world_size, device=cuda_if_available(rank))
+dist.all_gather_into_tensor(output_tensor=output,
+                            input_tensor=input, async_op=False)
+\end{lstlisting}
+
+\begin{importantbox}{这段代码为什么是后续课程的桥}
+如果做完 reduce-scatter 后就停止，每个 rank 只保留归约结果的一片；如果再做 all-gather，每个 rank 又得到完整归约结果。ZeRO/FSDP 的很多设计就在这两个点之间选择：什么时候需要完整参数，什么时候只保存分片状态。
+\end{importantbox}
+
+\subsection{barrier、同步和 deadlock}
+
+\code{dist.barrier()} 让所有 rank 等到同一个同步点。它常用于 benchmark、调试打印、确保 warmup 完成。它也会暴露控制流不一致：如果某个 rank 进入了 barrier，另一个 rank 因条件分支跳过，程序就会卡住。
+
+\begin{warningbox}{分布式 deadlock 常来自不一致}
+常见错误包括：某个 rank 少调用一次 collective、不同 rank 的 tensor shape 不一致、某些 rank 提前异常退出、print 或 dataloader 导致顺序错位。调试时先确认所有 rank 的 collective 顺序完全一致，再看性能。
+\end{warningbox}
+
+\subsection{本章小结}
+
+\code{torch.distributed} 的 API 看起来只是函数调用，但每个调用背后都是多进程同步协议。写分布式训练代码时，正确性约束包括数学结果、shape/dtype、调用顺序和进程生命周期。
+

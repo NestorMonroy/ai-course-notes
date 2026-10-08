@@ -1,0 +1,223 @@
+\section{硬件与软件栈}
+
+\subsection{旧式路径和现代路径}
+
+早期的常见路径是 GPU 经过 PCIe 到 CPU，再经过主机网卡和 Ethernet 去和别的节点通信。这个链路能工作，但太长、太慢、太容易被主机中转拖累。现代 data center 倾向于让 GPU 之间尽量直连，用 NVLink 或 NVSwitch 绕开主机路径。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[every node/.style={font=\small, align=center}]
+\node[draw, rounded corners, fill=red!10, minimum width=3cm, minimum height=0.9cm] (g0) at (0,0) {GPU};
+\node[draw, rounded corners, fill=red!10, minimum width=3cm, minimum height=0.9cm] (cpu) at (3.5,0) {CPU / Host};
+\node[draw, rounded corners, fill=red!10, minimum width=3cm, minimum height=0.9cm] (eth) at (7,0) {Ethernet};
+\node[draw, rounded corners, fill=red!10, minimum width=3cm, minimum height=0.9cm] (g1) at (10.5,0) {GPU};
+\draw[->, thick] (g0) -- (cpu);
+\draw[->, thick] (cpu) -- (eth);
+\draw[->, thick] (eth) -- (g1);
+\node[draw, rounded corners, fill=green!10, minimum width=5.6cm, minimum height=0.9cm, below=1.2cm of cpu] (nv) {NVLink / NVSwitch\\尽量绕开主机中转};
+\end{tikzpicture}
+\caption{通信路径的演化：越依赖主机中转，越容易被搬运成本拖慢}
+\end{figure}
+
+\begin{warningbox}{一个现实约束}
+PCIe、Ethernet、NVLink、NVSwitch 的性能会变，但层次关系不会变：\textbf{越接近算子执行位置，越快；越依赖主机中转，越慢。}
+\end{warningbox}
+
+\subsection{互联带宽对比：NVLink vs PCIe vs InfiniBand}
+
+选择并行策略时，硬件互联的带宽和延迟是最关键的约束之一。下表汇总了当前主流的 GPU 间互联技术：
+
+\begin{table}[H]
+\centering
+\small
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{p{3.2cm}p{2.6cm}p{2.4cm}p{2.2cm}p{4.8cm}}
+\toprule
+\textbf{互联技术} & \textbf{单向带宽} & \textbf{典型延迟} & \textbf{作用范围} & \textbf{工程影响} \\
+\midrule
+NVLink 4.0 (H100) & 900 GB/s (双向) & $\sim$1--2 $\mu$s & 同节点 GPU & 张量并行的理想链路 \\
+NVSwitch (DGX) & 900 GB/s (全互联) & $\sim$1--5 $\mu$s & 同节点 8 GPU & 8 卡全互联，无需 ring \\
+PCIe 5.0 x16 & 64 GB/s (双向) & $\sim$2--5 $\mu$s & GPU--CPU & 跨 CPU 的 GPU 通信瓶颈 \\
+InfiniBand NDR & 400 Gb/s $\approx$ 50 GB/s & $\sim$1--2 $\mu$s & 跨节点 & 跨节点数据并行的主力 \\
+RoCE / Ethernet 100G & 100 Gb/s $\approx$ 12.5 GB/s & $\sim$5--20 $\mu$s & 跨节点 & 低端集群的折衷方案 \\
+\bottomrule
+\end{tabular}
+}
+\caption{主流 GPU 互联技术带宽对比（数值为近似峰值，实际有效带宽通常为峰值的 60\%--85\%）}
+\end{table}
+
+\begin{importantbox}{带宽差异如何影响并行策略选择}
+\begin{itemize}
+    \item \textbf{NVLink 带宽是 InfiniBand 的 $\sim$18 倍}：张量并行每层都要通信，必须放在 NVLink 可达的范围内（同一节点）。跨节点做张量并行几乎不可行。
+    \item \textbf{InfiniBand 带宽是 Ethernet 的 $\sim$4 倍}：数据并行的梯度同步每步只发生一次，用 InfiniBand 跨节点通常可以接受；但用普通 Ethernet 就会明显拖慢训练。
+    \item \textbf{PCIe 是隐藏瓶颈}：即使同一节点，如果 GPU 之间没有 NVLink 而只能走 PCIe $\to$ CPU $\to$ PCIe，带宽会从 900 GB/s 骤降到 64 GB/s。
+\end{itemize}
+\end{importantbox}
+
+\begin{knowledgebox}{一个实际的带宽换算}
+H100 的 NVLink 双向总带宽 900 GB/s。如果要做一次 all-reduce 同步 $26\,\text{GB}$（Llama 2 13B 的梯度），在 ring 实现下每 rank 传输约 $2 \times \frac{p-1}{p} \times 26 \approx 39\,\text{GB}$（8 卡）。用 NVLink 大约 $39/450 \approx 87\,\text{ms}$（取单向有效带宽 450 GB/s）；用 InfiniBand 则需要 $39/40 \approx 975\,\text{ms}$。这就是为什么跨节点做 all-reduce 要谨慎。
+\end{knowledgebox}
+
+\subsection{NCCL 与 \texttt{torch.distributed}}
+
+NVIDIA 的 \textbf{NCCL} 负责把高层 collective 翻译成低层通信包和 CUDA kernel。它会先识别硬件拓扑，再决定走哪条链路、哪种调度方式、哪些传输可以并行进行。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[every node/.style={font=\small, align=center}]
+\node[draw, rounded corners, fill=blue!10, minimum width=3.05cm, minimum height=0.9cm] (hw) at (0,0) {硬件拓扑\\PCIe / NVLink / NVSwitch};
+\node[draw, rounded corners, fill=blue!16, minimum width=3.05cm, minimum height=0.9cm] (nccl) at (3.95,0) {NCCL\\选择路径并发起传输};
+\node[draw, rounded corners, fill=blue!22, minimum width=3.05cm, minimum height=0.9cm] (torch) at (7.9,0) {\texttt{torch.distributed}\\提供高层接口};
+\node[draw, rounded corners, fill=blue!28, minimum width=3.05cm, minimum height=0.9cm] (train) at (11.85,0) {训练代码\\DDP / TP / PP};
+\draw[->, thick] (hw) -- (nccl);
+\draw[->, thick] (nccl) -- (torch);
+\draw[->, thick] (torch) -- (train);
+\end{tikzpicture}
+\caption{从硬件拓扑到训练代码：NCCL 和 PyTorch 分别负责低层调度与高层接口}
+\end{figure}
+
+在 PyTorch 里，\texttt{torch.distributed} 提供了更高层的封装：
+
+\begin{itemize}
+    \item \texttt{init\_process\_group} 初始化分布式环境；
+    \item \texttt{all\_reduce}、\texttt{reduce\_scatter\_tensor}、\texttt{all\_gather\_into\_tensor} 对应 collective；
+    \item \texttt{send} / \texttt{recv} 用于点对点通信；
+    \item \texttt{barrier} 用于显式同步；
+    \item \texttt{destroy\_process\_group} 用于清理。
+\end{itemize}
+
+\begin{importantbox}{分布式编程里的同步点}
+\texttt{all\_reduce} 这类函数本身就是同步点。少一个 rank，大家都会等。很多分布式 bug 不是算错，而是某个进程没有走到同一个协议位置。
+\end{importantbox}
+
+\subsection{带宽基准的意义}
+
+讲里专门演示了如何通过脚本测量 NCCL 带宽。这个动作的意义不只是“看数字”，而是确认硬件拓扑是否合理、collective 是否真正走到了高速链路、以及训练瓶颈究竟在计算还是在通信。
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[every node/.style={font=\small, align=center}]
+\node[draw, rounded corners, fill=yellow!10, minimum width=3.05cm, minimum height=0.9cm] (warm) at (0,0) {warmup\\让缓存和内核稳定};
+\node[draw, rounded corners, fill=yellow!16, minimum width=3.05cm, minimum height=0.9cm] (measure) at (3.95,0) {measure\\计时一次 collective};
+\node[draw, rounded corners, fill=yellow!22, minimum width=3.05cm, minimum height=0.9cm] (bw) at (7.9,0) {bandwidth\\bytes / time};
+\node[draw, rounded corners, fill=yellow!28, minimum width=3.05cm, minimum height=0.9cm] (opt) at (11.85,0) {optimize\\看瓶颈到底在哪};
+\draw[->, thick] (warm) -- (measure);
+\draw[->, thick] (measure) -- (bw);
+\draw[->, thick] (bw) -- (opt);
+\end{tikzpicture}
+\caption{带宽测试的工程闭环：先测，再算，再优化}
+\end{figure}
+
+\begin{knowledgebox}{为什么要 benchmark}
+分布式训练里，理想带宽和实际带宽通常不是一回事。拓扑、张量大小、链路拥塞、协议选择都会影响结果。你不测，很多结论都只是猜。
+\end{knowledgebox}
+
+\subsection{通信复杂度怎么估}
+
+讲里反复强调的一点是：collective 的性能不是只看“有没有通信”，而是看 \textbf{通信次数}、\textbf{每次传多少}、以及 \textbf{能不能和计算重叠}。一个常见的一阶模型是
+\[
+T_{\text{comm}}(S, p) \approx \alpha \cdot N_{\text{msg}} + \frac{S}{B_{\text{eff}}}
+\]
+其中 $S$ 是总数据量，$p$ 是 rank 数，$\alpha$ 表示单次消息启动开销，$B_{\text{eff}}$ 是有效带宽。
+
+对 ring all-reduce 来说，一个更具体的近似是
+\[
+T_{\text{all-reduce}}(S, p) \approx 2(p-1)\alpha + 2\frac{p-1}{p}\frac{S}{B_{\text{eff}}}.
+\]
+这个式子想表达的不是“精确计时”，而是两个事实：\textbf{rank 越多，启动次数越多；张量越大，带宽项越重要。}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{3.2cm}p{4.3cm}p{4.3cm}}
+\toprule
+\textbf{项} & \textbf{含义} & \textbf{工程直觉} \\
+\midrule
+$\alpha$ & 启动一次通信的代价 & 小张量时它会主导总时间 \\
+$S / B_{\text{eff}}$ & 真正搬运数据的时间 & 大张量时它决定下限 \\
+$2(p-1)\alpha$ & ring 的多步调度开销 & rank 越多，控制面越重 \\
+$2\frac{p-1}{p}S$ & 每个 rank 需要传输的总字节数 & 比 naive 广播更省带宽 \\
+\bottomrule
+\end{tabular}
+\caption{all-reduce 复杂度里的两个核心项}
+\end{table}
+
+\begin{knowledgebox}{一个 4 卡的量化例子}
+假设需要同步一个 $64\,\text{MiB}$ 的梯度张量，$p=4$，有效带宽按 $50\,\text{GiB/s}$ 估计，启动开销按 $5\,\mu s$ 估计。则
+\[
+T \approx 6\alpha + 1.5\times \frac{64}{50}\,\text{ms} \approx 30\,\mu s + 1.92\,\text{ms}.
+\]
+也就是说，哪怕控制面几乎可以忽略，光带宽项也已经接近 2ms。若单步反向计算本身只有一两毫秒，通信就会立刻变成主瓶颈。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[every node/.style={font=\small, align=center}]
+\node[draw, circle, minimum size=0.9cm, fill=blue!10] (a) at (0,0) {0};
+\node[draw, circle, minimum size=0.9cm, fill=blue!10] (b) at (2.6,0) {1};
+\node[draw, circle, minimum size=0.9cm, fill=blue!10] (c) at (5.2,0) {2};
+\node[draw, circle, minimum size=0.9cm, fill=blue!10] (d) at (7.8,0) {3};
+\draw[->, thick] (a) to[bend left=15] node[above] {chunk 1} (b);
+\draw[->, thick] (b) to[bend left=15] node[above] {chunk 2} (c);
+\draw[->, thick] (c) to[bend left=15] node[above] {chunk 3} (d);
+\draw[->, thick] (d) to[bend left=15] node[above] {chunk 4} (a);
+\draw[->, thick] (a) to[bend right=25] node[below] {归约结果回传} (c);
+\end{tikzpicture}
+\caption{ring all-reduce 的直觉：数据沿着环走，归约在传递过程中逐步完成}
+\end{figure}
+
+\begin{warningbox}{为什么小张量常常跑不满}
+启动一次 collective 的固定开销并不会因为张量变小而消失。张量越小，\emph{有效带宽}越容易被启动延迟和同步等待吞掉，所以小张量经常看起来“理论上该快，实际上不快”。
+\end{warningbox}
+
+\subsection{all-reduce 和 reduce-scatter 的关系}
+
+把 all-reduce 拆成 reduce-scatter 和 all-gather，不只是教科书上的形式变换，而是底层实现优化的重要入口。前者把”每个人都拥有完整结果”先缩成”每个人先持有一段结果”，后者再把分段结果拼回去。这样做的好处是，通信模式更接近硬件可以并行执行的方式。
+
+\begin{importantbox}{Ring all-reduce 的带宽最优性}
+Ring all-reduce 的核心性质是：无论有多少个 rank，每个 rank 的总通信量都是 $2 \cdot \frac{p-1}{p} \cdot S$，其中 $S$ 是要同步的张量大小。这意味着：
+\begin{itemize}
+    \item 当 $p \to \infty$ 时，每 rank 通信量趋近 $2S$，\textbf{不随 rank 数线性增长}。
+    \item 这是带宽最优的：理论下界要求每个 rank 至少发送 $\frac{p-1}{p} S$ 和接收 $\frac{p-1}{p} S$，ring 实现恰好达到此下界。
+    \item 拆分为两步后，reduce-scatter 阶段传输 $\frac{p-1}{p} S$，all-gather 阶段再传输 $\frac{p-1}{p} S$，总和恰为 $2 \cdot \frac{p-1}{p} S$。
+\end{itemize}
+这也解释了为什么 NCCL 默认采用 ring-based 算法：它在大张量场景下几乎达到了链路的理论吞吐上限。
+\end{importantbox}
+
+Ring all-reduce 的具体执行分为两个阶段：
+
+\begin{enumerate}
+    \item \textbf{Reduce-scatter 阶段}（$p-1$ 步）：每个 rank 把张量分成 $p$ 个 chunk；在每一步中，每个 rank 向环中的下一个 rank 发送一个 chunk，同时接收上一个 rank 的 chunk 并做归约。$p-1$ 步后，每个 rank 持有完整归约结果的 $\frac{1}{p}$。
+    \item \textbf{All-gather 阶段}（$p-1$ 步）：每个 rank 把自己持有的归约完成的 chunk 沿环传递。$p-1$ 步后，所有 rank 都拥有完整的归约结果。
+\end{enumerate}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{3cm}p{4cm}p{4.2cm}}
+\toprule
+\textbf{实现方式} & \textbf{通信模式} & \textbf{常见代价} \\
+\midrule
+直接 all-reduce & 逻辑最简单 & 有时不如分解后容易 overlap \\
+reduce-scatter + all-gather & 先分片再拼回 & 更适合 pipeline 化实现 \\
+树形归约 & 归约深度较小 & 依赖拓扑和实现细节 \\
+\bottomrule
+\end{tabular}
+\caption{同一个语义，不同实现路径的工程取舍}
+\end{table}
+
+\subsection{怎么读一个 all-reduce 的数字}
+
+all-reduce 不是简单的“传一次大包”，而是把 \textbf{归约} 和 \textbf{广播} 合在一起。对于梯度同步来说，它的语义是“每个 rank 都贡献一份梯度，然后大家最终都拿到同一个平均值”。工程上常见的实现会拆成 reduce-scatter 和 all-gather 两步，目的不是换个名字，而是让通信更贴近硬件可以并行的方式。
+
+\begin{importantbox}{带宽数字背后的真正问题}
+如果测出来的数值很低，问题未必在算法本身，可能是：
+\begin{itemize}
+    \item 张量太小，启动开销占比过高；
+    \item 链路没走到预期拓扑；
+    \item 某个 rank 提前阻塞，导致整体被拖慢；
+    \item 计算和通信没有 overlap。
+\end{itemize}
+所以 benchmark 的意义，不是单纯做报表，而是把“慢在哪里”缩小到能解释的粒度。
+\end{importantbox}
+

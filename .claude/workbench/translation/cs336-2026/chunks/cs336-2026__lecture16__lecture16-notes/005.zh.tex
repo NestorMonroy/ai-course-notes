@@ -1,0 +1,104 @@
+\section{Kimi K1.5：curriculum、length control 与 RL infrastructure}
+
+接下来比较同一时期的 Kimi K1.5。它同样使用 long-CoT SFT + RL，但更公开地讨论 difficulty filtering、curriculum、length reward 和 systems utilization。
+
+\slidepair{slide-39.jpg}{slide-40.jpg}{Kimi K1.5 的案例价值，以及 dataset construction→long-CoT SFT→RL 的主路线。}{39--40}
+
+Slide 39 说明选择 Kimi 的原因：它与 R1 同期发布，同样声称通过 RL 达到或超过 o1，却公开了互补的 data 与 systems 细节。Slide 40 的三个步骤看似熟悉，但重心不同：先构造“当前模型仍会失败”的数据集，再用 long-CoT SFT 建立起点，最后用自定义 policy-gradient objective 在线改进。
+
+\begin{knowledgebox}{老师强调：RL 的 dataset construction 本身就是算法}
+普通 SFT 常把多个语料按比例混合后训练；RLVR 中，题目是否全对、全错或恰好有分歧会直接决定 advantage 是否有信息。Kimi 因此持续估计 success rate、调整难度与采样概率。Curriculum 不是 loader 的小优化，而是在线控制学习信号分布。
+\end{knowledgebox}
+
+\subsection{Data curriculum：让问题保持“有学习信号”}
+
+Kimi 过滤 multiple-choice/true-false 等容易产生 false positives 的题，选择 base model best-of-8 仍失败的样本，并按 topic 平衡。训练中按 $1-\text{success rate}$ 提高未解决问题的采样概率，避免把 compute 浪费在已经掌握的题上。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{slide-41.jpg}
+\caption{Kimi 的数据构造：topic balance、difficulty filtering 与 long-CoT SFT。}
+\figsource{CS336 Spring 2026 Lecture 16，Slide 41。}
+\end{figure}
+
+\begin{knowledgebox}{读图：difficulty 是动态属性}
+“难题”不是固定标签，而是相对于当前 policy。模型变强后，原来的 hard set 会变 easy，因此 curriculum 需要根据 rolling success rate 更新；这也是 RLVR data loader 与普通静态 SFT loader 的重要区别。
+\end{knowledgebox}
+
+\subsection{Kimi 的 reference-based RL objective}
+
+数据保持在有效难度区间后，Kimi 并没有直接复用 vanilla GRPO。它从 reference-regularized optimization 出发，像 DPO 一样利用 nonparametric optimum 反解 reward/policy 关系，再选择 squared loss surrogate，并保留 baselined policy-gradient 项。这个设计再次说明“RLVR model”不等于“GRPO model”。
+
+\singleslide{slide-42.jpg}{Kimi RL objective：reference-based 最优 policy 推导、平方损失 surrogate 与 regularized policy gradient。}{42}
+
+读这页时应把三层分开：reference policy 限制分布漂移；closed-form relation 把 reward 与 log-ratio 联系起来；实际优化再用可计算 surrogate。它与 DPO 共享推导工具，却仍在在线 rollout 上更新。算法类别不能只按公式长相判断，还要看数据是否由当前 policy 生成、reward 是否即时计算。
+
+\subsection{Length control：把更短的正确推理也写进 reward}
+
+Kimi 使用 batch-relative length reward，鼓励同组中更短且正确的 trajectories。这里的目标不是盲目压缩，而是在 correctness 已满足时减少无效 token，降低 inference cost 并避免 reasoning verbosity。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{slide-43.jpg}
+\caption{Kimi 的 length reward：在组内根据相对长度给予正负调整。}
+\figsource{CS336 Spring 2026 Lecture 16，Slide 43。}
+\end{figure}
+
+\begin{warningbox}{长度奖励必须以正确性为前提}
+若直接奖励短答案，模型会学会跳步骤或提前结束；若奖励长答案，又会产生 padding-like reasoning。更稳健的方式是在正确 trajectories 内比较 efficiency，并单独监控 proof completeness。
+\end{warningbox}
+
+\singleslide{slide-44.jpg}{Kimi 的额外 recipe：easy-to-hard curriculum、按失败率重采样，以及代码/数学 verifier 构造。}{44}
+
+Slide 44 把 length reward 放回完整数据循环。题目先有 difficulty label，训练从易到难；采样概率与 $1-\text{success rate}$ 成正比，减少重复已解决问题。代码 reward 通过 ground-truth solution 生成额外 tests，数学则用约 800K 样本训练 CoT/answer-equivalence reward model。所谓“verifiable”仍需要投入大量 verifier engineering。
+
+\subsection{RL infra：rollout 才是大头}
+
+本节进一步连接 systems。On-policy RL 大量时间花在 autoregressive generation；long CoTs 让 batch 内 sequence lengths 极不均匀；training engine 与 inference engine 的 tensor/parallel layout 又不同，频繁切换会损失 utilization。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{slide-45.jpg}
+\caption{RL systems bottlenecks：慢 rollout、train/inference 切换与长序列不均衡。}
+\figsource{CS336 Spring 2026 Lecture 16，Slide 45。}
+\end{figure}
+
+Slide 45 解释了为什么 RL 的 FLOPs 不能直接换算成训练速度：on-policy 数据必须通过慢速 autoregressive inference 生成，训练与推理常使用不同框架/并行布局，长 CoT 还让同一 batch 中短序列等待长尾序列。系统优化的对象应是整个采样—验证—更新 pipeline，而不是单独提高 trainer MFU。
+
+\singleslide{slide-46.jpg}{Kimi RL 基础设施拓扑：rollout、训练、权重同步与变长序列调度的协同。}{46}
+
+这页把抽象瓶颈落实到资源拓扑。Rollout workers 需要高并发推理与 KV cache，trainers 需要高吞吐反向传播，policy 权重更新后又必须及时广播；若同步过慢，采样数据 stale，若同步过频，通信与重载权重吞掉利用率。长短轨迹分桶、异步队列与版本标签是维持 on-policy 近似的关键。
+
+\begin{importantbox}{RLVR 的系统目标}
+优化的不只是 tokens/sec，而是 \textbf{useful verified trajectories per dollar}。更快生成错误答案没有价值；更强 verifier 若吞掉全部 compute 也不可持续。Rollout、verification 和 update 必须共同做容量规划。
+\end{importantbox}
+
+\subsection{系统账本：每个阶段应监控什么}
+
+为了把算法 loss 与基础设施连接起来，下面把 RLVR 拆成 prompt selection、rollout、verification 和 update 四个队列。任何一个阶段饱和都会让其余 GPU 空等；只看 trainer utilization 会把瓶颈误判成“训练不够快”。
+
+\begin{longtable}{L{0.17\textwidth}L{0.35\textwidth}L{0.38\textwidth}}
+\toprule
+阶段 & 关键指标 & 常见失败 \\
+\midrule
+Prompt selection & success-rate histogram、topic balance、staleness & 全对/全错组过多，curriculum 落后于 policy \\
+Rollout & tokens/s、length p95、batch imbalance、policy version & 长 CoT 拖慢 batch，rollout 数据迅速 stale \\
+Verification & verifier latency、false positive/negative、timeout & reward 漏洞、环境不稳定、执行成本失控 \\
+Update & KL、clip fraction、gradient norm、effective tokens & normalization/length bias，旧数据重复训练 \\
+End-to-end & verified successes/hour、cost/success、queue age & 单阶段局部最优，总体吞吐反而下降 \\
+\bottomrule
+\caption{RLVR 在线数据系统的运行账本。}
+\end{longtable}
+
+\singleslide{slide-47.jpg}{Kimi scaling results：大模型达到强总体表现，小模型实验展示 RL 数据与计算扩展趋势。}{47}
+
+Scaling 页应同时看绝对性能与学习效率。最终 Kimi K1.5 接近或超过 o1 证明整套 pipeline 有效；小模型数学实验则更适合分析随着 rollout 与 update 增加，正确率是否继续提升、是否出现 saturation，以及 sequence length 与成本怎样变化。只有把 reward、准确率和 compute 放在同一坐标系，才能判断扩展是否经济。
+
+\singleslide{slide-48.jpg}{RL 与 expert iteration 的消融：只从正样本学习能否替代对失败轨迹的负向更新。}{48}
+
+Slide 48 提出本讲的重要对照：rejection sampling/expert iteration 生成许多答案，只在 verifier 通过的轨迹上做 SFT；RL 则还会降低失败轨迹概率。若两者生成预算、成功样本数和训练 tokens 不匹配，比较会失真。消融的真正问题是 negative gradient 与在线数据刷新是否提供超出“更多优质 SFT 数据”的收益。
+
+\subsection{本章小结}
+
+Kimi 案例显示，curriculum、length control 和 infra scheduling 与 policy loss 同样关键。RLVR 是在线数据生产系统，而不仅是优化器。
+

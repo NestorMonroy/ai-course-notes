@@ -1,0 +1,67 @@
+\subsection{Common Crawl：更接近互联网，但远不等于互联网}
+
+Common Crawl 是整个网页语料生态的底层原料。它每月进行一次大规模爬取，产物通常经历 WARC 到 WET 再到可训练纯文本的多级转换。讲者特别强调，HTML 到文本的转换不是无关紧要的前处理，转换策略会显著影响下游效果。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.18\textwidth}p{0.35\textwidth}p{0.34\textwidth}}
+\toprule
+\textbf{步骤} & \textbf{在做什么} & \textbf{为什么重要} \\
+\midrule
+抓取 frontier & 从种子站点扩展到新 URL & 决定覆盖面和新鲜度 \\
+保存 WARC & 保留原始 HTTP 响应 & 便于回溯和复现 \\
+抽取 WET & 从 HTML 中提取可读文本 & 下游模型主要消费的是文本而不是 DOM \\
+去重过滤 & 去掉重复页面和模板页 & 避免 token 被低价值重复内容吞掉 \\
+语言/质量打分 & 挑出更像自然语言的段落 & 降低噪声和垃圾页比例 \\
+\bottomrule
+\end{tabular}
+\caption{Common Crawl 到训练文本之间的中间步骤不是“可有可无”的}
+\end{table}
+
+WARC、WET 这些格式名字听起来只是文件容器，但它们背后代表的是数据责任边界：你保留多少原始信息、什么时候丢弃 HTML 结构、怎么记录可复现性，都会决定后续过滤器还能不能追查问题来源。对大规模训练来说，日志、版本和可回滚能力并不比模型超参次要。
+
+\subsubsection{Worked Example：Common Crawl 的规模感知}
+
+要理解 Common Crawl 对预训练的意义，需要先对其规模有直觉：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.35\textwidth}p{0.55\textwidth}}
+\toprule
+\textbf{指标} & \textbf{数值} \\
+\midrule
+历史爬取次数（2008--2025） & 约 100 次 \\
+单次爬取时长 & 10--12 天，使用约 100 台机器（2016 年数据） \\
+种子 URL 数量 & 至少数亿个 \\
+单次快照原始大小 & 数十 TB（WARC 格式） \\
+C4 的起点（2019 年 4 月快照） & 约 1.4T tokens（原始） \\
+C4 过滤后 & 156B tokens（约 11\% 保留率） \\
+FineWeb（95 个快照合并） & 15T tokens \\
+DCLM-pool（多快照合并） & 240T tokens \\
+\bottomrule
+\end{tabular}
+\caption{Common Crawl 的规模：从原始爬取到可训练文本，保留率通常在 5\%--15\%}
+\end{table}
+
+从 1.4T tokens 到 156B tokens，C4 的过滤保留率约 11\%。这意味着 \textbf{将近 90\% 的原始网页内容被判定为不适合训练}。到了更激进的过滤方案（如 DCLM-baseline 或 FineWebEdu），保留率可以低至 1\%--5\%。这个数字本身就说明了数据清洗的核心地位。
+
+\begin{knowledgebox}{网页语料的三个现实问题}
+\begin{enumerate}
+    \item 网页噪声非常大，绝大多数内容不是训练语言模型的好材料。
+    \item 相同内容会以很多近重复版本出现，必须做去重。
+    \item 语言识别和质量过滤通常依赖启发式或分类器，而不是”直接相信网页”。
+\end{enumerate}
+\end{knowledgebox}
+
+\begin{knowledgebox}{为什么 Web 数据需要 URL 级别的去重}
+很多人以为去重只需要在文档内容层面做（比如比较文本哈希值），但实际上 \textbf{URL 级别的去重同样关键}。原因有三：
+\begin{itemize}
+    \item \textbf{同一 URL 跨快照重复}：Common Crawl 每月爬取一次，同一个 URL 可能在不同快照中反复出现，且内容几乎不变（如企业主页、产品说明页）。如果不做 URL 去重就直接合并多个快照，这些页面会以倍数膨胀。
+    \item \textbf{URL 规范化问题}：\texttt{http://} 和 \texttt{https://}、带 \texttt{www.} 和不带、URL 参数顺序不同——这些”不同 URL”实际上指向完全相同的内容。
+    \item \textbf{镜像站和内容农场}：大量网站会原封不动复制其他站点的内容，URL 不同但内容完全一致。仅靠 URL 去重不够，还需要结合内容指纹（如 MinHash）进行模糊去重。
+\end{itemize}
+FineWeb 等现代数据集会先做 URL 过滤（去掉已知低质量域名、色情站点、spam 域），再在内容层面做 MinHash 去重，形成两级防线。
+\end{knowledgebox}
+
+讲者还提到一个重要细节：HTML 到文本的转换工具选择会显著影响下游效果。DCLM 论文的实验表明，直接使用 Common Crawl 提供的 WET 文件（其转换质量较低）比使用 trafilatura 或 resiliparse 等专业工具从 WARC 重新提取文本，在下游任务上可以差好几个点。这意味着”前处理”远非无关紧要的琐事。
+

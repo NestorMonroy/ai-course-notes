@@ -1,0 +1,91 @@
+\section{训练一步的 compute 与 memory}
+
+前面的单算子账本还没有覆盖训练状态生命周期，本部分把 forward、loss、backward 与 optimizer update 连成一次完整 step。训练显存峰值取决于哪些 activations 必须保留到反向、梯度何时释放、optimizer state 如何更新，以及临时 buffer 是否与其他状态重叠。
+
+\subsection{Deep network 账本}
+
+本节先沿深层网络的数据流标记 producer 与 consumer：forward 产生每层 activation，backward 从 loss gradient 反向消费它们并产生参数梯度。只有明确每个 tensor 的 shape、dtype、生命周期和最后一次使用时刻，才能判断 checkpointing、in-place 或分片真正省了多少峰值显存。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{deep-network.png}
+\caption{深层网络示意图：forward 产生 activations，backward 用它们计算 gradients。}
+\figsource{CS336 Spring 2026 Lecture 2 官方可执行讲义，\texttt{gradients\_flops()} 与 \texttt{activation\_checkpointing()}。}
+\end{figure}
+
+\begin{knowledgebox}{读图：deep network 图里的状态}
+每一层都有参数，forward 产生 activation，backward 需要 activation 和参数来计算 gradients。训练 memory 不是只有 parameters，还包括 gradients、optimizer state 和 activations。
+\end{knowledgebox}
+
+对一层 \(h_2=h_1W_2\)，forward 约 \(2BD^2\) FLOPs。Backward 需要：
+
+\[
+\frac{\partial \ell}{\partial h_1}
+=
+\frac{\partial \ell}{\partial h_2}W_2^\top,
+\qquad
+\frac{\partial \ell}{\partial W_2}
+=
+h_1^\top\frac{\partial \ell}{\partial h_2}.
+\]
+
+这两个矩阵乘法各约 \(2BD^2\)，所以 backward 是 forward 的约 2 倍。对总参数 \(P\)，训练一步粗估：
+
+\[
+\text{FLOPs per step}\approx 6BP.
+\]
+
+\begin{importantbox}{6BP 公式的地位}
+这是大模型训练中最常用的粗账本之一。它忽略长上下文 attention 的额外项，但足以做训练时间数量级估计。
+\end{importantbox}
+
+\begin{knowledgebox}{老师强调：先 zoom in，再 consider all layers}
+源码先放大第二层 \(h_2=h_1W_2\)，分别写出 \(h_1\) 与 \(W_2\) 的梯度矩阵乘法，得到 backward 约为 forward 的两倍；随后才把同一账本推广到所有层，形成 forward \(2BP\)、backward \(4BP\)、合计 \(6BP\)。这种推导顺序很重要：公式不是背出来的，而是从一层的两个梯度路径累加出来的。
+\end{knowledgebox}
+
+\subsection{Optimizer state 与 training loop}
+
+\begin{longtable}{p{0.22\textwidth}p{0.22\textwidth}p{0.46\textwidth}}
+\toprule
+\textbf{状态} & \textbf{bytes/parameter} & \textbf{说明} \\
+\midrule
+Parameter & 2 & bf16 权重。 \\
+Gradient & 2 & bf16 梯度。 \\
+AdaGrad state & 4 & fp32 累积 squared gradients。 \\
+Adam state & 8 & fp32 first moment \(m\) + second moment \(v\)。 \\
+\bottomrule
+\end{longtable}
+
+\begin{lstlisting}[caption={AdaGrad optimizer 的核心状态}]
+g2 = state.get("g2", torch.zeros_like(grad))
+g2 += torch.square(grad)
+state["g2"] = g2
+p.data -= lr * grad / torch.sqrt(g2 + 1e-5)
+\end{lstlisting}
+
+\begin{knowledgebox}{术语消化：SGD、Momentum、AdaGrad、RMSProp、Adam}
+SGD 只用当前梯度；Momentum 对梯度做指数平均；AdaGrad 用历史梯度平方缩放学习率；RMSProp 对梯度平方做指数平均；Adam 同时维护一阶动量 \(m\) 和二阶动量 \(v\)，因此状态显存较大但训练稳定。
+\end{knowledgebox}
+
+\begin{knowledgebox}{课堂提示：optimizer state 为什么通常留在 fp32}
+老师指出，一阶或二阶统计会跨很多 training steps 持续累积，舍入误差也会随更新累积，因此 optimizer state 通常用 fp32。资源含义是 AdaGrad 额外需要约 4 bytes/parameter，Adam 的 \(m,v\) 合计约 8 bytes/parameter；这部分既是 Memory 账本，也是源码中 \texttt{Compute (for one training step)} 必须单独检查的更新开销。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={最小训练循环}]
+for step in range(num_train_steps):
+    x, y = get_batch()
+    pred_y = model(x).mean()
+    loss = F.mse_loss(pred_y, y)
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+\end{lstlisting}
+
+\begin{warningbox}{zero grad 不是细节}
+PyTorch 默认会累积 gradients。不清零会把上一步的梯度混入下一步。\texttt{set\_to\_none=True} 还能减少不必要的显存写入。
+\end{warningbox}
+
+\subsection{本章小结}
+
+训练一步可以拆成 forward、backward、optimizer step。Backward 通常约为 forward 的 2 倍；Adam 的 optimizer state 可能比参数本身更占显存；activations 则随 batch、sequence、layers 增长。
+

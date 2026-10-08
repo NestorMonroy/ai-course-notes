@@ -1,0 +1,57 @@
+\subsection{tensor parallelism：沿 width 维切模型}
+
+Pipeline 沿层切分后，每个 stage 内的矩阵仍可能太大或太慢，因此本节转向 width 维。Tensor parallelism 把同一层的权重矩阵分到多张 GPU，并在 row/column parallel matmul 边界恢复完整语义；它通信频繁，通常应限制在 NVLink 等高速互连域内。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-039.jpg}
+\caption{Slide 39：从矩阵乘法观察出发，考虑沿 width 而非 depth 切分模型。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 39 的矩阵乘法观察}
+如果 \(Y=XW\)，可以按 \(W\) 的列切分输出，也可以按行切分输入贡献。tensor parallel 的基本思想就是利用矩阵乘法可分解性，让不同 GPU 计算同一层的不同部分，而不是把不同层放在不同 GPU 上。
+\end{knowledgebox}
+
+
+\singleslide{slides-images/slide-040.jpg}{Tensor parallel 的列切/行切矩阵：$f$ 与 $g$ 在前向或反向执行 all-reduce。}{40}
+
+Slide 40 把一个 MLP 的两个矩阵分别按列和行分到 GPU。第一层 column parallel 让各 rank 计算不同 hidden features，第二层 row parallel 再把局部输出相加；通过把 all-reduce 安排在 $f/g$ 的前向或反向，既保持完整数学结果，又避免每层都复制全部矩阵。
+
+\begin{importantbox}{讲义补充：源 Slide 40 的 \(f\) 和 \(g\) 是通信位置}
+图中的 \(f\) 和 \(g\) 可以是 identity，也可以是 all-reduce。某些线性层 forward 不需要立即通信，但 backward 需要；另一些线性层相反。Megatron 风格 tensor parallel 的效率来自把 column-parallel 和 row-parallel linear 成对安排，让通信尽量少且位置可控。
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-041.jpg}
+\caption{Slide 41：Transformer block 中 row vs column tensor parallel 的切分规则。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 41 如何对应 Transformer 结构}
+QKV 和 up-projection 常用 columnwise 切分，因为它们把 hidden dimension 扩到多个输出通道；attention output 和 down-projection 常用 rowwise 切分，因为它们把分片结果聚回 hidden dimension。LayerNorm、router 等小模块通常复制，因为切分收益小且会增加额外通信。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-042.jpg}
+\caption{Slide 42：tensor parallel 通常限制在节点内，因为需要高速互连。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{warningbox}{读图：Slide 42 是硬件约束，不是习惯}
+TP 的通信发生在每个 block 的多个位置，频率远高于 data parallel 梯度同步或 pipeline stage 边界通信。若把 TP 放到跨节点慢链路，通信 latency 和 bandwidth 很容易压过本地 matmul 收益。因此常见建议是 TP size 不超过单节点 GPU 数。
+\end{warningbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-043.jpg}
+\caption{Slide 43：tensor parallel 与 pipeline parallel 的优缺点比较。}
+\figsource{CS336 Spring 2026 Lecture 8 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 43 的比较维度}
+TP 没有 pipeline bubble，包装模型相对直接，但依赖高速互连；PP 可跨慢链路且省参数显存，但有 bubble 和调度复杂度。选择 TP 还是 PP，不是看名字先进，而是看模型层宽、深度、节点内互连、跨节点链路和 batch size。
+\end{knowledgebox}
+

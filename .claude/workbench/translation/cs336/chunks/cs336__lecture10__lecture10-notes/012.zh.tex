@@ -1,0 +1,104 @@
+\section{量化与模型剪枝}
+
+\subsection{量化：降低数值精度}
+
+量化的核心思想极其简单：用更少的位数表示数值，从而减少内存占用和传输量。
+
+\begin{importantbox}{常见数值格式}
+\begin{itemize}
+    \item \textbf{fp32}（4 字节）：训练时用于参数和优化器状态
+    \item \textbf{bf16}（2 字节）：推理的默认格式
+    \item \textbf{fp8}（1 字节）：范围 $[-240, 240]$（e4m3），H100 原生支持
+    \item \textbf{int8}（1 字节）：范围 $[-128, 127]$，精度低于 fp8，但更便宜
+    \item \textbf{int4}（0.5 字节）：范围 $[-8, 7]$，极低精度
+\end{itemize}
+\end{importantbox}
+
+两种量化策略：
+
+\begin{itemize}
+    \item \textbf{量化感知训练}（QAT）：训练过程中模拟量化效果，但需要重新训练，扩展性差
+    \item \textbf{训练后量化}（PTQ）：对已训练好的模型，在少量校准数据上确定量化参数（缩放因子和零点）
+\end{itemize}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccccc}
+\toprule
+\textbf{格式} & \textbf{位宽} & \textbf{内存节省} & \textbf{精度损失} & \textbf{硬件支持} & \textbf{典型用途} \\
+\midrule
+fp32 & 32 bit & 基线 & 无 & 全部 & 训练（主权重） \\
+bf16 & 16 bit & 2$\times$ & 极小 & A100+ & 推理默认 \\
+fp8 (e4m3) & 8 bit & 4$\times$ & 小 & H100+ & 高精度推理 \\
+int8 & 8 bit & 4$\times$ & 小--中 & 广泛 & 通用量化 \\
+int4 & 4 bit & 8$\times$ & 中等 & 有限 & 边缘部署 \\
+int3 & 3 bit & 10.7$\times$ & 较大 & 软件模拟 & 极端压缩 \\
+\bottomrule
+\end{tabular}
+\caption{常见数值格式的精度--效率权衡。内存节省相对于 fp32 计算。实际加速比还取决于硬件对该格式的原生支持程度。}
+\end{table}
+
+\begin{warningbox}{量化不是免费的午餐}
+量化的内存节省是确定的（位宽直接决定），但速度提升取决于硬件支持。例如 int4 在没有原生 int4 Tensor Core 的 GPU 上需要解包（dequantize）后再计算，实际加速可能远低于理论 8$\times$。此外，量化到 4 bit 以下时，模型的``长尾知识''（罕见事实、复杂推理）会显著退化。
+\end{warningbox}
+
+\subsubsection{LLM.int8()：处理异常值}
+
+标准的 int8 量化步骤：将向量中的值缩放到 $[-128, 127]$ 范围内（除以最大绝对值，乘以 128）。
+
+\begin{warningbox}{异常值问题}
+大模型中某些激活值会出现\textbf{异常大的数值}（outliers），这些异常值会严重扭曲量化的缩放因子，导致其他正常值的精度急剧下降。这个问题在较大的网络中尤为突出。
+\end{warningbox}
+
+LLM.int8() 的解决方案：
+\begin{enumerate}
+    \item 识别矩阵中的异常值列（通常只占 0.1\%）
+    \item 异常值部分保持 fp16 精度处理
+    \item 其余部分使用 int8 量化
+    \item 两部分结果合并
+\end{enumerate}
+
+实验表明该方法效果良好（BLOOM 176B 模型上几乎无精度损失），但因为混合精度处理，实际速度比纯 fp16 慢 15--23\%。主要优势在于\textbf{能将大模型装入更少的 GPU}。
+
+\subsubsection{AWQ：激活感知量化}
+
+AWQ（Activation-aware Weight Quantization）的思路：
+
+\begin{importantbox}{AWQ 的核心思想}
+不是所有权重同等重要。通过观察\textbf{激活值}来确定哪些权重对输出影响最大，将最重要的 0.1--1\% 权重保持高精度，其余权重激进量化。
+
+AWQ 可以将模型从 fp16 量化到 int3/int4，实现 4 倍内存缩减和 3.2 倍推理加速。
+\end{importantbox}
+
+\subsection{模型剪枝与知识蒸馏}
+
+剪枝的思想更为直接：\textbf{直接移除模型中不重要的部分}，然后通过知识蒸馏修复精度损失。
+
+\begin{importantbox}{剪枝-蒸馏流程（NVIDIA 方案）}
+\begin{enumerate}
+    \item 在小规模校准数据集（约 1024 个样本）上，识别重要的层、头和隐藏维度
+    \item 移除不重要的部分，得到更小的模型
+    \item 用原始模型作为教师，对剪枝后的模型进行知识蒸馏
+\end{enumerate}
+\end{importantbox}
+
+\begin{knowledgebox}{从头训练 vs. 蒸馏}
+获得更快推理模型有两条路径：
+\begin{itemize}
+    \item \textbf{从头训练}：定义更快的架构 $\rightarrow$ 训练新模型。缺点：训练成本高
+    \item \textbf{蒸馏}：定义更快的架构 $\rightarrow$ 从原始模型初始化权重 $\rightarrow$ 用蒸馏修复。优点：可以利用已有模型
+\end{itemize}
+两种方法的目标相同：在不显著损失精度的前提下，降低推理复杂度。
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+\begin{itemize}
+    \item 量化通过降低数值精度直接减少内存传输量，是最简单直接的推理优化手段
+    \item 异常值处理（LLM.int8()）和激活感知量化（AWQ）解决了朴素量化的精度问题
+    \item 模型剪枝+蒸馏可以在结构层面缩小模型，效果与量化互补
+    \item 这些方法都是``有损''的——需要在精度和效率之间做权衡
+\end{itemize}
+
+%% ========== Section 6: 投机采样 ==========
+

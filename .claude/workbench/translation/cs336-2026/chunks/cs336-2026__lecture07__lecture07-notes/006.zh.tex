@@ -1,0 +1,71 @@
+\section{Data Parallelism：沿 batch 维切分}
+
+\subsection{基本策略}
+
+Data parallelism 沿 batch dimension 切分数据。每个 rank 保留完整模型参数，读取自己的 batch slice，独立 forward/backward，然后用 all-reduce 同步梯度。同步后每个 rank 执行相同 optimizer step，因此参数保持一致。
+
+\begin{knowledgebox}{课堂提示：允许 local loss 不同，不允许参数悄悄分叉}
+官方源专门列出三个观察：各 rank 因本地数据不同而得到不同 loss；梯度经过 all-reduce 后相同；所以更新后的参数继续相同。Data parallel 的正确性不要求每张卡看见同一批样本，却要求复制模型在同步点保持同一状态。若某个参数跳过归约或某个 rank 的 optimizer step 不一致，程序可能继续运行，但已经不再等价于同步 data parallel。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.54\textwidth]{data-parallelism.png}
+\caption{Data parallelism：切分 batch，复制模型。}
+\figsource{CS336 Spring 2026 Lecture 7 官方可执行讲义图像。}
+\end{figure}
+
+\begin{knowledgebox}{读图：data parallel 图里的“复制”和“切分”}
+图中每个 rank 都有完整网络层，所以参数、梯度和 optimizer state 默认是复制的；被切分的是 batch。这个策略的好处是每张卡可以独立做完整 forward/backward，通信只集中在梯度同步阶段。坏处是显存不随 GPU 数量线性扩展，因为模型状态仍然每卡一份。
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Lecture 7 的 data parallel 核心：本地 loss，跨 rank 平均梯度}]
+local_batch_size = batch_size // world_size
+start_index = rank * local_batch_size
+data = data[start_index:start_index + local_batch_size].to(device)
+
+for param in params:
+    x = x @ param
+    x = F.gelu(x)
+loss = x.square().mean()
+loss.backward()
+
+for param in params:
+    dist.all_reduce(tensor=param.grad, op=dist.ReduceOp.AVG,
+                    async_op=False)
+\end{lstlisting}
+
+\subsection{通信账本}
+
+若模型参数总量为 \(P\) bytes，每一步 DDP 梯度同步的主通信对象也是 \(P\) bytes 级别的梯度。由于每个 rank 都要得到完整平均梯度，典型实现使用 all-reduce。计算量随本地 batch 增长，通信量主要随参数量增长，因此 data parallel 对“大 batch、较厚计算”的场景友好。
+
+\begin{importantbox}{Data parallel 的优点和代价}
+优点是实现简单、数学语义接近单机大 batch、通信集中。代价是每卡保存完整参数、梯度和 optimizer state；若单卡装不下模型，普通 DDP 无法解决容量问题，只能引入 ZeRO/FSDP 这类状态分片方法。
+\end{importantbox}
+
+\subsection{为什么引出 FSDP/ZeRO}
+
+官方源写道：下一次会讲 FSDP/ZeRO，用 all-gather 和 reduce-scatter 避免每张卡都持有全部参数。直觉是：
+
+\begin{itemize}
+    \item forward 某层前，用 all-gather 临时拼出该层完整参数；
+    \item backward 后，用 reduce-scatter 同步梯度并只保留本 rank 负责的分片；
+    \item optimizer state 也按 rank 分片，减少重复存储。
+\end{itemize}
+
+\begin{knowledgebox}{术语消化：DDP、FSDP、ZeRO 的差别}
+\begin{tabular}{L{0.18\textwidth}L{0.32\textwidth}L{0.4\textwidth}}
+\toprule
+方法 & 保存方式 & 通信方式与课程关系 \\
+\midrule
+DDP & 每卡完整参数、梯度、optimizer state。 & backward 后 all-reduce 梯度，简单但显存重复。 \\
+ZeRO-1/2/3 & 按 stage 分片 optimizer state、梯度、参数。 & 用 reduce-scatter/all-gather 把复制状态改为分片状态。 \\
+FSDP & PyTorch 中的 fully sharded data parallel。 & 以模块为单位 all-gather 参数、释放参数、reduce-scatter 梯度。 \\
+\bottomrule
+\end{tabular}
+\end{knowledgebox}
+
+\subsection{本章小结}
+
+Data parallelism 是最容易理解的并行策略：数据切开，模型复制，梯度同步。它扩展吞吐，但不天然扩展模型容量；状态分片才是解决大模型显存的关键。
+

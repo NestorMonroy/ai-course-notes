@@ -1,0 +1,128 @@
+\section{路由机制（Routing）}
+
+路由机制是 MoE 的核心——它决定了每个 token 被分配到哪些 experts。本节将详细讨论路由的设计空间。
+
+\subsection{三种路由范式}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-013.jpg}
+\caption{三种路由方式：Token Choice（每个 token 选 top-K experts）、Expert Choice（每个 expert 选 top-K tokens）、Global Assignment（全局优化分配）\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第14页。来自 Fedus et al. 2022。}
+
+\begin{importantbox}{Token Choice Top-K 是事实标准}
+尽管早期 MoE 研究探索了多种路由方式，但\textbf{几乎所有大规模部署的 MoE 模型都收敛到了 Token Choice Top-K 路由}——DeepSeek V1/V2/V3、Qwen、Grok、Mixtral 等无一例外。
+\end{importantbox}
+
+三种路由范式的对比：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lp{5cm}p{5cm}}
+\toprule
+\textbf{路由方式} & \textbf{优点} & \textbf{缺点} \\
+\midrule
+Token Choice & 每个 token 被路由到最合适的 expert，质量最优 & 可能导致 expert 负载不均衡 \\
+Expert Choice & 天然负载均衡，每个 expert 处理相同数量的 token & 某些 token 可能不被任何 expert 处理，或被不合适的 expert 处理 \\
+Global Assignment & 理论最优分配 & 计算开销大，实践中收益不足以覆盖成本 \\
+\bottomrule
+\end{tabular}
+\caption{三种路由方式的对比}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-015.jpg}
+\caption{OLMoE 对比实验：Token Choice（TC，粉色）vs Expert Choice（EC，青色），Token Choice 在验证损失和 HellaSwag 上均表现更好\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第16页。来自 OLMoE。}
+
+\subsection{Top-K 路由的数学表达}
+
+Token Choice Top-K 路由的具体实现如下：
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-016.jpg}
+\caption{Top-K 路由的数学公式和前向传播流程\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第17页。}
+
+给定残差流输入 $\mathbf{u}_t$，路由器首先计算每个 expert 的亲和分数：
+
+$$s_{i,t} = \text{Softmax}_i\left(\mathbf{u}_t^T \mathbf{e}_i\right)$$
+
+其中：
+\begin{itemize}
+    \item $\mathbf{u}_t \in \mathbb{R}^d$：第 $t$ 个 token 的隐藏状态（残差流输入）
+    \item $\mathbf{e}_i \in \mathbb{R}^d$：第 $i$ 个 expert 的可学习向量（路由器参数）
+    \item $s_{i,t}$：token $t$ 对 expert $i$ 的归一化亲和分数
+\end{itemize}
+
+然后通过 Top-K 选择构造门控权重：
+
+$$g_{i,t} = \begin{cases} s_{i,t}, & \text{if } s_{i,t} \in \text{TopK}(\{s_{j,t} \mid 1 \leq j \leq N_r\}, K_r) \\ 0, & \text{otherwise} \end{cases}$$
+
+最终输出为所有 expert 输出的加权和加上残差连接：
+
+$$\mathbf{h}_t' = \mathbf{u}_t + \sum_{i=1}^{N_s} \text{FFN}_i^{(s)}(\mathbf{u}_t) + \sum_{i=1}^{N_r} g_{i,t} \cdot \text{FFN}_i^{(r)}(\mathbf{u}_t)$$
+
+\begin{knowledgebox}{路由器出奇地简单}
+路由器本质上就是一个\textbf{线性内积 + Softmax}——与 Attention 的 Query-Key 内积非常相似。$\mathbf{e}_i$ 可以理解为每个 expert 的``名片''，与 token 的隐藏状态做内积来衡量亲和度。没有人使用 MLP 路由器或更复杂的设计，因为：（1）路由器本身的 FLOPs 也要计算在内；（2）路由器的学习信号本身就很间接，即使增加复杂度也不一定能学到更好的路由。
+\end{knowledgebox}
+
+\subsection{K 值的选择}
+
+$K$（每个 token 激活的 expert 数量）是一个关键超参数：
+
+\begin{itemize}
+    \item \textbf{$K = 1$}（Switch Transformer）：最稀疏，FLOPs 最少，但探索不足——router 可能永远只利用最好的 expert，而忽视其他潜在更好的选择
+    \item \textbf{$K = 2$}（经典选择）：第二个 expert 提供探索信息，有助于学习更好的路由。Mixtral、早期 DeepSeek 使用
+    \item \textbf{$K > 2$}：更多 FLOPs 但更丰富的梯度信号。DeepSeek V3 使用 $K = 8$（配合细粒度 expert）
+\end{itemize}
+
+\begin{warningbox}{$K$ 的增加意味着 FLOPs 的增加}
+$K = 2$ 意味着每个 token 要经过两个 expert 的 FFN，FLOPs 翻倍。因此，谈论 MoE 模型时通常使用``激活参数''（activated parameters）而非总参数来衡量计算成本。例如 DeepSeek-V3 有 671B 总参数但只有 37B 激活参数。
+\end{warningbox}
+
+\subsection{Softmax 的位置：一个微妙的设计选择}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{slides-images/slide-017.jpg}
+\caption{不同 MoE 模型的路由变体对比：Softmax 在 Top-K 之前 vs 之后，是否归一化门控权重\protect\footnotemark}
+\end{figure}
+\footnotetext{Slides 第18页。}
+
+不同的 MoE 实现对 Softmax 的位置有不同选择：
+
+\begin{itemize}
+    \item \textbf{DeepSeek V1/V2、Qwen、Grok}：先 Softmax 后 Top-K（Softmax 在底部）
+    \item \textbf{DeepSeek V3、Mixtral、DBRX}：先 Top-K 后 Softmax（Softmax 在 gate 上）
+\end{itemize}
+
+先 Softmax 后 Top-K 意味着门控权重不再严格归一化到 1（因为被丢弃的 expert 权重不为零）。但这并不是问题——LayerNorm 可以在后续层补偿尺度变化。部分模型选择在 Top-K 之后重新归一化，但这也是可选的。
+
+\subsection{令人惊讶的发现：随机路由也有效}
+
+\begin{warningbox}{Hash 路由也能带来增益}
+多个研究表明，即使使用\textbf{哈希函数}（完全不含语义信息）来将 token 分配到 expert，MoE 仍然能获得相对于 Dense 模型的性能增益。这说明 MoE 的优势不仅仅来自``智能路由''，而是更根本地来自\textbf{参数量的增加和稀疏激活本身}。这应该深刻影响你对 MoE 本质的理解。
+\end{warningbox}
+
+\subsection{其他路由方法}
+
+除了 Top-K 路由外，研究者还尝试过多种其他方法：
+
+\begin{itemize}
+    \item \textbf{RL 路由}：最早期的方法之一，将路由决策视为策略，用强化学习优化。理论上最原则化，但实践中计算开销大、梯度方差高，效果不如更简单的方法。
+    \item \textbf{线性分配/最优传输}：优雅但计算代价高于收益，未被广泛采用。
+    \item \textbf{随机采样}：Google 的一篇论文提出``top-1 确定性 + top-2 按概率采样''的方案，增加探索但导致 train-test mismatch。
+\end{itemize}
+
+\subsection{本章小结}
+
+路由机制的设计空间很大，但行业已经收敛到一个简单的方案：\textbf{线性内积 + Softmax + Top-K 选择}。路由器参数量极小（每个 expert 只有一个 $d$ 维向量），训练通过标准反向传播的间接梯度进行。即使是随机路由也能带来增益，这暗示 MoE 的核心优势来自稀疏参数扩展本身。
+
+%% ========== Part 3: Expert 设计 ==========
+

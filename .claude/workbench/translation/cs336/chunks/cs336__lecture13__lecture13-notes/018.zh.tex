@@ -1,0 +1,183 @@
+\section{中训练、后训练与能力定制}
+
+\subsection{长上下文不是顺带出现的}
+
+长上下文不是 pre-training 的自然副产品，而常常需要单独训练阶段来扩展。讲者给出的关键词是：如果想把上下文长度从 4K 推到 100K 或更长，通常要在模型结构和数据上同时做文章。当前主流模型的上下文长度差异显著：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.3\textwidth}p{0.25\textwidth}p{0.35\textwidth}}
+\toprule
+\textbf{模型} & \textbf{上下文长度} & \textbf{备注} \\
+\midrule
+早期 GPT / BERT & 512 -- 2K tokens & 受限于绝对位置编码 \\
+LLaMA 2 & 4K tokens & 标准 RoPE \\
+DeepSeek v3 & 128K tokens & 专门的长上下文训练 \\
+Claude 3.5 Sonnet & 200K tokens & 需要特殊数据与注意力机制 \\
+Gemini 1.5 Pro & 1.5M tokens & 极长上下文，工程挑战巨大 \\
+\bottomrule
+\end{tabular}
+\caption{上下文长度从 512 到 150 万，增长了三个数量级}
+\end{table}
+
+Transformer 的注意力机制对序列长度是二次方复杂度，因此直接在预训练阶段用长序列非常昂贵。更实际的做法是先用短上下文预训练，再用专门的长上下文数据做扩展训练。
+
+\begin{knowledgebox}{长上下文为什么是数据问题}
+\begin{itemize}
+    \item 长文档比短句更难得，也更容易被过滤掉。
+    \item 训练长上下文时，模型不仅需要长序列，还需要长文档的分布。
+    \item 长上下文能力往往来自专门的数据混合，而不是“顺手训练出来”。
+\end{itemize}
+\end{knowledgebox}
+
+LongLoRA 之类的方法说明，长上下文能力通常要配合专门的训练文档，例如书籍、数学证明、长文档任务等。换句话说，数据的长度分布本身就是模型能力的一部分。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.2\textwidth}p{0.24\textwidth}p{0.24\textwidth}p{0.22\textwidth}}
+\toprule
+\textbf{长上下文所需材料} & \textbf{为什么有用} & \textbf{常见缺口} & \textbf{工程后果} \\
+\midrule
+书籍 / 教材 & 连续章节、前后引用多 & 许可与格式清洗 & 能训练跨段依赖 \\
+数学 / 证明 & 需要跟踪符号和中间步骤 & 质量低但格式要求高 & 适合做推理长度扩展 \\
+长文档 QA & 问题和证据跨很多段 & 需要精确对齐证据 & 强化检索与引用能力 \\
+代码仓库 / issues & 上下文跨度长、结构化强 & 噪声与依赖复杂 & 帮助模型维持多轮状态 \\
+\bottomrule
+\end{tabular}
+\caption{长上下文不是“把窗口拉长”就结束了，还得有对应的数据形态}
+\end{table}
+
+如果你只把上下文长度理解成一个超参数，就会误以为“把 RoPE 或 attention 改一下”就解决了问题。实际上，没有足够多的长文档样本，模型只是在更大的窗口里做更大的短文推断，长程能力不会自动冒出来。
+
+\subsection{从任务到 prompt}
+
+讲者把大量 NLP 训练数据看成一种统一的转换过程：把已有任务转成 prompt，让模型在同一接口上学习。这里最常见的来源是监督基准、问答数据和可模板化的任务集合。核心流程是：(1) 收集已有 NLP 任务，(2) 用模板将其转成 prompt-response 对，(3) 混合大量不同任务，(4) 让模型在统一接口下学习。
+
+\begin{importantbox}{任务化数据的核心思路}
+\begin{enumerate}
+    \item 把分类、抽取、问答、阅读理解等任务统一成 prompt/response 形式。
+    \item 通过模板化，让模型学会在统一接口下完成不同任务。
+    \item 用多任务混合提升泛化，而不是只盯一个单点指标。
+\end{enumerate}
+\end{importantbox}
+
+Super-Natural Instructions 和 Flan 2022 是这一路线的代表。它们证明了一个事实：大量现有 NLP 数据集并不需要重新发明，只需要被系统地改写成统一格式，就能变成更强的训练材料。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.21\textwidth}p{0.26\textwidth}p{0.23\textwidth}p{0.2\textwidth}}
+\toprule
+\textbf{任务类型} & \textbf{如何 prompt 化} & \textbf{模型学到什么} & \textbf{常见失败} \\
+\midrule
+分类 & 给出标签选项，让模型选一个 & 输出格式约束 & 只会猜标签，不会解释 \\
+抽取 & 让模型从文本中摘出答案片段 & 定位证据 & 过度生成、漏掉边界 \\
+阅读理解 & 把问题和上下文放进 prompt & 跨句整合 & 依赖模板，换写法就掉点 \\
+问答 / 指令 & 让模型直接回答人类请求 & 交互接口 & 忽略上下文或胡乱拒答 \\
+\bottomrule
+\end{tabular}
+\caption{把任务统一成 prompt-response 后，训练目标就从“识别任务”变成“使用统一接口”}
+\end{table}
+
+这一层变化很重要，因为它让模型在训练时就接触到“用户会怎么提问”的结构。后训练的很多收益，不是来自新知识，而是来自对输入形式和输出形式的再组织。
+
+\subsection{Instruction tuning 和 chat data}
+
+指令数据和聊天数据是 post-training 的核心。预训练模型已经学会语言分布，但还不会自然地回答”请你帮我做什么”。因此需要把自然语言任务转成显式的指令-响应格式。指令数据的演化经历了从人工标注到大规模合成的过程：
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{0.12\textwidth}p{0.1\textwidth}p{0.3\textwidth}p{0.13\textwidth}p{0.2\textwidth}}
+\toprule
+\textbf{数据集} & \textbf{规模} & \textbf{来源} & \textbf{年份} & \textbf{训练的模型} \\
+\midrule
+Alpaca & 52K & text-davinci-003 自动生成（self-instruct） & 2023 & LLaMA 7B \\
+Vicuna & 70K & ShareGPT 真实用户对话 & 2023 & LLaMA 13B \\
+Baize & 111.5K & GPT-3.5 自聊（种子来自 Quora/SO） & 2023 & LLaMA \\
+WizardLM & -- & Evol-Instruct（渐进增加难度） & 2023 & LLaMA \\
+MAmmoTH2 & 10M & Common Crawl 中的 quiz 站点 + GPT-4 提取 QA & 2024 & Mistral 7B \\
+OpenHermes & 1M & 多源聚合，GPT-4 生成 & 2024 & Mistral 7B \\
+Llama 2 chat & 27.5K & 高质量供应商标注 & 2023 & Llama 2 \\
+Nemotron PT & -- & 公开 prompt + 合成 response（Llama/Mixtral/DeepSeek） & 2024 & Llama-Nemotron \\
+\bottomrule
+\end{tabular}
+\caption{后训练数据演化：从 27.5K 人工标注到百万级合成数据}
+\end{table}
+
+\begin{knowledgebox}{这些方法在做什么}
+\begin{itemize}
+    \item \textbf{Alpaca}：用强模型（text-davinci-003）通过 self-instruct 方法自动生成 52K 指令样本，让 LLaMA 7B 学会跟随指令。成本极低（约 \$500），但质量受限于生成模型。
+    \item \textbf{Vicuna}：利用 ShareGPT 上真实用户与 ChatGPT 的对话（70K 条），逼近真实聊天分布。优势在于数据反映了用户真实需求，但 ShareGPT 已停运。
+    \item \textbf{Baize / WizardLM}：Baize 用 GPT-3.5 自聊生成多轮对话；WizardLM 用 Evol-Instruct 渐进增加问题难度和广度。
+    \item \textbf{MAmmoTH2}：从 Common Crawl 中用 fastText 分类器找出 quiz 类网站，再用 GPT-4 和 Mixtral 提取 QA 对，得到 1000 万条指令，显著提升数学能力。
+    \item \textbf{OpenHermes / Nemotron}：把多源指令、合成回答和推理轨迹再加工成更大训练集。Nemotron 特别注意使用商业可行的模型（Llama、Mixtral、DeepSeek r1、Qwen）生成回答，避免依赖 GPT-4 带来的许可限制。
+\end{itemize}
+\end{knowledgebox}
+
+\begin{importantbox}{Llama 2 的反直觉发现}
+Llama 2 chat 的 SFT 只用了 27,540 条高质量供应商标注数据，但团队声称这比使用开源社区的数百万条数据效果更好。他们的反思是：与其把预算花在标注更多 SFT 数据上，不如把更多精力放在 RLHF 数据的收集上。这说明后训练数据的\textbf{质量远比数量重要}——少量精心标注的数据可以胜过大量噪声数据。
+\end{importantbox}
+
+\subsubsection{后训练数据策略对比}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.14\textwidth}p{0.17\textwidth}p{0.17\textwidth}p{0.17\textwidth}p{0.23\textwidth}}
+\toprule
+\textbf{策略} & \textbf{SFT 数据} & \textbf{RLHF/偏好} & \textbf{代表} & \textbf{核心理念} \\
+\midrule
+人工标注 & 数万条 & 数十万偏好对 & Llama 2 chat & 少而精，质量为王 \\
+合成蒸馏 & 数万--数百万 & 模型自动排序 & Alpaca, OpenHermes & 用强模型教弱模型 \\
+自聊/自演化 & 自动生成 & 自动生成 & Baize, WizardLM & 低成本扩大覆盖面 \\
+网页挖掘 & 数百万 & -- & MAmmoTH2 & 互联网本身有大量隐含指令 \\
+混合策略 & 多源聚合 & 多源聚合 & Nemotron, T\"ulu & 取长补短 \\
+\bottomrule
+\end{tabular}
+\caption{后训练数据策略：没有单一最优方案，工业界普遍采用混合策略}
+\end{table}
+
+\begin{warningbox}{合成数据的双刃剑}
+合成数据可以补足稀缺能力，但也会把生成模型自己的偏差、幻觉和风格一起放大。它不是免费午餐，必须依赖过滤和验证。
+\end{warningbox}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.18\textwidth}p{0.3\textwidth}p{0.28\textwidth}p{0.16\textwidth}}
+\toprule
+\textbf{环节} & \textbf{典型做法} & \textbf{质量控制点} & \textbf{常见问题} \\
+\midrule
+生成题目 & 用强模型扩题、改题、变难度 & 覆盖度、难度分布 & 容易跑偏到无关问题 \\
+生成答案 & 多候选回答、CoT 草稿 & 正确性、格式一致性 & 幻觉和不稳定风格 \\
+筛选排序 & 规则 + 模型打分 + 人工复核 & 一致性、去重、难例保留 & 评分器偏见 \\
+回流训练 & 把高分样本加入训练集 & 避免风格塌缩 & 过拟合合成痕迹 \\
+\bottomrule
+\end{tabular}
+\caption{合成数据真正难的地方在筛选和回流，不在“生成”本身}
+\end{table}
+
+合成数据之所以越来越重要，是因为很多稀缺能力的原始分布本来就很难直接从互联网抓到。问题不是“能不能生成”，而是“生成以后你有没有能力判断哪些样本真的在帮模型变强”。这要求你同时懂任务、懂评价、懂过滤和懂训练循环。
+
+\subsection{为什么会越来越依赖合成数据}
+
+讲者不断强调一个趋势：很多能力已经不能只靠”抓互联网”得到，尤其是数学、代码、长上下文、推理和安全对齐。于是人们开始利用更强模型生成题目、生成答案、生成中间推理轨迹，再把这些合成样本重新喂给训练系统。
+
+合成数据的基本闭环包含四步：
+\begin{enumerate}
+    \item \textbf{种子问题/提示}：从已有数据集或人工设计中获取初始问题。
+    \item \textbf{强模型生成}：用更强的模型（如 GPT-4）生成答案或推理轨迹。
+    \item \textbf{过滤/验证/排序}：用规则、模型打分或人工审核筛选高质量样本。
+    \item \textbf{回流训练}：将筛选后的样本加入弱模型的训练集。
+\end{enumerate}
+
+这个闭环可以迭代进行：弱模型训练后变强，又可以生成更好的数据，形成正反馈循环。但也存在风险——如果过滤不严，模型可能越来越收敛到生成模型的特定风格（”模型塌缩”）。
+
+\subsection{中训练与后训练本章小结}
+
+中训练和后训练的核心区别在于数据的性质和规模：
+\begin{itemize}
+    \item \textbf{中训练}主要用更高质量的网页数据、数学数据、代码数据和长文档来补强预训练模型的能力短板，规模通常在百亿到万亿 token 量级。
+    \item \textbf{后训练}用指令数据、对话数据和偏好数据把模型变成可交互的助手，规模通常在数万到百万样本量级。
+    \item 合成数据在两个阶段都越来越重要，但后训练对合成数据的依赖更强——因为高质量的人类对话数据天然稀缺且获取成本极高。
+    \item 质量在后训练中远比数量重要：Llama 2 用 2.7 万条精标数据胜过百万条开源数据，说明了这一点。
+\end{itemize}
+

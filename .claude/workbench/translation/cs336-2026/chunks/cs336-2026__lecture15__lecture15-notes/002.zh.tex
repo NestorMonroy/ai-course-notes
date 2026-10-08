@@ -1,0 +1,196 @@
+\section{SFT Data：少量数据如何改变模型行为}
+
+本节的核心问题是：SFT 数据究竟提供了什么新信息？从 FLAN、Alpaca、OpenAssistant 到 Nemotron，数据逐渐从短 benchmark answers 演化为长对话、工具调用、代码修改和 agent traces。变化的不只是任务数量，更是 response style 与 interaction protocol。
+
+\subsection{从 FLAN 到 agent traces：数据形态的演进}
+
+本节先沿时间观察 supervision 变得更丰富的过程。早期数据主要告诉模型“任务输入怎样映射到短答案”；后来的对话和 agent traces 还编码角色、工具协议、错误恢复和多轮状态。数据形态扩大后，模型学习的不只是知识映射，而是完整的交互状态机。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{slide-09.jpg}
+\caption{开放世界 SFT 数据的演进：任务模板、自生成指令、对话、工具使用与 agent data。}
+\figsource{CS336 Spring 2026 Lecture 15，Slide 9。}
+\end{figure}
+
+\begin{knowledgebox}{读图：每一代数据改变了什么}
+FLAN 强调任务覆盖；Self-Instruct/Alpaca 扩大指令数量；ShareGPT/Vicuna 引入真实对话风格；OpenAssistant 增加多轮与详细回答；Tulu/Nemotron 把 tool calls、code context 和更复杂 role schema 纳入训练。模型学习的不只是答案，也学习“怎样参与一个交互协议”。
+\end{knowledgebox}
+
+演进图只给出数据集名称，Slides 10--13 则要求直接阅读样本。这样做很重要：同样是一条 prompt-response pair，FLAN 可能是把分类 benchmark 改写成自然语言，Alpaca 是短而规整的 synthetic instruction，OpenAssistant 追求长篇解释与引用，而 Nemotron 已把 system context、工具调用和 agent 操作写进 supervision。模型最终表现出的“人格”与交互方式，就来自这些局部写作选择的累积。
+
+\singleslide{slide-10.jpg}{FLAN 样本：从已有 NLP 数据集改写出的短任务与参考答案。}{10}
+
+读 FLAN 样本时先看任务来源：邮件主题、新闻分类、文章摘要等目标通常可验证、覆盖面广，但回答很像 benchmark gold label。它有效地教会模型识别任务并输出正确字段，却较少展示多轮澄清、面向用户的解释或工具协议。因此 FLAN 解决的是 task diversity，不等同于现代聊天助手的完整行为分布。
+
+\singleslide{slide-11.jpg}{Alpaca 样本：Self-Instruct 路线生成的简短、统一的 instruction-response pairs。}{11}
+
+Alpaca 把 instruction tuning 的规模扩张变得便宜，但图中健康建议、术语解释和短代码也暴露出 synthetic data 的共同特征：结构整齐、难度偏低、答案常像模板。大量此类样本可以快速建立“收到指令就回答”的接口，却可能让模型学到固定开场、列表化表达和缺少验证的自信语气。
+
+\singleslide{slide-12.jpg}{OpenAssistant 样本：更长、更像真实对话，也更容易携带未经核验的引用。}{12}
+
+OpenAssistant 的 monopsony 回答比 Alpaca 丰富得多，包含背景、劳动市场例子与文献。它展示了 detail 带来的价值，也埋下后文的知识风险：训练 loss 不会区分真实引用与流畅编造，只会奖励模型复现 demonstration。因而“答案更详细”既可能表示更强的帮助性，也可能把不可验证的事实写进模型的回答习惯。
+
+\singleslide{slide-13.jpg}{Nemotron 代码样本：instruction data 已扩展为带上下文、工具调用和状态的 agent trace。}{13}
+
+这页最值得看的不是 JavaScript 问题本身，而是 assistant response 中的 tool call、AGENTS.md 约束和任务状态。此时一条样本不再只是 $(x,y)$ 的问答，而是“观察环境→选择工具→读取结果→继续行动”的轨迹。若训练数据中的工具名、JSON schema、stop rule 或 role boundary 与部署环境不一致，模型即使懂任务，也会在协议层失败。
+
+\slidepair{slide-14.jpg}{slide-15.jpg}{跨数据集变化的可见属性，以及真正需要追踪的 style、knowledge、scale 与 safety 维度。}{14--15}
+
+Slides 14--15 把样本观察上升为审计维度。可见变化包括 chattiness、答案细节和 tool use；较不显眼但同样关键的是规模与 safety coverage。读这组图时要把“数据集更现代”拆成具体假设：它是否只是回答更长，是否真的提高 correctness，是否覆盖更多交互协议，是否通过 verifier，以及是否平衡了安全拒绝与正常帮助。
+
+令一条 SFT 样本为 $(x,y)$，其中 $x$ 包含 system/user context，$y$ 是目标 assistant response。最常见目标是 token-level negative log-likelihood：
+
+$$
+\mathcal{L}_{\mathrm{SFT}}(\theta)
+=-\sum_{t=1}^{|y|}\log \pi_\theta(y_t\mid x,y_{<t}).
+$$
+
+$\pi_\theta$ 是待微调策略；$y_t$ 是第 $t$ 个目标 token；通常只在 assistant tokens 上计算 loss，不对 user prompt 反向传播监督。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{L{0.18\textwidth}L{0.35\textwidth}L{0.37\textwidth}}
+\toprule
+样本字段 & 需要记录 & 常见失败 \\
+\midrule
+Source & human、synthetic、log、benchmark、repo & 来源泄漏、许可不清、重复放大 \\
+Correctness & verifier、tests、citation、人工复核 & 流畅错误被当作高质量 demonstration \\
+Protocol & system prompt、roles、tool schema、stop rule & 训练/推理模板不一致 \\
+Style & length、verbosity、format、hedging & 偏好评测把表面风格当能力 \\
+Difficulty & base-model success、task family、长尾 slice & 大量过易样本稀释学习信号 \\
+Provenance & generator/version、sampling、filter & 无法定位某类行为由哪批数据引入 \\
+\bottomrule
+\end{tabular}
+\caption{一条可审计 SFT 样本的最小账本。}
+\end{table}
+
+\begin{warningbox}{格式也是监督}
+Chat template、role token、tool-call JSON、thinking tag 和 stop token 都进入条件分布。训练与推理模板不一致会造成明显退化；把格式错误当成“小预处理问题”是常见事故。
+\end{warningbox}
+
+\subsection{Style：偏好评测很容易把“更长”误当成“更好”}
+
+上一小节说明 SFT 学到 interaction protocol，现在进一步看 response style。数据集在 chattiness、bullet density、hedging、citation style 和 response length 上差异巨大，而偏好评测对这些表面属性非常敏感。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{slide-16.jpg}
+\caption{不同 instruction-tuned models 的回答长度差异。}
+\figsource{CS336 Spring 2026 Lecture 15，Slide 16。}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{slide-17.jpg}
+\caption{Human/LM preference evaluations 中显著的 length effects。}
+\figsource{CS336 Spring 2026 Lecture 15，Slide 17。}
+\end{figure}
+
+\begin{knowledgebox}{读图：长度既是能力信号，也是 confounder}
+长回答更可能覆盖细节，因此在偏好比较中常获胜；但这不代表每个额外 token 都有价值。若 evaluator 把 length 当作 quality proxy，训练会鼓励冗长、重复和过度解释。正确分析应在长度分层内比较 correctness、helpfulness 和 calibration。
+\end{knowledgebox}
+
+Slides 16--17 的组合揭示了一条容易被隐藏的因果链：SFT corpus 先改变平均 response length，human 或 LLM judge 再把长度当成“更充分”的替代指标，偏好训练最终继续放大这一风格。要验证模型是否真的更强，应在相近长度下重做 pairwise comparison，并分别报告任务正确率、覆盖率、冗余率和用户明确要求的简洁度。
+
+\singleslide{slide-18.jpg}{传统 benchmark 对回答风格通常不敏感，因此无法替代交互式偏好评测。}{18}
+
+Slide 18 是必要的反例：很多 benchmark 只检查最终选项、短答案或 exact match，模型写一行还是十行都可能得到同一分数。因此“benchmark 不变、聊天偏好大幅上升”并不矛盾，它可能表示模型只学会了更讨喜的表达；反过来，偏好分数上升也不能自动证明底层知识或推理能力提高。
+
+\begin{warningbox}{评测提醒：先控制 style，再谈 capability gain}
+当候选模型长度分布差异明显时，至少同时做 length-controlled win rate、task-grounded correctness 与用户指令符合度评测。否则 SFT 和 RLHF 都会沿着 judge 最容易识别的表面特征优化，而不是沿着真正困难的正确性维度优化。
+\end{warningbox}
+
+\subsection{Knowledge extraction：微调不是可靠的知识写入器}
+
+本节从 style 转向 factuality。一个流行误解是：把模型不知道的长尾事实放进 SFT，模型就会稳定记住。实际结果常更复杂：新事实可能与 pretrained prior 冲突，少量样本不足以形成可泛化表示，模型反而学会在不确定时输出更具体的幻觉。
+
+\singleslide{slide-19.jpg}{OpenAssistant 的引用型回答：一条 demonstration 同时监督内容、引用习惯与确定语气。}{19}
+
+这页追问“模型究竟从样本中学到了什么”。它可能记住 monopsony 的定义，可能记住某篇论文，也可能只学会在学术问题后附上格式逼真的参考文献。Token-level likelihood 对三种解释一视同仁；如果 citation 没有经过检索或人工验证，SFT 会把“生成一个像引用的字符串”当成正确行为。数据审计因此必须把 factual claim 与 presentation style 分离。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{slide-20.jpg}
+\caption{Knowledge extraction 与 alignment：微调未知事实可能增加 hallucination。}
+\figsource{CS336 Spring 2026 Lecture 15，Slide 20。}
+\end{figure}
+
+\begin{warningbox}{不要混淆“激活已有知识”和“写入新知识”}
+SFT 很擅长教模型以某种格式调用 pretraining 中已有的能力；它不一定擅长用少量梯度可靠存储 tail knowledge。对知识密集任务，retrieval、tool use、continued pretraining 或 verifier 往往更稳健。
+\end{warningbox}
+
+老师在这里给出更具体的实践警告：对 base model 不熟悉的 tail knowledge 做少量 fine-tuning，不只可能“学不会”，还可能诱导模型编造参考文献或以更高确定性输出错误事实。原因不是模型获得了可靠数据库，而是训练把“被问到时给出具体答案”强化成了行为模式。
+
+\singleslide{slide-21.jpg}{Knowledge extraction 的三点结论：谨慎写入长尾事实、使用 correctness feedback、承认知识机制的复杂性。}{21}
+
+Slide 21 不应被读成“永远不要用 SFT 教知识”。更准确的结论是：当目标是激活预训练中已有的广泛知识，少量高质量 demonstration 很有效；当目标是注入罕见、可变或需要精确出处的事实，应优先考虑 retrieval、工具调用、continued pretraining，或至少引入可验证的 correctness reward。数据形态必须与知识更新目标匹配。
+
+\subsection{Safety：少量精心设计的行为样本可以很有效}
+
+从知识问题继续到 safety，目标发生了变化：不是让模型记住更多事实，而是让它在高风险场景中遵循 policy。课程展示的早期研究表明，几百条针对性强的 safety demonstrations 就能明显改变拒绝与重定向行为。
+
+\slidepair{slide-22.jpg}{slide-23.jpg}{部署模型面对的误导、诈骗等风险，以及公开模型报告中有限的 safety SFT 规模信息。}{22--23}
+
+Slide 22 用 misinformation 与 scams 说明 safety 不是抽象的“文明表达”，而是模型在真实分发渠道中可能放大的具体外部性。Slide 23 随即指出公开 recipe 的局限：即使 Llama 2 等报告给出“几千条安全样本”这样的量级，也很少完整披露场景 taxonomy、采样策略、拒绝标准和多轮升级方式。样本数因此不能单独代表 safety coverage。
+
+\slidepair{slide-24.jpg}{slide-25.jpg}{公开信息较完整的 safety pipeline，以及从真实用户场景中抽取训练案例的主线。}{24--25}
+
+这两页把 safety data 从静态红队题库还原为生产循环：先从用户请求与失败日志中发现风险场景，再聚类、改写、生成候选回答并由 policy 专家审核，最后把通过的 demonstrations 混入训练。读图时应关注闭环而不是单个数据集；部署后出现的新攻击、语言和工具权限会持续改变分布，因此 safety SFT 必须有版本与 provenance。
+
+\begin{knowledgebox}{实践经验：scenario extraction 比随机堆拒绝样本更重要}
+有效的 safety corpus 需要覆盖“正常帮助”和“危险协助”的决策边界。若只收集明显恶意请求，模型容易学成关键词拒绝器；若从真实用户轨迹抽取 borderline cases，并记录风险类型、允许的信息范围和理想重定向，模型才有机会学习细粒度 policy。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.82\textwidth]{slide-26.jpg}
+\caption{少量 safety-tuning samples 对有害行为指标的影响。}
+\figsource{CS336 Spring 2026 Lecture 15，Slide 26。}
+\end{figure}
+
+\begin{knowledgebox}{读图：为什么少量数据也能改变行为}
+Safety SFT 主要在已有表示上建立决策边界和 response pattern，因此样本效率可能很高。但 long tail 很大：不同语言、隐喻、multi-turn escalation、tool access 和 domain context 都会产生新 failure mode，不能把平均安全分数当成完结。
+\end{knowledgebox}
+
+老师特别强调，实验中大约 500 条精心选择的 safety examples 就能带来广泛下降的 unsafe following。这个结果支持“提取已有行为”的观点：base model 已在预训练中见过拒绝、风险解释和安全替代方案，SFT 主要教它何时调用这些模式。但这并不说明 500 条足以覆盖部署长尾；它只说明早期平均行为可以被少量高信号样本显著移动。
+
+\singleslide{slide-27.jpg}{SFT data 的综合结论：提取已有行为、谨慎注入事实、用少量高信号样本控制接口。}{27}
+
+Slide 27 将前面三条线合并：SFT 在激活预训练行为时最有效；即使训练事实正确，少量 tail knowledge 也可能伤害 factuality；style、instruction following 和 safety 等行为则常能被少量数据快速改变。工程上应先用 base-model probes 判断目标行为是否已存在，再决定使用 SFT、continued pretraining、retrieval 还是可验证反馈。
+
+\begin{importantbox}{SFT 数据的四个维度}
+评估一个 SFT corpus 时至少看：\textbf{coverage}（任务覆盖）、\textbf{quality}（正确性和推理质量）、\textbf{style}（长度与表达偏好）、\textbf{protocol}（roles、tools、formats）。只统计样本数无法解释模型差异。
+\end{importantbox}
+
+\subsection{Mid-training：为什么把 instruction data 混回大规模训练}
+
+前面讨论的是短轮 SFT；当 instruction data 数量和计算预算增加时，越来越多 recipe 把高质量 instruction-like data 混入 continued pretraining，再做一个较短 SFT round。这个阶段常被称为 mid-training 或 two-phase training。
+
+\slidepair{slide-28.jpg}{slide-29.jpg}{从“直接做几轮 gradient descent”到把 instruction data 作为大规模训练 mixture 的转变。}{28--29}
+
+Slide 28 先给出学术实验中常见的简单答案：在 demonstrations 上直接做 gradient descent 即可。但当团队拥有大量 instruction、code、math 和工具数据时，短轮 SFT 会受到 token budget、catastrophic forgetting 与 stage sensitivity 限制。Slide 29 因而提出三阶段 recipe：先预训练，再把 instruction-like data 混入较长的 continued-pretraining 阶段，最后做短而集中的 SFT。
+
+\begin{importantbox}{Mid-training 与最终 SFT 的职责不同}
+Mid-training 用较大 token budget 改变模型所处的数据分布，使 code、math、long-context 和 instruction format 成为稳定能力；最终 SFT 更像接口校准，集中统一 chat template、回答风格、tool protocol 与安全行为。二者虽然都可能使用 instruction data，但学习率、mixture 和验收指标不同。
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\textwidth]{slide-30.jpg}
+\caption{Mid-training/two-phase training：在 pretraining 与最终 SFT 之间加入高质量行为数据阶段。}
+\figsource{CS336 Spring 2026 Lecture 15，Slide 30。}
+\end{figure}
+
+Mid-training 的优势是能用更大 token budget 学习 code、math、long context 和 instruction format，同时避免最后 SFT 用过高 learning rate 扭曲 base capabilities。代价是 recipe 缺少公开细节，data mixture 和 stage boundary 往往决定成败。
+
+\begin{knowledgebox}{Nota de clase}
+讲者将 mid-training 描述为“很多公司都在用、但公开文档不足”的 common knowledge。工程上应把它视为 continued pretraining 的一个 domain shift，而不是神秘的新算法。
+\end{knowledgebox}
+
+课堂还给出一个容易忽略的工程原因：mid-training 通常远短于完整 pretraining，因此重新搜索 data mixture、比较 checkpoint 和做消融的成本更可控。也就是说，它不仅是能力阶段，也是把前面课程讲过的 mixture optimization 与 scaling-law 工具应用到 post-training 数据的一次机会。
+
+\subsection{本章小结}
+
+SFT 最擅长控制行为接口，而不是可靠注入长尾知识。高质量数据的关键维度包括 style、protocol、safety 和 task coverage；当规模扩大时，mid-training 把 instruction-like data 变成新的预训练分布。
+

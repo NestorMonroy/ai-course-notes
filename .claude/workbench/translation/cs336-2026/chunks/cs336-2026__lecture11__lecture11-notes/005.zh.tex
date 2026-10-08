@@ -1,0 +1,156 @@
+\section{muP in depth：为什么它想让超参跨宽度稳定}
+
+前面的案例多次使用 muP，但经验结果只有在机制清楚时才可迁移。本部分回到 maximum update parametrization 的两个量级条件：初始化 activation 保持 $\Theta(1)$，一次更新引起的 activation change 也保持 $\Theta(1)$；再检查现代 Transformer 组件如何破坏这些假设。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-044.jpg}
+\caption{Slide 44：Maximum update parametrization 深入：scale-invariant hyperparameter tuning 很诱人，但它如何工作、是否实践有效？}
+\figsource{CS336 Spring 2026 Lecture 11 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{术语消化：muP 与 SP}
+muP 是 maximum update parametrization，希望在宽度变化时保持 activation 和 update 的量级稳定，从而让小模型最优 learning rate 更可迁移。SP 是 standard parametrization，常见但宽度放大时训练动力学可能变化。Lecture 11 后半段问：现代 LM 里 muP 的理论条件哪些仍成立，哪些会被 RMSNorm、SwiGLU、exotic optimizers、weight decay 破坏。
+\end{importantbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-045.jpg}
+\caption{Slide 45：CerebrasGPT 从 0.1B 到 13B 用 Chinchilla recipe，核心发现是 muP 让 scaling 更稳定。}
+\figsource{CS336 Spring 2026 Lecture 11 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 45 的证据类型}
+CerebrasGPT 是 muP 实践证据之一：跨多个模型大小训练，比较稳定性和超参迁移。它说明 muP 不是纯理论玩具，但也不是所有现代架构自动适用的万能钥匙。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-046.jpg}
+\caption{Slide 46：什么是 muP：要求初始化时 activations 保持 \(\Theta(1)\)，一次梯度更新后 changes 也保持 \(\Theta(1)\)。}
+\figsource{CS336 Spring 2026 Lecture 11 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{读图：Slide 46 的两个条件}
+A1：随着层宽 \(n_l\) 改变，初始化时的 activations 不应爆炸或消失，应为 \(\Theta(1)\)。A2：一次梯度更新造成的 activation change 也应为 \(\Theta(1)\)。muP 的学习率和初始化规则就是围绕这两个量级条件设计的。
+\end{importantbox}
+
+\subsection{Deriving muP：condition A1}
+
+本节先处理初始化尺度。为了让宽度增加时每层 activation 不爆炸也不消失，需要根据输入输出维度缩放权重方差；推导的价值不是记住某个常数，而是学会从 producer/consumer 维度判断矩阵谱范数和输出范数如何随 width 改变。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-047.jpg}
+\caption{Slide 47：推导 muP 条件 A1，用深线性网络 \(h_l=W_lh_{l-1}\) 和矩阵 concentration 控制 activation。}
+\figsource{CS336 Spring 2026 Lecture 11 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读公式：Slide 47 的初始化尺度}
+若 \(W_l\sim \mathcal{N}(0,\sigma^2 I)\)，矩阵谱范数会随输入/输出维度变化。要让 \(\|h_l\|\) 不随宽度爆炸，就要让 \(\sigma\) 随 \(n_{l-1},n_l\) 缩放。标准 Xavier/He 初始化和 muP 都在解决“宽度变大时 activation 尺度如何保持”的问题。
+\end{knowledgebox}
+
+\subsection{Deriving muP：condition A2}
+
+Condition A1 只保证初始网络稳定，接下来还要保证训练更新不会随宽度变得过大或消失。本节把线性层梯度写成上游 loss gradient 与前层 activation 的 outer product，再选择 layer-specific learning-rate scaling，使 $\Delta W_l h_{l-1}$ 保持同一量级。
+
+
+\singleslide{slides-images/slide-048.jpg}{muP condition A2：约束权重更新诱导的 hidden-state change 在宽度扩展时保持 $\Theta(\sqrt n)$。}{48}
+推导把 SGD rank-one update、operator norm 与 activation norm 连接起来，用来决定 layer-wise learning-rate scaling。
+\begin{knowledgebox}{讲义补充：源 Slide 48 的 update 尺度}
+线性层更新可写为
+\[
+\Delta W_l = -\eta_l\, \nabla_{h_l}\ell\, h_{l-1}^{\top}.
+\]
+这说明 update 尺度由学习率 \(\eta_l\)、上游 loss gradient 和前一层 activation 共同决定。宽度变化时，若 \(\eta_l\) 不随维度调整，\(\Delta W_l h_{l-1}\) 可能不再是 \(\Theta(1)\)。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-049.jpg}
+\caption{Slide 49：A2 part 2：选择 LR 使 \(\|\Delta W_l\|_* \sqrt{n_{l-1}}=\Theta(\sqrt{n_l})\)。}
+\figsource{CS336 Spring 2026 Lecture 11 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读公式：Slide 49 的 learning-rate 缩放}
+这页的关键是把“update 后 activation change 保持常数”翻译成学习率缩放规则。不同层、不同参数类型可能需要不同 LR scaling；这也是 muP 比普通“所有参数同一 LR”更细的原因。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-050.jpg}
+\caption{Slide 50：muP mini recap：通过 \(W\) 和 \(\Delta W\) 控制 activations 与 changes；给出初始化和 Adam LR 规则。}
+\figsource{CS336 Spring 2026 Lecture 11 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{读图：Slide 50 的 baby muP 总结}
+muP 不是一条单独公式，而是一组随宽度缩放的初始化和学习率规则。其目标是让 activation scale 和 update scale 在不同宽度下可比。这样小模型调参才有希望迁移到大模型。
+\end{importantbox}
+
+\subsection{现代 LM 中 muP 的适用性}
+
+
+\singleslide{slides-images/slide-051.jpg}{muP 细节表：embedding、attention、MLP 与 softmax 层需要不同 initialization/LR multipliers。}{51}
+muP 不是“全局 LR 不变”，而是按参数角色规定 width scaling；实现遗漏任一特殊层都可能破坏 transfer。
+\begin{knowledgebox}{讲义补充：源 Slide 51 的细节意义}
+现代 Transformer 参数类型很多：embedding、attention projection、MLP matrix multiply、softmax/output linear。不同参数在前向和反向中的维度角色不同，因此 muP 需要按参数类型分别指定初始化和 LR scaling。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-052.jpg}
+\caption{Slide 52：Replicating muP：当宽度 scale 时，最优 LR 是否真的保持常数？}
+\figsource{CS336 Spring 2026 Lecture 11 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 52 的核心验证}
+muP 的实证检验不是看训练是否能跑，而是看不同宽度模型的 optimal LR 曲线是否对齐。如果最优 LR 随宽度稳定，muP 才实现了 scale-invariant tuning；如果漂移，说明理论假设或实现细节被破坏。
+\end{knowledgebox}
+
+
+\singleslide{slides-images/slide-053.jpg}{muP robustness 问题：SwiGLU、batch、初始化、RMSNorm、Lion 与 regularizers 都偏离简化理论。}{53}
+每个新组件都应在多个 widths 上做 hyperparameter-transfer test，不能仅因 backbone 使用 muP 就假设完整 recipe 稳定。
+\begin{warningbox}{讲义补充：源 Slide 53 是 muP 实践风险清单}
+muP 理论常在简化网络中推导，但现代 LM 包含 gating activations、normalization、attention details、复杂 optimizer 和大 batch。每个偏离都可能破坏 scale invariance。因此使用 muP 时要做 replication，而不是只引用理论。
+\end{warningbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-054.jpg}
+\caption{Slide 54：muP 对 RMSNorm gain 不鲁棒；learnable RMSNorm gains 会破坏 muP，但移除后损失很小。}
+\figsource{CS336 Spring 2026 Lecture 11 官方幻灯片。}
+\end{figure}
+
+\begin{knowledgebox}{读图：Slide 54 的工程修正}
+若 RMSNorm gain 是可学习参数，它可能引入随宽度变化的额外尺度自由度，使 muP 预期的 activation/update scaling 失效。一个务实修正是移除 learnable gains，并验证性能损失是否可接受。
+\end{knowledgebox}
+
+
+\singleslide{slides-images/slide-055.jpg}{muP 的边界：基于矩阵几何或特殊预条件的 exotic optimizers 可能需要新的 scaling rule。}{55}
+Muon 等 optimizer 改变更新的谱/矩阵结构，SGD/Adam 推导出的 width multiplier 不一定保持 feature-learning regime。
+\begin{knowledgebox}{讲义补充：源 Slide 55 的 optimizer 交互}
+muP 给的是参数化和 LR scaling 规则；optimizer 改变 update 方向和尺度。若 optimizer 使用 sign、orthogonalization 或其他非 AdamW 机制，muP 条件 A2 的 update 尺度可能重新变化，需要单独验证。
+\end{knowledgebox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-056.jpg}
+\caption{Slide 56：muP 对强 weight decay 不鲁棒，0.1 级别 weight decay 可能是显著 failure。}
+\figsource{CS336 Spring 2026 Lecture 11 官方幻灯片。}
+\end{figure}
+
+\begin{warningbox}{读图：Slide 56 的 weight decay 警告}
+Weight decay 直接改变权重尺度动态。强 decay 会和 muP 试图维持的尺度条件冲突，导致小模型 tuning 不再可迁移。做 muP 实验时，weight decay 不是次要超参，而是需要纳入 scaling check。
+\end{warningbox}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.86\textwidth]{slide-057.jpg}
+\caption{Slide 57：muP 是否有用？证据表明 muP 通常有用，SP 更不稳定，muP 参数化/初始化更容易调。}
+\figsource{CS336 Spring 2026 Lecture 11 官方幻灯片。}
+\end{figure}
+
+\begin{importantbox}{读图：Slide 57 的保守结论}
+muP 的价值是降低小模型到大模型超参迁移的不稳定性，而不是保证一次调参永远正确。当前证据支持“muP generally useful”，但现代 LM 组件会引入例外，需要针对架构做验证。
+\end{importantbox}
+

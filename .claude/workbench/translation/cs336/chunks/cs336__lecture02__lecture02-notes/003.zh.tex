@@ -1,0 +1,159 @@
+\section{Compute Accounting}
+
+\subsection{FLOPs 和 FLOP/s}
+
+FLOP 是一次浮点操作，比如一次加法或乘法。FLOP/s 则是硬件每秒能执行多少浮点操作。这里要避免两个缩写混淆：
+
+\begin{itemize}
+    \item \textbf{FLOPs}：算了多少浮点操作。
+    \item \textbf{FLOP/s}：每秒能做多少浮点操作。
+\end{itemize}
+
+\begin{importantbox}{资源核算的核心问题}
+训练时间约等于
+\[
+\frac{\text{总 FLOPs}}{\text{有效 FLOP/s}}.
+\]
+所以除了算法本身，我们还必须知道硬件的有效利用率。
+\end{importantbox}
+
+\subsection{线性模型的 FLOPs}
+
+先从最简单的线性模型开始。若有 \(B\) 个样本、每个样本维度为 \(D\)、输出维度为 \(K\)，那么前向传播的矩阵乘法
+\[
+Y = XW
+\]
+大约需要
+\[
+2BDK
+\]
+个 FLOPs。
+
+后向传播则需要对参数和中间激活分别做链式法则，整体大约是前向的两倍，所以线性层的完整训练步常用近似是：
+\[
+\text{forward} + \text{backward} \approx 6BDK.
+\]
+
+\begin{knowledgebox}{为什么是 6}
+粗略地看：
+\begin{itemize}
+    \item 前向：一次乘法 + 一次加法，约 \(2BDK\)
+    \item 反向：对参数和输入各再做一次类似的乘加，约 \(4BDK\)
+\end{itemize}
+合起来就是约 \(6BDK\)。
+\end{knowledgebox}
+
+\subsection{更一般的近似}
+
+对于 Transformer 这类模型，虽然结构更复杂，但一阶近似下，训练 FLOPs 仍可以写成：
+\[
+6 \times (\text{token 数}) \times (\text{参数量}).
+\]
+这也是前面 napkin math 的来源。
+
+\subsection{不同 GPU 代际的算力对比}
+
+选择硬件时，不仅要看峰值 FLOP/s，还要看内存容量和带宽。不同代际 GPU 的关键参数对比如下：
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.14\textwidth}p{0.13\textwidth}p{0.13\textwidth}p{0.14\textwidth}p{0.12\textwidth}p{0.12\textwidth}}
+\toprule
+\textbf{GPU} & \textbf{HBM} & \textbf{带宽} & \textbf{BF16 Peak} & \textbf{FP8 Peak} & \textbf{年份} \\
+\midrule
+V100 SXM & 32 GB & 900 GB/s & --- & --- & 2017 \\
+A100 SXM & 80 GB & 2.0 TB/s & 312 TF & --- & 2020 \\
+H100 SXM & 80 GB & 3.35 TB/s & 990 TF & 1979 TF & 2023 \\
+H200 SXM & 141 GB & 4.8 TB/s & 990 TF & 1979 TF & 2024 \\
+B200 SXM & 192 GB & 8.0 TB/s & 2250 TF & 4500 TF & 2025 \\
+\bottomrule
+\end{tabular}
+\caption{NVIDIA 数据中心 GPU 关键参数对比（TF = TFLOP/s）}
+\end{table}
+
+\begin{knowledgebox}{为什么 H200 和 H100 算力相同但价值更高}
+H200 和 H100 使用相同的 GPU 芯片（GH200），BF16 算力完全相同。H200 的优势在于将 HBM 从 80 GB 升级到 141 GB、带宽从 3.35 TB/s 升级到 4.8 TB/s。对于大模型推理（memory-bound 场景），更大的显存意味着可以加载更大的模型，更高的带宽意味着更快的 token 生成速度。
+\end{knowledgebox}
+
+\subsection{模型 FLOPs 利用率 MFU}
+
+硬件规格表给的是“峰值”性能，但真实训练不可能一直跑满。于是引入：
+\[
+\text{MFU} = \frac{\text{actual FLOP/s}}{\text{promised FLOP/s}}.
+\]
+
+MFU 不是一个抽象学术指标，而是直接决定你有多少硬件预算被真正转化成训练速度。一般来说，MFU 大于 0.5 已经算不错，尤其当矩阵乘法占主导时更是如此。
+
+\begin{warningbox}{为什么 float32 和 bfloat16 的 FLOP/s 不一样}
+硬件规格里的“峰值 FLOP/s”强依赖数据类型。很多 GPU 对 bfloat16/float16 的吞吐量远高于 float32，所以同一块卡上，切换 dtype 会显著改变你的实际吞吐。
+\end{warningbox}
+
+\subsection{Worked example: 把 FLOPs 直接换成训练时间}
+
+如果你知道总 FLOPs 和硬件的有效 FLOP/s，就可以直接估计 wall-clock time。以 70B 参数、15T tokens 的训练为例：
+\[
+6 \times 70\times 10^9 \times 15\times 10^{12}
+\]
+是总 FLOPs。若用 1024 张 H100，且把有效利用率设成 0.5，那么每天能提供的 FLOPs 就是：
+\[
+1024 \times 0.5 \times \text{H100 peak FLOP/s} \times 86400.
+\]
+把前者除以后者，就得到大约 144 天。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.24\textwidth}p{0.24\textwidth}p{0.23\textwidth}}
+\toprule
+\textbf{量} & \textbf{公式} & \textbf{含义} \\
+\midrule
+总 FLOPs & \(6NT\) & \(N\) 是参数量，\(T\) 是 token 数 \\
+日 FLOPs & \(G \cdot \eta \cdot 86400\) & \(G\) 是峰值 FLOP/s，\(\eta\) 是 MFU \\
+训练天数 & \(\text{总 FLOPs}/\text{日 FLOPs}\) & 直接换算 wall-clock \\
+\bottomrule
+\end{tabular}
+\caption{把算力预算换成时间，是训练计划里最实用的一个公式}
+\end{table}
+
+\begin{warningbox}{这个估算的局限}
+这个公式没有把通信、数据等待、checkpoint 开销、非矩阵乘法算子和 pipeline bubble 细节全部展开，所以它是预算级估算，不是秒级预测。
+\end{warningbox}
+
+\subsection{反向传播的 FLOPs}
+
+以两层线性模型为例：
+\[
+x \xrightarrow{w_1} h_1 \xrightarrow{w_2} h_2 \rightarrow \text{loss}.
+\]
+前向已经需要两次矩阵乘法。反向传播时，对 \(w_2\)、\(h_1\)、\(w_1\) 以及输入的梯度分别做链式法则，整体 FLOPs 约为前向的两倍。因此整个训练步常见的经验法则仍然是：
+\[
+\text{train step FLOPs} \approx 6 \times (\text{tokens}) \times (\text{parameters}).
+\]
+
+\begin{importantbox}{这个近似什么时候够用}
+只要你在做的是规模估算、预算估算、训练时长估算，这个近似就足够好。它不是为了证明定理，而是为了让你能快速判断“这个实验值不值得跑”。
+\end{importantbox}
+
+\subsection{Worked example: 两层线性网络的训练步}
+
+假设输入 \(x\in\mathbb{R}^{B\times D}\)，第一层权重 \(w_1\in\mathbb{R}^{D\times D}\)，第二层权重 \(w_2\in\mathbb{R}^{D\times K}\)。那么：
+\begin{itemize}
+    \item 前向：\(xw_1\) 再乘 \(w_2\)
+    \item 反向：对 \(w_2\)、\(h_1\)、\(w_1\) 求梯度
+\end{itemize}
+
+如果你把每个矩阵乘法都按 \(2\) FLOPs / 输出元素来算，最后就会得到“前向约 2 倍参数乘 token 数、反向约再来 4 倍”的总量级。这个例子说明：复杂模型的 FLOPs 近似，本质上是许多小矩阵乘法的叠加。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.2\textwidth}p{0.26\textwidth}p{0.22\textwidth}p{0.2\textwidth}}
+\toprule
+\textbf{阶段} & \textbf{主要操作} & \textbf{FLOPs 级别} & \textbf{含义} \\
+\midrule
+前向 & 两次 matmul & \(2BD(D+K)\) & 算预测 \\
+反向 & 对参数和输入求导 & 约为前向的 2 倍 & 传播梯度 \\
+训练步 & 前向 + 反向 & 约 \(6BD(D+K)\) & 完整更新一次 \\
+\bottomrule
+\end{tabular}
+\caption{两层线性网络是理解训练 FLOPs 的最小实例}
+\end{table}
+

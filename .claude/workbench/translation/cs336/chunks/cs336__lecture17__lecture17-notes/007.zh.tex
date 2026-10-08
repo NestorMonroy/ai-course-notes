@@ -1,0 +1,86 @@
+\section{从代码看实现}
+
+这一节专门把脚本中的核心函数拆开。这样做的目的不是为了复读代码，而是把“公式怎么落地”讲完整。
+
+\subsection{compute\_deltas: 把 reward 变成可训练信号}
+
+脚本里的 $\delta$ 不是单纯的 reward。它更像是一个 \textbf{update signal}，负责告诉优化器应该强化谁、压低谁。四种模式对应四种不同的信号整形方式：
+
+\begin{lstlisting}[caption={compute\_deltas: reward to update signal}]
+if mode == "rewards":
+    return rewards
+
+if mode == "centered_rewards":
+    mean_rewards = rewards.mean(dim=-1, keepdim=True)
+    return rewards - mean_rewards
+
+if mode == "normalized_rewards":
+    mean_rewards = rewards.mean(dim=-1, keepdim=True)
+    std_rewards = rewards.std(dim=-1, keepdim=True)
+    return (rewards - mean_rewards) / (std_rewards + 1e-5)
+
+if mode == "max_rewards":
+    max_rewards = rewards.max(dim=-1, keepdim=True)[0]
+    return torch.where(rewards == max_rewards, rewards, torch.zeros_like(rewards))
+\end{lstlisting}
+
+\begin{importantbox}{这段代码的本质}
+它没有改变 reward 的语义，只是在做“局部 baseline + 尺度控制 + winner emphasis”。这也是为什么 centered 和 normalized 往往比 raw rewards 更稳定。
+\end{importantbox}
+
+\subsection{compute\_loss: ratio, clipping, and conservative updates}
+
+如果只做最朴素的 policy gradient，那么 loss 就是
+\[
+\mathcal{L} = -\mathbb{E}[\log \pi(a \mid s)\,\delta].
+\]
+但为了更稳定，脚本引入了 old policy。此时就有 ratio：
+\[
+r = \frac{\pi_\theta(a\mid s)}{\pi_{\text{old}}(a\mid s)}.
+\]
+
+\begin{lstlisting}[caption={compute\_loss: naive / unclipped / clipped}]
+if mode == "naive":
+    return -einsum(log_probs, deltas, "...").mean()
+
+if mode == "unclipped":
+    ratios = torch.exp(log_probs - old_log_probs)
+    return -einsum(ratios, deltas, "...").mean()
+
+if mode == "clipped":
+    epsilon = 0.01
+    ratios = torch.exp(log_probs - old_log_probs)
+    unclipped = einsum(ratios, deltas, "...")
+    clipped = einsum(torch.clamp(ratios, 1 - epsilon, 1 + epsilon), deltas, "...")
+    return -torch.minimum(unclipped, clipped).mean()
+\end{lstlisting}
+
+\begin{warningbox}{为什么 clipped 更像“保守更新”}
+如果 ratio 变得太大，某些 response 会对梯度产生异常强的影响。clipping 的作用就是把这种放大效应截断，让单次 update 不至于把模型推得太远。
+\end{warningbox}
+
+\subsection{compute\_kl\_penalty: 保持和 reference model 的距离}
+
+除了 old policy，脚本还允许加入 reference model 的 KL 惩罚。它的作用不是替代 reward，而是作为“别漂太远”的约束。
+
+\begin{lstlisting}[caption={compute\_kl\_penalty}]
+return (torch.exp(ref_log_probs - log_probs)
+        - (ref_log_probs - log_probs)
+        - 1).sum(dim=-1).mean()
+\end{lstlisting}
+
+这一项的直觉很简单：如果 current policy 跟 reference model 越来越不像，就会付出额外代价。这样可以避免模型在追 reward 时把原来的语言能力和风格能力一起丢掉。
+
+
+\subsection{训练循环的职责边界}
+
+从系统角度看，这个训练 loop 实际上是在做四件互不混淆的事：
+\begin{itemize}
+    \item \textbf{sample}：用当前 policy 采样 responses；
+    \item \textbf{score}：用确定性的 reward 函数打分；
+    \item \textbf{freeze}：old policy / reference model 保持固定；
+    \item \textbf{update}：只更新 current policy。
+\end{itemize}
+
+这套分工很重要，因为它让“谁在提供信号、谁在被更新”保持清楚。只要这条边界混了，GRPO/PPO 这类方法就会变得很难调。
+
