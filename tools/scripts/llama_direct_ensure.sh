@@ -38,6 +38,9 @@ URL="${LLAMA_DIRECT_URL:-http://127.0.0.1:11500}"
 MODEL="${LLAMA_DIRECT_MODEL:-qwen35-9b-es-mx}"
 SHA=03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8
 JOB=llama-direct-es-mx
+# Por digest, nunca por etiqueta: el espejo th3rox/cache-ollama--ollama conserva este
+# mismo digest (runtime-images.json), verificado en Docker Hub el 2026-10-08.
+OLLAMA_IMAGE="${LLAMA_DIRECT_IMAGE:-docker.io/ollama/ollama@sha256:2a6e883b917fc543389599dae79918f5cac9e1438890506982f44aa4f5625d01}"
 
 alive() { curl -sf --noproxy '*' --max-time 5 "$URL/api/version" > /dev/null; }
 
@@ -55,7 +58,7 @@ else
         envs+=(--env "$name")
     done
     (cd "$THYROX" && bash bin/thyrox-bg start "$JOB" --grace 10 --work ai-course-notes:es-mx/llama-direct \
-        --kind workbench --image docker.io/ollama/ollama:0.35.0 --network host \
+        --kind workbench --image "$OLLAMA_IMAGE" --network host \
         --mount "$THYROX/.thyrox/models/artifacts/sha256-$SHA.gguf:/root/.ollama/models/blobs/sha256-$SHA:rw" \
         "${envs[@]}" --cpus 4 --memory-mib 9216 -- serve)
     for _ in $(seq 60); do alive && break; sleep 2; done
