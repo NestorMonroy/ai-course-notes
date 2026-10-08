@@ -104,3 +104,15 @@ nada que publicar antes de crear ES-B y ES-C.
 
 ES-A limita sus lazos: llama-direct sólo el lote 26 (`llama_direct_ensure.sh --to`),
 Opus por el pool sólo el 34. Lotes 27–30 → ES-B, 31–33 → ES-C.
+
+## VMs creadas (2026-10-08T01:47Z)
+
+| VM | Sesión | Rama (ai-course-notes y thyrox) | Lotes | Prompt |
+|---|---|---|---|---|
+| ES-A | `session_011tfzc28GV3swU7BCpC5uQr` | `feature/es-mx-translation` · `feature/ai-course-notes-l1` | 26 (llama-direct), 34 (Opus) | — |
+| ES-B | `session_016p3UBXf4mRLCtP2rC41jKy` | `feature/es-mx-vm-b-local-worker` | 27–30 | `prompts/es-b.md` |
+| ES-C | `session_019WeSB4iBHjpqYB9as4SQBH` | `feature/es-mx-vm-c-local-worker` | 31–33 | `prompts/es-c.md` |
+
+Las dos parten de `4822fd5` (ai-course-notes) y `ddc729130` (thyrox). La plantilla
+común es `prompts/worker-template.md` (`__VM__`, `__vm__`, `__LOTES__`); una VM nueva se
+crea con ella, su propia rama `feature/es-mx-vm-<x>-local-worker` y lotes disjuntos.
