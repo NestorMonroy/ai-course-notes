@@ -141,3 +141,14 @@ Integradas en `feature/es-mx-translation` (`9fd582a5`, `632a26a6`): prepararon s
 sin modelo. Siguen `BLOCKED`: sus sesiones no pueden adjuntar thyrox (`add_repo` y
 `git clone` rechazados por el clasificador de permisos). Requiere aprobación de la persona
 en cada sesión o recrearlas con thyrox como segunda fuente.
+
+## Corrección: el primer PROVEN era falso (07:2xZ)
+
+La versión de 06:4xZ contaba como respuesta todo `<n>.json` con `runtime: llama-direct`.
+Las 142 «respuestas» de `translate/20261008T062530/` eran errores `Connection refused`:
+el runner falló el lote entero en un segundo cuando `reconcile-orphans` retiró el
+servidor (H-THYROX-599). La prueba ahora sólo cuenta resultados sin `subtype` de error y
+con el fragmento entre marcadores, informa `errors=N`, y elige la última ejecución con al
+menos una respuesta real. Con eso, el lote 26 da `LOCAL_WORKER PROVEN` sobre **3
+traducciones reales** (`outputs/proof-es-a-kaist-cs492d.tsv`), no 142. Ritmo medido en
+la ejecución en curso: 339–1171 s por fragmento; 142 pendientes.

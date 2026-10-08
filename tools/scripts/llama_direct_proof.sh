@@ -70,16 +70,21 @@ grep -q "^$MODEL\(:latest\)\?$" <<<"$(tr ',' '\n' <<<"$loaded")" || missing+=("m
 bench="$CONSUMER/.claude/workbench/translation/$batch/translate"
 run=""
 for d in $(ls -td "$bench"/*/ 2>/dev/null); do
-    if grep -lqs '"runtime": "llama-direct"' "$d"*.json; then run="$d"; break; fi
+    if jq -e 'select(.runtime == "llama-direct" and .subtype == null)' "$d"*.json >/dev/null 2>&1; then run="$d"; break; fi
 done
-served="" responses=0 remote=no
+served="" responses=0 errors=0 remote=no
 if [[ -n "$run" ]]; then
-    served="$(jq -r 'select(.runtime == "llama-direct") | .model' "$run"*.json 2>/dev/null | sort | uniq -c | awk '{print $2"×"$1}' | paste -sd, -)"
-    responses="$(grep -ls '"runtime": "llama-direct"' "$run"*.json | wc -l)"
+    # Sólo cuenta una traducción real: sin `subtype` de error y con el fragmento entre
+    # marcadores. Un error de conexión también lleva runtime llama-direct; contarlo
+    # dio un PROVEN falso cuando el servidor murió a mitad del lote (H-THYROX-599).
+    real='select(.runtime == "llama-direct" and (.subtype == null) and ((.result // "") | test("(?m)^<<<ES$")))'
+    served="$(jq -r "$real | .model" "$run"*.json 2>/dev/null | sort | uniq -c | awk '{print $2"×"$1}' | paste -sd, -)"
+    responses="$(jq -r "$real | .model" "$run"*.json 2>/dev/null | wc -l)"
+    errors="$(jq -r 'select(.runtime == "llama-direct" and .subtype != null) | .subtype' "$run"*.json 2>/dev/null | wc -l)"
     jq -r '.model // empty' "$run"*.json 2>/dev/null | grep -qiE 'claude|anthropic|gpt|gemini' && remote=yes
 fi
 emit RUN_DIR "${run:-none}"
-emit ACTUAL_SERVED_MODEL "${served:-none} (responses=$responses)"
+emit ACTUAL_SERVED_MODEL "${served:-none} (responses=$responses, errors=${errors:-0})"
 emit REMOTE_MODEL_IN_RESULTS "$remote"
 (( responses > 0 )) || missing+=("sin-respuestas")
 [[ "$remote" == no ]] || missing+=("modelo-remoto")
