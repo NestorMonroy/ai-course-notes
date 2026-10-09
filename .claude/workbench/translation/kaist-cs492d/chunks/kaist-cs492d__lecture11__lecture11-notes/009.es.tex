@@ -1,0 +1,58 @@
+\section{Detalles de implementación de la guía bajo el marco DDPM}
+
+Para ayudar a los lectores a comprender cómo funciona DPS a nivel de código, esta sección desglosa detalladamente cómo se combinan los pasos de desruido de DDPM con el término de guía.
+
+\subsection{Repaso del proceso inverso de DDPM}
+
+El proceso inverso (reverse process) de DDPM define cómo muestrear $x_{t-1}$ a partir de $x_t$:
+
+$$
+x_{t-1} = \frac{1}{\sqrt{\alpha_t}} \left( x_t - \frac{1-\alpha_t}{\sqrt{1-\bar{\alpha}_t}} \epsilon_\theta(x_t, t) \right) + \sigma_t z
+$$
+
+Donde $z \sim \mathcal{N}(0, I)$ es un término de ruido aleatorio, $\sigma_t$ es la desviación estándar del ruido correspondiente al paso de tiempo, y $\epsilon_\theta$ es la red preentrenada para predecir el ruido.
+
+Esta fórmula puede reescribirse en términos de la forma del estimador Tweedie $\hat{x}_0$:
+
+$$
+x_{t-1} = c_1(t) \cdot x_t + c_2(t) \cdot \hat{x}_0 + \sigma_t z
+$$
+
+Donde $c_1(t)$ y $c_2(t)$ son coeficientes que dependen únicamente del cronograma de ruido (noise schedule). El punto clave es: \textbf{$x_{t-1}$ es una función afín de $\hat{x}_0$, y $\hat{x}_0$ es a su vez una función de $x_t$}.
+
+\subsection{Método de inyección del término de guía}
+
+La operación central de la guía consiste en añadir un término de corrección al $x_{t-1}$ de cada paso:
+
+$$
+x_{t-1}^{\text{guided}} = x_{t-1}^{\text{unguided}} - \zeta_t \cdot \nabla_{x_t} \left\| y - \mathcal{A}(\hat{x}_0) \right\|_2^2
+$$
+
+Donde $\zeta_t$ es el tamaño de paso (step size) asociado al paso de tiempo.
+
+\begin{warningbox}{El cálculo del gradiente requiere retropropagación}
+Nota que el gradiente en $\nabla_{x_t} \| y - \mathcal{A}(\hat{x}_0) \|_2^2$ se calcula con respecto a $x_t$, mientras que $\hat{x}_0$ depende de $x_t$ (a través de la fórmula Tweedie y la red de predicción de ruido $\epsilon_\theta$). Por lo tanto, calcular este gradiente implica realizar una retropropagación a través de $\epsilon_\theta$, lo que significa:
+\begin{enumerate}
+    \item Cada paso de guía requiere una retropropagación adicional, con un costo computacional aproximadamente 2-3 veces mayor que la propagación hacia adelante.
+    \item Los parámetros de la red de predicción de ruido no se actualizan; simplemente utilizamos la información del gradiente para modificar la trayectoria de muestreo.
+    \item Es necesario habilitar el rastreo de gradientes en PyTorch mediante \texttt{x\_t.requires\_grad\_(True)}.
+\end{enumerate}
+\end{warningbox}
+
+\subsection{Consideraciones prácticas sobre el cronograma del tamaño de paso}
+
+\begin{knowledgebox}{Estrategia de selección del tamaño de paso $\zeta_t$}
+La elección del tamaño de guía $\zeta_t$ es crucial para la calidad del resultado:
+\begin{itemize}
+    \item \textbf{Demasiado grande}: Los resultados generados cumplen estrictamente con la restricción $\mathcal{A}(x_0) = y$, pero pueden desviarse de la variedad (manifold) de los datos, generando artefactos.
+    \item \textbf{Demasiado pequeño}: Los resultados son realistas pero no satisfacen suficientemente las condiciones de restricción.
+    \item \textbf{Estrategias comunes}: Utilizar un tamaño de paso constante o una atenuación lineal según el paso de tiempo (tamaño de paso pequeño al principio, ya que la estimación de $\hat{x}_0$ es imprecisa; tamaño de paso grande al final, ya que la estimación es más precisa).
+    \item \textbf{Estrategias adaptativas}: Ajustar dinámicamente el tamaño de paso según el valor de $\| y - \mathcal{A}(\hat{x}_0) \|$.
+\end{itemize}
+En la práctica, generalmente se requiere realizar una búsqueda en cuadrícula sobre tareas específicas para determinar el tamaño de paso óptimo.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Bajo el marco DDPM, la implementación de la guía DPS se reduce a añadir un término de corrección de gradiente después de cada paso de desruido. Los detalles de implementación clave incluyen la retropropagación del gradiente, la selección del tamaño de paso y la gestión del costo computacional.
+
