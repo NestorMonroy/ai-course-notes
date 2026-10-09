@@ -1,0 +1,61 @@
+\section{Derivación de DPM-Solver}
+
+\subsection{Estructura semilineal de la PF-ODE}
+
+Volviendo a la PF-ODE de los modelos de difusión. Mediante el uso de la red predictora de ruido $\boldsymbol{\epsilon}_\theta$ y la parametrización del modelo de difusión variacional, la PF-ODE puede expresarse como:
+$$\frac{d\mathbf{x}}{dt} = \underbrace{f(t) \cdot \mathbf{x}(t)}_{\text{parte lineal}} + \underbrace{g(t) \cdot \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t)}_{\text{parte no lineal}}$$
+
+Donde:
+\begin{itemize}
+    \item $f(t)$: coeficiente de arrastre calculable analíticamente mediante $\alpha_t, \sigma_t$
+    \item $g(t)$: coeficiente difusivo correlacionado calculable analíticamente mediante $\alpha_t, \sigma_t$
+    \item $\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t)$: red predictora de ruido, que es la única parte no lineal (requiere evaluación de una red neuronal)
+\end{itemize}
+
+\begin{importantbox}{Observación central de DPM-Solver}
+La PF-ODE posee una estructura semilineal: la parte lineal $f(t) \cdot \mathbf{x}$ puede resolverse con \textbf{precisión} mediante un integrador exponencial; la única aproximación numérica necesaria involucra la integración no lineal relacionada con $\boldsymbol{\epsilon}_\theta$. Esto significa que podemos minimizar al máximo el error numérico.
+\end{importantbox}
+
+\subsection{Resolución mediante integrador exponencial}
+
+Aplicando la solución exacta de la ODE semilineal de la sección anterior y tomando $\lambda_t$ como variable de integración (sustituyendo el tiempo $t$), obtenemos:
+$$\mathbf{x}_t = \frac{\alpha_t}{\alpha_s} \mathbf{x}_s - \alpha_t \int_{\lambda_s}^{\lambda_t} e^{-\lambda}\, \hat{\boldsymbol{\epsilon}}_\theta(\lambda)\, d\lambda$$
+
+Donde:
+\begin{itemize}
+    \item $\frac{\alpha_t}{\alpha_s} \mathbf{x}_s$: solución exacta de la parte lineal
+    \item $\hat{\boldsymbol{\epsilon}}_\theta(\lambda) = \boldsymbol{\epsilon}_\theta(\mathbf{x}_{\tau(\lambda)}, \tau(\lambda))$: se considera a la red predictora de ruido como una función de $\lambda$
+    \item Intervalo de integración $[\lambda_s, \lambda_t]$: corresponde al tiempo $[s, t]$
+\end{itemize}
+
+\begin{knowledgebox}{Significado del cambio de variable $t \to \lambda$}
+Sustituir la variable de integración desde el tiempo $t$ por el log-SNR $\lambda$ ofrece dos ventajas: (1) simplifica las expresiones complejas de los coeficientes $\alpha_t, \sigma_t$, transformando el núcleo de la integral en un simple $e^{-\lambda}$; (2) $\lambda$ se distribuye uniformemente en el espacio de programación del ruido, constituyendo una variable de integración más natural. El ponente enfatiza que esta simplificación hace que la ODE, originalmente compleja, resulte sorprendentemente concisa.
+\end{knowledgebox}
+
+Tras una simplificación adicional, la fórmula central de DPM-Solver es:
+$$\mathbf{x}_t = \frac{\alpha_t}{\alpha_s} \mathbf{x}_s - \sigma_t \int_{\lambda_s}^{\lambda_t} e^{\lambda - \lambda_t}\, \boldsymbol{\epsilon}_\theta(\mathbf{x}_\lambda, \lambda)\, d\lambda$$
+
+Esta fórmula transforma el problema de resolver la ODE en: cómo aproximar la integral ponderada de la predicción del ruido. Las aproximaciones de distintos órdenes corresponden a DPM-Solver de distintos órdenes.
+
+\subsection{Aproximación de primer orden: DPM-Solver-1 es DDIM}
+
+La aproximación más simple asume que, dentro del intervalo de integración $[\lambda_s, \lambda_t]$, la predicción del ruido $\boldsymbol{\epsilon}_\theta$ es constante (desarrollo de Taylor de orden cero):
+$$\boldsymbol{\epsilon}_\theta(\mathbf{x}_\lambda, \lambda) \approx \boldsymbol{\epsilon}_\theta(\mathbf{x}_s, s) \quad \forall \lambda \in [\lambda_s, \lambda_t]$$
+
+Sustituyendo en la fórmula de la integral y calculando la integral definida de $e^{-\lambda}$, se obtiene:
+$$\mathbf{x}_t = \frac{\alpha_t}{\alpha_s} \mathbf{x}_s - \sigma_t (e^{h} - 1) \boldsymbol{\epsilon}_\theta(\mathbf{x}_s, s)$$
+
+Donde $h = \lambda_t - \lambda_s$.
+
+\begin{importantbox}{DDIM es DPM-Solver-1}
+Desarrollando la expresión anterior en términos de $\alpha_t, \sigma_t$, se verifica que esto coincide exactamente con la fórmula de muestreo determinista de DDIM! Es decir, DDIM no realiza una discretización de Euler \textbf{global} sobre la PF-ODE, sino que aprovecha la estructura semilineal para realizar una \textbf{integración exponencial}: trata la parte lineal con precisión y realiza solo una aproximación de orden cero sobre la predicción del ruido. Esto explica por qué DDIM funciona mejor que el método de Euler directo.
+\end{importantbox}
+
+\begin{warningbox}{Malentendido común: DDIM no es el método de Euler básico}
+Muchas personas creen que DDIM consiste en discretizar la PF-ODE mediante el método de Euler. En realidad, DDIM realiza una \textbf{integración exponencial} de primer orden sobre la PF-ODE: trata con precisión la parte lineal y aplica solo una aproximación de orden cero a la predicción del ruido no lineal. Esta sutil diferencia tiene implicaciones esenciales en la precisión, especialmente cuando se utilizan pocas iteraciones.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La derivación de DPM-Solver aprovecha la estructura semilineal de la PF-ODE: trata la parte lineal con precisión mediante un integrador exponencial y limita la aproximación numérica a la integración de la predicción del ruido. El DPM-Solver de primer orden es equivalente a DDIM.
+
