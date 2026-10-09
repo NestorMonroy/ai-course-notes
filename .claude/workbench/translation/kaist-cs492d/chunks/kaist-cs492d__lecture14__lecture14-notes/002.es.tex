@@ -1,0 +1,90 @@
+\section{MDLM: Modelo de lenguaje con difusión enmascarada}
+
+\subsection{Objetivos del diseño e ideas centrales}
+
+El objetivo de MDLM (Masked Diffusion Language Model) es diseñar un modelo de lenguaje que soporte la \textbf{generación paralela}. A diferencia de los modelos AR, que generan palabra por palabra, MDLM parte de una secuencia completamente enmascarada y recupera progresivamente el texto completo.
+
+Intuición del proceso de generación:
+\begin{enumerate}
+    \item Estado inicial: una secuencia de longitud $L$ con todos los elementos enmascarados $[\text{M}, \text{M}, \ldots, \text{M}]$
+    \item Se introduce la secuencia en un Transformer bidireccional similar a BERT
+    \item El modelo predice las palabras para todas las posiciones enmascaradas
+    \item Se revelan selectivamente algunas predicciones y el resto se vuelve a enmascarar
+    \item Se repiten los pasos 2--4 hasta que todas las posiciones estén reveladas
+\end{enumerate}
+
+\begin{importantbox}{Diferencia fundamental entre MDLM y AR}
+\begin{itemize}
+    \item \textbf{Modelos AR}: utilizan \textbf{atención causal}, donde cada token depende únicamente del contexto a su izquierda, generando uno por uno
+    \item \textbf{MDLM}: utiliza \textbf{atención bidireccional}, donde cada token depende del contexto completo, permitiendo generar múltiples palabras simultáneamente
+\end{itemize}
+\end{importantbox}
+
+\subsection{Proceso hacia adelante: ruido enmascarado}
+
+El marco central de los modelos de difusión consiste en definir un \textbf{proceso de corrosión hacia adelante} conocido $q$ y luego aprender su \textbf{proceso inverso} $p_\theta$.
+
+En MDLM, el proceso hacia adelante es la operación de \textbf{enmascaramiento}. Dado un texto limpio $\mathbf{x}$, se genera una secuencia con ruido mediante el enmascaramiento progresivo de las palabras.
+
+\begin{importantbox}{Nivel de señal}
+MDLM utiliza un nivel de señal $\alpha_t \in [0, 1]$ para controlar el grado de ruido:
+\begin{itemize}
+    \item $\alpha_t = 1$: oración completamente limpia $\mathbf{x}$ (tiempo $t = 0$)
+    \item $\alpha_t = 0$: secuencia completamente enmascarada (tiempo $t = 1$)
+\end{itemize}
+El proceso desde la oración limpia hasta el estado de ruido intermedio $\mathbf{z}_t$ es muy simple: para cada palabra limpia se lanza una moneda con probabilidad $1 - \alpha_t$ de reemplazarla por un token enmascarado.
+\end{importantbox}
+
+Formalmente, el proceso hacia adelante se expresa como:
+
+$$q(\mathbf{z}_t | \mathbf{x}) = \prod_{i=1}^{L} q(z_t^{(i)} | x^{(i)})$$
+
+donde cada posición opera independientemente:
+
+$$q(z_t^{(i)} | x^{(i)}) = \begin{cases} \alpha_t & \text{si } z_t^{(i)} = x^{(i)} \text{（se mantiene la palabra original）} \\ 1 - \alpha_t & \text{si } z_t^{(i)} = \text{M} \text{（se reemplaza por enmascaramiento）} \end{cases}$$
+
+\begin{itemize}
+    \item $\mathbf{x}$: secuencia de texto limpio
+    \item $\mathbf{z}_t$: secuencia de ruido correspondiente al tiempo $t$
+    \item $\alpha_t$: nivel de señal en el tiempo $t$
+    \item $L$: longitud de la secuencia
+    \item M: token especial de enmascaramiento
+\end{itemize}
+
+\subsection{Posterior inversa: función de desenmascaramiento}
+
+\begin{importantbox}{Posterior inversa}
+Esta es una de las fórmulas más importantes del curso. La posterior inversa $q(\mathbf{z}_s | \mathbf{z}_t, \mathbf{x})$ describe cómo pasar de un estado más ruidoso $\mathbf{z}_t$ a uno más limpio $\mathbf{z}_s$ (donde $s < t$), dado el secuencia con ruido $\mathbf{z}_t$ y el texto limpio $\mathbf{x}$.
+\end{importantbox}
+
+Para cada posición $i$, el comportamiento de la posterior inversa depende del estado actual de dicha posición:
+\begin{itemize}
+    \item \textbf{Token revelado} ($z_t^{(i)} \neq \text{M}$): permanece inalterado, es decir, $z_s^{(i)} = z_t^{(i)}$
+    \item \textbf{Token enmascarado} ($z_t^{(i)} = \text{M}$): se desenmascara a la palabra limpia $x^{(i)}$ con probabilidad $\frac{\alpha_s - \alpha_t}{1 - \alpha_t}$; de lo contrario, permanece enmascarado
+\end{itemize}
+
+\begin{warningbox}{La posterior inversa por sí misma no se puede usar directamente para generar}
+Obsérvese que $q(\mathbf{z}_s | \mathbf{z}_t, \mathbf{x})$ requiere conocer el texto limpio $\mathbf{x}$, pero durante la generación desconocemos exactamente cuál es $\mathbf{x}$. Por tanto, el desafío consiste en aprender una \textbf{red de desruido} $x_\theta(\mathbf{z}_t, t)$ que estime $\mathbf{x}$ y, posteriormente, sustituir ese estimado en la fórmula de la posterior inversa para obtener $p_\theta(\mathbf{z}_s | \mathbf{z}_t)$.
+\end{warningbox}
+
+\subsection{Proceso de generación $p_\theta$}
+
+Durante la inferencia, utilizamos el Transformer desruido entrenado $x_\theta$ para aproximar el proceso inverso:
+
+\begin{enumerate}
+    \item Se introduce la secuencia con ruido $\mathbf{z}_t$ en un Transformer bidireccional
+    \item El modelo produce una \textbf{distribución de categorías} sobre el vocabulario para cada posición enmascarada
+    \item Se muestrea de dicha distribución y se rellenan todas las posiciones enmascaradas
+    \item Se vuelven a enmascarar selectivamente algunas predicciones (dependiendo del paso temporal, se decide cuántas retener)
+    \item Se repite el proceso anterior hasta que todas las posiciones estén reveladas
+\end{enumerate}
+
+\begin{knowledgebox}{Operación de copiado}
+El Transformer de MDLM incluye un mecanismo de copia: para las posiciones que ya están limpias (no enmascaradas), el modelo copia directamente la entrada como salida sin modificaciones. Esto implica que la pérdida de entropía cruzada se calcula efectivamente \textbf{únicamente en las posiciones enmascaradas}, lo cual simplifica considerablemente el entrenamiento.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El diseño central de MDLM puede resumirse así: (1) el proceso hacia adelante convierte el texto en una secuencia totalmente enmascarada mediante enmascaramiento progresivo; (2) se aprende un Transformer bidireccional para estimar el texto limpio; (3) se utiliza la fórmula de la posterior inversa para desenmascarar progresivamente y generar el texto.
+
+\newpage
