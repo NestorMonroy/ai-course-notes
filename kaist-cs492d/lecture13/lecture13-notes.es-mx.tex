@@ -1,0 +1,657 @@
+\documentclass[a4paper]{article}
+
+% Paquetes básicos
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+% FandolSong no cubre algunos caracteres de nombres (U+73FA); WenQuanYi Zen Hei sí.
+\usepackage[AutoFallBack=true]{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+\setCJKfallbackfamilyfont{\CJKrmdefault}{WenQuanYi Zen Hei}
+% polyglossia no traduce los nombres de listados.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\usepackage{float}
+
+% Cajas de resaltado
+\newtcolorbox{knowledgebox}[1]{
+    enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, attach boxed title to top left={yshift=-2mm, xshift=2mm},
+    boxrule=1pt, sharp corners
+}
+
+\newtcolorbox{importantbox}[1]{
+    enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black,
+    coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+\newtcolorbox{warningbox}[1]{
+    enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+% Listados
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    stringstyle=\color{red!60!black},
+    commentstyle=\color{green!60!black},
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    captionpos=b,
+    extendedchars=true
+}
+
+% Metadatos de la portada
+\newcommand{\notetitle}{KAIST CS492D Lecture 13: Score Distillation / Course Wrap-Up}
+\newcommand{\noteauthors}{Elaboradas a partir de la clase de Minhyuk Sung}
+\newcommand{\notedate}{Otoño de 2025}
+\newcommand{\videochannel}{Minhyuk Sung (KAIST)}
+\newcommand{\videopublishdate}{2025}
+\newcommand{\videoduration}{60 minutos}
+\newcommand{\videourl}{https://www.youtube.com/watch?v=xVcHTUYQms4}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+\begin{document}
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}
+\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}
+\vspace{0.8cm}
+{\large \noteauthors\par}
+\vspace{0.3cm}
+{\large \notedate\par}
+\vspace{1.2cm}
+
+\ifdefempty{\videocoverpath}{
+{\small Al generar las notas, indique la ruta local de la portada del video.\par}
+}{
+\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par
+}
+
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\ifdefempty{\videourl}{}{
+\textbf{Enlace del video}: \href{\videourl}{\nolinkurl{\videourl}}\par
+}
+\end{tcolorbox}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+%% ==================== Inicio del contenido ====================
+
+
+````
+\section{Introducción: del previo en 2D a la generación multimodal}
+
+Esta clase es la última de KAIST CS492D (Diffusion Models and Their Applications). El profesor Minhyuk Sung ya discutió en las clases anteriores la teoría básica de los modelos de difusión (DDPM, DDIM, difusión en tiempo continuo, conversión SDE/ODE, Flow Matching) y técnicas como la guía en el momento del inferencia. Esta clase se centra en una pregunta clave: \textbf{cómo utilizar modelos de difusión de imágenes 2D preentrenados para generar datos de otras modalidades que nunca han aparecido en los datos de entrenamiento}—especialmente contenido 3D.
+
+\begin{knowledgebox}{Resumen de la sección: de la guía a la destilación}
+En las clases anteriores, discutimos cómo inyectar señales de guía (guidance) durante la fase de inferencia para que el modelo de difusión genere muestras que cumplan con restricciones específicas. El Score Distillation Sampling (SDS) de esta clase va un paso más allá: no realiza generación guiada dentro de un dominio de datos existente, sino que destila el conocimiento del modelo de difusión preentrenado hacia un dominio de datos completamente nuevo.
+\end{knowledgebox}
+
+\subsection{Motivación: la brecha en la escala de los datos}
+
+Los modelos de difusión han obtenido un gran éxito en la generación de imágenes y videos; una de las razones principales es la escala de los datos de entrenamiento: los conjuntos de datos de imágenes ya alcanzan miles de millones (por ejemplo, LAION-5B tiene unas 5 mil millones de imágenes). Sin embargo, para otros tipos de datos, la escala es muy inferior:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Tipo de dato} & \textbf{Escala máxima del conjunto público} & \textbf{Analogía} \\
+\midrule
+Imagen 2D & $\sim$5 mil millones & Población mundial \\
+Modelo 3D & $\sim$10 millones & Población de Seúl \\
+Estructura molecular & Millones & Menor \\
+Datos de movimiento/acción & Decenas de miles & Muy pocos \\
+\bottomrule
+\end{tabular}
+\caption{Comparativa de la escala de conjuntos públicos por tipo de dato}
+\end{table}
+
+\begin{importantbox}{Pregunta clave}
+Los modelos de difusión de imágenes cuentan con una gran capacidad generativa y diversidad gracias a los datos de entrenamiento de miles de millones. Pero para campos como modelos 3D, gráficos vectoriales, CAD o estructuras moleculares, es difícil obtener conjuntos de entrenamiento de la misma magnitud. \textbf{¿Podemos aprovechar el conocimiento que ya han aprendido los modelos de difusión de imágenes para generar estos datos multimodales?}
+\end{importantbox}
+
+La relevancia práctica de esta pregunta es muy amplia: escenarios como imágenes médicas (entrenar modelos de diagnóstico con pocas muestras), diseño industrial (generación de modelos CAD) y comercio electrónico (presentación 3D de productos) se enfrentan a la escasez de datos.
+
+\subsection{Resumen de la sección}
+
+Esta sección introduce la motivación principal del Score Distillation: los modelos de difusión de imágenes preentrenados poseen un rico conocimiento previo aprendido en miles de millones de imágenes. SDS ofrece una manera de transferir ese conocimiento hacia otros campos como el 3D, incluso cuando el dominio objetivo no cuenta con datos de entrenamiento a gran escala.
+
+\newpage
+\section{Antecedentes de renderizado neuronal}
+
+Antes de discutir la **destilación de puntajes**, es necesario comprender un prerrequisito clave: el **renderizado diferenciable**.
+
+\subsection{De imágenes multivistas a reconstrucción 3D}
+
+La tarea fundamental del renderizado neuronal consiste en: dado un conjunto de imágenes desde múltiples perspectivas de una escena, reconstruir su representación en 3D de manera que las imágenes generadas al renderizarla desde cualquier nueva perspectiva sean lo más realistas posible.
+
+\begin{knowledgebox}{Idea central del renderizado neuronal}
+El renderizado neuronal utiliza \textbf{redes neuronales} como representación de la escena en 3D. Los parámetros de la red $\theta$ codifican implícitamente la información geométrica y de apariencia de la escena. Dado un conjunto de parámetros de perspectiva de cámara $\pi$, se puede generar una imagen correspondiente en 2D mediante la función de renderizado diferenciable $g(\theta, \pi)$.
+
+El trabajo representativo incluye NeRF (Neural Radiance Fields) y 3D Gaussian Splatting.
+\end{knowledgebox}
+
+\subsection{Objetivo de optimización de la reconstrucción 3D tradicional}
+
+Dados $N$ imágenes de referencia desde perspectivas conocidas $\{I_i\}_{i=1}^{N}$, el objetivo de optimización para la reconstrucción en 3D es muy directo:
+
+$$
+\theta^* = \arg\min_{\theta} \sum_{i=1}^{N} \| g(\theta, \pi_i) - I_i \|_2^2
+$$
+
+Donde:
+\begin{itemize}
+    \item $\theta$: parámetros de la representación en 3D (por ejemplo, los pesos de la red en NeRF)
+    \item $\pi_i$: parámetros de cámara de la $i$-ésima imagen (posición y orientación)
+    \item $g(\theta, \pi_i)$: imagen renderizada desde la perspectiva $\pi_i$
+    \item $I_i$: imagen de referencia real desde la misma perspectiva
+\end{itemize}
+
+\begin{warningbox}{La calidad de reconstrucción depende del número de imágenes de entrada}
+El renderizado neuronal tradicional requiere un gran número de imágenes de entrada (generalmente $\sim$100) para obtener una reconstrucción en 3D de alta calidad. Cuando el número de imágenes disminuye a 10, 5 e incluso 1, la calidad de reconstrucción cae drásticamente: las áreas no cubiertas por los ángulos de visión presentan artefactos evidentes (como regiones negras o desenfocadas).
+\end{warningbox}
+
+\subsection{Desafíos en aplicaciones prácticas}
+
+El renderizado neuronal enfrenta diversos desafíos en aplicaciones prácticas:
+
+\begin{itemize}
+    \item \textbf{Velocidad de reconstrucción}: gran carga computacional, no adecuado para aplicaciones en tiempo real
+    \item \textbf{Velocidad de renderizado}: se requiere un renderizado rápido para soportar navegación interactiva
+    \item \textbf{Escala de la escena}: desde objetos individuales hasta escenas a nivel urbano
+    \item \textbf{Objetos dinámicos}: cómo manejar objetos en movimiento dentro de la escena
+    \item \textbf{Número de imágenes de entrada}: cómo lograr una reconstrucción de alta calidad con el mínimo número posible de imágenes
+\end{itemize}
+
+Especialmente en escenarios de comercio electrónico (como la exhibición de productos en 3D para compras en línea), los usuarios esperan poder generar modelos 3D rápidamente a partir de solo unas pocas fotografías. Esto exige una reconstrucción de alta calidad con un número mínimo de imágenes de entrada.
+
+\subsection{Resumen de la sección}
+
+El renderizado neuronal proporciona un puente desde imágenes 2D hacia representaciones en 3D, cuyo núcleo es la \textbf{función de renderizado diferenciable}. Los métodos tradicionales dependen de grandes cantidades de imágenes de entrada; sin embargo, al incorporar conocimientos previos externos (como el conocimiento de modelos preentrenados de difusión), se puede reducir significativamente el número de imágenes necesarias e incluso lograr generación 3D con cero ejemplos.
+
+\newpage
+
+\section{De la guía con CLIP a la guía con modelos de difusión}
+
+\subsection{Generación 3D guiada por CLIP}
+
+Antes del surgimiento de Score Distillation, los investigadores exploraron primero el uso de conocimientos previos del modelo CLIP (Contrastive Language-Image Pre-training) para asistir en la reconstrucción 3D.
+
+\begin{knowledgebox}{Introducción al modelo CLIP}
+CLIP es un modelo de alineación visual-lingüística propuesto por OpenAI, que mapea imágenes y textos al mismo espacio de embeddings. Al calcular la distancia entre los vectores de embeddings, se puede medir el grado de alineación semántica entre una imagen y una descripción textual. CLIP se entrena en grandes conjuntos de datos de pares imagen-texto y posee una potente capacidad de transferencia sin ejemplos (zero-shot).
+\end{knowledgebox}
+
+\subsubsection{Reconstrucción 3D con pocos ejemplos}
+
+La estrategia que utiliza la idea de CLIP es la siguiente:
+\begin{itemize}
+    \item Para las vistas que tienen imágenes de referencia: se utiliza la pérdida de reconstrucción L2 tradicional.
+    \item Para las vistas que no tienen imágenes de referencia: se utiliza la distancia CLIP como función de pérdida.
+\end{itemize}
+
+Por ejemplo, al reconstruir un modelo de bulldozer (推土机), sabemos que, sin importar desde qué ángulo se observe, debería ser siempre ``bulldozer''. Por lo tanto, para las vistas que carecen de imágenes de referencia, podemos exigir que la imagen renderizada esté tan cerca como sea posible del texto ``bulldozer'' en el espacio de embeddings de CLIP.
+
+\subsubsection{Generación 3D sin ejemplos}
+
+El caso límite de la generación 3D guiada por CLIP es: \textbf{completamente sin ninguna imagen de referencia}, generando un modelo 3D basándose únicamente en una descripción textual. En este escenario, todas las vistas utilizan la pérdida CLIP:
+
+$$
+\theta^* = \arg\min_{\theta} \sum_{\pi \sim \mathcal{P}} d_{\text{CLIP}}(g(\theta, \pi),\ \text{``a bulldozer''})
+$$
+
+\begin{importantbox}{Cambio de paradigma: de la reconstrucción a la generación}
+Cuando el número de imágenes de entrada disminuye hasta cero, la naturaleza de la tarea cambia fundamentalmente: deja de ser ``reconstrucción 3D'' para convertirse en ``generación 3D''. Esto representa el primer intento importante de crear contenido 3D utilizando conocimientos previos de 2D.
+
+Trabajo representativo: DreamFields (2021) — logró la generación texto a 3D utilizando únicamente la pérdida CLIP y NeRF.
+\end{importantbox}
+
+\subsection{Limitaciones de la guía con CLIP}
+
+Aunque la generación 3D guiada por CLIP abrió un nuevo camino, la calidad de salida es limitada; los modelos 3D generados suelen ser bastante toscos y carecen de detalles. Esto se debe a que CLIP es esencialmente un modelo discriminador (discriminator), que solo puede determinar si una imagen coincide con un texto, pero no puede ofrecer una guía detallada sobre ``cómo debería verse la imagen''.
+
+\begin{warningbox}{Limitaciones de CLIP como función de pérdida}
+La distancia en el espacio de embeddings de CLIP solo puede medir la alineación a nivel semántico y no puede proporcionar una guía de generación a nivel de píxel. Al optimizar con la pérdida CLIP, el modelo podría producir resultados ``semánticamente correctos pero visualmente poco naturales'' (problema de adversarial examples).
+\end{warningbox}
+
+\subsection{Pregunta central: ¿Podemos reemplazar CLIP con modelos de difusión?}
+
+CLIP es un discriminador natural —ingresa una imagen y un texto, y devuelve una puntuación de coincidencia. Sin embargo, los modelos de difusión son generadores —ingresan un texto y producen una imagen.
+
+\textbf{Pregunta}: ¿Cómo se puede utilizar un modelo generador como discriminador?
+
+Si se utilizara GAN, esto sería sencillo —el propio GAN incluye un discriminador—. Pero los modelos de difusión no tienen un discriminador explícito. Score Distillation Sampling (SDS) fue propuesto precisamente para resolver este problema.
+
+\subsection{Resumen de la sección}
+
+La generación 3D guiada por CLIP (como DreamFields) demostró la viabilidad de generar contenido 3D utilizando conocimientos previos de 2D, pero está limitada porque CLIP solo puede ofrecer una guía a nivel semántico. La idea siguiente más natural es: reemplazar CLIP con modelos de difusión que posean un conocimiento más rico a nivel de píxel, logrando así resultados de generación de mayor calidad.
+
+\newpage
+\section{Score Distillation Sampling (SDS)}
+
+\subsection{Idea central: usar la función de pérdida del modelo de difusión como métrica de alineación}
+
+La intuición central de SDS es sorprendentemente simple: \textbf{utilizar directamente la función de pérdida de entrenamiento del modelo de difusión como una medida de calidad generativa}.
+
+\begin{importantbox}{Insight clave de SDS}
+Una vez completado el entrenamiento del modelo de difusión, para datos reales $x_0$ dentro de la distribución de entrenamiento, la pérdida de predicción de ruido convergerá a un valor muy pequeño:
+$$
+\mathcal{L}_{\text{diffusion}}(x_0) = \mathbb{E}_{t, \epsilon}\left[\| \epsilon_\phi(x_t, t, c) - \epsilon \|_2^2\right] \approx \text{valor pequeño}
+$$
+Esto significa que podemos utilizar esta pérdida al revés: \textbf{si una imagen hace que la predicción de ruido del modelo de difusión preentrenado sea pequeña, entonces esa imagen se acerca a la distribución real de datos}.
+\end{importantbox}
+
+\subsection{Flujo algorítmico de SDS}
+
+El proceso de optimización de SDS consta de cuatro pasos que se ejecutan en bucle en cada iteración:
+
+\begin{enumerate}
+    \item \textbf{Renderizado}: Renderizar la representación 3D actual desde una perspectiva aleatoria $\pi$ para obtener una imagen 2D
+    $$x_0 = g(\theta, \pi)$$
+
+    \item \textbf{Adición de ruido hacia adelante}: Muestrear aleatoriamente el paso de tiempo $t$ y el ruido $\epsilon$, y ejecutar el proceso hacia adelante en la imagen renderizada
+    $$x_t = \sqrt{\bar{\alpha}_t}\, x_0 + \sqrt{1 - \bar{\alpha}_t}\, \epsilon$$
+
+    \item \textbf{Predicción de ruido}: Utilizar el modelo de difusión preentrenado para predecir el ruido
+    $$\hat{\epsilon} = \epsilon_\phi(x_t, t, c)$$
+    donde $c$ es la condición textual (por ejemplo, ``una bulldozer'')
+
+    \item \textbf{Propagación hacia atrás}: Calcular la pérdida $\| \hat{\epsilon} - \epsilon \|_2^2$ y propagar el gradiente a través de la función de renderizado $g$ hasta los parámetros de la representación 3D $\theta$
+\end{enumerate}
+
+\subsection{Derivación del gradiente y aproximación de Jacobiano}
+
+Calculando el gradiente sobre la función de pérdida anterior respecto a $\theta$ y aplicando la regla de la cadena, obtenemos:
+
+$$
+\nabla_\theta \mathcal{L} = (\hat{\epsilon} - \epsilon) \cdot \underbrace{\frac{\partial \hat{\epsilon}}{\partial x_t}}_{\text{Jacobiano del U-Net}} \cdot \frac{\partial x_t}{\partial x_0} \cdot \frac{\partial g(\theta, \pi)}{\partial \theta}
+$$
+
+Los tres factores corresponden respectivamente a:
+\begin{itemize}
+    \item $(\hat{\epsilon} - \epsilon)$: residuo de la predicción de ruido
+    \item $\frac{\partial \hat{\epsilon}}{\partial x_t}$: Jacobiano de la red que predice el ruido (U-Net)
+    \item $\frac{\partial x_t}{\partial x_0} \cdot \frac{\partial g}{\partial \theta}$: derivadas del proceso hacia adelante y de la función de renderizado
+\end{itemize}
+
+\begin{importantbox}{Simplificación central del gradiente de SDS}
+En la práctica, \textbf{el Jacobiano del U-Net $\frac{\partial \hat{\epsilon}}{\partial x_t}$ se aproxima como una matriz identidad} (es decir, se ignora directamente). Esto trae dos grandes beneficios:
+
+\begin{enumerate}
+    \item \textbf{Ahorro de cómputo}: Calcular el Jacobiano del U-Net requiere realizar una propagación hacia atrás para todos los parámetros de la red; esta es la parte con mayor costo computacional de todo el flujo. Saltarla permite ahorrar significativamente tiempo y memoria gráfica.
+    \item \textbf{Calidad prácticamente inalterada}: Los experimentos demuestran que la calidad generativa es casi idéntica independientemente de si se incluye o no el término del Jacobiano.
+\end{enumerate}
+
+El gradiente simplificado de SDS es:
+$$
+\nabla_\theta \mathcal{L}_{\text{SDS}} \approx \mathbb{E}_{t,\epsilon}\left[w(t)(\hat{\epsilon} - \epsilon) \frac{\partial g(\theta, \pi)}{\partial \theta}\right]
+$$
+donde $w(t)$ es una función de peso relacionada con el paso de tiempo.
+\end{importantbox}
+
+\begin{warningbox}{SDS carece de garantías teóricas estrictas}
+El profesor Minhyuk Sung señala explícitamente que SDS es un método ``muy práctico pero sin una explicación teórica perfecta''. No se deriva como el gradiente óptimo desde alguna función objetivo definida, sino que es un diseño heurístico práctico. No obstante, su rendimiento en experimentos es excelente.
+\end{warningbox}
+
+\subsection{¿Por qué se llama ``Score Distillation''?}
+
+\begin{knowledgebox}{Interpretación del nombre: Score Distillation Sampling}
+\textbf{Score} (puntuación): La predicción de ruido aprendida por el modelo de difusión $\epsilon_\phi$ está estrechamente relacionada con la función score $\nabla_x \log p(x)$ de la distribución de datos. El residuo de la predicción de ruido $(\hat{\epsilon} - \epsilon)$ proporciona esencialmente una dirección sobre ``cómo debería ajustarse los datos para acercarse más a la distribución real''.
+
+\textbf{Distillation} (destilación): Distilamos el conocimiento aprendido por el modelo de difusión preentrenado (en forma de score/predicción de ruido) hacia una nueva representación (por ejemplo, un modelo 3D).
+
+\textbf{Sampling}: Todo el proceso puede verse como un proceso de muestreo especial: no se realiza en el espacio de imágenes, sino que se ``muestra'' en el espacio de parámetros $\theta$ mediante descenso de gradiente una representación 3D que haga que todas las vistas renderizadas se acerquen a la distribución real de imágenes.
+\end{knowledgebox}
+
+\subsection{Requisito clave de SDS: renderizado diferenciable}
+
+El gradiente de SDS debe propagarse hacia atrás a través de la función de renderizado $g$ hasta los parámetros de la representación 3D $\theta$; por lo tanto, \textbf{la función de renderizado debe ser diferenciable}. Esto es precisamente donde radica la importancia del Neural Rendering: tanto NeRF como 3D Gaussian Splatting proporcionan tuberías de renderizado diferenciables.
+
+\subsection{Resumen de la sección}
+
+SDS logra un diseño ingenioso que utiliza la función de pérdida de los modelos de difusión preentrenados como objetivo de optimización para la generación multimodal. Su simplificación central (ignorar el Jacobiano del U-Net) hace que el algoritmo sea tanto eficiente como efectivo. Aunque carece de un análisis teórico completo, ha logrado resultados impresionantes en la práctica.
+
+\newpage
+\section{DreamFusion: una aplicación representativa de SDS}
+
+\subsection{Resumen de DreamFusion}
+
+DreamFusion (Poole et al., 2022) es el primer trabajo que aplicó con éxito SDS para la generación 3D a partir de texto. Realiza la transferencia de conocimiento de un modelo difusivo de imagen a texto preentrenado, Imagen, a un NeRF, logrando generar modelos 3D únicamente a partir de descripciones textuales.
+
+\begin{importantbox}{Flujo de trabajo de DreamFusion}
+El flujo de trabajo de DreamFusion es el siguiente:
+\begin{enumerate}
+    \item Inicializar una representación aleatoria de NeRF, $\theta$
+    \item En cada iteración:
+    \begin{itemize}
+        \item Seleccionar aleatoriamente un punto de vista de cámara $\pi$
+        \item Renderizar la imagen 2D bajo dicho punto de vista, $x_0 = g(\theta, \pi)$
+        \item Calcular el gradiente de SDS y actualizar $\theta$
+    \end{itemize}
+    \item Tras miles de iteraciones, $\theta$ converge a un modelo 3D de alta calidad
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Ejemplos de resultados generados}
+
+DreamFusion puede generar modelos 3D basándose en diversas descripciones textuales creativas, tales como:
+\begin{itemize}
+    \item ``a fox wearing a sweater'' (una zorra usando un suéter)
+    \item ``a ghost eating a hamburger'' (un fantasma comiendo una hamburguesa)
+    \item ``a DSLR photo of a peacock on a surfboard'' (una fotografía de cámara DSLR de un pavón sobre una tabla de surf)
+\end{itemize}
+
+Estos son escenarios creativos para los cuales es casi imposible encontrar modelos 3D correspondientes en internet; sin embargo, dado que los modelos difusivos de imagen se han entrenado con miles de millones de imágenes, han ``visto'' suficientes conceptos visuales relevantes y, por lo tanto, pueden generar resultados 3D coherentes guiados por SDS.
+
+\subsection{Aplicaciones amplias de SDS}
+
+SDS no se limita a la generación 3D; su marco puede extenderse a cualquier tarea que cumpla con las siguientes condiciones:
+\begin{enumerate}
+    \item Los datos objetivo pueden convertirse en imágenes mediante algún \textbf{mapeo diferenciable}
+    \item Existe un \textbf{modelo difusivo preentrenado} disponible
+\end{enumerate}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Aplicación} & \textbf{Tipo de dato} & \textbf{Función de renderizado $g$} \\
+\midrule
+Texto a 3D & NeRF/Malla 3D & Renderizador 3D diferenciable \\
+Generación de gráficos vectoriales & Parámetros de trazos SVG & Rasterización diferenciable \\
+Generación 4D & Escenas 3D dinámicas & Renderizador de video \\
+Edición 3D & Modelos 3D existentes & Renderizador 3D diferenciable \\
+Generación de texturas & Texturas superficiales mapeadas & Mapeo UV y renderizado \\
+\bottomrule
+\end{tabular}
+\caption{Instanciaciones del marco SDS en diversos escenarios de aplicación}
+\end{table}
+
+\begin{knowledgebox}{De la difusión de imágenes a la difusión de video}
+La idea de SDS también puede combinarse con \textbf{modelos difusivos de video} preentrenados para generar contenido 4D (escenas 3D dinámicas). Al utilizar los fotogramas de video como objetivo de renderizado, se aprovecha el conocimiento sobre la consistencia temporal aprendido por el modelo difusivo de video para generar escenas 3D dinámicas.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+DreamFusion representa una aplicación semillera de SDS en la generación 3D a partir de texto, demostrando el enorme potencial de transferir grandes previas 2D al dominio 3D. El marco de SDS posee una alta generalidad y puede extenderse a diversas modalidades como gráficos vectoriales, escenarios 4D, texturas y audio.
+
+\newpage
+\section{Problemas y desafíos de SDS}
+
+Aunque SDS ha logrado resultados impresionantes, también presenta algunos problemas inherentes.
+
+\subsection{El problema Janus (problema multifacético)}
+
+El modo de falla más famoso de SDS es el \textbf{Janus Problem} (nombrado por el dios romano bifronte Janus): los modelos 3D generados parecen ver hacia adelante desde cada perspectiva, lo que resulta en un solo objeto mostrando múltiples caras.
+
+\begin{warningbox}{Causa raíz del problema Janus}
+La causa fundamental del problema Janus reside en la contradicción entre el prior 2D y la consistencia 3D:
+
+\begin{enumerate}
+    \item Los modelos de difusión de imágenes se entrenan en imágenes de \textbf{una sola perspectiva}, por lo que no poseen el concepto de consistencia 3D.
+    \item SDS optimiza los resultados de renderizado de cada perspectiva de forma independiente; cada perspectiva tiende a generar la imagen más ``típica'' de esa descripción textual.
+    \item Para objetos con una cara claramente definida, como rostros humanos, la imagen más ``típica'' es casi siempre desde la perspectiva frontal.
+    \item El resultado es que cada cara del modelo 3D se convierte en una cara frontal, generando múltiples rostros.
+\end{enumerate}
+
+En esencia, esto se debe a que los modelos de difusión 2D solo poseen un prior de \textbf{observación local} (imágenes de una sola perspectiva), mientras que la generación 3D requiere restricciones de \textbf{consistencia global}.
+\end{warningbox}
+
+\subsection{Compromiso entre el peso CFG y la diversidad}
+
+Al utilizar SDS, generalmente es necesario establecer un peso de Classifier-Free Guidance (CFG) muy alto para obtener una salida limpia.
+
+\begin{knowledgebox}{Efecto de doble filo de un alto peso de CFG}
+Un peso de CFG elevado contrae la distribución generativa hacia una región estrecha que coincide altamente con la descripción textual:
+
+\begin{itemize}
+    \item \textbf{Ventaja}: mayor calidad de salida y mayor coherencia con la descripción textual.
+    \item \textbf{Desventaja}: la diversidad disminuye drásticamente; todos los resultados generados tienden a parecerse entre sí.
+\end{itemize}
+
+Cómo mantener la diversidad al mismo tiempo que se garantiza la calidad constituye una pregunta abierta importante para SDS.
+\end{knowledgebox}
+
+\subsection{Otras limitaciones}
+
+\begin{itemize}
+    \item \textbf{Problema de sobreexposición}: las texturas generadas por SDS suelen ser excesivamente saturadas y carecen de naturalidad.
+    \item \textbf{Optimización inestable}: debido a la perspectiva aleatoria y el ruido aleatorio en cada iteración, el proceso de optimización puede oscilar.
+    \item \textbf{Costo computacional}: cada iteración requiere una propagación hacia adelante del modelo de difusión; todo el proceso de optimización necesita miles de iteraciones.
+    \item \textbf{Calidad geométrica}: la geometría 3D generada a menudo no es suficientemente detallada, especialmente en las zonas ocultas.
+\end{itemize}
+
+\begin{warningbox}{De un prior local a una consistencia global: dificultad fundamental}
+Todos los problemas de SDS pueden rastrearse a una dificultad fundamental única: utilizar un \textbf{prior de observación 2D local} para restringir la \textbf{estructura 3D global}. Este es un problema mal planteado (ill-posed): infinitas estructuras 3D pueden producir renderizados 2D que parezcan razonables a simple vista. Un solo prior 2D no es suficiente para eliminar esta ambigüedad; se requiere introducir conocimiento previo específico del dominio 3D.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Los principales desafíos de SDS incluyen el problema Janus, texturas sobreexpuestas y el ajuste del peso CFG. La raíz de estos problemas radica en que la localidad del prior 2D no puede restringir completamente la consistencia global de la estructura 3D. Trabajos posteriores (como las diversas versiones mejoradas de SDS: VSD, ISM, etc.) se dedican a mitigar estos problemas.
+
+\newpage
+
+\section{Síntesis y ampliación}
+
+\subsection{Repaso del contenido del curso}
+
+El curso KAIST CS492D se centró esta sesión en la teoría y aplicaciones de los modelos de difusión y Flow, cubriendo dos grandes áreas:
+
+\subsubsection{Fundamentos teóricos}
+
+\begin{enumerate}
+    \item \textbf{DDPM} (Denoising Diffusion Probabilistic Models): marco base de los modelos de difusión, definiendo el proceso de adición de ruido hacia adelante y el proceso de eliminación de ruido hacia atrás.
+    \item \textbf{DDIM} (Denoising Diffusion Implicit Models): método de muestreo determinista que acelera el proceso de inferencia.
+    \item \textbf{Difusión en tiempo continuo}: extensión del proceso de difusión discreto al marco de EDO/SDE en tiempo continuo.
+    \item \textbf{Conversión entre SDE y ODE}: establece la conexión entre muestreo estocástico y determinista.
+    \item \textbf{Flow Matching}: método más flexible de modelado generativo que conecta los modelos de difusión con la teoría de transporte óptimo.
+\end{enumerate}
+
+\subsubsection{Expansión de aplicaciones}
+
+\begin{enumerate}
+    \item \textbf{Guía en tiempo de inferencia} (Inference-Time Guidance): control del proceso generativo mediante señales de guía sin necesidad de volver a entrenar el modelo.
+    \item \textbf{Destilación de puntuaciones} (Score Distillation): transferencia del conocimiento de modelos de difusión preentrenados a otros dominios de datos, logrando generación cruzada de modalidades.
+    \item \textbf{Generación 3D}: creación de contenido 3D aprovechando conocimientos previos de modelos de difusión de imágenes 2D.
+\end{enumerate}
+
+\begin{importantbox}{Filosofía del diseño del curso}
+El diseño del curso para este semestre enfatiza un enfoque progresivo desde los fundamentos hasta las aplicaciones: primero se comprende la esencia matemática de los modelos (teoría de probabilidades, ecuaciones diferenciales estocásticas, transporte óptimo), y luego se explora cómo aplicar estas herramientas teóricas a problemas prácticos (edición de imágenes, generación 3D, transferencia cruzada de modalidades).
+\end{importantbox}
+
+\subsection{Futuras direcciones: difusión discreta y modelos multimodales}
+
+Al final del curso, la profesora Minhyuk Sung planteó una pregunta reflexiva:
+
+\begin{importantbox}{Autoregresivo vs. Difusión: el límite se difumina}
+La visión tradicional sostenía que:
+\begin{itemize}
+    \item Los \textbf{modelos autoregresivos} son ideales para datos de secuencia \textbf{discreta} como el texto.
+    \item Los \textbf{modelos de difusión/Flow} son ideales para datos de alta dimensión \textbf{continuos} como imágenes y videos.
+\end{itemize}
+
+Sin embargo, este límite está rompiéndose:
+\begin{itemize}
+    \item Los modelos autoregresivos también generan imágenes de alta calidad mediante tokenización de imágenes (por ejemplo, VQ-VAE).
+    \item Los modelos de difusión discreta extienden el proceso de difusión al espacio de datos discretos.
+    \item Modelos multimodales como GPT-4o y Gemini pueden generar texto e imágenes simultáneamente.
+\end{itemize}
+\end{importantbox}
+
+\subsubsection{Modelos de difusión discretos}
+
+Los modelos de difusión no se limitan a datos continuos; también pueden aplicarse a datos discretos. El proceso hacia adelante de la difusión discreta no implica agregar ruido gaussiano, sino degradar gradualmente los datos mediante una \textbf{cadena de Markov discreta} (por ejemplo, reemplazo aleatorio de tokens). Esto abre la puerta para aplicar modelos de difusión al texto, código y secuencias moleculares.
+
+\subsubsection{Generación multimodal unificada}
+
+La investigación de vanguardia actual explora unificar el texto y las imágenes en un mismo marco generativo:
+
+\begin{knowledgebox}{Dos paradigmas para arquitecturas multimodales unificadas}
+\begin{enumerate}
+    \item \textbf{Tokenizar todo}: discretización de imágenes en tokens (mediante VQ-VAE, etc.) y procesamiento conjunto con tokens de texto mediante modelos autoregresivos. Ejemplo representativo: la serie GPT-4o.
+    \item \textbf{Arquitectura híbrida}: decodificación autoregresiva para la parte de texto y decodificación por difusión/Flow para la parte de imágenes, conectadas a través de un espacio de representación compartido. Ejemplo representativo: Transfusion.
+\end{enumerate}
+
+Cuál paradigma prevalecerá sigue siendo una pregunta abierta.
+\end{knowledgebox}
+
+\subsection{Sugerencias para investigadores}
+
+La profesora Minhyuk Sung ofreció varias recomendaciones al finalizar el curso:
+
+\begin{enumerate}
+    \item \textbf{Practicar}: existen numerosas implementaciones de código abierto para técnicas como SDS; se recomienda ejecutar personalmente el código, observar los resultados y comprender los patrones de falla.
+    \item \textbf{Enfocarse no solo en la generación, sino también en la edición}: la edición 3D (modificación de contenido 3D existente) puede tener un valor práctico mayor que la generación ex nihilo.
+    \item \textbf>Pensar transversalmente>: el marco de SDS no se limita al contenido visual; existen aplicaciones potenciales en audio, moléculas y movimiento.
+    \item \textbf{Seguir tendencias de vanguardia}: las áreas de fusión entre autoregresivo y difusión, así como modelos multimodales unificados, merecen atención continua.
+\end{enumerate}
+
+\subsection{Convertir el contenido de esta clase en un plan de investigación}
+
+Si se considera esta clase como un punto de partida para la investigación en lugar de una simple revisión, lo más importante es descomponer aún más ``¿qué puede hacer SDS'' en rutas experimentales ejecutables. Muchos proyectos de texto a 3D fracasan no por falta de conocimiento previo de modelos grandes, sino porque no se diseñan claramente las tres cosas: \textbf{representación, optimización y evaluación}.
+
+\begin{knowledgebox}{Diseño experimental mínimo para proyectos SDS}
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.16\textwidth} p{0.28\textwidth} p{0.34\textwidth}}
+\toprule
+Módulo & Selección mínima viable & Observaciones que deben registrarse prioritariamente \\
+\midrule
+Representación 3D & NeRF o 3D Gaussian Splatting & Coherencia de perspectiva, suavidad geométrica, estabilidad del entrenamiento \\
+Priorio 2D & Modelos de difusión condicionados por texto tipo Stable Diffusion / Imagen & Sensibilidad al prompt, saturación de color, recuperación de detalles \\
+Estrategia de optimización & Baseline SDS + regularización + muestreo de cámara & Frecuencia Janus, deriva de parches, velocidad de convergencia \\
+Método de evaluación & Renderizado multivista + puntuación CLIP/usuario + imprimibilidad geométrica & ¿El resultado solo ``parece'' o tiene verdadera consistencia 3D? \\
+\bottomrule
+\end{tabular}
+\caption{Construcción del primer prototipo de investigación de texto a 3D basado en el contenido del curso}
+\end{table}
+\end{knowledgebox}
+
+\begin{warningbox}{Juicio erróneo común: alta calidad 2D no implica alta calidad 3D}
+Una imagen renderizada individualmente hermosa no demuestra que el modelo haya aprendido realmente geometría estable. El error de juicio más común en el sistema SDS ocurre cuando los investigadores se convence por imágenes de alta fidelidad en ciertos puntos de vista, ignorando problemas como colapso estructural al girar a la parte trasera, texturas repetidas y errores topológicos del objeto. Por lo tanto, los registros experimentales deben incluir una crucero continuo de perspectivas, no solo muestras óptimas.
+\end{warningbox}
+
+\subsection{Patrones de falla y puntos de control para ajuste de parámetros}
+
+Desde la perspectiva de la práctica investigativa, la parte más difícil de un proyecto SDS no es ``ejecutar el loss'', sino identificar en qué nivel surge exactamente el fallo actual: si las condiciones de texto son insuficientemente claras, si el priorio de difusión 2D es demasiado fuerte, si el muestreo de cámara es irrazonable o si la capacidad del propio sistema de representación 3D es limitada. Mezclar estos problemas lleva a que los experimentos queden reducidos a probar prompts ciegamente.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.22\textwidth} p{0.3\textwidth} p{0.28\textwidth}}
+\toprule
+Fenómeno & Causa raíz más probable & Acción de reparación a intentar prioritariamente \\
+\midrule
+Adecuado por delante, colapsado por detrás & Restricciones multivista insuficientes, distribución de perspectiva de muestreo demasiado estrecha & Ampliar la cobertura de elevación/azimut, introducir regularización dependiente de la vista \\
+Color sobresaturado, texturas pegajosas & Gradiente SDS demasiado fuerte, arrastre excesivo del priorio 2D & Reducir la intensidad de guía, aumentar entropía/regularización TV \\
+Geometría hinchada, bordes difusos & Capacidad de representación insuficiente o regularización de densidad inestable & Cambiar sistema de representación 3D, agregar priorio geométrico, restringir explícitamente opacidad \\
+Resultados altamente dependientes de detalles del prompt & Las condiciones de texto asumen demasiada información estructural & Reescribir plantillas de prompts y acompañar con perspectivas de referencia o supervisión débil \\
+\bottomrule
+\end{tabular}
+\caption{Patrones de falla comunes y acciones de reparación en proyectos SDS de texto a 3D}
+\end{table}
+
+\begin{importantbox}{El verdadero marco metodológico dejado por el cierre del curso}
+La lección más importante al final de este curso no es ``aprender otro algoritmo nuevo'', sino comprender que la investigación sobre modelos de difusión está pasando de la mera generación de imágenes a \textbf{transferir priores fuertes a dominios con datos escasos}. SDS, VSD, difusión discreta y arquitecturas multimodales unificadas pertenecen a este problema matriz más amplio: cómo permitir que un generador entrenado en conjuntos de datos masivos proporcione señales de optimización para otro espacio de representación valioso pero con pocos datos.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+El curso cubrió sistemáticamente el desarrollo teórico desde DDPM hasta Flow Matching, así como la expansión de aplicaciones desde la guía en tiempo de inferencia hasta la destilación de puntuaciones. Las tendencias de vanguardia actuales —difusión discreta, generación de imágenes autoregresiva y modelos multimodales unificados— están rompiendo los límites tradicionales de selección de modelos, presagiando marcos de modelado generativo más flexibles y potentes.
+
+\newpage
+\section{Síntesis y ampliación}
+
+\subsection{Puntos clave de esta clase}
+
+\begin{enumerate}
+    \item \textbf{El problema del vacío de datos}: existen conjuntos de datos de imágenes a escala de miles de millones, pero la cantidad de datos para otras modalidades como modelos 3D es mucho menor. Cómo utilizar el conocimiento previo en 2D para compensar la falta de datos en 3D constituye la motivación central.
+
+    \item \textbf{Neural Rendering como puente}: la función de renderizado diferenciable $g(\theta, \pi)$ mapea una representación 3D a una imagen 2D, permitiendo que las señales de optimización del espacio 2D se propaguen hacia atrás a los parámetros 3D.
+
+    \item \textbf{De CLIP a los modelos difusos}: CLIP proporciona alineación a nivel semántico, pero carece de detalles. Los modelos difusos contienen un conocimiento previo mucho más rico a nivel de píxel; SDS ofrece una manera efectiva de aprovechar estos conocimientos previos.
+
+    \item \textbf{El mecanismo central de SDS}: utiliza la función de pérdida de predicción de ruido del modelo difuso preentrenado como medida de calidad de renderizado, logrando una optimización eficiente mediante una simplificación que ignora el Jacobiano de U-Net.
+
+    \item \textbf{Éxito y limitaciones de DreamFusion}: demuestra el enorme potencial de SDS en la generación texto a 3D, pero problemas como Janus Problem revelan las limitaciones inherentes del conocimiento previo en 2D.
+
+    \item \textbf{Tendencias futuras}: la línea entre los modelos autoregresivos y difusos se está desdibujando; los marcos de generación multimodal unificados son una dirección importante.
+\end{enumerate}
+
+\subsection{Tabla comparativa de métodos}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.18\textwidth} p{0.22\textwidth} p{0.24\textwidth} p{0.22\textwidth}}
+\toprule
+Método & Ventaja central & Limitación principal & Escenario de uso \\
+\midrule
+CLIP guiado 3D & Alineación semántica directa e implementación relativamente simple & Detalles débiles, deriva de forma fácil & Exploración de conceptos sin ejemplos \\
+SDS / DreamFusion & Permite reutilizar un conocimiento previo en difusos 2D fuerte & Problema Janus, sobre-saturación, inestabilidad geométrica & Generación de prototipos de alta fidelidad texto a 3D \\
+VSD / distilación mejorada & Mejor diversidad y estabilidad & Entrenamiento y optimización más complejos & Generación 3D buscando mayor calidad y menos artefactos \\
+Marco de generación multimodal unificado & Oportunidad de conectar las fronteras entre 2D/3D/video & Aún en etapa rápida de evolución & Investigación de modelos generativos universales de próxima generación \\
+\bottomrule
+\end{tabular}
+\caption{Comparación de varias categorías de métodos centrales presentados en la Clase 13}
+\end{table}
+
+\subsection{Preguntas para reflexionar más}
+
+\begin{itemize}
+    \item ¿Hasta qué punto puede sustituir el conocimiento previo en 2D a los datos reales 3D sin quedar permanentemente limitado por problemas de consistencia de perspectiva?
+    \item Cuando la línea entre los modelos autoregresivos y difusos se desdibuja continuamente, ¿los sistemas futuros de generación 3D conservarán las categorías de métodos claramente definidas de hoy?
+    \item En el futuro, ¿Neural Rendering jugará más un papel de puente para el entrenamiento o se convertirá en una representación intermedia estándar dentro de la generación multimodal unificada?
+\end{itemize}
+
+\subsection{Lecturas adicionales}
+
+\begin{itemize}
+    \item Poole, B. et al. ``DreamFusion: Text-to-3D using 2D Diffusion.'' \textit{ICLR 2023}. \\
+    ——Trabajo pionero que propone por primera vez el uso de SDS para la generación texto a 3D
+
+    \item Wang, Z. et al. ``ProlificDreamer: High-Fidelity and Diverse Text-to-3D Generation with Variational Score Distillation.'' \textit{NeurIPS 2023}. \\
+    ——Propone VSD (Distilación de Puntuaciones Variacional), mejorando significativamente los problemas de sobre-saturación y diversidad de SDS
+
+    \item Mildenhall, B. et al. ``NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis.'' \textit{ECCV 2020}. \\
+    ——El artículo original de Neural Radiance Fields, un hito en el campo del Neural Rendering
+
+    \item Kerbl, B. et al. ``3D Gaussian Splatting for Real-Time Radiance Field Rendering.'' \textit{SIGGRAPH 2023}. \\
+    ——3D Gaussian Splatting, un método de renderizado diferenciable eficiente
+
+    \item Jain, A. et al. ``DreamFields: Zero-Shot Text-Guided Object Generation with Dream Fields.'' \textit{CVPR 2022}. \\
+    ——Generación 3D sin ejemplos guiada por CLIP
+
+    \item Radford, A. et al. ``Learning Transferable Visual Models From Natural Language Supervision.'' \textit{ICML 2021}. \\
+    ——Artículo original del modelo CLIP
+
+    \item Luo, T. et al. ``Discrete Diffusion Modeling by Estimating the Ratios of the Data Distribution.'' \textit{ICML 2024}. \\
+    ——Trabajo representativo de los modelos difusos discretos
+\end{itemize}
+
+%% ==================== Fin del cuerpo ====================
+
+\end{document}

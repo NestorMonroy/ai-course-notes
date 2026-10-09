@@ -1,0 +1,648 @@
+\documentclass[a4paper]{article}
+
+% Paquetes básicos
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+% FandolSong no cubre algunos caracteres de nombres (U+73FA); WenQuanYi Zen Hei sí.
+\usepackage[AutoFallBack=true]{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+\setCJKfallbackfamilyfont{\CJKrmdefault}{WenQuanYi Zen Hei}
+% polyglossia no traduce los nombres de listados.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\usepackage{float}
+
+% Cajas de resaltado
+\newtcolorbox{knowledgebox}[1]{
+    enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, attach boxed title to top left={yshift=-2mm, xshift=2mm},
+    boxrule=1pt, sharp corners
+}
+
+\newtcolorbox{importantbox}[1]{
+    enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black,
+    coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+\newtcolorbox{warningbox}[1]{
+    enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+% Listados
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    stringstyle=\color{red!60!black},
+    commentstyle=\color{green!60!black},
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    captionpos=b,
+    extendedchars=true
+}
+
+% Metadatos de la portada
+\newcommand{\notetitle}{Clase 9 de KAIST CS492D: Flow Matching 1}
+\newcommand{\noteauthors}{Elaboradas a partir de la clase de Minhyuk Sung}
+\newcommand{\notedate}{Otoño de 2025}
+\newcommand{\videochannel}{Minhyuk Sung (KAIST)}
+\newcommand{\videopublishdate}{2025}
+\newcommand{\videoduration}{53 minutos}
+\newcommand{\videourl}{https://www.youtube.com/watch?v=-1hgQC58Nfc}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}
+\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}
+\vspace{0.8cm}
+{\large \noteauthors\par}
+\vspace{0.3cm}
+{\large \notedate\par}
+\vspace{1.2cm}
+
+\ifdefempty{\videocoverpath}{
+{\small Al generar las notas, indique la ruta local de la portada del video.\par}
+}{
+\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par
+}
+
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\ifdefempty{\videourl}{}{
+\textbf{Enlace del video}: \href{\videourl}{\nolinkurl{\videourl}}\par
+}
+\end{tcolorbox}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+%% --- Inicio del contenido --- %%
+
+\section{Contexto y repaso del curso}
+
+Esta clase es la novena del curso KAIST CS492D (Modelos de difusión y modelos generativos), con el tema \textbf{Flow Matching} (flujo coincidente). En las clases anteriores, discutimos en detalle las diversas variantes de los modelos de difusión —desde DDPM hasta DDIM, pasando por modelos basados en SDE/ODE y técnicas de aceleración como DPM-Solver—. Esta clase introducirá los modelos generativos desde una perspectiva totalmente nueva: \textbf{Continuous Normalizing Flows} (flujos normalizadores continuos) y \textbf{Flow Matching} (flujo coincidente).
+
+\begin{knowledgebox}{Repaso de la estructura del curso}
+En las clases anteriores, establecimos la siguiente cadena de conocimientos:
+\begin{enumerate}
+    \item \textbf{DDPM}: modelo de difusión de desruido en pasos discretos, que típicamente requiere 1000 pasos de muestreo.
+    \item \textbf{DDIM}: muestreo determinístico, que reduce los pasos a 50--200.
+    \item \textbf{Score-Based SDE}: unifica el proceso de difusión bajo un marco de ecuaciones diferenciales estocásticas (SDE).
+    \item \textbf{Probability Flow ODE}: deriva una forma equivalente en ODE desde la SDE, logrando generación determinística.
+    \item \textbf{DPM-Solver}: un solver especializado que aprovecha la estructura de ODE, reduciendo aún más los pasos a 10--15.
+\end{enumerate}
+El Flow Matching de esta clase ofrecerá otra forma de comprender y entrenar modelos generativos basados en ODE.
+\end{knowledgebox}
+
+\subsection{Cuello de botella de velocidad de los modelos de difusión}
+
+La ventaja principal de los modelos de difusión radica en su capacidad para generar salidas de alta calidad sin colapso de modos (mode collapse). Sin embargo, su cuello de botella principal sigue siendo la \textbf{velocidad de muestreo}:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Método} & \textbf{Pasos típicos} & \textbf{¿Requiere reentrenamiento?} \\
+\midrule
+DDPM & $\sim$1000 & No \\
+DDIM & 50--200 & No \\
+DPM-Solver (orden superior) & 10--15 & No \\
+Consistency Models & 1--2 & Sí (fine-tuning) \\
+Métodos de destilación & 1--5 & Sí (fine-tuning) \\
+\bottomrule
+\end{tabular}
+\caption{Comparativa de métodos de aceleración del muestreo en modelos de difusión}
+\end{table}
+
+El ponente señala que la evolución desde DDPM hasta DPM-Solver logró una aceleración de aproximadamente \textbf{100 veces}, sin necesidad de reentrenar el modelo —una característica muy atractiva de los modelos de difusión—. Sin embargo, para reducir aún más los pasos a 1--5, se requieren métodos adicionales de entrenamiento como la destilación.
+
+\subsection{Introducción a Consistency Models}
+
+\begin{importantbox}{Idea central de Consistency Models}
+La idea básica de Consistency Models es: entrenar una red para que pueda predecir la salida final directamente desde \textbf{cualquier punto intermedio} en la trayectoria de ODE. Específicamente:
+\begin{enumerate}
+    \item Partiendo de una muestra gaussiana estándar, se ejecuta un solver de ODE para obtener la trayectoria completa.
+    \item Para cada punto intermedio $x_t$ en la trayectoria, se calcula la expectativa de la salida final utilizando la fórmula de Tweedie.
+    \item Se entrena la red para que las predicciones en momentos tempranos sean coherentes con las predicciones en momentos tardíos (consistent).
+\end{enumerate}
+De este modo, durante la inferencia, basta con uno o dos pasos para saltar directamente desde el ruido hasta la muestra de datos.
+\end{importantbox}
+
+El inconveniente común tanto de Consistency Models como de otros métodos de destilación es que ambos requieren un modelo de difusión preentrenado como punto de partida, logrando la aceleración mediante un ajuste adicional (fine-tuning). Esto implica dedicar más recursos computacionales durante la fase de entrenamiento a cambio de una velocidad mayor en tiempo de prueba.
+
+\subsection{Resumen de la sección}
+
+Desde DDPM hasta Consistency Models, la comunidad de modelos de difusión ha logrado avances significativos en la aceleración del muestreo. No obstante, estos métodos se ven limitados ya sea por un cronograma de ruido (noise schedule) específico o requieren entrenamiento de destilación complejo. Flow Matching abordará el problema desde una perspectiva completamente diferente, ofreciendo un marco más flexible y conciso para entrenar modelos generativos.
+
+\section{De los modelos de difusión a los modelos de flujo: una conversión de paradigma}
+
+\subsection{Inversión de la dirección temporal}
+
+Antes de introducir formalmente el \textbf{Flow Matching}, el orador enfatizó un cambio en la convención de notación que es \textbf{extremadamente confuso}:
+
+\begin{warningbox}{Inversión de la dirección temporal — el punto más propenso a confusiones}
+La dirección temporal del \textbf{modelo de difusión} (desde la perspectiva del proceso hacia adelante):
+\begin{itemize}
+    \item $t = 0$: distribución de datos $p_{\text{data}}$
+    \item $t = T$: distribución de ruido (gaussiana estándar) $\mathcal{N}(0, I)$
+\end{itemize}
+
+La dirección temporal del \textbf{Flow Matching} (desde la perspectiva del proceso generativo):
+\begin{itemize}
+    \item $t = 0$: distribución de ruido (gaussiana estándar) $p_0 = \mathcal{N}(0, I)$
+    \item $t = 1$: distribución de datos $p_1 = p_{\text{data}}$
+\end{itemize}
+
+Es decir, en el Flow Matching, $x_0$ representa una muestra de ruido gaussiano y $x_1$ representa una muestra de datos reales. ¡Esto es completamente opuesto al hábito establecido en los modelos de difusión!
+\end{warningbox}
+
+El orador reconoció que incluso él mismo se confunde frecuentemente entre estas dos convenciones de notación. La razón por la que se mantiene esta inconsistencia es que los modelos de difusión y el flujo matching provienen de tradiciones literarias distintas; sus respectivos artículos e libros de texto siguen sus propias convenciones.
+
+\subsection{Diferencias clave entre modelos de difusión y modelos de flujo}
+
+\begin{importantbox}{Diferencia central: flexibilidad de la distribución de referencia}
+En los \textbf{modelos de difusión}, todas las deducciones asumen que la distribución de referencia (distribución de ruido) es una gaussiana estándar $\mathcal{N}(0, I)$. Si se cambiara a otra distribución (por ejemplo, una gaussiana anisotrópica), todas las deducciones matemáticas tendrían que realizarse de nuevo.
+
+Una gran ventaja de los \textbf{modelos de flujo} es que la distribución de referencia $p_0$ puede ser \textbf{cualquier distribución}. Sin importar cómo cambie $p_0$, las fórmulas matemáticas del flujo matching permanecen inalteradas. Esto permite considerar a los modelos de flujo como una \textbf{generalización} de los modelos de difusión.
+\end{importantbox}
+
+Aunque ambos provienen de tradiciones literarias distintas, finalmente son matemáticamente equivalentes (en el caso especial de una distribución de referencia gaussiana estándar). Este es un hallazgo importante que esta clase busca revelar.
+
+\subsection{Resumen de la sección}
+
+El Flow Matching adopta la perspectiva del proceso generativo, invierte la dirección temporal y permite cualquier distribución de referencia. Aunque finalmente se puede establecer una relación de equivalencia con los modelos de difusión, esta nueva perspectiva aporta objetivos de entrenamiento más concisos y un espacio de diseño de modelos más flexible.
+\section{Marco básico de los flujos regularizados continuamente (CNF)}
+
+\subsection{Tres conceptos clave}
+
+El marco matemático del \textbf{Flow Matching} se desarrolla alrededor de tres conceptos centrales, que mantienen estrechas interrelaciones:
+
+\begin{importantbox}{Los tres conceptos clave del Flow Matching}
+\begin{enumerate}
+    \item \textbf{Mapa de flujo}(Flow Map)$\phi_t(x)$: posición en el instante $t$ a lo largo de la trayectoria que parte desde $x$
+    \item \textbf{Campo vectorial}(Vector Field)$v_t(x)$: define la dirección y magnitud de la velocidad en cada punto espacio-temporal dentro de la ODE
+    \item \textbf{Trayectoria de densidad de probabilidad}(Probability Density Path)$p_t(x)$: distribución de probabilidad de los puntos de datos en el instante $t$
+\end{enumerate}
+La relación entre estos tres elementos atraviesa toda la teoría del Flow Matching.
+\end{importantbox}
+
+\subsection{Mapa de flujo (Flow Map)}
+
+El mapa de flujo $\phi_t(x_0)$ representa la posición alcanzada tras un tiempo $t$, partiendo desde el punto inicial $x_0$ (procedente de la distribución de referencia $p_0$). Su definición formal es:
+
+$$\phi_t(x_0) = x_0 + \int_0^t v_s(\phi_s(x_0)) \, ds$$
+
+Donde las definiciones de cada símbolo son:
+\begin{itemize}
+    \item $\phi_t(x_0)$: posición en la trayectoria a partir de $x_0$ en el instante $t$
+    \item $v_s(\cdot)$: campo vectorial (campo de velocidades) en el instante $s$
+    \item $\phi_0(x_0) = x_0$: condición de frontera; el punto de inicio de la trayectoria cuando $t=0$ es $x_0$ mismo
+    \item $\phi_1(x_0) \sim p_1$: condición de frontera; en $t=1$ debe llegar a una muestra de la distribución de datos
+\end{itemize}
+
+\begin{knowledgebox}{Relación entre ODE y mapa de flujo}
+El mapa de flujo es esencialmente la solución a la siguiente ecuación diferencial ordinaria (ODE):
+$$\frac{d\phi_t(x_0)}{dt} = v_t(\phi_t(x_0)), \quad \phi_0(x_0) = x_0$$
+Aquí \textbf{no hay aleatoriedad}: una vez fijados el punto de partida $x_0$ y el campo vectorial $v_t$, la trayectoria completa queda determinada. Esto es también lo que significa "Ordinary" en Ordinary Differential Equation, en contraste con los términos estocásticos presentes en las SDE.
+\end{knowledgebox}
+
+A veces, para simplificar la notación, utilizamos $x_t$ para denotar $\phi_t(x_0)$, es decir, el punto de la trayectoria a partir de $x_0$ en el instante $t$.
+
+\subsection{Campo vectorial (Vector Field)}
+
+El campo vectorial $v_t(x)$ define la "velocidad" en cada punto espacio-temporal $(t, x)$. Es la derivada temporal del mapa de flujo:
+
+$$v_t(\phi_t(x_0)) = \frac{d\phi_t(x_0)}{dt}$$
+
+El campo vectorial codifica la información del mapeo desde el ruido hacia los datos. Si logramos encontrar un buen campo vectorial que permita mapear muestras extraídas de $p_0$ hacia $p_1$ (distribución de datos), entonces habremos obtenido un modelo generativo.
+
+\subsection{Trayectoria de densidad de probabilidad (Probability Density Path)}
+
+La trayectoria de densidad de probabilidad $p_t(x)$ describe la densidad de probabilidad del punto de datos $x$ en el instante $t$. Satisface las siguientes propiedades:
+\begin{itemize}
+    \item $p_0 = \mathcal{N}(0, I)$ (distribución de referencia, usualmente una gaussiana estándar)
+    \item $p_1 \approx p_{\text{data}}$ (distribución de datos)
+    \item En instantes intermedios, $p_t$ es una interpolación entre $p_0$ y $p_1$
+\end{itemize}
+
+\begin{knowledgebox}{Ecuación de continuidad (Continuity Equation)}
+La relación entre el campo vectorial y la trayectoria de densidad de probabilidad se da mediante la \textbf{ecuación de continuidad}:
+$$\frac{\partial p_t(x)}{\partial t} + \nabla \cdot (p_t(x) v_t(x)) = 0$$
+Esta es una forma simplificada de la ecuación de Fokker-Planck en ausencia de términos de difusión (es decir, para ODE en lugar de SDE). Establece una conexión matemática exacta entre el campo vectorial y la trayectoria probabilística.
+\end{knowledgebox}
+
+\subsection{Relación entre los tres elementos}
+
+En los modelos de difusión, nuestro camino de deducción es:
+$$\text{Trayectoria de densidad } p_t \;\longrightarrow\; \text{Forma SDE/ODE} \;\longrightarrow\; \text{Campo vectorial } v_t \;\longrightarrow\; \text{Mapa de flujo } \phi_t$$
+
+Mientras que en el Flow Matching, seguimos un \textbf{camino inverso}:
+$$\text{Campo vectorial } v_t \;\longrightarrow\; \text{Mapa de flujo } \phi_t \;\longrightarrow\; \text{Trayectoria de densidad } p_t$$
+
+Es decir, primero definimos el campo vectorial y luego deducimos a partir de él tanto el mapa de flujo como la trayectoria probabilística.
+
+\subsection{Cálculo de la probabilidad logarítmica}
+
+El campo vectorial también puede utilizarse para calcular la probabilidad logarítmica de los puntos de datos. Para $x_1 \sim p_1$, su verosimilitud logarítmica se calcula mediante:
+
+$$\log p_1(x_1) = \log p_0(x_0) - \int_0^1 \nabla \cdot v_t(\phi_t(x_0)) \, dt$$
+
+Donde los términos tienen el siguiente significado:
+\begin{itemize}
+    \item $\log p_0(x_0)$: probabilidad logarítmica del punto de inicio bajo la distribución de referencia (distribución gaussiana, con forma analítica conocida)
+    \item $\nabla \cdot v_t$: divergencia del campo vectorial
+    \item Término de integración: acumulación de cambios de volumen a lo largo de la trayectoria
+\end{itemize}
+
+Esto implica que si podemos encontrar un campo vectorial que maximice $\log p_1(x_1)$, podremos entrenar un buen modelo generativo.
+
+\subsection{Resumen de la sección}
+
+El marco de los flujos regularizados continuamente (CNF) se compone de tres conceptos centrales: mapa de flujo, campo vectorial y trayectoria de densidad de probabilidad. Estos están interconectados a través de las ODE y la ecuación de continuidad. A diferencia de los modelos de difusión, el CNF define el proceso generativo partiendo directamente del campo vectorial, proporcionando así un marco matemático más directo.
+
+
+\section{Función objetivo de Flow Matching}
+
+\subsection{Método ingenuo: entrenamiento con máxima verosimilitud global}
+
+Una intuición es maximizar directamente la verosimilitud logarítmica de los datos:
+
+$$\max_\theta \; \mathbb{E}_{x_1 \sim p_{\text{data}}} \left[ \log p_1(x_1) \right]$$
+
+En concreto:
+\begin{enumerate}
+    \item Se parametriza el campo vectorial con una red neuronal $v_\theta(t, x)$
+    \item Para cada punto de datos $x_1$, se ejecuta la ODE hacia atrás desde $x_1$ hasta $x_0$
+    \item Se calcula $\log p_0(x_0) - \int_0^1 \nabla \cdot v_\theta(t, \phi_t) \, dt$
+    \item Se maximiza este valor
+\end{enumerate}
+
+\begin{warningbox}{Defecto letal del método ingenuo}
+Aunque este método es correcto en teoría, presenta problemas graves en la práctica:
+\begin{enumerate}
+    \item \textbf{Coste computacional elevado}: calcular la función de pérdida requiere resolver una ODE en cada paso, lo cual es una operación costosa por sí misma.
+    \item \textbf{Inestabilidad numérica}: los solucionadores de ODE tienden a acumular errores numéricos durante integraciones prolongadas.
+    \item \textbf{Dificultad para la retropropagación}: el gradiente debe propagarse hacia atrás a través de todo el proceso de resolución de la ODE (requiere el método adjunto), aumentando aún más el coste computacional y la inestabilidad.
+\end{enumerate}
+Esta es la dificultad central que enfrentaron los primeros Continuous Normalizing Flows (como Neural ODE, Chen et al., 2018).
+\end{warningbox}
+
+\subsection{Objetivo de Flow Matching: regresión del campo vectorial}
+
+El avance clave de Flow Matching radica en: \textbf{saltar la resolución de la ODE}, entrenando el campo vectorial directamente con una función de pérdida simple de regresión.
+
+La función de pérdida de Flow Matching se define como:
+
+$$\mathcal{L}_{\text{FM}}(\theta) = \mathbb{E}_{t \sim \mathcal{U}[0,1], \, x_t \sim p_t} \left\| v_\theta(t, x_t) - v_t(x_t) \right\|^2$$
+
+Donde los símbolos tienen el siguiente significado:
+\begin{itemize}
+    \item $v_\theta(t, x_t)$: campo vectorial predicho por la red neuronal
+    \item $v_t(x_t)$: campo vectorial objetivo (ground truth)
+    \item $t \sim \mathcal{U}[0,1]$: muestreo uniforme de pasos de tiempo
+    \item $x_t \sim p_t$: muestreo de la distribución marginal en el instante $t$
+\end{itemize}
+
+\begin{importantbox}{Ventaja clave de Flow Matching}
+Esta función de pérdida es una simple \textbf{regresión de error cuadrático medio}, sin necesidad de resolver ninguna ODE. Sin embargo, el problema radica en que no conocemos la forma analítica del campo vectorial marginal $v_t(x_t)$ ni de la distribución marginal $p_t(x_t)$, ya que la propia distribución de datos $p_{\text{data}}$ es desconocida.
+
+Esto da lugar a la innovación clave de Flow Matching: el \textbf{Conditional Flow Matching}.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Maximizar directamente la verosimilitud requiere costosas resoluciones de ODE, mientras que Flow Matching propone una función objetivo de regresión concisa. No obstante, la no analiticidad de las magnitudes marginales exige introducir aún más una formulación condicional.
+
+\section{Emparejamiento de flujo condicional (Conditional Flow Matching)}
+
+\subsection{Motivación del establecimiento condicional}
+
+La distribución marginal $p_t(x)$ y el campo vectorial marginal $v_t(x)$ no tienen expresiones analíticas, ya que dependen de la distribución de datos desconocida. Para resolver este problema, el \textbf{emparejamiento de flujo} introduce versiones \textbf{condicionales} de cada magnitud.
+
+La idea central es: dado un punto de datos específico $x_1$, "simplificar" la distribución de datos en una distribución gaussiana concentrada cerca de $x_1$, $\mathcal{N}(x_1, \sigma_{\min}^2 I)$ (donde $\sigma_{\min}$ es extremadamente pequeño). De esta manera, todas las magnitudes condicionales tienen expresiones analíticas.
+
+\begin{knowledgebox}{Establecimiento condicional y proceso de difusión hacia adelante}
+Este establecimiento condicional tiene una conexión profunda con el núcleo de transición hacia adelante (forward transition kernel) en los modelos de difusión. En los modelos de difusión, dado un punto de datos $x_0$ (tenga en cuenta la convención de notación de los modelos de difusión), el proceso hacia adelante define la distribución condicional en cada paso de tiempo como $q(x_t | x_0) = \mathcal{N}(\alpha_t x_0, \sigma_t^2 I)$.
+
+En el emparejamiento de flujo, hacemos algo similar: dado un punto de datos $x_1$, definimos la trayectoria de probabilidad condicional $p_t(x | x_1)$. La estructura matemática es completamente idéntica, con la diferencia de que la dirección del tiempo es opuesta.
+\end{knowledgebox}
+
+\subsection{Trayectoria de probabilidad condicional}
+
+Dada una muestra de datos $x_1$, la trayectoria de probabilidad condicional se define como:
+
+$$p_t(x | x_1) = \mathcal{N}(x; \mu_t(x_1), \sigma_t^2(x_1) I)$$
+
+donde $\mu_t$ y $\sigma_t$ deben satisfacer las \textbf{condiciones de frontera}:
+\begin{itemize}
+    \item en $t = 0$: $\mu_0(x_1) = 0$, $\sigma_0(x_1) = 1$, de modo que $p_0(x | x_1) = \mathcal{N}(0, I)$
+    \item en $t = 1$: $\mu_1(x_1) \approx x_1$, $\sigma_1(x_1) \approx \sigma_{\min} \to 0$, de modo que $p_1(x | x_1) \approx \delta(x - x_1)$
+\end{itemize}
+
+La trayectoria de probabilidad marginal se recupera integrando sobre todos los puntos de datos:
+
+$$p_t(x) = \int p_t(x | x_1) \, p_{\text{data}}(x_1) \, dx_1$$
+
+\subsection{Mapeo de flujo condicional}
+
+\begin{importantbox}{Mapeo de flujo condicional lineal: la belleza de la simplicidad del emparejamiento de flujo}
+Una elección de diseño clave del emparejamiento de flujo es definir el mapeo de flujo condicional como una \textbf{función lineal}:
+$$\phi_t(x_0 | x_1) = \mu_t(x_1) + \sigma_t(x_1) \cdot x_0$$
+Esto significa que, dado un punto de datos $x_1$ y una muestra con ruido $x_0$, la trayectoria desde $x_0$ hasta $x_1$ es una \textbf{línea recta} (cuando $\mu_t$ y $\sigma_t$ son funciones lineales).
+
+Deben satisfacerse las condiciones de frontera:
+\begin{itemize}
+    \item $\phi_0(x_0 | x_1) = x_0$ (en $t=0$, la salida es la muestra con ruido)
+    \item $\phi_1(x_0 | x_1) \approx x_1$ (en $t=1$, la salida se acerca a la muestra de datos)
+\end{itemize}
+\end{importantbox}
+
+Las ventajas del mapeo de flujo condicional lineal son:
+\begin{enumerate}
+    \item La trayectoria de probabilidad condicional se convierte naturalmente en una distribución gaussiana
+    \item El campo vectorial condicional tiene una expresión analítica
+    \item El proceso de muestreo es simple y eficiente
+\end{enumerate}
+
+\subsection{Campo vectorial condicional}
+
+Partiendo de la definición del mapeo de flujo condicional, el campo vectorial condicional se puede obtener derivando con respecto al tiempo:
+
+$$u_t(x | x_1) = \frac{d\phi_t(x_0 | x_1)}{dt} = \mu_t'(x_1) + \sigma_t'(x_1) \cdot x_0$$
+
+donde $\mu_t'$ y $\sigma_t'$ son las derivadas de $\mu_t$ y $\sigma_t$ con respecto al tiempo $t$.
+
+Dado que $x_0 = (\phi_t^{-1}(x | x_1)) = \frac{x - \mu_t(x_1)}{\sigma_t(x_1)}$, el campo vectorial condicional se puede escribir como una función de $x$:
+
+$$u_t(x | x_1) = \mu_t'(x_1) + \frac{\sigma_t'(x_1)}{\sigma_t(x_1)} \left( x - \mu_t(x_1) \right)$$
+
+\begin{warningbox}{No confunda las magnitudes condicionales con las marginales}
+El campo vectorial condicional $u_t(x | x_1)$ depende del punto de datos específico $x_1$, mientras que finalmente necesitamos el \textbf{campo vectorial marginal} $v_t(x)$, que no depende de $x_1$. El campo vectorial condicional por sí mismo no puede usarse directamente para la generación (ya que durante la generación no conocemos el objetivo $x_1$), pero es una cantidad intermedia clave en el proceso de entrenamiento.
+\end{warningbox}
+
+\subsection{De las magnitudes condicionales a las marginales}
+
+El campo vectorial marginal se puede obtener mediante un promedio ponderado del campo vectorial condicional y la trayectoria de probabilidad condicional:
+
+$$v_t(x) = \frac{\int u_t(x | x_1) \, p_t(x | x_1) \, p_{\text{data}}(x_1) \, dx_1}{p_t(x)}$$
+
+\begin{importantbox}{Teorema central del Conditional Flow Matching}
+El resultado teórico clave del emparejamiento de flujo es que la función de pérdida utilizada para entrenar con el campo vectorial condicional:
+$$\mathcal{L}_{\text{CFM}}(\theta) = \mathbb{E}_{t, \, x_1 \sim p_{\text{data}}, \, x_0 \sim p_0} \left\| v_\theta(t, \phi_t(x_0 | x_1)) - u_t(\phi_t(x_0 | x_1) | x_1) \right\|^2$$
+tiene el \textbf{mismo gradiente} (con respecto a los parámetros $\theta$) que la función de pérdida original del emparejamiento de flujo $\mathcal{L}_{\text{FM}}(\theta)$.
+
+Esto significa que podemos entrenar el campo vectorial marginal usando una pérdida condicional, y todas las cantidades en la pérdida condicional tienen expresiones analíticas.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+El Conditional Flow Matching convierte magnitudes marginales no analíticas en magnitudes condicionales con forma analítica mediante la introducción de un establecimiento condicional. La garantía teórica clave es que la función de pérdida condicional y la función de pérdida marginal tienen el mismo gradiente, por lo tanto, los efectos del entrenamiento son equivalentes. Esta es la razón fundamental por la cual el emparejamiento de flujo puede evitar la resolución de EDOs.
+\section{Variaciones concretas de Flow Matching}
+
+\subsection{Opción más simple: trayectorias de Transporte Óptimo}
+
+La opción más sencilla y frecuentemente utilizada es el \textbf{mapeo de flujo condicional de Transporte Óptimo (OT)}, también conocido como rectified flow:
+
+$$\phi_t(x_0 | x_1) = (1 - t) x_0 + t \, x_1$$
+
+Los parámetros correspondientes son:
+\begin{itemize}
+    \item $\mu_t(x_1) = t \, x_1$
+    \item $\sigma_t(x_1) = 1 - t$
+\end{itemize}
+
+Esto constituye una \textbf{interpolación lineal} entre $x_0$ y $x_1$, donde la trayectoria condicional correspondiente es una \textbf{línea recta}.
+
+\begin{importantbox}{Campo vectorial y objetivo de entrenamiento de la ruta OT}
+Para la ruta OT, el campo vectorial condicional es extremadamente simple:
+$$u_t(x | x_1) = x_1 - x_0$$
+Este es un \textbf{vector constante} (no depende de $t$), con dirección desde $x_0$ hacia $x_1$.
+
+Por lo tanto, el objetivo de entrenamiento de Conditional Flow Matching se convierte en:
+$$\mathcal{L}_{\text{CFM}}(\theta) = \mathbb{E}_{t, \, x_1, \, x_0} \left\| v_\theta(t, (1-t)x_0 + t x_1) - (x_1 - x_0) \right\|^2$$
+
+El proceso de entrenamiento es extremadamente sencillo:
+\begin{enumerate}
+    \item Muestrear $x_1 \sim p_{\text{data}}$, $x_0 \sim \mathcal{N}(0, I)$, $t \sim \mathcal{U}[0,1]$
+    \item Calcular $x_t = (1-t)x_0 + t \, x_1$
+    \item Entrenar la red $v_\theta(t, x_t)$ para predecir $x_1 - x_0$
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Correspondencia con los schedulers VP/VE en modelos de difusión}
+
+Además de la ruta OT, también podemos elegir una parametrización que corresponda a los schedulers VP (Variance Preserving) o VE (Variance Exploding) de los modelos de difusión.
+
+\textbf{Correspondencia VP} (análogo al scheduler de ruido de DDPM):
+\begin{itemize}
+    \item $\mu_t(x_1) = \alpha_t \, x_1$, donde $\alpha_0 = 0$, $\alpha_1 \approx 1$
+    \item $\sigma_t(x_1) = \sqrt{1 - \alpha_t^2}$ (manteniendo la varianza total constante)
+\end{itemize}
+
+El campo vectorial condicional se convierte en:
+$$u_t(x | x_1) = \frac{\alpha_t'}{1 - \alpha_t^2} \left( \alpha_t \, x_1 - x \right) + \alpha_t' \, x_1$$
+
+\begin{knowledgebox}{Relación entre Flow Matching y la función de puntuación (score function)}
+Existe una relación matemática exacta entre el campo vectorial condicional y la función de puntuación (\textit{score function}) en los modelos de difusión. Bajo la parametrización VP:
+$$u_t(x | x_1) = f(t) \, x + g(t) \, \nabla_x \log p_t(x | x_1)$$
+donde $f(t)$ y $g(t)$ son coeficientes relacionados con el scheduler de ruido.
+
+Esto indica que \textbf{entrenar el campo vectorial de Flow Matching y la función de puntuación para modelos de difusión están esencialmente haciendo lo mismo}—solo utilizan diferentes parametrizaciones y pesos de pérdida distintos.
+\end{knowledgebox}
+
+\subsection{Trayectorias rectas vs trayectorias curvas}
+
+\begin{warningbox}{Trayectoria condicional vs trayectoria marginal}
+Aunque cada \textbf{trayectoria condicional} (dada $x_0$ y $x_1$) es una línea recta, la \textbf{trayectoria marginal} (solo dada $x_0$, sin conocer el objetivo $x_1$) generalmente no lo es. Esto se debe a que un mismo punto espacial $x_t$ puede ser atravesado por múltiples trayectorias condicionales distintas, y la red debe predecir el promedio ponderado de estos campos vectoriales condicionales.
+
+Esta es la razón por la cual, incluso al entrenar con la ruta OT, sigue siendo necesario resolver una ODE en múltiples pasos durante el muestreo real—ya que el campo vectorial marginal aprendido no es constante.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La ruta OT (interpolación lineal) es la variación más simple y frecuentemente utilizada de Flow Matching, donde el objetivo de entrenamiento se reduce a predecir $x_1 - x_0$. Al seleccionar diferentes funciones para $\mu_t$ y $\sigma_t$, Flow Matching puede reproducir diversos schedulers de ruido de los modelos de difusión. Esta flexibilidad constituye una ventaja importante de los modelos de flujo.
+\section{Una perspectiva unificada de Flow Matching y los modelos de difusión}
+
+\subsection{Establecimiento de la equivalencia}
+
+En esta parte final de la clase, el docente reveló las conexiones profundas entre Flow Matching y los modelos de difusión. Cuando seleccionamos $\mu_t$ y $\sigma_t$ correspondientes a los esquemas VP/VE:
+
+\begin{enumerate}
+    \item La trayectoria de probabilidad condicional de Flow Matching $p_t(x | x_1) = \mathcal{N}(\mu_t x_1, \sigma_t^2 I)$ es idéntica a la distribución del salto hacia adelante del modelo de difusión (solo con dirección temporal opuesta).
+    \item Existe una correspondencia exacta entre el campo vectorial condicional de Flow Matching y el término de deriva en la ODE de Probability Flow.
+    \item Ambos objetivos de entrenamiento son equivalentes bajo una parametrización adecuada y ponderación de pérdidas apropiada.
+\end{enumerate}
+
+\begin{importantbox}{Perspectiva unificada: dos caminos hacia la misma montaña}
+\textbf{Trayectoria del modelo de difusión}: Definir el proceso hacia adelante (inyección de ruido) $\to$ derivar la SDE inversa $\to$ obtener la ODE de Probability Flow $\to$ entrenar la función score.
+
+\textbf{Trayectoria de Flow Matching}: Definir el mapeo de flujo condicional $\to$ derivar el campo vectorial condicional $\to$ entrenar una red que prediga el campo vectorial.
+
+Ambos caminos llegan finalmente al mismo objetivo: una ODE capaz de mapear ruido a datos. La diferencia radica en:
+\begin{itemize}
+    \item El modelo de difusión deriva el campo vectorial partiendo de la trayectoria de densidad de probabilidad.
+    \item Flow Matching deriva la trayectoria de densidad de probabilidad partiendo del mapeo de flujo.
+    \item El orden de derivación es inverso, pero los resultados son equivalentes.
+\end{itemize}
+\end{importantbox}
+
+\subsection{Ventajas de Flow Matching}
+
+Aunque matemáticamente equivalentes, el marco de Flow Matching ofrece las siguientes ventajas prácticas:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Característica} & \textbf{Modelo de difusión} & \textbf{Flow Matching} \\
+\midrule
+Distribución de referencia & Debe ser gaussiana estándar & Puede ser cualquier distribución \\
+Objetivo de entrenamiento & Predicción de ruido / Predicción de score & Predicción de velocidad \\
+Derivación teórica & Requiere SDE/Fokker-Planck & Define directamente la ODE \\
+Esquema de ruido & Requiere diseño cuidadoso & Selección libre de $\mu_t$, $\sigma_t$ \\
+Trayectoria recta & No natural (trayectorias curvas) & Natural (trayectoria OT) \\
+\bottomrule
+\end{tabular}
+\caption{Comparación de características entre modelos de difusión y Flow Matching}
+\end{table}
+
+\begin{knowledgebox}{Por qué los modelos generativos modernos prefieren Flow Matching}
+Modelos de generación de imágenes más recientes como Stable Diffusion 3 (Stability AI) y Flux (Black Forest Labs) han adoptado el marco de Flow Matching / Rectified Flow. Las razones principales incluyen:
+\begin{enumerate}
+    \item \textbf{Trayectorias más rectas}: Las trayectorias generadas por la trayectoria OT se acercan más a líneas rectas, lo que mejora el rendimiento con pocas muestras.
+    \item \textbf{Entrenamiento más sencillo}: El objetivo de predicción de velocidad es más intuitivo que la predicción de ruido o score.
+    \item \textbf{Diseño más flexible}: Permite seleccionar libremente la distribución de referencia y la parametrización de la trayectoria.
+    \item \textbf{Fundamento teórico superior}: Conexión natural con la teoría de transporte óptimo (optimal transport).
+\end{enumerate}
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Flow Matching y los modelos de difusión son matemáticamente equivalentes, pero Flow Matching proporciona un marco teórico más conciso y un espacio de diseño de modelos más flexible. En la práctica, la estructura de trayectoria óptima derivada de trayectorias rectas (trayectoria OT) hace que Flow Matching sea el paradigma de entrenamiento preferido para los modelos generativos actuales.
+\section{Proceso de entrenamiento e inferencia}
+
+\subsection{Algoritmo de entrenamiento}
+
+El algoritmo completo de entrenamiento de Conditional Flow Matching es el siguiente:
+
+\begin{lstlisting}[caption={Algoritmo de entrenamiento de Conditional Flow Matching (ruta OT)}]
+# v_theta: red neuronal que parametriza el campo vectorial
+# p_data: distribución de datos (conjunto de entrenamiento)
+
+for cada paso de entrenamiento:
+    # 1. Muestrear datos y ruido
+    x1 = sample_from(p_data)           # muestra de datos
+    x0 = sample_from(Normal(0, I))     # muestra de ruido
+    t  = sample_from(Uniform(0, 1))    # paso temporal
+
+    # 2. Calcular interpolación (mapa de flujo condicional)
+    xt = (1 - t) * x0 + t * x1
+
+    # 3. Calcular objetivo (campo vectorial condicional)
+    target = x1 - x0
+
+    # 4. Calcular pérdida y actualizar
+    prediction = v_theta(t, xt)
+    loss = MSE(prediction, target)
+    loss.backward()
+    optimizer.step()
+\end{lstlisting}
+
+\begin{warningbox}{Precauciones durante el entrenamiento}
+\begin{enumerate}
+    \item El tiempo $t$ debe muestrearse uniformemente de $[0, 1]$; algunas implementaciones realizan un recorte pequeño en los extremos (por ejemplo, $[\epsilon, 1-\epsilon]$) para evitar problemas numéricos.
+    \item Para la ruta OT, el objetivo $x_1 - x_0$ no depende de $t$, pero $x_t$ sí depende de $t$; por lo tanto, la red aún debe tener $t$ como entrada.
+    \item La arquitectura de la red puede reutilizar la de U-Net o DiT de los modelos difusos, siempre y cuando se garantice que la codificación del tiempo $t$ sea correcta.
+\end{enumerate}
+\end{warningbox}
+
+\subsection{Algoritmo de inferencia (muestreo)}
+
+Después de completar el entrenamiento, el proceso para generar nuevas muestras es el siguiente:
+
+\begin{lstlisting}[caption={Algoritmo de muestreo de Flow Matching (método Euler)}]
+# v_theta: red neuronal del campo vectorial entrenada
+# N: número de pasos de discretización
+# dt: tamaño del paso = 1/N
+
+# 1. Muestrear de la distribución de referencia
+x = sample_from(Normal(0, I))
+
+# 2. Resolver la ODE desde t=0 hasta t=1
+for i in range(N):
+    t = i / N
+    x = x + v_theta(t, x) * dt    # paso de Euler
+
+# x es ahora aproximadamente una muestra de p_data
+return x
+\end{lstlisting}
+
+Se pueden utilizar solucionadores de ODE de orden superior (como Heun o Dormand-Prince/RK45) para mejorar la calidad del muestreo o reducir el número de pasos.
+
+\subsection{Resumen de la sección}
+
+Los procesos de entrenamiento e inferencia de Flow Matching son extremadamente concisos: el entrenamiento consiste en regresión de objetivos de velocidad en puntos de interpolación aleatorios, y la inferencia implica resolver una ODE partiendo del ruido. Todo el proceso no involucra ninguna simulación de SDE ni diseño complejo de programación de ruido.
+\section{Síntesis y ampliación}
+
+\subsection{Repaso de los puntos clave de esta clase}
+
+Esta clase presentó Flow Matching como un nuevo paradigma para el entrenamiento de modelos generativos, con las siguientes contribuciones centrales:
+
+\begin{enumerate}
+    \item \textbf{Marco CNF (Flujos Normalizados Continuos)}: Un proceso determinista de generación basado en EDO, constituido por tres conceptos fundamentales: el mapeo de flujo, el campo vectorial y la trayectoria de densidad de probabilidad.
+    \item \textbf{Función objetivo de Flow Matching}: Una pérdida simple de regresión de campos vectoriales que elimina por completo los costos computacionales asociados a la resolución de EDO.
+    \item \textbf{Conditional Flow Matching}: Mediante técnicas de condicionamiento, se transforman cantidades marginales no analíticas en cantidades condicionales con forma analítica, manteniendo al mismo tiempo la equivalencia del entrenamiento.
+    \item \textbf{Unificación con los modelos de difusión}: Se revela la equivalencia matemática entre Flow Matching y los modelos de difusión, junto con las ventajas que ofrece Flow Matching en términos de flexibilidad.
+\end{enumerate}
+
+\begin{importantbox}{Fórmulas clave para consulta rápida}
+\textbf{Mapeo de flujo condicional en la trayectoria OT}: $\phi_t(x_0 | x_1) = (1 - t)x_0 + t \, x_1$
+
+\textbf{Campo vectorial condicional en la trayectoria OT}: $u_t(x | x_1) = x_1 - x_0$
+
+\textbf{Pérdida de entrenamiento CFM}: $\mathcal{L} = \mathbb{E}_{t, x_1, x_0} \left\| v_\theta(t, (1-t)x_0 + tx_1) - (x_1 - x_0) \right\|^2$
+
+\textbf{Muestreo mediante EDO}: $\frac{dx_t}{dt} = v_\theta(t, x_t), \quad x_0 \sim \mathcal{N}(0, I)$
+\end{importantbox}
+
+\subsection{Lecturas adicionales}
+
+\begin{itemize}
+    \item \textbf{Artículo original sobre Flow Matching}: Lipman et al., ``Flow Matching for Generative Modeling'', ICLR 2023
+    \item \textbf{Conditional Flow Matching}: Tong et al., ``Improving and Generalizing Flow-Based Generative Models with Minibatch Optimal Transport'', ICML 2024
+    \item \textbf{Rectified Flow}: Liu et al., ``Flow Straight and Fast: Learning to Generate and Transfer Data with Rectified Flow'', ICLR 2023
+    \item \textbf{Neural ODE}: Chen et al., ``Neural Ordinary Differential Equations'', NeurIPS 2018 — trabajo pionero sobre flujos normalizados continuos.
+    \item \textbf{Stochastic Interpolants}: Albergo \& Vanden-Eijnden, ``Building Normalizing Flows with Stochastic Interpolants'', ICLR 2023
+    \item \textbf{Tutorial de Meta Flow Matching}: \href{https://ai.meta.com/blog/flow-matching-guide-generative-ai/}{Meta AI Blog} ofrece un tutorial detallado y código.
+    \item \textbf{Derivación de la ecuación de Fokker-Planck}: Una derivación detallada sobre la relación entre el campo vectorial, las trayectorias de probabilidad y la ecuación de continuidad; se recomienda consultar Song et al., ``Score-Based Generative Modeling through Stochastic Differential Equations'' (parte del apéndice).
+\end{itemize}
+
+%% --- Fin del contenido --- %%
+
+\end{document}

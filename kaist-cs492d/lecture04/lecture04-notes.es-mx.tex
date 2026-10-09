@@ -1,0 +1,580 @@
+\documentclass[a4paper]{article}
+
+% Paquetes básicos
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+% FandolSong no cubre algunos caracteres de nombres (U+73FA); WenQuanYi Zen Hei sí.
+\usepackage[AutoFallBack=true]{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+\setCJKfallbackfamilyfont{\CJKrmdefault}{WenQuanYi Zen Hei}
+% polyglossia no traduce los nombres de listados.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\usepackage{float}
+
+% Cajas de resaltado
+\newtcolorbox{knowledgebox}[1]{
+    enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, attach boxed title to top left={yshift=-2mm, xshift=2mm},
+    boxrule=1pt, sharp corners
+}
+
+\newtcolorbox{importantbox}[1]{
+    enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black,
+    coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+\newtcolorbox{warningbox}[1]{
+    enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+% Listados
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    stringstyle=\color{red!60!black},
+    commentstyle=\color{green!60!black},
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    captionpos=b,
+    extendedchars=true
+}
+
+% Metadatos de la portada
+\newcommand{\notetitle}{Lección 4 de KAIST CS492D: Modelos basados en puntuación}
+\newcommand{\noteauthors}{Elaboradas a partir de la clase de Minhyuk Sung}
+\newcommand{\notedate}{Otoño de 2025}
+\newcommand{\videochannel}{Minhyuk Sung (KAIST)}
+\newcommand{\videopublishdate}{2025}
+\newcommand{\videoduration}{57 minutos}
+\newcommand{\videourl}{https://www.youtube.com/watch?v=AG4qcza52yo}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}
+\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}
+\vspace{0.8cm}
+{\large \noteauthors\par}
+\vspace{0.3cm}
+{\large \notedate\par}
+\vspace{1.2cm}
+
+\ifdefempty{\videocoverpath}{
+{\small Al generar las notas, indique la ruta local de la portada del video.\par}
+}{
+\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par
+}
+
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\ifdefempty{\videourl}{}{
+\textbf{Enlace del video}: \href{\videourl}{\nolinkurl{\videourl}}\par
+}
+\end{tcolorbox}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+%% --- Inicio del contenido --- %%
+
+\section{Revisión de DDPM}
+
+El tema de esta clase son los Modelos Basados en Puntuaciones (Score-Based Models), pero antes de desarrollar el nuevo contenido, el ponente primero revisó las ideas centrales de DDPM (Modelos Probabilísticos de Difusión Descontaminación) presentadas en la clase anterior, sentando las bases para comprender posteriormente la conexión profunda entre la función score y los modelos de difusión.
+
+\subsection{Marco básico de los modelos de difusión}
+
+La idea básica de los modelos de difusión es definir el proceso de generación de datos como un \textbf{proceso secuencial}. A diferencia de modelos tradicionales como VAE que tienen una única variable latente, los modelos de difusión mapean gradualmente los puntos de datos $x_0$ a una serie de variables latentes $x_1, x_2, \ldots, x_T$, de tal manera que la variable latente final $x_T$ sigue una distribución conocida (generalmente una distribución gaussiana estándar). El proceso de generación es el proceso inverso del anterior: partiendo de una muestra gaussiana estándar $x_T$, se reconstruye gradualmente hasta el punto de datos $x_0$.
+
+\begin{importantbox}{Dos características clave de los modelos de difusión}
+\begin{enumerate}
+    \item \textbf{Propiedad de Markov}: en el proceso hacia adelante, la muestreo de $x_t$ depende únicamente de $x_{t-1}$; en el proceso inverso, el muestreo de $x_{t-1}$ depende únicamente de $x_t$.
+    \item \textbf{Transición hacia adelante Gaussiana}: la distribución de transición hacia adelante se define como una distribución gaussiana de forma específica, controlada por los parámetros $\beta_t$:
+    $$q(x_t \mid x_{t-1}) = \mathcal{N}(x_t; \sqrt{1-\beta_t}\, x_{t-1},\; \beta_t I)$$
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Distribución de salto hacia adelante y entrenamiento}
+
+Dado que la distribución de transición hacia adelante es una distribución gaussiana con media lineal, podemos deducir la forma analítica de la \textbf{distribución de salto hacia adelante} (forward jump distribution), es decir, la distribución para muestrear directamente cualquier instante intermedio $x_t$ desde $x_0$:
+
+$$q(x_t \mid x_0) = \mathcal{N}(x_t;\; \sqrt{\bar{\alpha}_t}\, x_0,\; (1-\bar{\alpha}_t) I)$$
+
+donde $\bar{\alpha}_t = \prod_{s=1}^{t}(1-\beta_s)$. Esto significa que durante el entrenamiento no es necesario ejecutar el proceso hacia adelante paso a paso; se puede ``saltar'' directamente al muestreo de $x_t$.
+
+\begin{knowledgebox}{Salto hacia adelante vs. salto hacia atrás}
+En el proceso hacia adelante, dado que la media de la distribución de transición es una función lineal de la variable condicional, la composición de distribuciones gaussianas multietapa sigue siendo una distribución gaussiana; por lo tanto, se puede obtener una distribución de salto en forma cerrada. Sin embargo, en el proceso inverso, dado que la media de la distribución de transición inversa es una función \textbf{no lineal} del output de la red neuronal, la distribución compuesta de iteración multietapa \textbf{ya no es gaussiana}; por lo tanto, el proceso inverso no puede omitir los pasos intermedios y debe iterarse paso a paso mediante muestreo.
+\end{knowledgebox}
+
+\subsection{Tres objetivos de predicción}
+
+En el marco DDPM, hay tres objetivos de predicción equivalentes para entrenar la red neuronal:
+
+\begin{enumerate}
+    \item \textbf{Predictor de media} (Mean Predictor): predecir directamente la media $\mu_\theta(x_t, t)$ de la distribución de transición inversa.
+    \item \textbf{Predictor de muestra limpia} (Clean Sample Predictor / $x_0$-prediction): predecir el valor esperado del punto de datos original $x_0$ dado $x_t$, es decir $\hat{x}_\theta(x_t, t) \approx \mathbb{E}[x_0 \mid x_t]$.
+    \item \textbf{Predictor de ruido} (Noise Predictor / $\epsilon$-prediction): predecir el ruido gaussiano estándar $\epsilon_\theta(x_t, t) \approx \mathbb{E}[\epsilon_t \mid x_t]$ utilizado al muestrear $x_t$ desde $x_0$.
+\end{enumerate}
+
+\begin{knowledgebox}{Relaciones de equivalencia entre los tres predictores}
+Dado que $x_t = \sqrt{\bar{\alpha}_t}\, x_0 + \sqrt{1-\bar{\alpha}_t}\, \epsilon_t$, donde $\epsilon_t \sim \mathcal{N}(0, I)$, se pueden calcular los valores de los otros dos a partir del output de cualquier predictor; la diferencia entre los tres radica únicamente en su forma de parametrización. La función de pérdida final de entrenamiento puede simplificarse a una simple pérdida L2 de la forma $\|f_\theta(x_t, t) - f_{\text{target}}\|^2$ después de eliminar los pesos del paso temporal.
+\end{knowledgebox}
+
+Independientemente del objetivo de predicción elegido, el proceso de entrenamiento de DDPM consiste en: muestrear $x_0 \sim p_{\text{data}}$, muestrear $t \sim \text{Uniform}(1,T)$, muestrear $\epsilon \sim \mathcal{N}(0,I)$, calcular $x_t = \sqrt{\bar{\alpha}_t}\, x_0 + \sqrt{1-\bar{\alpha}_t}\, \epsilon$, y luego minimizar la función de pérdida L2 correspondiente.
+
+\subsection{Necesidad de modelos generativos}
+
+El ponente planteó una pregunta reflexiva: si ya disponemos de un conjunto de datos con 5 mil millones de imágenes, ¿por qué necesitamos modelos generativos? ¿Por qué no muestrear directamente una imagen de ellos?
+
+\begin{importantbox}{Ventajas de los modelos generativos frente a la búsqueda directa}
+\begin{enumerate}
+    \item \textbf{Compresión}: un modelo de difusión preentrenado puede tener solo unos cientos de MB, pero codifica información distribucional de miles de millones de imágenes, con una relación de compresión extremadamente alta.
+    \item \textbf{Novedad y diversidad}: los modelos generativos pueden producir imágenes completamente nuevas que no existen en el conjunto de datos, en lugar de copiarlas simplemente.
+    \item \textbf{Protección de privacidad}: los modelos generativos tienen la posibilidad (aunque no se puede garantizar completamente) de no outputear directamente las imágenes originales del conjunto de entrenamiento, protegiendo en cierta medida la privacidad de los datos.
+    \item \textbf{Generación condicional}: los modelos generativos pueden generar nuevos datos alineados con condiciones de entrada (como descripciones de texto), algo que la búsqueda simple no puede lograr fácilmente.
+\end{enumerate}
+\end{importantbox}
+
+\begin{warningbox}{La protección de privacidad no es absoluta}
+El ponente señaló claramente que los modelos de difusión \textbf{no pueden garantizar} no generar imágenes originales del conjunto de entrenamiento. De hecho, investigaciones previas demuestran que ciertos modelos preentrenados efectivamente generan imágenes que se pueden encontrar casi exactamente en internet. Por lo tanto, la protección de privacidad es solo una ``potencialidad'', no una ``garantía''.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+DDPM transforma el problema complejo de modelado de distribuciones de datos en una tarea simple de descontaminación al definir un proceso hacia adelante de Markov gaussiano y un proceso inverso aprendible. La solución en forma cerrada de la distribución de salto hacia adelante hace que el entrenamiento sea eficiente, y los tres objetivos de predicción equivalentes ofrecen flexibilidad para la implementación. Pero ¿cuál es el \textbf{significado físico} del predictor de ruido ($\epsilon$-prediction)? Esta es exactamente la pregunta central que los Modelos Basados en Puntuaciones (Score-Based Models) de esta clase buscan responder.
+
+
+\section{Definición y propiedades de la función de puntuación}
+
+\subsection{Definición de la función de puntuación}
+
+La función de puntuación (score function) tiene una definición precisa en estadística: es el gradiente del logaritmo de la función de densidad de probabilidad:
+
+\begin{importantbox}{Definición de la función de puntuación}
+Dada una función de densidad de probabilidad $p(x)$, su función de puntuación se define como:
+$$s(x) = \nabla_x \log p(x)$$
+donde $\nabla_x$ denota el gradiente respecto al punto de datos $x$ (y no respecto a los parámetros del modelo).
+\end{importantbox}
+
+Es importante notar que, en este contexto, la palabra ``puntuación'' no se refiere al concepto común de ``nota'' o puntaje, sino que es un término técnico con un significado específico en estadística. La función de puntuación es un campo vectorial: para cada punto $x$ en el espacio de datos, proporciona un vector de la misma dimensión que apunta hacia la dirección en la que la probabilidad logarítmica aumenta más rápidamente.
+
+\begin{knowledgebox}{Comprensión intuitiva de la función de puntuación}
+La función de puntuación $\nabla_x \log p(x)$ puede entenderse como una ``dirección guía'':
+\begin{itemize}
+    \item En regiones cercanas a alta densidad de probabilidad, el valor de la puntuación es pequeño (porque ya se está cerca de la ``cima'').
+    \item En regiones de baja densidad de probabilidad, la puntuación apunta hacia la dirección de mayor densidad.
+    \item Los puntos donde la puntuación es cero corresponden a los puntos extremos de la densidad de probabilidad.
+\end{itemize}
+En términos intuitivos, la función de puntuación nos indica ``hacia dónde debemos ir para llegar a una zona con mayor probabilidad''.
+\end{knowledgebox}
+
+\subsection{Función de puntuación de la distribución gaussiana}
+
+Para establecer una intuición, calculemos la función de puntuación de una distribución gaussiana. Para la distribución condicional (es decir, la distribución del salto hacia adelante):
+
+$$q(x_t \mid x_0) = \mathcal{N}(x_t;\; \sqrt{\bar{\alpha}_t}\, x_0,\; (1-\bar{\alpha}_t) I)$$
+
+su función de puntuación es:
+
+$$\nabla_{x_t} \log q(x_t \mid x_0) = -\frac{x_t - \sqrt{\bar{\alpha}_t}\, x_0}{1-\bar{\alpha}_t}$$
+
+Este derivado es directo: primero se escribe la función de densidad de probabilidad de la distribución gaussiana, luego se toma el logaritmo y se retienen solo los términos relacionados con $x_t$ (es decir, el término cuadrático), y finalmente se calcula el gradiente respecto a $x_t$.
+
+\begin{importantbox}{Relación entre predicción de ruido y función de puntuación}
+Recordando que $x_t = \sqrt{\bar{\alpha}_t}\, x_0 + \sqrt{1-\bar{\alpha}_t}\, \epsilon_t$, se obtiene:
+$$\epsilon_t = \frac{x_t - \sqrt{\bar{\alpha}_t}\, x_0}{\sqrt{1-\bar{\alpha}_t}}$$
+Por lo tanto:
+$$\nabla_{x_t} \log q(x_t \mid x_0) = -\frac{\epsilon_t}{\sqrt{1-\bar{\alpha}_t}}$$
+Es decir, el $\epsilon_t$ predicho por el predictor de ruido en DDPM difiere de la función de puntuación condicional únicamente por un factor de escala. El significado físico de la predicción de ruido es aprender la función de puntuación (hasta un factor de escala).
+\end{importantbox}
+
+Este descubrimiento revela el significado profundo del predictor de ruido de DDPM: aunque superficialmente estamos ``prediciendo ruido'', en realidad estamos aprendiendo la función de puntuación de la distribución del salto hacia adelante.
+
+\subsection{De la puntuación condicional a la puntuación marginal}
+
+Hasta ahora hemos discutido la función de puntuación de la distribución \textbf{condicional} $q(x_t \mid x_0)$, ya que conocemos $x_0$. Sin embargo, en el proceso de generación no conocemos $x_0$; lo que realmente necesitamos es la función de puntuación de la distribución \textbf{marginal} $q(x_t)$:
+
+$$\nabla_{x_t} \log q(x_t) = ?$$
+
+donde $q(x_t) = \int q(x_t \mid x_0)\, q(x_0)\, dx_0$. Dado que $q(x_0)$ (la distribución real de los datos) suele ser desconocida y compleja, $q(x_t)$ generalmente no tiene una forma analítica cerrada.
+
+No obstante, mediante deducciones matemáticas se puede demostrar:
+
+$$\nabla_{x_t} \log q(x_t) = \mathbb{E}_{q(x_0 \mid x_t)}\left[\nabla_{x_t} \log q(x_t \mid x_0)\right]$$
+
+\begin{importantbox}{La puntuación marginal es la esperanza a posteriori de la puntuación condicional}
+La función de puntuación de la distribución marginal es igual al valor esperado de la función de puntuación condicional bajo la distribución a posteriori $q(x_0 \mid x_t)$. Esto significa que la red neuronal predictora de ruido $\epsilon_\theta(x_t, t)$ entrenada efectivamente está aprendiendo la función de puntuación obtenida promediando a posteriori todos los posibles $x_0$.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La función de puntuación se define como el gradiente de la densidad de probabilidad logarítmica y codifica información completa sobre la distribución de probabilidad. La función de puntuación de la distribución gaussiana tiene una solución cerrada concisa, mientras que el predictor de ruido en DDPM esencialmente aprende la función de puntuación de la distribución del salto hacia adelante (con un factor de escala). La puntuación marginal es igual a la esperanza de la puntuación condicional bajo la distribución a posteriori, lo que proporciona una explicación matemática rigurosa para entender el objetivo de aprendizaje de las redes neuronales en los modelos de difusión.
+\section{Fórmula de Tweedie}
+
+\subsection{Enunciado de la fórmula e intuición}
+
+La fórmula de Tweedie es una herramienta matemática clave para comprender la conexión entre la función score y los modelos de difusión. Responde a la siguiente pregunta: si conocemos la distribución marginal $p(x)$ y la distribución de verosimilitud $p(x \mid \mu)$, ¿podemos inferir la esperanza del variable latente $\mu$ a partir de la observación $x$?
+
+\begin{importantbox}{Fórmula de Tweedie}
+Considere el siguiente proceso generativo: primero se muestrea un valor medio $\mu$ desde una distribución a priori $p(\mu)$, y luego se muestrea una observación $x$ desde la distribución de verosimilitud $p(x \mid \mu) = \mathcal{N}(x;\; \mu, \sigma^2 I)$. Sea la distribución marginal $p(x) = \int p(x \mid \mu)\, p(\mu)\, d\mu$; entonces, el valor medio posterior es:
+$$\mathbb{E}[\mu \mid x] = x + \sigma^2 \nabla_x \log p(x)$$
+\end{importantbox}
+
+\begin{knowledgebox}{Intuición de la fórmula de Tweedie}
+Esta fórmula posee una explicación intuitiva muy elegante:
+\begin{itemize}
+    \item Si solo conocemos la observación $x$ y no tenemos otra información, la estimación más ingenua de $\mu$ es $x$ mismo.
+    \item Pero la función score $\nabla_x \log p(x)$ proporciona una ``dirección de corrección'': apunta hacia regiones de alta densidad de probabilidad.
+    \item La fórmula de Tweedie nos indica que la estimación óptima del valor medio posterior consiste en realizar un paso de corrección a partir de la estimación ingenua $x$, siguiendo la dirección del score, con una amplitud de corrección proporcional a la varianza del ruido $\sigma^2$.
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Verificación en el caso gaussiano simple}
+
+El ponente utiliza un ejemplo sencillo para verificar la validez y la intuición de la fórmula de Tweedie:
+
+Sea $p(\mu) = \mathcal{N}(0, 1)$ y $p(x \mid \mu) = \mathcal{N}(x;\; \mu, \sigma^2)$. Dado que tanto la distribución a priori como la de verosimilitud son gaussianas, la distribución marginal también lo será (propiedad de las distribuciones gaussianas), por lo que:
+
+$$p(x) = \mathcal{N}(0, 1 + \sigma^2)$$
+
+Por tanto, la función score es:
+
+$$\nabla_x \log p(x) = -\frac{x}{1 + \sigma^2}$$
+
+Sustituyendo en la fórmula de Tweedie:
+
+$$\mathbb{E}[\mu \mid x] = x + \sigma^2 \cdot \left(-\frac{x}{1+\sigma^2}\right) = x \cdot \frac{1}{1+\sigma^2}$$
+
+\begin{knowledgebox}{Verificación intuitiva: estimación con contracción}
+El resultado $\mathbb{E}[\mu \mid x] = \frac{x}{1+\sigma^2}$ presenta un efecto de ``contracción'' (shrinkage):
+\begin{itemize}
+    \item Cuando $x > 0$, $\mathbb{E}[\mu \mid x] < x$: la estimación del valor medio está más cerca de cero que el valor observado (en la dirección del valor medio a priori).
+    \item Cuando $x < 0$, $\mathbb{E}[\mu \mid x] > x$: análogamente, se contrae hacia cero.
+    \item Cuanto mayor es $\sigma^2$ (mayor es el ruido), más fuerte es la contracción: en presencia de alto ruido, confiamos más en la distribución a priori.
+    \item Cuando $\sigma^2 \to 0$, $\mathbb{E}[\mu \mid x] \to x$: cuando desaparece el ruido, la observación misma constituye la mejor estimación.
+\end{itemize}
+Esto concuerda perfectamente con la intuición de la inferencia bayesiana.
+\end{knowledgebox}
+
+\subsection{Aplicación en modelos de difusión}
+
+Al aplicar la fórmula de Tweedie a la distribución del salto hacia adelante en los modelos de difusión, $q(x_t \mid x_0) = \mathcal{N}(\sqrt{\bar{\alpha}_t}\, x_0, (1-\bar{\alpha}_t)I)$, donde el papel de ``valor medio'' lo desempeña $\sqrt{\bar{\alpha}_t}\, x_0$ y la ``varianza'' es $\sigma_t^2 = 1-\bar{\alpha}_t$, obtenemos:
+
+$$\mathbb{E}[\sqrt{\bar{\alpha}_t}\, x_0 \mid x_t] = x_t + (1-\bar{\alpha}_t)\, \nabla_{x_t} \log q(x_t)$$
+
+Reordenando los términos:
+
+\begin{importantbox}{Forma de la fórmula de Tweedie en modelos de difusión}
+$$\mathbb{E}[x_0 \mid x_t] = \frac{1}{\sqrt{\bar{\alpha}_t}} \left(x_t + (1-\bar{\alpha}_t)\, \nabla_{x_t} \log q(x_t)\right)$$
+Esto indica que conocer la función score marginal $\nabla_{x_t} \log q(x_t)$ es equivalente a conocer la estimación óptima de $x_0$ dado $x_t$. La función score contiene toda la información necesaria para el ``desenfoque'' (denoising).
+\end{importantbox}
+
+\begin{warningbox}{Diferencia entre score condicional y score marginal}
+El $\nabla_{x_t} \log q(x_t)$ que aparece aquí es el score de la distribución \textbf{marginal}, no el score de la distribución condicional $q(x_t \mid x_0)$. El score condicional se puede calcular directamente utilizando la fórmula de la distribución gaussiana, pero el score marginal requiere promediar mediante integración sobre todos los posibles $x_0$. Durante el entrenamiento, las redes neuronales aprenden implícitamente el score marginal mediante el promedio de grandes cantidades de muestras.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La fórmula de Tweedie proporciona una solución cerrada elegante para el valor medio posterior en modelos del tipo ``observación igual a media más ruido'': basta con añadir una corrección en la dirección de la función score al valor observado. En los modelos de difusión, establece un vínculo estrecho entre la función score y la operación de desenfoque (recuperación esperada de $x_0$ a partir de $x_t$), ofreciendo un puente fundamental para comprender los métodos basados en el score.
+\section{Dinámica de Langevin: muestreo basado en Score}
+
+\subsection{Idea central}
+
+Hemos establecido anteriormente el concepto de \texttt{score function} y visto cómo codifica información rica sobre la distribución de probabilidad. La pregunta clave ahora es: si conocemos el \texttt{score function} de una distribución, ¿podemos muestrear de ella?
+
+La respuesta es afirmativa; la dinámica de Langevin (\textbf{Langevin dynamics}) es precisamente el método para lograr este objetivo. Proviene de la física estadística y su idea central es que, mediante un proceso iterativo guiado por el \texttt{score function}, se puede partir de una \textbf{distribución inicial arbitraria} y converger finalmente a la distribución objetivo.
+
+\begin{importantbox}{Proceso de muestreo de Langevin Dynamics}
+Dada la función score del \texttt{score function} $\nabla_x \log q(x)$ de la distribución objetivo $q(x)$, la fórmula de actualización iterativa de la dinámica de Langevin es:
+$$x_{k+1} = x_k + \eta\, \nabla_x \log q(x_k) + \sqrt{2\eta}\, z_k, \quad z_k \sim \mathcal{N}(0, I)$$
+donde $\eta > 0$ es el parámetro de paso. Cuando $\eta \to 0$ y el número de iteraciones $K \to \infty$, la distribución de $x_K$ converge a $q(x)$.
+\end{importantbox}
+
+\begin{knowledgebox}{Los tres componentes de Langevin Dynamics}
+La fórmula de actualización de la dinámica de Langevin consta de tres partes:
+\begin{enumerate}
+    \item \textbf{Posición actual} $x_k$: el estado actual de la partícula.
+    \item \textbf{Guía por Score} $\eta\, \nabla_x \log q(x_k)$: la fuerza determinista que empuja la partícula hacia regiones de alta densidad de probabilidad.
+    \item \textbf{Ruido aleatorio} $\sqrt{2\eta}\, z_k$: evita que la partícula se quede atrapada en valores locales óptimos y garantiza una exploración adecuada de la distribución objetivo.
+\end{enumerate}
+Si solo hubiera la guía por score sin inyección de ruido, la partícula convergería únicamente al punto de máximo de la densidad de probabilidad (modo), sin formar la distribución correcta. La existencia del término de ruido asegura la diversidad de las muestras finales.
+\end{knowledgebox}
+
+\subsection{Propiedades clave de Langevin Dynamics}
+
+La dinámica de Langevin tiene una propiedad extraordinaria: \textbf{no requiere conocer} la función de densidad de probabilidad $q(x)$ en sí misma, sino únicamente el \texttt{score function} $\nabla_x \log q(x)$.
+
+\begin{importantbox}{El Score Function basta para describir completamente la distribución}
+El \texttt{score function} $\nabla_x \log q(x)$ determina de manera única la distribución de probabilidad $q(x)$ (hasta una constante de normalización), al cumplir ciertas condiciones de regularidad. Esto se debe a que:
+\begin{itemize}
+    \item $\nabla_x \log q(x) = \frac{\nabla_x q(x)}{q(x)}$, lo cual contiene información sobre el gradiente local de $q(x)$.
+    \item Mediante la dinámica de Langevin, podemos recuperar el proceso de muestreo a partir del \texttt{score function}.
+    \item Esto también implica que: incluso sin conocer la constante de normalización de la función de densidad de probabilidad (que suele ser difícil de calcular en espacios de alta dimensión), basta con conocer el \texttt{score function} para realizar el muestreo.
+\end{itemize}
+\end{importantbox}
+
+En los modelos probabilísticos tradicionales, muestrear de distribuciones complejas requiere habitualmente calcular la inversa de la función de distribución acumulada (CDF), lo cual es prácticamente inviable en espacios de alta dimensión. La dinámica de Langevin ofrece una alternativa: basta con calcular el gradiente de la densidad de probabilidad logarítmica respecto a los puntos de datos y, mediante un proceso iterativo, se puede muestrear.
+
+\begin{warningbox}{Limitaciones prácticas de Langevin Dynamics}
+Las garantías teóricas de convergencia requieren que el paso $\eta \to 0$ y que las iteraciones sean infinitas; en la práctica, ambas condiciones no pueden cumplirse. El paso finito y el número finito de iteraciones introducen errores de aproximación. Además, en distribuciones multimodales, la dinámica de Langevin puede tardar mucho tiempo en saltar entre diferentes modos (problema de mezclado).
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La dinámica de Langevin es un método de muestreo basado en el \texttt{score function}. A través del proceso iterativo de ``guía por score + inyección de ruido aleatorio'', puede partir de cualquier distribución inicial y converger a la distribución objetivo. La ventaja central de este método radica en que permite realizar el muestreo conociendo únicamente el \texttt{score function} y no la función de densidad de probabilidad en sí misma, evitando así el problema de calcular constantes de normalización difíciles en espacios de alta dimensión.
+
+
+\section{Score Matching: Aprendizaje de la función Score}
+
+\subsection{Planteamiento del problema}
+
+En las sesiones anteriores vimos que: (1) la función score describe completamente la distribución de probabilidad; (2) mediante dinámicas de Langevin se puede realizar muestreo utilizando la función score. Entonces, la pregunta clave se convierte en: \textbf{¿cómo aprender la función score a partir de los datos?}
+
+La idea más directa es definir un objetivo de coincidencia de scores:
+
+$$\mathcal{L}_{\text{SM}} = \mathbb{E}_{q(x)}\left[\left\| s_\theta(x) - \nabla_x \log q(x) \right\|^2\right]$$
+
+donde $s_\theta(x)$ es el estimador de score parametrizado por una red neuronal.
+
+\begin{warningbox}{Dificultades del Score Matching directo}
+La función de pérdida anterior tiene un problema fundamental: requiere conocer la función score $\nabla_x \log q(x)$ de la distribución real $q(x)$, y es precisamente lo que queremos aprender. Esto parece caer en un ciclo de ``el huevo pone la gallina, la gallina pone el huevo''.
+\end{warningbox}
+
+\subsection{Denoising Score Matching}
+
+El insight clave para resolver este problema es que, aunque no conozcamos la función score de la distribución original $q(x)$, si definimos una versión \textbf{con ruido} de la distribución $q_\sigma(x_t)$:
+
+$$q_\sigma(x_t) = \int q(x_t \mid x_0)\, q(x_0)\, dx_0$$
+
+donde $q(x_t \mid x_0) = \mathcal{N}(x_t;\; x_0, \sigma^2 I)$, entonces el \textbf{score condicional} $\nabla_{x_t} \log q(x_t \mid x_0)$ es conocido:
+
+$$\nabla_{x_t} \log q(x_t \mid x_0) = -\frac{x_t - x_0}{\sigma^2}$$
+
+\begin{importantbox}{Pérdida de Denoising Score Matching (DSM)}
+Después de una deducción matemática (omitiendo los detalles de las transformaciones de identidad), se puede demostrar que el objetivo de score matching es equivalente a:
+$$\mathcal{L}_{\text{DSM}} = \mathbb{E}_{q(x_0)}\, \mathbb{E}_{q(x_t \mid x_0)}\left[\left\| s_\theta(x_t) - \nabla_{x_t} \log q(x_t \mid x_0) \right\|^2\right]$$
+Dado que $\nabla_{x_t} \log q(x_t \mid x_0)$ tiene una solución en forma cerrada, ¡esta pérdida es computable!
+\end{importantbox}
+
+\begin{knowledgebox}{Proceso de entrenamiento de DSM}
+Los pasos de entrenamiento de Denoising Score Matching son extremadamente simples:
+\begin{enumerate}
+    \item Muestrear un punto de datos $x_0 \sim q(x_0)$ (es decir, tomar una muestra de entrenamiento).
+    \item Muestrear ruido $\epsilon \sim \mathcal{N}(0, I)$, obteniendo $x_t = x_0 + \sigma\, \epsilon$.
+    \item Calcular el objetivo de score $\nabla_{x_t} \log q(x_t \mid x_0) = -\epsilon / \sigma$.
+    \item Minimizar $\|s_\theta(x_t) + \epsilon/\sigma\|^2$.
+\end{enumerate}
+Se puede observar que esto es esencialmente \textbf{idéntico} al entrenamiento de predicción de ruido en DDPM.
+\end{knowledgebox}
+
+\subsection{Equivalencia con el entrenamiento de DDPM}
+
+En DDPM, el objetivo de entrenamiento del predictor de ruido es:
+
+$$\mathcal{L}_{\text{DDPM}} = \mathbb{E}_{x_0, t, \epsilon}\left[\left\| \epsilon_\theta(x_t, t) - \epsilon \right\|^2\right]$$
+
+Mientras que en denoising score matching, el objetivo de entrenamiento de la red score es:
+
+$$\mathcal{L}_{\text{DSM}} = \mathbb{E}_{x_0, t, \epsilon}\left[\left\| s_\theta(x_t, t) + \frac{\epsilon}{\sqrt{1-\bar{\alpha}_t}} \right\|^2\right]$$
+
+La relación entre ambos es $s_\theta(x_t, t) = -\epsilon_\theta(x_t, t) / \sqrt{1-\bar{\alpha}_t}$; es decir, la red score y la red de predicción de ruido difieren únicamente por un factor de escala relacionado con el paso de tiempo.
+
+\begin{importantbox}{Unificación de DDPM y Modelos basados en Score}
+El marco de predicción de ruido de DDPM y el marco de score matching basado en score son \textbf{dos caras de la misma moneda}:
+\begin{itemize}
+    \item Perspectiva de DDPM: entrenar una red neuronal para predecir el ruido añadido a los datos.
+    \item Perspectiva basada en score: entrenar una red neuronal para estimar la función score de la distribución con ruido.
+    \item Ambas perspectivas son matemáticamente completamente equivalentes, diferenciándose solo por un factor de escala.
+\end{itemize}
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Score matching resuelve el problema de ``cómo aprender la función score a partir de los datos'' mediante una astuta transformación del objetivo de score marginal incomputable en un objetivo de denoising score matching computable. Este objetivo de entrenamiento es matemáticamente completamente equivalente al entrenamiento de predicción de ruido de DDPM, unificando así dos direcciones de investigación que parecían diferentes.
+\section{Redes de puntuación condicionadas al ruido (NCSN)}
+
+\subsection{Problema de estimación de puntuación en regiones de baja densidad}
+
+Aprender directamente el score function de la distribución de datos original $p_{\text{data}}(x)$ mediante score matching tiene un problema grave.
+
+\begin{warningbox}{Inexactitud de la puntuación en regiones de baja densidad}
+En distribuciones multimodales, existen \textbf{regiones de baja probabilidad} (low density regions) entre los diferentes modos. En estas zonas:
+\begin{enumerate}
+    \item Hay muy pocos datos de entrenamiento, por lo que la estimación del score es extremadamente inexacta.
+    \item Sin embargo, el punto de partida para el muestreo mediante Langevin dynamics suele caer en estas regiones de baja densidad (ya que la distribución inicial es usualmente uniforme o gaussiana).
+    \item Una puntuación inexacta provoca que la fase inicial del proceso de muestreo esté llena de ruido; las partículas se mueven erráticamente ("huyen") en las zonas de baja densidad, resultando difícil llegar eficazmente a las regiones de alta densidad.
+\end{enumerate}
+\end{warningbox}
+
+El ponente ilustra este problema con una animación de una distribución bidimensional: al partir de puntos de muestreo uniformes, si la puntuación en las zonas de baja densidad es inexacta, las partículas realizarán un movimiento aleatorio durante las etapas iniciales del muestreo en lugar de desplazarse de manera direccional hacia las regiones de alta densidad.
+
+\subsection{Solución mediante ruido de múltiples escalas}
+
+La idea central para resolver el problema de la inexactitud de la puntuación en zonas de baja densidad consiste en añadir \textbf{niveles distintos de ruido gaussiano} a los datos, con lo cual se "rellenan" las regiones de baja densidad.
+
+Cuando la varianza del ruido $\sigma^2$ es grande, la distribución $q_\sigma(x)$ después de añadir el ruido se vuelve más ``suave'':
+\begin{itemize}
+    \item Las regiones de baja densidad originales quedan ``rellenas'' por el ruido; ya no existen zonas con probabilidad próxima a cero.
+    \item El score function puede estimarse con precisión en todo el espacio.
+    \item Pero el costo es que la distribución se vuelve borrosa, perdiendo información detallada.
+\end{itemize}
+
+Cuando la varianza del ruido $\sigma^2$ es pequeña:
+\begin{itemize}
+    \item La distribución después de añadir el ruido se acerca más a la distribución de datos originales e incluye información estructural fina.
+    \item Pero la puntuación en las regiones de baja densidad sigue siendo inexacta.
+\end{itemize}
+
+\begin{importantbox}{La idea central de NCSN: aprendizaje de puntuaciones a múltiples escalas}
+La idea central de NCSN (Noise-Conditioned Score Networks) es aprender simultáneamente el score function para varios niveles de ruido:
+$$s_\theta(x, \sigma) \approx \nabla_x \log q_\sigma(x)$$
+donde $\sigma$ toma una serie de valores decrecientes $\sigma_1 > \sigma_2 > \cdots > \sigma_L$. La red toma $x$ y $\sigma$ como entrada y devuelve la puntuación correspondiente al nivel de ruido.
+\end{importantbox}
+
+\subsection{Dinámica de Langevin con recocido (Annealed Langevin Dynamics)}
+
+Con el score function a múltiples escalas, para el muestreo se utiliza \textbf{dinámica de Langevin con recocido} (Annealed Langevin Dynamics):
+
+\begin{importantbox}{Algoritmo de muestreo mediante Dinámica de Langevin con recocido}
+\begin{enumerate}
+    \item Comenzar con gran varianza ($\sigma_1$ grande, distribución borrosa): la puntuación es bastante precisa en todo el espacio, guiando a las partículas desde su posición inicial hacia las regiones de alta densidad.
+    \item Reducir progresivamente el nivel de ruido ($\sigma_2, \sigma_3, \ldots$): la puntuación se vuelve cada vez más precisa, refinando la guía de las partículas hacia las zonas de alta densidad de la distribución real.
+    \item Converger en el nivel de ruido mínimo ($\sigma_L$ pequeño, cercano a la distribución original): las partículas se encuentran en las regiones de alta densidad de la distribución original.
+\end{enumerate}
+En cada nivel de ruido se ejecutan varios pasos de Langevin dynamics y luego se cambia al siguiente (nivel de ruido menor).
+\end{importantbox}
+
+\begin{knowledgebox}{Analogía física de la Dinámica de Langevin con recocido}
+Este proceso es análogo al recocido (annealing) de metales:
+\begin{itemize}
+    \item Fase de alta temperatura (gran ruido): las moléculas pueden moverse libremente, cruzar barreras y explorar el panorama energético completo.
+    \item Enfriamiento lento (reducción progresiva del ruido): las moléculas se estabilizan gradualmente en la configuración de menor energía.
+    \item Fase de baja temperatura (poco ruido): las moléculas quedan bloqueadas en estados de baja energía precisos.
+\end{itemize}
+Análogo a la programación de temperaturas en el recocido simulado (simulated annealing).
+\end{knowledgebox}
+
+\subsection{Relación con el proceso inverso de los modelos de difusión}
+
+El proceso de desruido a múltiples escalas mediante dinámica de Langevin con recocido guarda una relación profunda con el proceso inverso de los modelos de difusión:
+
+\begin{importantbox}{Correspondencia entre Score-Based Model y DDPM}
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Concepto} & \textbf{Perspectiva DDPM} & \textbf{Perspectiva Score-Based} \\
+\midrule
+Proceso hacia adelante & Añadir ruido progresivamente (varianza creciente) & Distribución de datos se vuelve progresivamente borrosa \\
+Proceso inverso & Desruido progresivo & Dinámica de Langevin con recocido \\
+Salida de la red & Ruido $\epsilon_\theta$ & Puntuación $s_\theta$ \\
+Objetivo de entrenamiento & Predicción de ruido L2 & Score matching desruidor \\
+$\sigma_t$ grande & Inicios del proceso hacia adelante | Inicio del recocido (navegación gruesa) \\
+$\sigma_t$ pequeño | Finales del proceso hacia adelante | Finales del recocido (refinamiento) \\
+\bottomrule
+\end{tabular}
+\end{center}
+El incremento progresivo de la varianza en el proceso hacia adelante de DDPM corresponde exactamente a la distribución a múltiples escalas desde poco ruido hasta mucho ruido en los modelos basados en puntuación; el proceso inverso de desruido de DDPM corresponde exactamente al refinamiento progresivo desde gran ruido hasta poco ruido en la dinámica de Langevin con recocido.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+NCSN resuelve el problema de inexactitud en la estimación del score function en zonas de baja densidad mediante la introducción de ruido a múltiples escalas. La dinámica de Langevin con recocido comienza con gran ruido (navegación gruesa) y reduce progresivamente hacia poco ruido (refinamiento), lo que permite que el proceso de muestreo cruce eficazmente las zonas de baja densidad mientras converge finalmente a la distribución objetivo precisa. Este marco es matemáticamente totalmente equivalente al proceso inverso de desruido de DDPM, aunque ofrece una perspectiva e intuición distintas.
+\section{Una perspectiva unificada de los modelos basados en puntuaciones y DDPM}
+
+\subsection{La convergencia de dos vías de investigación}
+
+Históricamente, DDPM y los modelos basados en puntuaciones (score-based models) fueron dos vías de desarrollo independiente:
+
+\begin{knowledgebox}{El desarrollo de ambas vías}
+\begin{itemize}
+    \item \textbf{Vía DDPM}: Ho et al. (2020) derivaron el objetivo de entrenamiento basado en inferencia variacional y ELBO. Partiendo de las tradiciones de los modelos gráficos probabilísticos y los autoencoders variacionales, definieron cadenas de Markov hacia adelante/hacia atrás y entrenaron el proceso inverso maximizando el ELBO.
+    \item \textbf{Vía basada en puntuaciones}: Song \& Ermon (2019, 2020) se basaron en score matching y dinámicas de Langevin. Partiendo de la función score en estadística, entrenaron un estimador de score mediante denoising score matching y realizaron muestreo usando dinámicas de Langevin con recocido (annealed).
+\end{itemize}
+Ambas vías finalmente se unificaron en el marco de SDE basado en puntuaciones de Song et al. (2021).
+\end{knowledgebox}
+
+\subsection{Resumen matemático de la relación de equivalencia}
+
+Ya hemos establecido progresivamente todas las relaciones de equivalencia en las secciones anteriores; aquí hacemos un resumen sistemático:
+
+\begin{enumerate}
+    \item \textbf{Equivalencia del objetivo de entrenamiento}: La pérdida de predicción de $\epsilon$ en DDPM es equivalente a la pérdida de Denoising Score Matching (con un factor de escala diferente).
+    \item \textbf{Equivalencia de la salida de la red}: $\epsilon_\theta(x_t, t) = -\sqrt{1-\bar{\alpha}_t}\, s_\theta(x_t, t)$.
+    \item \textbf{Equivalencia del proceso de muestreo}: El muestreo inverso en DDPM es equivalente a las dinámicas de Langevin con recocido (en su forma discretizada).
+    \item \textbf{Conexión Tweedie}: $\mathbb{E}[x_0 \mid x_t]$ puede expresarse tanto mediante la función score como mediante un predictor de ruido.
+\end{enumerate}
+
+\begin{importantbox}{Significado práctico de la perspectiva unificada}
+Comprender esta equivalencia no es solo una cuestión de elegancia académica, sino que tiene implicaciones prácticas importantes:
+\begin{itemize}
+    \item Se puede utilizar la teoría basada en puntuaciones para analizar las propiedades de DDPM (como la convergencia y la calidad del muestreo).
+    \item Se pueden emplear las técnicas prácticas de DDPM para mejorar el muestreo basado en puntuaciones (por ejemplo, en el diseño del schedule).
+    \item La perspectiva de la función score proporciona una base teórica natural para la generación condicional (guía por clasificador, guía libre de clasificador).
+    \item El marco de SDE de tiempo continuo de Song et al. generaliza los pasos discretos a procesos continuos, abriendo el camino para diseños de muestreadores más flexibles (como DDIM, DPM-Solver, entre otros).
+\end{itemize}
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Aunque DDPM y los modelos basados en puntuaciones surgieron de diferentes puntos de partida y motivaciones, son matemáticamente completamente equivalentes. DDPM ofrece una perspectiva de modelos gráficos probabilísticos e inferencia variacional, mientras que los modelos basados en puntuaciones aportan la intuición física de la función score y las dinámicas de Langevin. Comprender ambas perspectivas es crucial para dominar profundamente la teoría de los modelos de difusión.
+
+
+\section{Síntesis y ampliación}
+
+\subsection{Repaso de los puntos clave}
+
+Esta clase se centró en \textbf{Score-Based Models}, estableciendo sistemáticamente los siguientes conceptos fundamentales:
+
+\begin{enumerate}
+    \item \textbf{Score Function}: definido como $\nabla_x \log p(x)$, es un campo vectorial que apunta en la dirección de aumento de probabilidad y codifica completamente la información de la distribución de probabilidad.
+
+    \item \textbf{Predicción de ruido como aprendizaje del Score}: el predictor de ruido $\epsilon_\theta$ en DDPM difiere del score function únicamente por un factor de escala, revelando el profundo significado físico de la predicción de ruido.
+
+    \item \textbf{Fórmula de Tweedie}: proporciona una fórmula directa desde el score function hasta la estimación de la media posterior (denoising): $\mathbb{E}[\mu \mid x] = x + \sigma^2 \nabla_x \log p(x)$.
+
+    \item \textbf{Dinámicas de Langevin}: un método de muestreo que depende únicamente del score function, convergiendo a la distribución objetivo mediante un proceso iterativo de ``ascenso por gradiente + inyección de ruido''.
+
+    \item \textbf{Score Matching con desruido}: transforma el objetivo no computable de score matching en un objetivo computable de desruido; su proceso de entrenamiento es totalmente equivalente al de DDPM.
+
+    \item \textbf{Ruido multiescala y estrategia de recocido}: resuelve el problema de inexactitud del score en regiones de baja densidad mediante múltiples niveles de ruido del score function y dinámicas de Langevin con recocido, lo cual es equivalente al proceso inverso de desruido de DDPM.
+\end{enumerate}
+
+\subsection{Lecturas adicionales}
+
+\begin{itemize}
+    \item \textbf{Song \& Ermon (2019)}: \textit{Generative Modeling by Estimating Gradients of the Data Distribution} -- propone NCSN, integrando por primera vez score matching y dinámicas de Langevin con recocido para la generación de imágenes.
+    \item \textbf{Ho et al. (2020)}: \textit{Denoising Diffusion Probabilistic Models (DDPM)} -- deriva el objetivo de entrenamiento de los modelos de difusión desde una perspectiva de inferencia variacional.
+    \item \textbf{Song et al. (2021)}: \textit{Score-Based Generative Modeling through Stochastic Differential Equations} -- propone el marco Score SDE, unificando DDPM y NCSN como procesos continuos en el tiempo.
+    \item \textbf{Vincent (2011)}: \textit{A Connection Between Score Matching and Denoising Autoencoders} -- establece por primera vez los fundamentos teóricos del score matching con desruido.
+    \item \textbf{Efron (2011)}: \textit{Tweedie's Formula and Selection Bias} -- un tratamiento clásico de la fórmula de Tweedie en estadística.
+\end{itemize}
+
+%% --- Fin del contenido --- %%
+
+\end{document}

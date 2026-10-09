@@ -1,0 +1,679 @@
+\documentclass[a4paper]{article}
+
+% Paquetes básicos
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+% FandolSong no cubre algunos caracteres de nombres (U+73FA); WenQuanYi Zen Hei sí.
+\usepackage[AutoFallBack=true]{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+\setCJKfallbackfamilyfont{\CJKrmdefault}{WenQuanYi Zen Hei}
+% polyglossia no traduce los nombres de listados.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\usepackage{float}
+
+% Cajas de resaltado
+\newtcolorbox{knowledgebox}[1]{
+    enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, attach boxed title to top left={yshift=-2mm, xshift=2mm},
+    boxrule=1pt, sharp corners
+}
+
+\newtcolorbox{importantbox}[1]{
+    enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black,
+    coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+\newtcolorbox{warningbox}[1]{
+    enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+% Listados
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    stringstyle=\color{red!60!black},
+    commentstyle=\color{green!60!black},
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    captionpos=b,
+    extendedchars=true
+}
+
+% Metadatos de la página inicial
+\newcommand{\notetitle}{KAIST CS492D: Modelos generativos condicionales y difusos latentes}
+\newcommand{\noteauthors}{Elaboradas a partir de la clase de Minhyuk Sung}
+\newcommand{\notedate}{Otoño de 2025}
+\newcommand{\videochannel}{Minhyuk Sung (KAIST)}
+\newcommand{\videopublishdate}{2025}
+\newcommand{\videoduration}{65 minutos}
+\newcommand{\videourl}{https://www.youtube.com/watch?v=elW_X0ezM70}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}
+\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}
+\vspace{0.8cm}
+{\large \noteauthors\par}
+\vspace{0.3cm}
+{\large \notedate\par}
+\vspace{1.2cm}
+
+\ifdefempty{\videocoverpath}{
+{\small Al generar las notas, indique la ruta local de la portada del video.\par}
+}{
+\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par
+}
+
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\ifdefempty{\videourl}{}{
+\textbf{Enlace del video}: \href{\videourl}{\nolinkurl{\videourl}}\par
+}
+\end{tcolorbox}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+%% --- Inicio del contenido --- %%
+
+\section{Introducción: de la generación incondicional a la condicional}
+
+Esta clase es la sexta del curso KAIST CS492D (Modelos de difusión y sus aplicaciones), impartida por el profesor Minhyuk Sung. Las clases anteriores ya presentaron los principios fundamentales de modelos de difusión como DDPM y DDIM, y los estudiantes tienen capacidad para implementar modelos básicos de difusión. En esta clase "cambiaremos de marcha" para discutir cómo introducir \textbf{información condicional} (etiquetas de clase, descripciones de texto, imágenes, etc.) en aplicaciones prácticas y cómo realizar un \textbf{fine-tuning eficiente} de modelos de difusión preentrenados a gran escala.
+
+\begin{knowledgebox}{Repaso de conocimientos previos}
+En el marco DDPM/DDIM, existe una relación determinista entre la salida de la red de predicción de ruido $\epsilon_\theta(x_t, t)$ y la función score:
+$$
+\nabla_{x_t} \log p(x_t) \;\propto\; -\frac{1}{\sqrt{1-\bar\alpha_t}}\,\epsilon_\theta(x_t, t)
+$$
+donde $\bar\alpha_t$ es el producto acumulado de la programación de ruido. Esta relación constituye la base matemática de todos los métodos de generación condicional: guiar las trayectorias de generación mediante la modificación de la función score.
+\end{knowledgebox}
+
+Esta clase cubre los siguientes temas centrales:
+\begin{enumerate}
+    \item \textbf{Classifier Guidance}: guía condicional mediante un clasificador externo
+    \item \textbf{Classifier-Free Guidance (CFG)}: guía condicional sin clasificador, estándar industrial
+    \item \textbf{DDIM Inversion}: inversión determinista y edición de imágenes
+    \item \textbf{Latent Diffusion Models}: reducción del costo computacional ejecutando la difusión en el espacio latente
+    \item \textbf{ControlNet}: control condicional mediante fine-tuning eficiente
+    \item \textbf{LoRA}: ajuste de rango bajo para personalización en modelos de difusión
+\end{enumerate}
+
+\newpage
+
+\section{Guía del clasificador: Classifier Guidance}
+
+\subsection{De la distribución conjunta a la distribución condicional}
+
+El objetivo de la generación condicional es aprender la distribución condicional $p(x|y)$, donde $y$ es la información condicional (por ejemplo, una etiqueta de clase). El insight clave radica en la relación simple que existe entre la función score de la distribución conjunta y la de la distribución condicional:
+
+$$
+\nabla_{x_t}\log p(x_t, y) = \nabla_{x_t}\log p(x_t) + \nabla_{x_t}\log p(y|x_t)
+$$
+
+Esto se debe a que $p(x_t, y) = p(x_t)\cdot p(y|x_t)$; al tomar el logaritmo y calcular el gradiente respecto a $x_t$, el término $\log p(y)$ desaparece porque es constante en relación con $x_t$.
+
+\begin{importantbox}{Fórmula central de Classifier Guidance}
+En cada paso de eliminación de ruido de los modelos de difusión, se modifica la función score:
+$$
+\tilde{\nabla}_{x_t}\log p(x_t, y) = \underbrace{\nabla_{x_t}\log p(x_t)}_{\text{score incondicional (modelo preentrenado)}} + \underbrace{\nabla_{x_t}\log p(y|x_t)}_{\text{guía por gradiente del clasificador}}
+$$
+Correspondientemente, al mapear esto a la predicción de ruido, la regla de actualización es:
+$$
+\tilde{\epsilon}(x_t, t) = \epsilon_\theta(x_t, t) - \sqrt{1-\bar\alpha_t}\;\nabla_{x_t}\log p_\phi(y|x_t)
+$$
+donde $p_\phi(y|x_t)$ es un clasificador entrenado sobre datos con ruido.
+\end{importantbox}
+
+\subsection{Entrenamiento del clasificador de ruido}
+
+Aquí hay un detalle crucial: el clasificador $p_\phi(y|x_t)$ no es un clasificador de imágenes convencional, sino que debe ser capaz de manejar puntos intermedios $x_t$ con \textbf{niveles arbitrarios de ruido}. El método de entrenamiento es el siguiente:
+
+\begin{enumerate}
+    \item Para cada par $(x_0, y)$ en el conjunto de datos, muestrear aleatoriamente un paso de tiempo $t$.
+    \item Obtener la imagen con ruido $x_t$ mediante el proceso hacia adelante $q(x_t|x_0)$.
+    \item Entrenar al clasificador para predecir la probabilidad de la clase $y$ utilizando $x_t$ y $t$ como entradas.
+\end{enumerate}
+
+\begin{warningbox}{El clasificador debe manejar entradas con ruido}
+¡No se puede utilizar directamente un clasificador ImageNet entrenado en imágenes limpias! El clasificador debe entrenarse sobre $x_t$ con diversos niveles de ruido; de lo contrario, la señal de gradiente será completamente confiable en los pasos de alto ruido. Esto representa un costo de entrenamiento adicional para Classifier Guidance.
+\end{warningbox}
+
+\subsection{Control de la intensidad de la guía}
+
+Mediante la introducción de un peso $w$ se controla la intensidad de la condición:
+
+$$
+\tilde{\epsilon}(x_t, t) = \epsilon_\theta(x_t, t) - w\cdot\sqrt{1-\bar\alpha_t}\;\nabla_{x_t}\log p_\phi(y|x_t)
+$$
+
+\begin{itemize}
+    \item $w = 0$: Generación incondicional pura.
+    \item $w = 1$: Generación condicional estándar (correspondiente al score de la distribución conjunta).
+    \item $w > 1$: Efecto condicional aumentado —la salida es más fiel a la condición, pero disminuye la diversidad.
+\end{itemize}
+
+\begin{knowledgebox}{Comprensión intuitiva de la intensidad de la guía}
+Desde la perspectiva de las trayectorias, la trayectoria de eliminación de ruido del modelo de difusión incondicional va de $x_T$ a $x_0$ siguiendo el campo de score incondicional. Agregar el término de gradiente del clasificador equivale a \textbf{desviar} la trayectoria en cada paso hacia la región del manifold de datos que satisface la condición $y$. Aumentar $w$ hace que la desviación sea más intensa, produciendo resultados más "típicos" pero con menor diversidad.
+\end{knowledgebox}
+
+\subsection{Ventajas y limitaciones de Classifier Guidance}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{6cm}p{6cm}}
+\toprule
+\textbf{Ventajas} & \textbf{Limitaciones} \\
+\midrule
+Reutilización de modelos incondicionales preentrenados & Requiere entrenamiento adicional de un clasificador de ruido \\
+Control flexible de la intensidad de la guía & Se debe ejecutar dos redes durante la inferencia \\
+No requiere reentrenamiento del modelo de difusión & Los gradientes del clasificador pueden ser inestables \\
+Derivación matemática clara & Limitado a tipos de condición para los que está disponible un clasificador \\
+\bottomrule
+\end{tabular}
+\caption{Comparación de ventajas y desventajas de Classifier Guidance}
+\end{table}
+
+Estas limitaciones impulsaron directamente la propuesta de Classifier-Free Guidance.
+
+\subsection{Resumen de la sección}
+
+La idea central de Classifier Guidance es: aprovechar la descomposición bayesiana para descomponer la generación condicional en un score incondicional más el gradiente del clasificador. Este insight revela una ventaja única de los modelos de difusión frente a las GAN y los VAE: pueden lograr orientación condicional mediante la manipulación del score function \textbf{sin reentrenar} el modelo generador. Esta paradigma de manipulación de scores se mantendrá presente en todo el contenido posterior del curso.
+
+\newpage
+\section{Guía libre de clasificador (CFG): Guía sin clasificador}
+
+\subsection{Motivación: eliminar la dependencia de un clasificador externo}
+
+Aunque la Classifier Guidance es elegante, en una implementación práctica requiere entrenar y mantener adicionalmente una red clasificadora de ruido, lo que incrementa la complejidad del sistema y el costo computacional. El objetivo de la Guía libre de clasificador (CFG) es: \textbf{alcanzar efectos de guía condicional equivalentes a los de Classifier Guidance sin utilizar ningún clasificador externo}.
+
+\begin{importantbox}{El enfoque central de CFG}
+En lugar de entrenar por separado el modelo incondicional y el clasificador, se entrena un solo \textbf{único} modelo difusor que posea simultáneamente la capacidad de predicción condicional e incondicional. Durante la inferencia, se refuerza el efecto condicional mediante una \textbf{extrapolación} basada en dos propagaciones hacia adelante (condicionada + incondicional).
+\end{importantbox}
+
+\subsection{Estrategia de entrenamiento: Null Label y Conditional Dropout}
+
+El entrenamiento de CFG es muy sencillo: durante el entrenamiento estándar de un modelo difusor condicional, se reemplaza la información condicional $y$ con una probabilidad determinada (generalmente 10\%--20\%) por una etiqueta especial null label $\varnothing$:
+
+$$
+\epsilon_\theta(x_t, t, y) = \begin{cases}
+\text{predicción condicional} & \text{probabilidad } 1-p_{\text{uncond}} \\
+\epsilon_\theta(x_t, t, \varnothing) & \text{probabilidad } p_{\text{uncond}}
+\end{cases}
+$$
+
+\begin{itemize}
+    \item Para etiquetas de categoría: el null label puede ser un índice especial 0.
+    \item Para condiciones de texto: el null label es el embedding de una cadena vacía "".
+    \item Para condiciones de imagen: el null label puede ser un tensor lleno de ceros.
+\end{itemize}
+
+De este modo, una sola red puede aprender simultáneamente:
+\begin{itemize}
+    \item Al ingresar la condición $y$: $\epsilon_\theta(x_t, t, y) \;\longleftrightarrow\;$ score condicional $\nabla_{x_t}\log p(x_t|y)$
+    \item Al ingresar $\varnothing$: $\epsilon_\theta(x_t, t, \varnothing) \;\longleftrightarrow\;$ score incondicional $\nabla_{x_t}\log p(x_t)$
+\end{itemize}
+
+\subsection{Fórmula de inferencia: extrapolación condicional e incondicional}
+
+Durante la inferencia, CFG refuerza el efecto condicional realizando una \textbf{extrapolación} sobre las predicciones condicionales e incondicionales:
+
+$$
+\tilde{\epsilon}(x_t, t, y) = \epsilon_\theta(x_t, t, \varnothing) + w \cdot \bigl[\epsilon_\theta(x_t, t, y) - \epsilon_\theta(x_t, t, \varnothing)\bigr]
+$$
+
+Forma equivalente:
+
+$$
+\tilde{\epsilon}(x_t, t, y) = (1-w)\,\epsilon_\theta(x_t, t, \varnothing) + w\,\epsilon_\theta(x_t, t, y)
+$$
+
+\begin{importantbox}{Significado del parámetro de intensidad de guía $w$ en CFG}
+\begin{itemize}
+    \item $w = 0$: generación totalmente incondicional (ignorando la condición $y$).
+    \item $w = 1$: generación condicional estándar (sin refuerzo por extrapolación).
+    \item $w > 1$: refuerzo condicional — extrapolación más allá de la dirección condicional.
+    \item $0 < w < 1$: interpolación — atenuación del efecto condicional.
+\end{itemize}
+En aplicaciones prácticas, $w$ suele establecerse entre 5 y 15; el valor específico depende de la tarea y el modelo.
+\end{importantbox}
+
+\subsection{Equivalencia entre CFG y Classifier Guidance}
+
+La fórmula de extrapolación de CFG se puede reescribir como:
+
+$$
+\tilde{\epsilon}(x_t, t, y) = \epsilon_\theta(x_t, t, y) + (w-1)\bigl[\epsilon_\theta(x_t, t, y) - \epsilon_\theta(x_t, t, \varnothing)\bigr]
+$$
+
+Comparada con la fórmula de Classifier Guidance:
+
+$$
+\tilde{\epsilon}(x_t, t) = \epsilon_\theta(x_t, t) - w'\cdot\sqrt{1-\bar\alpha_t}\;\nabla_{x_t}\log p_\phi(y|x_t)
+$$
+
+Se puede demostrar que ambos son matemáticamente equivalentes cuando $\lambda = w - 1$. La diferencia $\epsilon_\theta(x_t, t, y) - \epsilon_\theta(x_t, t, \varnothing)$ codifica implícitamente la información del gradiente del clasificador $\nabla_{x_t}\log p(y|x_t)$.
+
+\begin{warningbox}{Costo computacional de CFG}
+CFG requiere ejecutar dos propagaciones hacia adelante en cada paso de desruido (una condicionada y otra incondicional); por tanto, el tiempo de inferencia es aproximadamente el doble del caso sin guía. En una implementación práctica, se puede mitigar este problema agrupando ambas predicciones en un solo batch mediante batched inference. Algunos trabajos recientes (como métodos de destilación) intentan distilar el efecto de CFG dentro de una única propagación hacia adelante.
+\end{warningbox}
+
+\subsection{Negative Prompt: aplicación creativa de CFG}
+
+El marco de CFG también soporta una extensión interesante: las \textbf{palabras clave negativas} (Negative Prompt). En CFG estándar, la predicción incondicional utiliza el null label $\varnothing$. Si se reemplaza $\varnothing$ por una condición específica "no deseada" $y_{\text{neg}}$, la fórmula se convierte en:
+
+$$
+\tilde{\epsilon} = \epsilon_\theta(x_t, t, y_{\text{neg}}) + w\bigl[\epsilon_\theta(x_t, t, y) - \epsilon_\theta(x_t, t, y_{\text{neg}})\bigr]
+$$
+
+Esto significa que la imagen generada se alejará del concepto descrito por $y_{\text{neg}}$. Por ejemplo, si $y_{\text{neg}} =$ ``male'', las imágenes de retrato generadas tenderán a mostrar características femeninas.
+
+\begin{knowledgebox}{Amplia aplicabilidad de CFG}
+La condición en CFG no se limita a etiquetas de categoría; puede ser: descripción de texto (text-to-image), señales de audio (audio-to-image), información de perspectiva (novel view synthesis), otras imágenes (image-to-image) y cualquier otra modalidad. Esto hace que CFG sea el mecanismo de guía condicional más universal entre los modelos difusores modernos, siendo adoptado por casi todos los modelos principales (Stable Diffusion, DALL-E, Imagen, etc.).
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La Guía libre de clasificador es una de las técnicas prácticas más importantes en el campo de los modelos difusores. Su innovación central radica en la estrategia de entrenamiento mediante conditional dropout, que permite a un solo modelo aprender simultáneamente las distribuciones condicionales e incondicionales, y luego lograr un refuerzo condicional controlado mediante extrapolación durante la inferencia. En comparación con Classifier Guidance, CFG no requiere un clasificador adicional, soporta cualquier tipo de condición e es fácil de implementar, por lo que se ha convertido en una configuración estándar en la industria.
+
+\newpage
+\section{Inversión DDIM: Inversión determinista y edición de imágenes}
+
+\subsection{Repaso del muestreo determinista de DDIM}
+
+La característica central de DDIM (Denoising Diffusion Implicit Models) es convertir el proceso inverso en uno \textbf{determinista}. En DDPM, cada paso del proceso inverso inyecta ruido aleatorio; mientras que en DDIM, al establecer la varianza $\sigma_t = 0$, la fórmula de actualización se convierte en:
+
+$$
+x_{t-1} = \sqrt{\bar\alpha_{t-1}}\,\hat{x}_0(x_t) + \sqrt{1-\bar\alpha_{t-1}}\,\epsilon_\theta(x_t, t)
+$$
+
+donde $\hat{x}_0(x_t) = \frac{x_t - \sqrt{1-\bar\alpha_t}\,\epsilon_\theta(x_t, t)}{\sqrt{\bar\alpha_t}}$ es la estimación de la imagen limpia.
+
+\begin{importantbox}{Propiedad determinista de DDIM}
+En DDIM, el mapeo desde $x_T$ hasta $x_0$ es determinista: dado el mismo ruido inicial $x_T$ y los parámetros del modelo, siempre se genera exactamente la misma $x_0$. Esto significa que existe un \textbf{mapeo biyectivo implícito} $x_T \leftrightarrow x_0$.
+\end{importantbox}
+
+\subsection{Inversión: Recuperando $x_T$ desde $x_0$}
+
+La característica determinista de DDIM hace posible una operación importante —la \textbf{inversión} (inversion). Dada una imagen real $x_0$, buscamos el vector de ruido correspondiente $x_T$ de tal manera que el proceso inverso determinista de DDIM pueda reconstruir $x_0$ con precisión.
+
+\begin{warningbox}{La inversión no es simplemente un proceso hacia adelante}
+Intuitivamente, el proceso hacia adelante $q(x_T|x_0) = \mathcal{N}(\sqrt{\bar\alpha_T}\,x_0,\, (1-\bar\alpha_T)\,I)$ permitiría calcular directamente $x_T$. Sin embargo, este es un proceso hacia adelante \textbf{aleatorio}, por lo que el $x_T$ obtenido no garantiza regresar a $x_0$ mediante el proceso inverso determinista de DDIM. La Inversión DDIM requiere calcular hacia atrás siguiendo una trayectoria \textbf{determinista}.
+\end{warningbox}
+
+Método aproximado para la inversión: reemplazar $t-1$ por $t+1$ en la fórmula de actualización de DDIM y utilizar el supuesto de suavidad de la función de ruido ($\epsilon_\theta(x_t, t) \approx \epsilon_\theta(x_{t+1}, t+1)$), calculando paso a paso desde $x_0$ hasta $x_T$:
+
+$$
+x_{t+1} = \sqrt{\bar\alpha_{t+1}}\,\hat{x}_0(x_t) + \sqrt{1-\bar\alpha_{t+1}}\,\epsilon_\theta(x_t, t)
+$$
+
+\begin{knowledgebox}{Precisión de la aproximación y número de pasos temporales}
+La precisión de la Inversión DDIM depende del tamaño del intervalo de pasos temporales. Cuantos más pasos temporales (intervalos menores), más precisa es la aproximación $\epsilon_\theta(x_t, t) \approx \epsilon_\theta(x_{t+1}, t+1)$ y, por ende, más precisa es la reconstrucción de la inversión. En la práctica, generalmente se requieren entre 50 y 200 pasos para obtener resultados de alta calidad en la inversión.
+\end{knowledgebox}
+
+\subsection{Inversión DDIM + CFG = Edición de imágenes}
+
+La combinación de Inversión DDIM con CFG permite lograr potentes funciones de edición de imágenes. El flujo de trabajo es el siguiente:
+
+\begin{enumerate}
+    \item \textbf{Fase de inversión}: Dada una imagen de entrada $x_0$ y una descripción textual original $y_{\text{src}}$ (por ejemplo, ``a photograph of a puppy''), se obtiene $x_T$ mediante Inversión DDIM.
+    \item \textbf{Fase de generación}: Partiendo del mismo $x_T$, se realiza un muestreo determinista de DDIM utilizando una nueva descripción textual $y_{\text{tgt}}$ (por ejemplo, ``a photograph of a gray cat'').
+    \item \textbf{Resultado}: La imagen de salida es similar a la original en términos de composición general y estilo, pero su contenido cumple con la nueva descripción textual.
+\end{enumerate}
+
+Este método permite:
+\begin{itemize}
+    \item Sustitución de objetos: reemplazar frutas por pasteles.
+    \item Modificación de atributos: poner gafas de sol a una persona.
+    \item Transformación de estilo: convertir fotografías en estilos de pintura específicos.
+\end{itemize}
+
+\subsection{Resumen de la sección}
+
+La Inversión DDIM aprovecha la característica determinista del muestreo de DDIM para lograr un mapeo aproximado desde una imagen real hasta el espacio de ruido. Al combinarse con CFG, solo es necesario cambiar la condición textual para realizar edición de imágenes a nivel semántico, sin necesidad de ningún entrenamiento adicional. Esto demuestra que los modelos difusivos no solo pueden generar imágenes, sino que también funcionan como potentes herramientas de edición de imágenes.
+
+\newpage
+\section{Modelos de difusión latentes: Modelos de difusión latentes}
+
+\subsection{El cuello de botella computacional de la difusión en espacio de píxeles}
+
+En todos los modelos de difusión discutidos anteriormente, el proceso de difusión se realiza directamente en \textbf{espacio de píxeles}: todas las variables intermedias $x_t$ tienen las mismas dimensiones que la imagen original. Para imágenes de alta resolución (como $512\times512\times3$ o mayores), esto conlleva un costo computacional y de memoria enorme.
+
+\begin{warningbox}{El costo de entrenar directamente en espacio de píxeles}
+Tomemos Stable Diffusion como ejemplo; su conjunto de datos de entrenamiento, LAION-5B, contiene aproximadamente 5.8 mil millones de imágenes. Si se entrena un modelo de difusión de alta resolución directamente en el espacio de píxeles:
+\begin{itemize}
+    \item Entrenar con una \textbf{GPU única} toma aproximadamente \textbf{2--3 años}
+    \item Generar 10,000 imágenes (con una GPU única) toma aproximadamente \textbf{un día}
+\end{itemize}
+Todas las variables intermedias y la salida deben mantener las mismas dimensiones; esta es una desventaja estructural de los modelos de difusión en comparación con GAN.
+\end{warningbox}
+
+\subsection{Arquitectura de dos etapas: compresión + difusión}
+
+La idea central de los Modelos de Difusión Latentes (LDM) consiste en mover el proceso de difusión desde el espacio de píxeles hacia un \textbf{espacio latente de baja dimensión}:
+
+\textbf{Primera etapa: Entrenamiento del autoencoder de imágenes}
+\begin{itemize}
+    \item Codificador $\mathcal{E}$: Comprime la imagen de alta resolución $x \in \mathbb{R}^{H\times W\times 3}$ en una representación latente de baja dimensión $z = \mathcal{E}(x) \in \mathbb{R}^{h\times w\times c}$
+    \item Decodificador $\mathcal{D}$: Reconstruye la imagen a partir de la representación latente $\hat{x} = \mathcal{D}(z) \approx x$
+    \item Tasa de compresión: Generalmente $h = H/8$, $w = W/8$, reduciendo las dimensiones espaciales 64 veces
+\end{itemize}
+
+\textbf{Segunda etapa: Entrenamiento del modelo de difusión en el espacio latente}
+\begin{itemize}
+    \item Todas las operaciones de difusión (añadir ruido, eliminar ruido, cálculo del score) se realizan en el espacio $z$
+    \item La red predictora de ruido toma como entrada $z_t$ (en lugar de $x_t$) y devuelve una estimación de ruido de la misma dimensión que $z_t$
+    \item Una vez completada la generación, los resultados se mapean de nuevo al espacio de píxeles mediante el decodificador $\mathcal{D}$
+\end{itemize}
+
+\begin{importantbox}{Las ventajas clave de Latent Diffusion}
+\begin{enumerate}
+    \item \textbf{Eficiencia computacional}: Ejecutar la difusión en un espacio latente de $64\times64$ es aproximadamente 64 veces más rápido que hacerlo en el espacio de píxeles de $512\times512$
+    \item \textbf{Riqueza semántica}: El espacio latente, entrenado mediante un autoencoder, ya codifica información semántica de alto nivel; los modelos de difusión pueden centrarse más en la estructura semántica que en los detalles de píxeles
+    \item \textbf{Modularidad}: El autoencoder y el modelo de difusión pueden entrenarse e intercambiarse de forma independiente
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Selección del autoencoder}
+
+El autoencoder utilizado en LDM no es un VAE estándar (su peso de regularización de divergencia KL suele ser alto, sacrificando la calidad de reconstrucción), sino que se asemeja más a un \textbf{autoencoder convencional}, optimizando principalmente la calidad de reconstrucción:
+
+\begin{itemize}
+    \item Uso de una regularización de divergencia KL con pesos bajos para garantizar la regularidad del espacio latente
+    \item Inclusión de pérdida perceptual y pérdida adversarial para mejorar la calidad de reconstrucción
+    \item El codificador-decodificador generalmente adopta una arquitectura convolucional, admitiendo entradas de resolución arbitraria
+\end{itemize}
+
+\begin{knowledgebox}{¿Por qué no usar un VAE estándar?}
+La regularización KL del VAE estándar incentiva que el espacio latente se acerque a una distribución normal estándar, lo que daña la calidad de reconstrucción. En LDM, el objetivo principal del autoencoder es la \textbf{compresión sin pérdidas} —mantener la mayor cantidad posible de información de la imagen mientras se reduce drásticamente la dimensión—. Por ello, se prefiere una regularización más débil para que el espacio latente conserve más detalles.
+\end{knowledgebox}
+
+\subsection{Mecanismo de inyección condicional}
+
+En la arquitectura de LDM, la información condicional (texto, imagen, mapas semánticos) se inyecta en U-Net mediante un mecanismo de \textbf{atención cruzada}:
+
+\begin{enumerate}
+    \item La información condicional $y$ (por ejemplo, texto) se mapea primero a vectores de embedding mediante un codificador condicional (como el CLIP text encoder)
+    \item En cada bloque de atención de U-Net, las características de $z_t$ actúan como Query y los embeddings condicionales como Key y Value
+    \item La salida de la atención cruzada fusiona la información espacial de $z_t$ con la información semántica condicional
+\end{enumerate}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Componente} & \textbf{Dimensiones de entrada} & \textbf{Función} \\
+\midrule
+Codificador de imágenes $\mathcal{E}$ & $512\times512\times3 \to 64\times64\times4$ & Píxeles$\to$espacio latente \\
+U-Net predictora de ruido & $64\times64\times4 + \text{tiempo} + \text{cond}$ & Estimación del score \\
+Codificador condicional (CLIP) & texto $\to \mathbb{R}^{77\times768}$ & Texto$\to$embedding \\
+Decodificador de imágenes $\mathcal{D}$ & $64\times64\times4 \to 512\times512\times3$ & Espacio latente$\to$píxeles \\
+\bottomrule
+\end{tabular}
+\caption{Componentes centrales de Stable Diffusion y sus dimensiones}
+\end{table}
+
+\subsection{Arquitectura de Stable Diffusion}
+
+Stable Diffusion es la implementación más conocida de LDM, desarrollada en colaboración entre CompVis (LMU Munich) y Stability AI. Su arquitectura completa incluye:
+
+\begin{enumerate}
+    \item \textbf{Codificador/Decodificador VAE}: Muestreo espacial a 8 veces, espacio latente de 4 canales
+    \item \textbf{U-Net con atención cruzada}: Aproximadamente 860 millones de parámetros, que incluye bloques ResNet + bloques Transformer
+    \item \textbf{CLIP text encoder}: Codifica el prompt de texto en una secuencia de embeddings de token de $77\times768$
+    \item \textbf{Soporte para CFG}: Durante el entrenamiento, se reemplaza la condición de texto con una cadena vacía con una probabilidad del 10\%
+\end{enumerate}
+
+\begin{knowledgebox}{De U-Net a Transformer}
+Los LDM tempranos (incluidos Stable Diffusion v1/v2) utilizaban U-Net como red predictora de ruido. La tendencia reciente es pasar a arquitecturas puras basadas en Transformer (como DiT), debido a su mayor facilidad de escalabilidad y consistencia con el stack tecnológico de NLP. Stable Diffusion 3 ya adopta la arquitectura MM-DiT (Multimodal Diffusion Transformer).
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Los Modelos de Difusión Latentes transforman el problema de difusión en un espacio de píxeles de alta dimensión a uno en un espacio latente de baja dimensión mediante un diseño de dos etapas: "compresión primero, luego difusión". Esto reduce drásticamente los costos computacionales manteniendo la calidad de generación. Esta arquitectura se ha convertido en el paradigma estándar para modelos modernos de generación de imágenes/vídeo (Stable Diffusion, DALL-E 3, Sora, etc.) y representa una innovación tecnológica clave para llevar los modelos de difusión desde prototipos académicos hacia aplicaciones industriales.
+
+\newpage
+\section{ControlNet: ajuste fino de control condicional eficiente}
+
+\subsection{Planteamiento del problema: lograr nuevas condiciones mediante modelos preentrenados}
+
+Cuando se dispone de un modelo difusivo preentrenado en miles de millones de imágenes (como Stable Diffusion) y se desea que acepte nuevas entradas condicionales (por ejemplo, mapas de bordes, poses corporales o mapas de profundidad), surge una dificultad central:
+
+\begin{warningbox}{El costo de entrenar desde cero un modelo condicional}
+Si se entrena un nuevo modelo condicional desde cero utilizando \textbf{guía sin clase}:
+\begin{itemize}
+    \item Se requiere \textbf{datos emparejados} a escala de miles de millones (imagen condicional + imagen real), con un costo de recolección extremadamente alto
+    \item Se necesita entrenar el modelo difusivo completo desde cero, lo que implica un costo computacional enorme
+    \item No es posible reutilizar el amplio conocimiento visual aprendido por el modelo preentrenado existente
+\end{itemize}
+Por ejemplo, para entrenar un modelo de «mapa de bordes $\to$ imagen real», teóricamente se necesitarían 5.000 millones de pares (mapa de bordes, imagen real) de datos emparejados; en la práctica, es casi imposible obtener conjuntos de este tamaño y alta calidad.
+\end{warningbox}
+
+El objetivo de ControlNet es: \textbf{congelar los parámetros del modelo preentrenado y permitir que el modelo acepte nuevas entradas condicionales utilizando solo una cantidad reducida de datos emparejados (por ejemplo, entre 50K y 100K pares) y un número pequeño de parámetros adicionales}.
+
+\subsection{Diseño arquitectónico de ControlNet}
+
+El diseño de ControlNet se rige por dos principios fundamentales:
+
+\textbf{Principio uno: mantener invariable la salida inicial (convolución cero)}
+
+Al inicio del ajuste fino, la salida de los módulos añadidos debe ser cero, de modo que el comportamiento de toda la red sea idéntico al del modelo preentrenado. Esto se logra mediante \textbf{convolución cero}, es decir, inicializando tanto los pesos como los sesgos de las capas de conexión a cero.
+
+\textbf{Principio dos: reutilizar el codificador preentrenado (copia entrenable)}
+
+ControlNet crea una \textbf{copia entrenable} de la parte del codificador U-Net preentrenada, destinada a procesar las entradas condicionales:
+
+\begin{enumerate}
+    \item \textbf{U-Net original}: parámetros congelados, continúa procesando $z_t$ y $t$ (garantizando la calidad de generación)
+    \item \textbf{Copia del codificador de ControlNet}: parámetros entrenables, recibe adicionalmente la imagen condicional $c$
+    \item \textbf{Conexión por convolución cero}: la salida del codificador de la copia se suma a las conexiones salientes (skip connections) del U-Net original mediante una capa de convolución cero
+\end{enumerate}
+
+\begin{importantbox}{Estrategia de inicialización por convolución cero en ControlNet}
+Al inicio del entrenamiento:
+\begin{itemize}
+    \item Todos los pesos y sesgos de la convolución cero son iguales a 0
+    \item La salida de la copia de ControlNet queda «oculta» por la convolución cero, sin afectar al U-Net original
+    \item La salida del sistema completo es \textbf{exactamente igual} a la del modelo preentrenado; las capacidades generativas ya aprendidas no se ven comprometidas por el añadido de nuevos módulos
+\end{itemize}
+A medida que avanza el entrenamiento, la convolución cero aprende pesos no nulos e incorpora gradualmente la información condicional al proceso de generación.
+\end{importantbox}
+
+\subsection{Entrenamiento de ControlNet}
+
+Durante el entrenamiento solo se actualizan los parámetros de la copia del codificador de ControlNet y de las capas de convolución cero; el U-Net original permanece completamente congelado:
+
+\begin{itemize}
+    \item Datos de entrenamiento: conjunto reducido de datos emparejados (por ejemplo, 50K pares de mapa de bordes-imagen real)
+    \item Objetivo de entrenamiento: pérdida difusiva estándar $\|\epsilon - \epsilon_\theta(z_t, t, c)\|^2$
+    \item Costo de entrenamiento: considerablemente inferior al entrenamiento desde cero; generalmente se completan los entrenamientos en 8 GPUs durante varios días
+\end{itemize}
+
+\begin{knowledgebox}{Diversas modalidades condicionales en ControlNet}
+Dado que el codificador condicional de ControlNet puede procesar cualquier entrada de imagen con la misma resolución que la imagen original, ha sido aplicado con éxito a:
+\begin{itemize}
+    \item \textbf{Mapa de bordes Canny}: controla contornos y bordes
+    \item \textbf{Pose corporal (OpenPose)}: controla las acciones de las figuras humanas
+    \item \textbf{Mapa de profundidad}: controla la estructura espacial y las relaciones de distancia
+    \item \textbf{Segmentación semántica}: controla el contenido de las regiones
+    \item \textbf{Bocetos/dibujos a mano alzada}: genera imágenes realistas a partir de trazos simples
+    \item \textbf{Mapas normales}: controla la orientación de las superficies y la iluminación
+\end{itemize}
+Cada tipo de condición requiere entrenar un módulo de ControlNet específico, pero todos pueden compartir el mismo modelo base congelado.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Mediante tres diseños clave —congelación del modelo preentrenado, copia del codificador entrenable e inicialización por convolución cero—, ControlNet logra dotar a los modelos difusivos preentrenados de la capacidad de aceptar nuevas modalidades condicionales con una cantidad reducida de datos y recursos computacionales. Resuelve perfectamente la contradicción entre «no querer entrenar desde cero» y «no querer perder el conocimiento preentrenado», consolidándose como uno de los métodos más exitosos en el campo del ajuste fino de modelos difusivos.
+
+\newpage
+\section{LoRA: adaptación de rango bajo}
+
+\subsection{El dilema del ajuste fino con todos los parámetros}
+
+Cuando deseamos adaptar un modelo de difusión preentrenado a un estilo específico o a un sujeto particular (como generar fotografías de una persona concreta), el método más directo es ajustar finamente todos los parámetros del modelo. Sin embargo, esto plantea problemas graves:
+
+\begin{itemize}
+    \item El U-Net de Stable Diffusion tiene aproximadamente 860M de parámetros; el ajuste fino con todos los parámetros requiere una gran cantidad de memoria gráfica (VRAM).
+    \item Ajustar finamente un modelo grande con pocos datos (por ejemplo, 5--20 imágenes) provoca fácilmente \textbf{sobreajuste}.
+    \item Cada versión personalizada necesita almacenar los pesos completos del modelo (varios GB), lo que incrementa el costo de despliegue.
+    \item El ajuste fino puede dañar las capacidades generales aprendidas por el modelo preentrenado (\textbf{olvido catastrófico}).
+\end{itemize}
+
+\subsection{La idea central de LoRA}
+
+LoRA (Low-Rank Adaptation) se basa en una hipótesis clave: \textbf{las actualizaciones de peso provocadas por el ajuste fino residen en un subespacio de rango bajo}.
+
+Para una matriz de pesos $W_0 \in \mathbb{R}^{d \times k}$ dentro del modelo preentrenado, LoRA descompone la actualización en el producto de dos matrices de rango bajo:
+
+$$
+W = W_0 + \Delta W = W_0 + B \cdot A
+$$
+
+donde $B \in \mathbb{R}^{d \times r}$, $A \in \mathbb{R}^{r \times k}$ y $r \ll \min(d, k)$ es el rango.
+
+\begin{importantbox}{Eficiencia de parámetros de LoRA}
+Tomando como ejemplo una matriz de pesos de $1024 \times 1024$:
+\begin{itemize}
+    \item Ajuste fino con todos los parámetros: $1024 \times 1024 = 1,048,576$ parámetros entrenables.
+    \item LoRA ($r=4$): $1024 \times 4 + 4 \times 1024 = 8,192$ parámetros entrenables.
+    \item Reducción de parámetros: \textbf{128 veces}.
+\end{itemize}
+En los modelos de difusión, generalmente se aplica LoRA solo a las matrices $W_Q$, $W_K$, $W_V$, $W_O$ de las capas de atención, reduciendo aún más el número total de parámetros entrenables.
+\end{importantbox}
+
+\subsection{Aplicación de LoRA en modelos de difusión}
+
+Estrategia de inicialización y entrenamiento de LoRA:
+
+\begin{itemize}
+    \item $A$ se inicializa con ruido gaussiano aleatorio, mientras que $B$ se inicializa como una matriz nula.
+    \item Al comenzar el entrenamiento, $\Delta W = BA = 0$, garantizando que la salida inicial sea consistente con el modelo preentrenado.
+    \item Solo se entrena $A$ y $B$, manteniendo congelados todos los parámetros originales $W_0$.
+    \item Durante la inferencia, $\Delta W$ puede combinarse de nuevo en $W_0$, sin \textbf{aumentar ningún retraso de inferencia}.
+\end{itemize}
+
+Escenarios de uso típicos:
+\begin{itemize}
+    \item \textbf{Adaptación de estilo}: entrenar un LoRA con obras de un artista específico para generar imágenes en ese estilo.
+    \item \textbf{Personalización de sujetos} (DreamBooth + LoRA): entrenar con varias fotos de un objeto o persona específica para generar nuevas imágenes de ese sujeto.
+    \item \textbf{Inyección de conceptos}: enseñar al modelo a comprender nuevos conceptos visuales (como el logo de una marca específica).
+\end{itemize}
+
+\begin{warningbox}{Selección del rango de LoRA}
+El rango $r$ es el hiperparámetro más crítico de LoRA:
+\begin{itemize}
+    \item Si $r$ es demasiado pequeño (por ejemplo, 1--2): la capacidad expresiva es insuficiente y el resultado del ajuste fino es pobre.
+    \item Si $r$ es demasiado grande (por ejemplo, 128+): se acerca al ajuste fino con todos los parámetros, perdiendo la ventaja de eficiencia de parámetros.
+    \item Recomendación práctica: para modelos de difusión, $r = 4 \sim 32$ suele ser una buena elección.
+    \item Para tareas de adaptación de estilo, $r$ puede ser más pequeño (4--8); para tareas con condiciones complejas, $r$ necesita ser mayor (16--32).
+\end{itemize}
+\end{warningbox}
+
+\begin{knowledgebox}{Combinabilidad de LoRA}
+Una característica elegante de LoRA es su \textbf{combinabilidad}: múltiples módulos LoRA pueden combinarse dinámicamente durante la inferencia. Por ejemplo, un LoRA controla el estilo y otro controla el sujeto; ambos pueden cargarse simultáneamente y mezclar sus pesos para lograr "un artista específico pintando a una persona específica". Esto convierte a LoRA en la base de un ecosistema personalizado impulsado por la comunidad —existen miles de modelos LoRA en plataformas como Civitai—.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+LoRA reduce drásticamente el número de parámetros y la carga computacional requerida para el ajuste fino mediante descomposición de rango bajo, haciendo posible adaptar modelos de difusión a gran escala con pocos datos en GPUs de nivel consumidor. Su estrategia de inicialización nula (similar en espíritu a ControlNet) garantiza que el ajuste fino no degrade las capacidades preentrenadas, mientras que la combinación de parámetros durante la inferencia elimina sobrecostes adicionales de latencia.
+
+\newpage
+\section{Síntesis y ampliación}
+
+\subsection{Trama de tecnologías centrales}
+
+Esta lección parte de la pregunta básica de la generación condicional e introduce sistemáticamente el stack tecnológico clave para llevar los modelos de difusión a aplicaciones prácticas:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lp{4.5cm}p{4.5cm}}
+\toprule
+\textbf{Tecnología} & \textbf{Problema resuelto} & \textbf{Idea central} \\
+\midrule
+Classifier Guidance & Generación condicional & score = score incondicional + gradiente del clasificador \\
+CFG & Eliminación del clasificador externo & dropout condicional + extrapolación en inferencia \\
+DDIM Inversion & Edición de imágenes & inversión determinista + regeneración cambiando condiciones \\
+Latent Diffusion & Reducción de costos computacionales & compresión previa al espacio latente antes de la difusión \\
+ControlNet & Control condicional con pocos datos & modelo base congelado + copia entrenable del codificador \\
+LoRA & Personalización eficiente & actualización de pesos de rango bajo \\
+\bottomrule
+\end{tabular}
+\caption{Resumen de las tecnologías centrales de esta lección}
+\end{table}
+
+\subsection{Perspectiva unificada: Manipulación de puntajes (Score Manipulation)}
+
+Una perspectiva que atraviesa toda esta lección (y todo el campo de los modelos de difusión) es la \textbf{manipulación de puntajes} —dirigir las trayectorias de generación modificando la función de puntaje (o la predicción de ruido equivalente), guiándolas hacia una dirección objetivo. Ya sea Classifier Guidance, CFG o más aplicaciones que se discutirán en lecciones futuras, su esencia es:
+
+$$
+\tilde{s}(x_t, t) = s_{\text{base}}(x_t, t) + \text{término de guía}
+$$
+
+Esta es la ventaja central que distingue a los modelos de difusión de GAN y VAE: cada paso del proceso generativo puede ser ajustado flexiblemente mediante señales externas.
+
+\subsection{Recomendaciones de elección de ingeniería: cuándo usar qué tecnología}
+
+Si se aplican los contenidos de esta lección al diseño de sistemas reales, la siguiente tabla permite juzgar rápidamente la selección tecnológica:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.2\textwidth} p{0.24\textwidth} p{0.26\textwidth}}
+\toprule
+Objetivo de tarea & Tecnología prioritaria & Criterios de decisión clave \\
+\midrule
+Solo se requiere generación condicional con texto & CFG / Latent Diffusion & ¿Se acepta cierto costo computacional adicional a cambio de una consistencia condicional más fuerte? \\
+Se requiere control estructural (bordes, postura, profundidad) & ControlNet & ¿Ya existe una señal condicional confiable y si se busca adaptación rápida con pocos datos \\
+Se requiere estilo personalizado o personalización del sujeto & LoRA & ¿Hay solo少量 de datos? ¿Se exige baja memoria gráfica y despliegue combinable \\
+Se requiere conservar la estructura de la imagen original y editarla & DDIM Inversion + regeneración cambiando condiciones & ¿Se exige modificar el contenido de la imagen original de forma controlada en lugar de muestrear desde cero? \\
+\bottomrule
+\end{tabular}
+\caption{Tabla de referencia rápida para selección de tecnologías en Lecture 6}
+\end{table}
+
+\subsection{Significado para las lecciones subsiguientes}
+
+El valor de Lecture 6 no radica solo en presentar varios métodos específicos, sino en establecer un marco unificado: los modelos de difusión preentrenados son un prior general, mientras que CFG, ControlNet, LoRA e Inversion redirigen ese prior hacia tareas específicas a diferentes niveles. Ya sea guía durante inferencia, difusión para video o generación 3D, todo esto esencialmente se puede ver como una extensión adicional de este marco.
+
+\subsection{Lecturas adicionales}
+
+\begin{itemize}
+    \item \textbf{Classifier Guidance}: Dhariwal \& Nichol, ``Diffusion Models Beat GANs on Image Synthesis,'' NeurIPS 2021
+    \item \textbf{Classifier-Free Guidance}: Ho \& Salimans, ``Classifier-Free Diffusion Guidance,'' NeurIPS Workshop 2022
+    \item \textbf{Latent Diffusion / Stable Diffusion}: Rombach et al., ``High-Resolution Image Synthesis with Latent Diffusion Models,'' CVPR 2022
+    \item \textbf{ControlNet}: Zhang et al., ``Adding Conditional Control to Text-to-Image Diffusion Models,'' ICCV 2023
+    \item \textbf{LoRA}: Hu et al., ``LoRA: Low-Rank Adaptation of Large Language Models,'' ICLR 2022
+    \item \textbf{DDIM}: Song et al., ``Denoising Diffusion Implicit Models,'' ICLR 2021
+    \item \textbf{HuggingFace Diffusers}: \href{https://huggingface.co/docs/diffusers}{huggingface.co/docs/diffusers} — biblioteca estándar de modelos de difusión preentrenados
+\end{itemize}
+
+%% --- Fin del contenido --- %%
+
+\end{document}

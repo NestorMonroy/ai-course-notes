@@ -1,0 +1,768 @@
+\documentclass[a4paper]{article}
+
+% Paquetes básicos
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+% FandolSong no cubre algunos caracteres de nombres (U+73FA); WenQuanYi Zen Hei sí.
+\usepackage[AutoFallBack=true]{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+\setCJKfallbackfamilyfont{\CJKrmdefault}{WenQuanYi Zen Hei}
+% polyglossia no traduce los nombres de listados.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\usepackage{float}
+
+% Cajas de resaltado
+\newtcolorbox{knowledgebox}[1]{
+    enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, attach boxed title to top left={yshift=-2mm, xshift=2mm},
+    boxrule=1pt, sharp corners
+}
+
+\newtcolorbox{importantbox}[1]{
+    enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black,
+    coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+\newtcolorbox{warningbox}[1]{
+    enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+% Listados
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    stringstyle=\color{red!60!black},
+    commentstyle=\color{green!60!black},
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    captionpos=b,
+    extendedchars=true
+}
+
+% Metadatos de la portada
+\newcommand{\notetitle}{KAIST CS492D Clase 12: Generación guiada en tiempo de inferencia 2}
+\newcommand{\noteauthors}{Elaboradas a partir de la clase de Minhyuk Sung}
+\newcommand{\notedate}{Otoño de 2025}
+\newcommand{\videochannel}{Minhyuk Sung (KAIST)}
+\newcommand{\videopublishdate}{2025}
+\newcommand{\videoduration}{68 minutos}
+\newcommand{\videourl}{https://www.youtube.com/watch?v=5D95I30oedA}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+\begin{document}
+
+````
+
+
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}
+\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}
+\vspace{0.8cm}
+{\large \noteauthors\par}
+\vspace{0.3cm}
+{\large \notedate\par}
+\vspace{1.2cm}
+
+\ifdefempty{\videocoverpath}{
+{\small Al generar las notas, indique la ruta local de la portada del video.\par}
+}{
+\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par
+}
+
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\ifdefempty{\videourl}{}{
+\textbf{Enlace del video}: \href{\videourl}{\nolinkurl{\videourl}}\par
+}
+\end{tcolorbox}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+%% --- Inicio del contenido --- %%
+
+\section{Repaso del curso y contexto del problema}
+
+Esta es la clase 12 de la serie de KAIST CS492D sobre ``modelos de difusión'', que continúa con el contenido de la sesión anterior sobre generación guiada en tiempo de inferencia (Inference-Time Guided Generation), profundizando en técnicas de guía más avanzadas. La clase anterior presentó tres categorías principales de métodos de guía en tiempo de inferencia:
+
+\begin{enumerate}
+    \item \textbf{Manipulación de atención y capas intermedias}: lograr la guía mediante la modificación directa de las capas intermedias o las salidas de atención de la red neuronal. La ventaja es que es fácil de implementar, pero la desventaja es que carece de una explicación teórica y solo funciona en escenarios específicos.
+    \item \textbf{Guía basada en problemas inversos (DPS)}: modelar la generación condicional como un problema inverso, descomponiendo el puntaje condicional usando la regla de Bayes en la suma del puntaje marginal y el gradiente de verosimilitud condicional.
+    \item \textbf{Guía basada en funciones de recompensa}: definir las preferencias del usuario mediante una función de recompensa diferenciable, inyectando guías de gradiente durante el proceso de generación.
+\end{enumerate}
+
+\begin{importantbox}{Repaso de problemas inversos}
+Dado un observable $y$ y una función de mapeo $\mathcal{A}$, el objetivo del problema inverso es encontrar la $x$ que satisfaga $y = \mathcal{A}(x)$. En el marco de los modelos de difusión, necesitamos calcular el puntaje condicional $\nabla_{x_t} \log p(x_t | y)$, descomponiéndolo usando la regla de Bayes en:
+$$\nabla_{x_t} \log p(x_t | y) = \nabla_{x_t} \log p(x_t) + \nabla_{x_t} \log p(y | x_t)$$
+donde el primer término es el puntaje marginal que ya aprendió el modelo preentrenado, y el segundo término es el gradiente de verosimilitud condicional que requiere un cálculo adicional.
+\end{importantbox}
+
+\subsection{Aproximación central del método DPS}
+
+La idea clave del método DPS (Diffusion Posterior Sampling) es: cuando la función de mapeo $\mathcal{A}$ en el problema inverso es lineal, el término puntaje condicional puede calcularse mediante el parámetro $R$ (la pseudoinversa de $\mathcal{A}$). Además, se puede obtener una forma más concisa mediante una aproximación más gruesa: aproximar la distribución condicional como una distribución gaussiana:
+
+$$\nabla_{x_t} \log p(y | x_t) \approx -\nabla_{x_t} \| y - \mathcal{A}(\hat{x}_0(x_t)) \|^2$$
+
+donde $\hat{x}_0(x_t)$ es los datos limpios estimados a partir del estado ruidoso actual $x_t$ usando la fórmula de Tweedie.
+
+\begin{knowledgebox}{Fórmula de Tweedie}
+La fórmula de Tweedie proporciona la estimación posterior óptima de los datos limpios $x_0$ dados una observación ruidosa $x_t$:
+$$\hat{x}_0(x_t) = \frac{1}{\sqrt{\bar{\alpha}_t}} \left( x_t + (1 - \bar{\alpha}_t) \nabla_{x_t} \log p(x_t) \right)$$
+En la práctica, esto equivale a estimar $x_0$ usando una red de predicción de ruido preentrenada $\epsilon_\theta(x_t, t)$.
+\end{knowledgebox}
+
+\subsection{Simplicidad en la implementación de DPS}
+
+El método DPS es extremadamente sencillo de implementar: solo requiere agregar una línea de código al pipeline de generación. En cada paso de desruido, primero se calcula $x_{t-1}$ mediante el proceso inverso estándar y luego se realiza una actualización de un paso a $x_{t-1}$ basándose en el gradiente de la pérdida L2:
+
+$$x_{t-1} \leftarrow x_{t-1} - \eta \cdot \nabla_{x_t} \| y - \mathcal{A}(\hat{x}_0(x_t)) \|^2$$
+
+donde $\eta$ es el tamaño del paso de guía (guidance step size), que controla la intensidad de la guía en cada paso. Todo el flujo del algoritmo DPS puede resumirse así:
+
+\begin{enumerate}
+    \item Comenzar con $x_T \sim \mathcal{N}(0, I)$
+    \item Para cada paso temporal $t = T, T-1, \ldots, 1$:
+    \begin{enumerate}
+        \item Calcular $\hat{x}_0(x_t)$ usando el modelo preentrenado (estimación de Tweedie)
+        \item Calcular el gradiente de guía $g = \nabla_{x_t} \| y - \mathcal{A}(\hat{x}_0(x_t)) \|^2$
+        \item Ejecutar el paso de desruido estándar para obtener $\tilde{x}_{t-1}$
+        \item Aplicar la actualización de guía $x_{t-1} = \tilde{x}_{t-1} - \eta_t \cdot g$
+    \end{enumerate}
+    \item Salir con $x_0$
+\end{enumerate}
+
+El ponente recomienda encarecidamente a los estudiantes que experimenten el método DPS usando su propio código de modelos de difusión (como la implementación en las tareas del curso), ya que realmente solo requiere agregar una línea de código de actualización de gradiente al pipeline de generación.
+
+\begin{warningbox}{Costo de la aproximación}
+Aunque aproximar $p(y|x_t)$ como una distribución gaussiana hace que los cálculos sean extremadamente simples, esto no representa la distribución real. Especialmente en pasos temporales con alto nivel de ruido, la calidad de la estimación de $\hat{x}_0$ es deficiente y el error de aproximación de la verosimilitud condicional puede ser muy grande. Por lo tanto, el rendimiento práctico suele ser muy sensible al peso de guía y al número de pasos temporales.
+\end{warningbox}
+
+\begin{knowledgebox}{Problemas inversos lineales vs. no lineales}
+Cuando la función de mapeo $\mathcal{A}$ es lineal (como en superresolución, desenfocamiento o reparación), se puede derivar una expresión más precisa del puntaje condicional que involucra operaciones de pseudoinversa de $\mathcal{A}$. Sin embargo, en la práctica, incluso en casos lineales, la aproximación gaussiana simple de DPS logra buenos resultados; por lo tanto, generalmente se usa directamente la forma general de guía por gradiente L2. Para mapeos no lineales $\mathcal{A}$ (como recuperación de fase o modelos de sensores no lineales), el error de la aproximación gaussiana puede ser mayor, pero sigue siendo el método más práctico hasta ahora.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El marco DPS descompone el puntaje condicional en un puntaje marginal y un gradiente de verosimilitud condicional mediante la regla de Bayes, y simplifica este último usando una aproximación gaussiana a un gradiente de pérdida L2. Este método no requiere entrenamiento adicional y puede aplicarse a cualquier función condicional diferenciable.
+\section{Guía de generación desde la perspectiva SDE/ODE}
+
+\subsection{Guía en la formulación SDE}
+
+El proceso inverso del modelo difusivo puede formularse equivalentemente como una ecuación diferencial estocástica (SDE) en tiempo continuo. Bajo la formulación SDE, la forma discretizada en el dominio del tiempo del proceso inverso es:
+
+$$x_{t-\Delta t} = x_t + f(x_t, t)\Delta t + g(t)\Delta W$$
+
+donde $f$ contiene la función de señal y $g$ es el coeficiente de ruido. Introducir la guía DPS en la formulación SDE también es directo: después de calcular $x_{t-\Delta t}$ en cada paso, se realiza una actualización basada en el gradiente condicional.
+
+\begin{importantbox}{Equivalencia entre SDE y DDPM}
+El paso inverso discreto del DDPM puede considerarse como la discretización en el dominio del tiempo de la SDE continua. Ambas formulaciones son completamente equivalentes: la formulación SDE proporciona un marco de tiempo continuo más natural, mientras que el DDPM es su caso particular en pasos de tiempo discretos. La guía DPS puede aplicarse consistentemente en ambas formulaciones.
+\end{importantbox}
+
+\subsection{Viabilidad de la formulación ODE}
+
+Además de la formulación SDE, el proceso inverso del modelo difusivo también puede describirse mediante una ODE de flujo de probabilidad. La forma de la ODE de flujo de probabilidad es:
+
+$$\frac{dx}{dt} = f(x, t) - \frac{1}{2}g(t)^2 \nabla_x \log p_t(x)$$
+
+Su característica principal es la ausencia del término de ruido aleatorio; dada una condición inicial $x_T$, la trayectoria es determinista. Las discusiones en clase indican que la idea de guía de DPS puede aplicarse completamente a la formulación ODE, solo añadiendo actualizaciones de gradiente de guía después de resolver cada paso.
+
+\begin{knowledgebox}{Comparación entre tres formulaciones}
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Característica & DDPM & SDE & ODE \\
+\midrule
+Dominio temporal & Discreto & Continuo & Continuo \\
+Aleatoriedad & Sí & Sí & No \\
+Calidad de muestreo & Alta & Alta & Alta \\
+Velocidad de muestreo & Lenta (requiere múltiples pasos) & Lenta & Acelerable \\
+Guía DPS & Soportado & Soportado & Soportado \\
+Fundamento teórico & Inferencia variacional & Análisis estocástico & Flujo de probabilidad \\
+\bottomrule
+\end{tabular}
+\end{center}
+Las tres formulaciones enfrentan el mismo problema práctico en términos de guía: el equilibrio entre la precisión de la aproximación de Tweedie y la intensidad de la guía.
+\end{knowledgebox}
+
+\subsection{Equilibrio entre número de pasos temporales e intensidad de guía}
+
+\begin{warningbox}{Más pasos temporales vs. mayor peso de guía}
+Durante la inferencia, la guía presenta un equilibrio central crítico:
+\begin{itemize}
+    \item \textbf{Aumentar el número de pasos temporales}: más pasos implican inyecciones de gradiente de guía más frecuentes, lo que mejora el efecto de guía, pero reduce la velocidad de generación.
+    \item \textbf{Aumentar el peso de guía}: reducir los pasos temporales pero aumentar la intensidad de la guía en cada paso provoca que las muestras intermedias se desvíen de la distribución de entrenamiento, haciendo que las predicciones de la red de predicción de ruido sean inexactas y, en última instancia, que la salida resultante se vuelva poco realista.
+\end{itemize}
+Este es el desafío central de los métodos de guía durante la inferencia: la salida o no cumple con la condición dada, o cumple con la condición pero se vuelve poco realista. Cómo lograr un equilibrio entre realismo y cumplimiento de condiciones es clave para ajustar los parámetros.
+\end{warningbox}
+
+Si se desea obtener simultáneamente aceleración (menos pasos) y buenos efectos de guía, podría ser necesario introducir información condicional durante la fase de entrenamiento. Sin embargo, esto perdería la ventaja de la guía en tiempo de inferencia de ``no requerir entrenamiento adicional''.
+
+El ponente señaló que este equilibrio se manifiesta en la práctica de la siguiente manera: cuando el peso de guía es demasiado alto, las muestras intermedias $x_t$ se empujan hacia regiones fuera de la distribución de datos de entrenamiento. En estas regiones fuera de la distribución, la red de predicción de ruido $\epsilon_\theta$ nunca ha visto entradas similares, por lo que sus predicciones se vuelven inexactas. Estas predicciones inexactas se acumularán en los pasos posteriores, lo que lleva a una salida final que, aunque potencialmente cumple con la condición dada, se vuelve visualmente poco realista y genera artefactos.
+
+\begin{knowledgebox}{Sugerencias prácticas de ajuste de parámetros}
+Según las discusiones en clase, las siguientes reglas empíricas ayudan a obtener mejores resultados en la práctica:
+\begin{itemize}
+    \item Utilizar un mayor número de pasos de desruido (por ejemplo, 1000 pasos), permitiendo que la perturbación de cada paso de guía sea menor.
+    \item El peso de guía puede variar según el paso temporal: utilizar pesos más bajos en las etapas tempranas (alta ruido) y aumentar gradualmente en las etapas posteriores (bajo ruido).
+    \item Intentar simultáneamente ambos samplers, SDE y ODE, para comparar los resultados.
+    \item Para la misma condición, realizar múltiples muestreos y seleccionar el mejor (estrategia best-of-N).
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La guía DPS puede aplicarse consistentemente en las tres formulaciones: DDPM, SDE y ODE. En la práctica, es necesario ajustar cuidadosamente el número de pasos temporales y el peso de guía para lograr un equilibrio entre el cumplimiento de la condición y el realismo de la salida.
+
+
+\section{Escalado en tiempo de prueba: de los LLM a los modelos difusos}
+
+\subsection{El fin de la era del preentrenamiento y el cómputo en inferencia}
+
+Ilya Sutskever (cofundador de OpenAI) planteó una idea influyente: la era del preentrenamiento está llegando a su fin. Para los grandes modelos de lenguaje (LLM), los datos de entrenamiento disponibles en internet se están agotando. Incluso si se sigue aumentando la escala del modelo o la cantidad de cómputo de entrenamiento, las mejoras en el rendimiento serán cada vez más limitadas.
+
+\begin{knowledgebox}{El surgimiento del escalado en tiempo de prueba}
+La idea central del escalado en tiempo de prueba (test-time scaling) es: en lugar de invertir más recursos computacionales durante el entrenamiento, es mejor gastar más cómputo durante la inferencia para mejorar la calidad de la salida. Esta idea ya ha obtenido un éxito significativo en el campo de los LLM:
+\begin{itemize}
+    \item Los modelos O1/O3 de OpenAI invierten más tiempo durante la inferencia mediante un "modo de pensamiento" para mejorar las respuestas.
+    \item DeepSeek R1 entrena con RL (aprendizaje por refuerzo) al modelo para que genere tokens de pensamiento intermedios, logrando un "momento aha" —el modelo puede descubrir y corregir errores de razonamiento por sí mismo—.
+    \item En el benchmark ARC-AGI, la puntuación de O3 saltó del 10\%--20\% de los modelos anteriores hasta alcanzar el 88\%.
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{La transición desde LLM hasta modelos difusos}
+
+La pregunta central del curso es: ¿es posible trasladar la idea del escalado en tiempo de prueba desde los LLM hacia los modelos difusos y los modelos de flujo? El ponente considera que este es un enfoque muy prometedor. Además, las técnicas en tiempo de inferencia requieren menos recursos computacionales que el cómputo en entrenamiento, lo que permite a equipos de investigación pequeños desarrollar modelos de alto rendimiento.
+
+\begin{importantbox}{El marco Proposer-Verifier}
+La arquitectura básica del escalado en tiempo de prueba se compone de dos componentes:
+\begin{itemize}
+    \item \textbf{Proposer (proponente)}: un modelo generativo preentrenado (como un modelo difuso), encargado de generar salidas candidatas.
+    \item \textbf{Verifier (verificador)}: otro modelo o función que evalúa la calidad de la salida del proposer. Puede ser una red neuronal, un verificador de código o cualquier función de puntuación.
+\end{itemize}
+Basándose en el feedback del verifier, se puede (1) guiar el proceso de generación del proposer o (2) hacer que el proposer genere múltiples candidatos para seleccionar el óptimo. Esto es análogo al marco "generador-discriminador" de las GANs.
+\end{importantbox}
+
+\subsection{Guía en tiempo de prueba desde la perspectiva del RL}
+
+La presentación de Dan (ingeniero de OpenAI) ilustra con viveza la visión del escalado en tiempo de prueba: al igual que a Einstein le tomaron 8 años desarrollar la relatividad general en 1907, el modelo O3 solo necesita un minuto de "pensamiento" para resolver un examen final de relatividad general —lo cual depende de invertir más cómputo durante la inferencia—.
+
+Yann LeCun alguna vez comparó el preentrenamiento con una "torta grande", y el aprendizaje por refuerzo (RL) era simplemente las "cerezas de la torta". Sin embargo, la hoja de ruta de OpenAI indica que en el futuro el cómputo de RL ocupará una proporción cada vez mayor del cómputo total, superando potencialmente al cómputo de preentrenamiento.
+
+\begin{warningbox}{Implicaciones de las tendencias de investigación}
+El ponente observa que la comunidad actual de investigación en IA ya no se centra únicamente en desarrollar nuevas tecnologías individuales o publicar artículos. Cada vez más equipos de investigación (incluidas startups) están aprovechando las técnicas de escalado en tiempo de prueba para superar el rendimiento de los modelos existentes utilizando recursos computacionales relativamente menores en comparación con entrenar un modelo grande desde cero. Esto ofrece una oportunidad importante a laboratorios académicos y pequeños equipos con recursos limitados: no es necesario contar con miles de GPUs; también se pueden obtener resultados competitivos mediante técnicas ingeniosas en tiempo de inferencia.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El escalado en tiempo de prueba ya ha demostrado un gran potencial en el campo de los LLM. Trasladar esta idea hacia los modelos difusos, mejorando la calidad de la generación durante la inferencia a través del marco proposer-verifier, es una dirección importante en la investigación actual.
+
+
+\section{Guía mediante la función de recompensa: derivación en estilo RL}
+
+\subsection{Planteamiento del problema: muestreo con recompensa}
+
+Supongamos que tenemos un modelo de difusión preentrenado cuya distribución aprendida de los datos es $p_0(x_0)$. Además, disponemos de una función de recompensa continua y diferenciable $r(x_0)$; cuando la salida $x_0$ se ajusta más a las preferencias del usuario, el valor de $r(x_0)$ es mayor.
+
+\begin{importantbox}{El problema inverso es un caso particular de la guía mediante función de recompensa}
+Todos los problemas inversos pueden considerarse como casos particulares de la guía mediante función de recompensa. Basta con definir:
+$$r(x_0) = -\| y - \mathcal{A}(x_0) \|^2$$
+Es decir, utilizar el negativo de la pérdida L2 como función de recompensa. Cuanto más cerca esté la salida $x_0$ de la observación $y$ tras pasar por la transformación $\mathcal{A}$, mayor será la recompensa.
+\end{importantbox}
+
+El alcance de la guía mediante función de recompensa va mucho más allá de los problemas inversos. Por ejemplo:
+
+\begin{itemize}
+    \item \textbf{Generación de movimiento}: definir una función de recompensa para que las trayectorias generadas eviten colisiones con objetos en el escenario
+    \item \textbf{Generación de moléculas}: definir una función de recompensa para que las estructuras moleculares generadas posean propiedades de acoplamiento específicas
+    \item \textbf{Cualquier modelo discriminador diferenciable}: siempre que exista un modelo de puntuación diferenciable, se puede utilizar su salida como función de recompensa
+\end{itemize}
+
+\subsection{Maximización de la recompensa bajo restricción KL}
+
+Queremos definir una nueva distribución de datos $p_0^*(x_0)$ tal que las muestras $x_0$ extraídas de ella no solo tengan alta recompensa, sino que también se desvíen poco de la distribución original. Formalizado como el siguiente problema de optimización:
+
+$$p_0^* = \arg\max_{p} \; \mathbb{E}_{x_0 \sim p}[r(x_0)] - \frac{1}{\beta} D_{\mathrm{KL}}(p \| p_0)$$
+
+Donde $\beta > 0$ controla el equilibrio entre la maximización de la recompensa y la desviación de la distribución:
+\begin{itemize}
+    \item A mayor $\beta$, se prioriza más la maximización de la recompensa, pero podrían generarse muestras poco realistas
+    \item A menor $\beta$, la distribución se acerca más a la original, aunque la recompensa podría ser insuficientemente alta
+\end{itemize}
+
+\begin{knowledgebox}{Conexión con RLHF}
+Esta fórmula tiene una forma idéntica a la del RLHF (Reinforcement Learning from Human Feedback) en el ámbito de los LLM. En RLHF, $p_0$ es la distribución del modelo SFT, $r$ es la salida del modelo de recompensa y $\beta$ es el coeficiente de penalización KL. La guía en tiempo de inferencia para modelos de difusión y el RLHF para LLM resuelven esencialmente el mismo problema matemático.
+\end{knowledgebox}
+
+\subsection{Solución cerrada de la distribución óptima}
+
+El problema de optimización anterior tiene solución cerrada. Mediante multiplicadores de Lagrange y cálculo variacional, se puede demostrar que la distribución óptima es:
+
+$$p_0^*(x_0) = \frac{1}{Z_0} p_0(x_0) \exp(\beta \cdot r(x_0))$$
+
+Donde $Z_0 = \int p_0(x_0) \exp(\beta \cdot r(x_0)) dx_0$ es la constante de normalización (función de partición). Se observa que la nueva distribución realiza un reponderado sobre la distribución original según $\exp(\beta \cdot r(x_0))$: la densidad de probabilidad en las regiones de alta recompensa se amplifica, mientras que la de baja recompensa se comprime.
+
+\begin{knowledgebox}{Perspectiva desde los modelos de energía}
+La forma de $p_0^*(x_0)$ corresponde exactamente a un modelo basado en energía (Energy-Based Model), cuya función de energía es:
+$$E(x_0) = -\log p_0(x_0) - \beta \cdot r(x_0)$$
+La distribución de datos original proporciona la ``energía previa'', mientras que la función de recompensa aporta la ``energía condicional''. $\beta$ controla el peso relativo entre ambas, similar al parámetro de temperatura inversa en la física estadística. Cuando $\beta \to 0$, $p_0^* \to p_0$ (retorno a la distribución original); cuando $\beta \to \infty$, $p_0^*$ se concentra alrededor del punto con mayor recompensa.
+\end{knowledgebox}
+
+\subsection{Distribución en pasos intermedios y función de valor óptima}
+
+\begin{importantbox}{Desafío central: los pasos intermedios}
+El proceso generativo de los modelos de difusión implica un desruido multietapa desde $x_T$ hasta $x_0$. Para muestrear de $p_0^*$, no solo necesitamos conocer $p_0^*$, sino también la distribución en cada paso intermedio $p_t^*(x_t)$. Esto requiere definir y calcular la función de valor óptima $V^*(x_t, t)$.
+\end{importantbox}
+
+Análogamente al papel que desempeña la función de recompensa $r(x_0)$ en la distribución final, la distribución en los pasos intermedios se puede expresar como:
+
+$$p_t^*(x_t) = \frac{1}{Z_t} p_t(x_t) \exp(\beta \cdot V^*(x_t, t))$$
+
+Donde $V^*(x_t, t)$ es la función de valor óptima (optimal value function), que representa la recompensa futura esperada obtenida partiendo desde $x_t$ y siguiendo una estrategia óptima.
+
+\begin{warningbox}{La función de valor no tiene solución analítica}
+A diferencia de la distribución final, la función de valor óptima en los pasos intermedios $V^*(x_t, t)$ no posee forma analítica. Esto se debe a que implica calcular la esperanza sobre todas las trayectorias futuras posibles, lo cual no puede realizarse directamente. Por tanto, es necesario introducir aproximaciones.
+\end{warningbox}
+
+\subsection{Aproximación de Tweedie para la función de valor}
+
+Bajo inspiración en el pensamiento de la aproximación de Tweedie utilizado en DPS, se puede aproximar la función de valor óptima como:
+
+$$V^*(x_t, t) \approx r(\hat{x}_0(x_t))$$
+
+Es decir, sustituir la función de recompensa con la estimación de Tweedie de $x_0$ en el momento actual. El significado de esta aproximación es que la ``recompensa futura esperada'' en los pasos intermedios puede reemplazarse por la ``recompensa instantánea de la estimación óptima actual''.
+
+Aunque se trata de una aproximación bastante gruesa, posee un valor práctico importante:
+
+\begin{itemize}
+    \item No requiere entrenar una red neuronal de valor adicional
+    \item Solo es necesario utilizar el modelo de difusión existente (que proporciona la estimación de Tweedie) y la función de recompensa
+    \item El costo computacional se reduce a una sola propagación hacia adelante (estimación de Tweedie) + una evaluación de la función de recompensa + una propagación hacia atrás (cálculo del gradiente)
+\end{itemize}
+
+El ponente también mencionó que, teóricamente, podría entrenarse una red neuronal dedicada para aprender la función de valor óptima $V^*(x_t, t)$, pero este método suele ser poco estable en la práctica. Por ello, aunque la aproximación de Tweedie es sencilla, constituye actualmente la solución más práctica.
+
+\begin{warningbox}{Niveles de aproximación de la función de valor}
+De lo exacto a lo grueso, existen las siguientes formas de aproximar la función de valor:
+\begin{enumerate}
+    \item \textbf{Cálculo exacto}: requiere calcular la esperanza sobre todas las trayectorias futuras; el cálculo no es factible
+    \item \textbf{Entrenamiento de una red de valores}: entrenar $V_\phi(x_t, t)$ para aproximar $V^*$; requiere grandes cantidades de datos de entrenamiento y tiempo, además de que puede ser inestable
+    \item \textbf{Estimación de Monte Carlo}: muestrear múltiples trayectorias partiendo desde $x_t$ y tomar la recompensa promedio. Mayor costo computacional pero más preciso
+    \item \textbf{Estimación en un solo paso de Tweedie}: $V^*(x_t, t) \approx r(\hat{x}_0(x_t))$, la más simple pero con el mayor error
+\end{enumerate}
+DPS y la mayoría de los métodos de guía en tiempo de inferencia adoptan la cuarta opción, ya que no requiere ningún entrenamiento adicional.
+\end{warningbox}
+
+\subsection{Obtención de la fórmula equivalente a DPS}
+
+Bajo dicha aproximación, el gradiente de la función puntual de la nueva distribución se convierte en:
+
+$$\nabla_{x_t} \log p_t^*(x_t) = \underbrace{\nabla_{x_t} \log p_t(x_t)}_{\text{gradiente puntual original}} + \underbrace{\beta \cdot \nabla_{x_t} r(\hat{x}_0(x_t))}_{\text{gradiente de la recompensa futura esperada}}$$
+
+\begin{importantbox}{Interpretación RL de DPS}
+Al tomar la función de recompensa como $r(x_0) = -\| y - \mathcal{A}(x_0) \|^2$, la expresión anterior se reduce inmediatamente a la fórmula de DPS. Por tanto, DPS puede entenderse desde dos perspectivas:
+\begin{itemize}
+    \item \textbf{Perspectiva bayesiana}: puntual condicional = puntual marginal + gradiente de verosimilitud condicional
+    \item \textbf{Perspectiva RL}: puntual de la estrategia óptima = puntual de la estrategia original + gradiente de la recompensa futura esperada
+\end{itemize}
+Ambas son matemáticamente equivalentes, pero la perspectiva RL ofrece un marco más general, donde la función de recompensa no se limita a los problemas inversos.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Mediante la maximización de la recompensa con restricción KL, podemos definir una nueva distribución objetivo. Una vez que estimamos la función de valor óptima mediante la aproximación de Tweedie, se puede derivar una fórmula de guía completamente equivalente a DPS. La perspectiva RL proporciona un marco teórico más general para la guía en tiempo de inferencia.
+
+\section{Más allá del problema inverso: aplicaciones diversificadas}
+
+\subsection{Aplicaciones extendidas en el dominio de las imágenes}
+
+El poder de la guía durante la inferencia va mucho más allá de resolver problemas inversos. Siempre que se pueda definir una función de recompensa diferenciada adecuada, es posible guiar a un modelo preentrenado para generar salidas que cumplan con diversas condiciones. A continuación, se presentan algunos escenarios de aplicación típicos.
+
+\begin{knowledgebox}{De problemas inversos a la guía general}
+Los problemas inversos son solo un caso particular de la guía mediante funciones de recompensa. Las condiciones para aplicar el marco de guía general son:
+\begin{enumerate}
+    \item Contar con un modelo preentrenado de difusión o flujo (proposer)
+    \item Poder definir una función de recompensa/pérdida diferenciada (verifier)
+    \item La función de recompensa puede codificar las condiciones que el usuario desea que cumpla la salida
+\end{enumerate}
+Cualquier problema que satisfaga estas tres condiciones puede ser abordado mediante guía durante la inferencia.
+\end{knowledgebox}
+
+\subsection{Generación de imágenes panorámicas}
+
+Los modelos de difusión de imágenes preentrenados suelen generar imágenes con una resolución fija (por ejemplo, $512 \times 512$). ¿Cómo aprovechar un modelo preentrenado para generar imágenes panorámicas de mayor tamaño?
+
+\textbf{Idea central}: dividir el lienzo grande en múltiples ventanas superpuestas (cada una con un tamaño igual a la resolución de entrenamiento del modelo), ejecutar el proceso de desruido en paralelo sobre todas las ventanas y, al mismo tiempo, garantizar la consistencia en las regiones superpuestas mediante la guía.
+
+En concreto:
+\begin{enumerate}
+    \item Colocar múltiples ventanas superpuestas sobre el lienzo grande
+    \item Ejecutar el desruido de difusión de manera independiente para cada ventana
+    \item Definir la función de recompensa: las ventanas adyacentes deben producir valores de píxel idénticos en las regiones superpuestas
+    \item La función de recompensa puede definirse simplemente como la distancia L2 de la región superpuesta (o una pérdida de estilo más avanzada)
+    \item Después de cada paso de desruido, actualizar todas las ventanas basándose en el gradiente de la consistencia de superposición
+\end{enumerate}
+
+\begin{importantbox}{Espacio canónico y espacio de instancia}
+Este tipo de aplicaciones de sincronización introduce dos conceptos:
+\begin{itemize}
+    \item \textbf{Espacio canónico}: el espacio donde se encuentra los datos generados finalmente (por ejemplo, el lienzo completo de la imagen panorámica o el espacio de textura de un objeto 3D)
+    \item \textbf{Espacio de instancia}: el espacio en el que opera cada proceso de difusión de manera independiente (por ejemplo, una sola ventana o una imagen 2D de un solo punto de vista)
+\end{itemize}
+El proceso de generación se realiza en paralelo en múltiples espacios de instancia, logrando la sincronización mediante restricciones de consistencia en el espacio canónico.
+\end{importantbox}
+
+En la implementación práctica, la forma más sencilla de sincronización (idéntica a DPS) es:
+
+\begin{enumerate}
+    \item Muestrear todos los $x_T$ en el espacio canónico
+    \item Proyectar el ruido del espacio canónico a cada espacio de instancia
+    \item Realizar un paso de desruido de manera independiente en cada espacio de instancia
+    \item Proyectar el resultado desruidido de vuelta al espacio canónico
+    \item Tomar el promedio en las regiones superpuestas (o actualizar basándose en el gradiente de la pérdida L2)
+    \item Proyectar nuevamente el resultado actualizado a cada espacio de instancia y continuar con el siguiente paso
+\end{enumerate}
+
+\begin{warningbox}{Promedio simple vs. guía por gradiente}
+La forma más ingenua de sincronización consiste directamente en tomar el promedio en las regiones superpuestas. Aunque esta manera es sencilla, puede provocar desenfoque e inconsistencia. El uso de una guía basada en gradientes al estilo DPS (definiendo la consistencia L2 o una pérdida de estilo como función de recompensa) suele lograr mejores resultados, ya que permite que el modelo sea ``consciente'' de las restricciones de consistencia en cada paso de desruido.
+\end{warningbox}
+
+\subsection{Imágenes panorámicas de 360 grados}
+
+La misma idea puede extenderse a la generación de imágenes panorámicas de 360 grados. Desplegar la esfera como múltiples proyecciones planas superpuestas y ejecutar procesos de difusión de manera independiente en cada proyección, logrando una coordinación global mediante restricciones de consistencia en la esfera.
+
+\subsection{Generación de texturas 3D}
+
+Dada la geometría superficial de un modelo 3D (mesh), ¿cómo aprovechar un modelo de difusión de imágenes 2D para generarle texturas? Se trata de un problema extremadamente práctico: los modelos 3D son omnipresentes en videojuegos, cine y realidad virtual, mientras que la creación manual de texturas resulta laboriosa y costosa.
+
+\begin{enumerate}
+    \item Renderizar la superficie 3D desde múltiples puntos de vista (proyectada a 2D), obteniendo una imagen 2D parcialmente visible por cada punto de vista
+    \item Ejecutar el desruido de difusión sobre la imagen 2D de cada punto de vista (operación en el espacio de instancia)
+    \item Proyectar los resultados 2D de vuelta a la superficie 3D (mapeado al espacio canónico)
+    \item Asegurar mediante una función de recompensa que las regiones superpuestas en la superficie 3D desde diferentes puntos de vista sean consistentes
+\end{enumerate}
+
+En este caso, el espacio canónico es el espacio de texturas sobre la superficie 3D (espacio UV), mientras que el espacio de instancia corresponde al espacio de imágenes 2D de cada punto de vista. La función de proyección $\pi_i$ mapea un punto en la superficie 3D a las coordenadas 2D del $i$-esimo punto de vista, y la función de reproyección $\pi_i^{-1}$ mapea píxeles 2D de vuelta a la superficie 3D.
+
+\begin{importantbox}{Restricciones de sincronización en la generación de texturas 3D}
+Supóngase que se observa un objeto 3D desde $K$ puntos de vista $\{v_1, \ldots, v_K\}$, donde la imagen renderizada 2D para cada punto de vista $v_i$ es $I_i$. Para cualquier punto $p$ en la superficie 3D, si es visible tanto desde el punto de vista $v_i$ como desde $v_j$, debe cumplirse:
+$$\text{color en } \pi_i(p) = \text{color en } \pi_j(p)$$
+Esta restricción puede formalizarse como una función de recompensa:
+$$r = -\sum_{i < j} \sum_{p \in \text{overlap}(v_i, v_j)} \| I_i(\pi_i(p)) - I_j(\pi_j(p)) \|^2$$
+\end{importantbox}
+
+\subsection{Generación de imágenes ambiguas (ilusiones visuales)}
+
+Una aplicación interesante consiste en generar ``imágenes ambiguas'' —una imagen que presenta significados completamente distintos bajo diferentes transformaciones:
+\begin{itemize}
+    \item En posición normal es un óleo de grupo de personas; al invertirla, se convierte en el retrato de un anciano
+    \item En posición normal es una maceta con plantas verdes; al invertirla, se transforma en un retrato de Einstein
+\end{itemize}
+
+\begin{knowledgebox}{Formalización de imágenes ambiguas}
+Generar imágenes ambiguas puede considerarse como un problema de sincronización:
+\begin{itemize}
+    \item Espacio canónico: el espacio de la imagen original
+    \item Espacios de instancia: los puntos de vista originales y transformados (por ejemplo, invertidos o rotados)
+    \item Restricción: solo existe una imagen en el espacio canónico, pero cumple con descripciones de texto distintas en cada uno de los dos espacios de instancia
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Zoom infinito (Infinite Zooming)}
+
+Otra aplicación notable es la generación de videos de ``zoom infinito'' utilizando modelos de difusión de imágenes: desde una galaxia, pasando por detalles en un plato, hasta el interior de un edificio. Esto se logra definiendo espacios de instancia para diferentes niveles de zoom e imponiendo restricciones de consistencia en las regiones superpuestas entre niveles adyacentes.
+
+Concretamente, cada nivel de zoom corresponde a un espacio de instancia; la ``región superpuesta'' entre niveles adyacentes es la imagen completa del nivel de mayor zoom y la región central del nivel de menor zoom. Al garantizar la consistencia en estas áreas, se logra un efecto visualmente coherente de zoom infinito.
+
+\begin{knowledgebox}{Estructura jerárquica del zoom infinito}
+El zoom infinito puede entenderse como un problema de sincronización jerárquico:
+\begin{itemize}
+    \item Nivel 0: la vista más macroscópica (por ejemplo, toda la galaxia)
+    \item Nivel 1: una versión ampliada de la región central del nivel 0
+    \item Nivel 2: una ampliación adicional de la región central del nivel 1
+    \item $\ldots$
+\end{itemize}
+Cada nivel constituye un espacio de instancia independiente que utiliza el mismo modelo preentrenado de imágenes para el desruido. La relación de consistencia entre niveles adyacentes se define mediante correspondencias de escala, asegurando que el contenido visual de la imagen ampliada coincida con la región central del nivel superior.
+\end{knowledgebox}
+
+\subsection{Ensamblaje de secuencias largas para generación de movimiento}
+
+Para la generación de movimiento, los modelos preentrenados suelen producir solo secuencias cortas. Mediante técnicas de sincronización similares, es posible unir múltiples segmentos de movimiento corto en una secuencia larga, garantizando al mismo tiempo transiciones suaves.
+
+\subsection{Resumen de la sección}
+
+Las aplicaciones de la guía durante la inferencia van mucho más allá de los problemas inversos. A través de la definición de funciones de recompensa adecuadas y restricciones de sincronización, se puede aprovechar modelos de imágenes 2D preentrenados para generar contenido que excede el dominio de entrenamiento, como mapas panorámicos, texturas 3D e imágenes ambiguas. La idea central radica en la separación y sincronización entre el espacio canónico y el espacio de instancia.
+\section{Ventajas y limitaciones del método}
+
+\subsection{Comparación exhaustiva de los métodos de guía en tiempo de inferencia}
+
+\begin{center}
+\begin{tabular}{p{3cm}p{3.5cm}p{3.5cm}p{3.5cm}}
+\toprule
+\textbf{Método} & \textbf{Manipulación de atención} & \textbf{DPS (problema inverso)} & \textbf{Guía por función de recompensa} \\
+\midrule
+Fundamento teórico & Ninguno (intuición de ingeniería) & Teorema de Bayes & Optimización con RL / restricciones KL \\
+Condiciones de aplicación & Arquitecturas específicas & Mapeo $\mathcal{A}$ conocido & Función de recompensa diferenciable \\
+Generalidad & Baja & Media & Alta \\
+Dificultad de implementación & Media & Baja & Baja \\
+Requisitos de entrenamiento & Ninguno & Ninguno & Ninguno (o mínimos) \\
+Aplicaciones típicas & Control de composición & Superresolución / eliminación de ruido / reparación & Guía de preferencias arbitrarias \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Ventajas}
+
+\begin{enumerate}
+    \item \textbf{Generalidad}: Siempre que se pueda definir una función de recompensa diferenciable, es aplicable. Funciona con múltiples modalidades como imágenes, video, movimiento y moléculas.
+    \item \textbf{Sin entrenamiento adicional}: Aprovecha modelos preentrenados existentes, sin necesidad de recopilar nuevos datos ni realizar entrenamiento suplementario.
+    \item \textbf{Implementación sencilla}: El código central solo requiere añadir un paso de guía por gradiente en el pipeline de generación.
+    \item \textbf{Combinación flexible}: Se pueden aplicar múltiples funciones de recompensa simultáneamente para lograr una guía multicondicional.
+    \item \textbf{Amigable computacionalmente}: En comparación con entrenar desde cero, la guía en tiempo de inferencia requiere menos recursos computacionales.
+\end{enumerate}
+
+\subsection{Limitaciones}
+
+\begin{warningbox}{La función de recompensa debe ser diferenciable}
+La guía en tiempo de inferencia depende de la propagación hacia atrás de gradientes; por lo tanto, la función de recompensa debe ser diferenciable. Para métricas de evaluación no diferenciables (como FID, IS, etc.), no pueden usarse directamente como señales de guía. Esta es una limitación fundamental del método actual.
+\end{warningbox}
+
+\begin{warningbox}{El equilibrio entre realismo y cumplimiento de condiciones es inevitable}
+Aumentar la intensidad de la guía hace que las muestras intermedias se desvíen de la distribución de entrenamiento, lo que provoca que la red predictora de ruido genere predicciones inexactas en regiones fuera de distribución. El resultado final es:
+\begin{itemize}
+    \item Intensidad de guía baja: La salida es realista pero no cumple las condiciones.
+    \item Intensidad de guía alta: Se cumplen las condiciones, pero la salida pierde realismo.
+\end{itemize}
+Buscar el peso de guía óptimo generalmente requiere ajuste empírico de hiperparámetros.
+\end{warningbox}
+
+Otras limitaciones incluyen:
+\begin{itemize}
+    \item Velocidad de inferencia más lenta: Más pasos temporales ofrecen un efecto de guía mejorado, pero incrementan el tiempo de inferencia.
+    \item El aproximado de Tweedie tiene mayores errores en pasos de alto ruido: La calidad de la estimación de $\hat{x}_0$ en los primeros pasos temporales es pobre.
+    \item No hay garantía teórica de convergencia al óptimo global.
+\end{itemize}
+
+\begin{knowledgebox}{Comparación con los métodos en tiempo de entrenamiento}
+La guía en tiempo de inferencia complementa a los métodos en tiempo de entrenamiento (como ControlNet, modelos difusivos condicionales y ajuste fino RLHF):
+\begin{itemize}
+    \item \textbf{Métodos en tiempo de entrenamiento}: Ofrecen mayor estabilidad y velocidad de generación, pero requieren grandes cantidades de datos y recursos computacionales para el entrenamiento, además de que cada condición debe entrenarse por separado.
+    \item \textbf{Métodos en tiempo de inferencia}: No requieren entrenamiento, tienen alta flexibilidad y permiten combinar múltiples condiciones al instante, aunque la estabilidad es menor y la velocidad de generación más lenta.
+\end{itemize}
+En la ingeniería práctica, la estrategia óptima suele ser una combinación de ambos: usar los métodos en tiempo de entrenamiento para tipos de condiciones comunes y fijos, y la guía en tiempo de inferencia para necesidades temporales y diversas.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Los métodos de guía en tiempo de inferencia presentan ventajas como una fuerte generalidad, la ausencia de necesidad de entrenamiento y una implementación sencilla, pero están limitados por el requisito de que la función de recompensa sea diferenciable y por el equilibrio inherente entre realismo y cumplimiento de condiciones.
+
+\section{Implementación práctica: cómo convertir la guía en tiempo de inferencia en un experimento reproducible}
+
+\subsection{Los cuatro controles clave del diseño experimental}
+
+Al avanzar desde el contenido del curso hacia su implementación en ingeniería, lo más importante no es reinventar una fórmula, sino gestionar de forma sistemática varios controles centrales.
+
+\begin{enumerate}
+    \item \textbf{Selección del sampler}: DDPM, SDE y ODE corresponden a distintos compromisos entre velocidad y estabilidad.
+    \item \textbf{Programación de la intensidad de la guía}: fijar los pesos es lo más sencillo, pero suele ser menos estable que un schedule que varía según el paso temporal.
+    \item \textbf{Calidad del verificador}: si el reward / verifier no es confiable, determina directamente si la dirección de la guía es correcta.
+    \item \textbf{Estrategia de filtrado de candidatos}: la muestreo único, best-of-$N$ y el reordenamiento (reranking) alteran significativamente los resultados finales.
+\end{enumerate}
+
+\begin{importantbox}{Muchos experimentos fracasan no por defectos del modelo, sino por un verifier insuficiente}
+Si el propio verifier no se alinea con las preferencias humanas o solo recompensa patrones locales fácilmente explotables, los modelos de difusión aprenderán a ser ``astutos''. Esto es isomórfico al problema de la explotación del reward en RLHF.
+\end{importantbox}
+
+\subsection{Plantilla recomendada para registros experimentales}
+
+Para permitir comparaciones justas entre distintos métodos, el contenido del curso es ideal para convertirse en una plantilla unificada de registro experimental:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.18\textwidth} p{0.22\textwidth} p{0.42\textwidth}}
+\toprule
+Ítem del experimento & Campos a registrar & Descripción \\
+\midrule
+Modelo base & Modelo preentrenado, resolución, dominio de entrenamiento & Afecta la calidad de la estimación de Tweedie y su capacidad de transferencia \\
+Configuración de muestreo & Número de pasos, sampler, semilla aleatoria & Determina la velocidad y el rango de variabilidad de los resultados \\
+Configuración de guía & Tipo de reward, peso, schedule & Determina el equilibrio entre cumplimiento condicional y realismo \\
+Método de verificación & Métricas automáticas, preferencias humanas, ejemplos de fallo & Evita centrarse solo en el promedio e ignorar colapsos modales \\
+Costo computacional & Tiempo por muestra individual, memoria gráfica (VRAM), número de ejecuciones best-of-$N$ & Facilita la comparación de costos con métodos durante el entrenamiento \\
+\bottomrule
+\end{tabular}
+\caption{Plantilla mínima de registro para experimentos de guía en tiempo de inferencia}
+\end{table}
+
+\begin{knowledgebox}{Por qué es importante una ``base de casos de fallo''}
+Los métodos de guía de modelos de difusión suelen parecer buenos en casos promedio, pero sufren distorsiones sistemáticas ante ciertas combinaciones de condiciones o escenarios de alta resolución. Crear una base de datos específica para los ejemplos de fallo resulta más útil para la investigación posterior que simplemente reportar el valor medio.
+\end{knowledgebox}
+
+\subsection{De un solo reward a combinaciones múltiples}
+
+En aplicaciones reales, raramente existe un único objetivo. Las imágenes deben cumplir con el texto y, además, satisfacer la consistencia geométrica, restricciones de estilo, instrucciones de edición y restricciones físicas, entre otros. Por ello, el reward total suele expresarse como:
+
+$$r_{\text{total}}(x) = \lambda_1 r_{\text{text}}(x) + \lambda_2 r_{\text{consistency}}(x) + \lambda_3 r_{\text{physics}}(x) + \cdots$$
+
+Esto genera dos nuevos problemas:
+
+\begin{itemize}
+    \item Las escalas de los distintos rewards difieren; sumarlas directamente permitiría que un solo ítem domine la optimización.
+    \item Los objetivos de los rewards pueden ser mutuamente conflictivos; por ejemplo, una restricción geométrica más fuerte podría comprimir los detalles y la diversidad de la imagen.
+\end{itemize}
+
+\begin{warningbox}{Error más común en combinaciones múltiples de rewards: ajustar los pesos a la intuición sin fundamento}
+Sin normalización del reward, recorte de gradientes o asignación por paso temporal, las distintas restricciones se interferirán entre sí, resultando en una salida ni realista ni condicionalmente válida. Una práctica más segura es que distintos rewards asuman el control principal en diferentes periodos temporales; por ejemplo, enfatizar la estructura global en etapas tempranas y los detalles y la consistencia en fases posteriores.
+\end{warningbox}
+
+\subsection{Fronteras de investigación: de la guía hand-crafted al verifier aprendido}
+
+La tendencia implícita del taller es que, a corto plazo, la aproximación de Tweedie junto con funciones de reward manuales sigue siendo la vía más rentable; sin embargo, a largo plazo, la dirección más probable es entrenar verificadores o modelos de valor más potentes:
+
+\begin{itemize}
+    \item \textbf{Modelo de reward aprendido}: acercar el verifier a las preferencias humanas o al índice de éxito en tareas aguas abajo.
+    \item \textbf{Modelo de valor temporal}: no solo evaluar el $x_0$ final, sino también el potencial futuro de los estados intermedios $x_t$.
+    \item \textbf{Cálculo adaptativo}: asignar más pasos de inferencia a muestras difíciles en lugar de tratar todas las entradas por igual.
+    \item \textbf{Pipeline híbrido}: durante el entrenamiento, el modelo controla la dirección general; durante la inferencia, la guía se encarga del pulido final.
+\end{itemize}
+
+\subsection{Protocolo de evaluación: no limitarse a un único indicador visual}
+
+Aunque el curso se centra principalmente en la deducción metodológica, desde una perspectiva metodológica de investigación, la guía en tiempo de inferencia requiere especialmente evaluaciones multidimensionales. Un protocolo más completo debería incluir al menos lo siguiente:
+
+\begin{enumerate}
+    \item \textbf{Cumplimiento condicional}: error de reconstrucción del problema inverso, tasa de cumplimiento de restricciones y éxito de la tarea.
+    \item \textbf{Realismo}: FID, CLIP score, puntuación subjetiva humana o métrica perceptual específica para la tarea.
+    \item \textbf{Estabilidad}: si la variabilidad de los resultados es controlable bajo diferentes semillas aleatorias.
+    \item \textbf{Costo}: tiempo wall-clock por muestreo individual, memoria gráfica (VRAM) y el costo adicional derivado del best-of-$N$.
+\end{enumerate}
+
+\begin{warningbox}{Reportar solo ``la mejor imagen'' exagera gravemente la eficacia del método}
+La guía en tiempo de inferencia puede seleccionar fácilmente casos estéticos mediante múltiples muestreos, pero sin reportar el rendimiento promedio, la tasa de fallos y el costo computacional, no se pueden comparar de forma justa distintos métodos. Las ventajas y desventajas del escalado en tiempo de prueba deben divulgarse simultáneamente.
+\end{warningbox}
+
+\subsection{Por qué esta ruta es especialmente importante para equipos medianos y pequeños}
+
+Un juicio realista enfatizado por el ponente es que, ante la continua elevación del umbral para entrenar modelos grandes, los métodos en tiempo de prueba ofrecen a laboratorios pequeños y medianos otra vía competitiva.
+
+\begin{itemize}
+    \item No es necesario entrenar desde cero modelos generativos a gran escala.
+    \item Se pueden reutilizar directamente pesos públicos y samplers de código abierto.
+    \item El foco de la investigación se desplaza hacia el diseño del verifier, la construcción del reward y la asignación de cómputo.
+    \item Son más adecuados para iteraciones rápidas, ya que los ciclos de retroalimentación por experimento son mucho más cortos que los requeridos para un nuevo entrenamiento.
+\end{itemize}
+
+\begin{knowledgebox}{La comunidad de modelos de difusión podría replicar la evolución de la comunidad de LLM}
+Los LLM han trazado una trayectoria muy clara: tras la comercialización de los modelos preentrenados, lo que realmente abre brechas es el post-entrenamiento, la evaluación y la orquestación en tiempo de prueba. Es probable que los modelos de difusión evolucionen siguiendo una ruta similar, y el foco competitivo futuro tenderá a inclinarse hacia el verifier, las herramientas (tooling) y el diseño de sistemas.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Convertir realmente la guía en tiempo de inferencia en un sistema de investigación o producto depende de unificar los registros experimentales, diseñar combinaciones estables de rewards y tratar la calidad del verifier como una prioridad absoluta. Muchos problemas que parecen pertenecer a la capa algorítmica son, en esencia, cuestiones de diseño experimental y de evaluación.
+\section{Síntesis y ampliación}
+
+\subsection{Repaso de los puntos clave}
+
+Esta clase abordó en profundidad la teoría y práctica de la guía durante el proceso de inferencia desde tres perspectivas:
+
+\begin{enumerate}
+    \item \textbf{Unificación desde la perspectiva SDE/ODE}: La guía mediante DPS no solo es aplicable a la formulación discreta de DDPM, sino que también se aplica consistentemente en las formulaciones de tiempo continuo de SDE y ODE.
+    \item \textbf{Reinterpretación desde la perspectiva de RL}: Mediante un marco de maximización de recompensas sujeto a restricciones de KL, se derivó una fórmula de guía equivalente a DPS. Esta perspectiva de RL revela las profundas conexiones entre la guía durante la inferencia y el RLHF.
+    \item \textbf{Amplia gama de aplicaciones}: Mediante técnicas de sincronización en el espacio canónico/espacio de instancia, los modelos preentrenados pueden generar contenido que va más allá del dominio de entrenamiento, como panoramas, texturas 3D e imágenes ambiguas.
+\end{enumerate}
+
+\subsection{Resonancia con el escalado en tiempo de prueba de LLM}
+
+Esta clase situó la guía durante la inferencia de modelos difusos dentro de una tendencia más amplia de IA: el \textit{test-time scaling}. El campo de los LLM ha demostrado el enorme potencial de gastar más cómputo durante la inferencia a través de O1/O3/DeepSeek R1. La guía durante la inferencia de modelos difusos es esencialmente también una técnica de escalado en tiempo de prueba; no aumenta el costo del entrenamiento, sino que mejora la calidad de la salida mediante cálculos adicionales durante la inferencia.
+
+\subsection{Tabla de resumen: métodos, valor y riesgos}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.22\textwidth} p{0.21\textwidth} p{0.23\textwidth} p{0.22\textwidth}}
+\toprule
+Tema & Valor central & Riesgo principal & Recomendación práctica \\
+\midrule
+DPS / Guía de problemas inversos & Manejo de restricciones de observación sin reentrenamiento & Grandes errores de aproximación en etapas de alto ruido & Utilizar un mayor número de pasos y realizar una programación de guía \\
+Guía de recompensas desde la perspectiva de RL & Unificar el problema dentro del marco verifier + reward & Hacking de reward, aproximación de valor rugosa & Realizar primero la verificación con el verifier antes de abordar guías más fuertes \\
+Generación sincronizada & Extrapolación de modelos preentrenados en 2D a panoramas / 3D / ilusiones & Conflictos de restricciones entre múltiples instancias, propenso a distorsiones & Registrar explícitamente proyecciones y regiones superpuestas entre el espacio canónico/espacio de instancia \\
+Escalado en tiempo de prueba & Intercambiar mayor calidad de inferencia por menor costo de entrenamiento & Aumento del gasto computacional y latencia más alta & Controlar los costos mediante best-of-$N$ o asignación adaptativa de recursos \\
+\bottomrule
+\end{tabular}
+\caption{Visión general de los métodos de la Clase 12}
+\end{table}
+
+\subsection{Tres puntos de acción para investigadores}
+
+\begin{enumerate}
+    \item Establecer primero una línea base estable en un reward simple, diferenciable y evaluable, antes de expandirse a configuraciones con múltiples restricciones.
+    \item Crear un repositorio de casos de fallo unificado para cada método, registrando especialmente los patrones de degradación bajo pesos de guía altos y número reducido de pasos.
+    \item Estudiar por comparación la guía durante la inferencia de modelos difusos frente a los métodos de verifier / reranking / cómputo adaptativo de LLM, en lugar de considerarlos por separado.
+\end{enumerate}
+
+\subsection{Preguntas adicionales para profundizar}
+
+\begin{itemize}
+    \item ¿Es posible entrenar un verifier unificado que sirva simultáneamente para problemas inversos, tareas de edición y preferencias estéticas?
+    \item ¿Podría permitir que el modelo decida dinámicamente qué muestras merecen más pasos de inferencia, logrando así un verdadero escalado adaptativo en tiempo de prueba?
+    \item Para modalidades más complejas como 3D, video y trayectorias robóticas, ¿sigue siendo estable la sincronización entre el espacio canónico/espacio de instancia?
+\end{itemize}
+
+\subsection{División de responsabilidades con los métodos de control durante el entrenamiento}
+
+Al colocar el contenido de esta clase dentro de una perspectiva más completa del sistema generativo, se obtiene un juicio muy práctico: la guía durante la inferencia no busca reemplazar a ControlNet, LoRA o modelos difusos condicionales, sino colaborar con ellos mediante una división de tareas.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{p{0.22\textwidth} p{0.24\textwidth} p{0.22\textwidth} p{0.2\textwidth}}
+\toprule
+Enfoque & Problemas en los que es más hábil & Costo principal & Escenarios más adecuados \\
+\midrule
+Control durante el entrenamiento & Tipos de condiciones fijos y frecuentes & Necesidad de datos, entrenamiento y mantenimiento de múltiples modelos & Entornos de producción estables, servicios de baja latencia \\
+Guía durante la inferencia & Restricciones temporales, variables y combinadas & Muestreo más lento, ajuste de hiperparámetros más sensible & Exploración de investigación, demandas de cola larga, ensamblaje de restricciones complejas \\
+Enfoque híbrido & Estructura gruesa durante el entrenamiento y refinamiento fino durante la inferencia & Diseño del sistema más complejo & Tareas que requieren simultáneamente generación de alta calidad y control flexible \\
+\bottomrule
+\end{tabular}
+\caption{Límites de responsabilidad entre el control durante el entrenamiento y la guía durante la inferencia}
+\end{table}
+
+La revelación central de esta tabla es: si una condición aparece casi siempre, lo mejor es absorberla en la etapa de entrenamiento; si las condiciones son temporales, transversales a tareas o difíciles de recopilar datos supervisados, es más adecuado mantenerlas para resolverlas durante la inferencia.
+
+\subsection{Lecturas adicionales}
+
+\begin{itemize}
+    \item \textbf{Artículo original de DPS}: Chung et al., ``Diffusion Posterior Sampling for General Noisy Inverse Problems,'' ICLR 2023.
+    \item \textbf{Reseña sobre escalado en tiempo de prueba}: El ponente recomendó un artículo de revisión sobre tecnologías de escalado en tiempo de prueba, que abarca diversas técnicas en los campos de modelos difusos y modelos de flujo.
+    \item \textbf{SyncDiffusion}: Lee et al., ``SyncDiffusion: Coherent Montage via Synchronized Joint Diffusions,'' NeurIPS 2023——Generación sincronizada de imágenes panorámicas.
+    \item \textbf{Visual Anagrams}: Geng et al., ``Visual Anagrams: Generating Multi-View Optical Illusions with Diffusion Models,'' CVPR 2024——Generación de ilusiones ópticas multivista.
+    \item \textbf{TEXTure}: Richardson et al., ``TEXTure: Text-Guided Texturing of 3D Meshes,'' SIGGRAPH 2023——Generación de texturas 3D utilizando modelos difusos en 2D.
+    \item \textbf{RLHF para Difusión}: Fan et al., ``DPOK: Reinforcement Learning for Fine-tuning Text-to-Image Diffusion Models''——Introducción de la idea de RLHF en el entrenamiento de modelos difusos texto-imagen.
+\end{itemize}
+
+%% --- Fin del contenido --- %%
+
+\end{document}

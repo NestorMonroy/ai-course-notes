@@ -1,0 +1,647 @@
+\documentclass[a4paper]{article}
+
+% Paquetes básicos
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+% FandolSong no cubre algunos caracteres de nombres (U+73FA); WenQuanYi Zen Hei sí.
+\usepackage[AutoFallBack=true]{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+\setCJKfallbackfamilyfont{\CJKrmdefault}{WenQuanYi Zen Hei}
+% polyglossia no traduce los nombres de listings.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\usepackage{float}
+
+% Cajas de resaltado
+\newtcolorbox{knowledgebox}[1]{
+    enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, attach boxed title to top left={yshift=-2mm, xshift=2mm},
+    boxrule=1pt, sharp corners
+}
+
+\newtcolorbox{importantbox}[1]{
+    enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black,
+    coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+\newtcolorbox{warningbox}[1]{
+    enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+% Listings
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    stringstyle=\color{red!60!black},
+    commentstyle=\color{green!60!black},
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    captionpos=b,
+    extendedchars=true
+}
+
+% Metadatos de la portada
+\newcommand{\notetitle}{KAIST CS492D Clase 5: Modelos de Difrusión para Descontaminación Implícita (DDIM)}
+\newcommand{\noteauthors}{Elaboradas a partir de la clase de Minhyuk Sung}
+\newcommand{\notedate}{Otoño de 2025}
+\newcommand{\videochannel}{Minhyuk Sung (KAIST)}
+\newcommand{\videopublishdate}{2025}
+\newcommand{\videoduration}{57 minutos}
+\newcommand{\videourl}{https://www.youtube.com/watch?v=vRvT1NOKsxw}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+% Pie de página con información del repositorio
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\thepage}
+\fancyfoot[R]{\footnotesize\color{gray}\href{\repourl}{Notas de Curso de IA}}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}
+\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}
+\vspace{0.8cm}
+{\large \noteauthors\par}
+\vspace{0.3cm}
+{\large \notedate\par}
+\vspace{1.2cm}
+
+\ifdefempty{\videocoverpath}{
+{\small Al generar las notas, indique la ruta local de la portada del video.\par}
+}{
+\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par
+}
+
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\ifdefempty{\videourl}{}{
+\textbf{Enlace del video}: \href{\videourl}{\nolinkurl{\videourl}}\par
+}\par
+\textbf{Página del proyecto}: \href{\repourl}{\nolinkurl{\repourl}}\par
+\end{tcolorbox}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+%% --- Inicio del contenido --- %%
+
+\section{Introducción y repaso del contexto}
+
+Esta clase es la quinta de la asignatura KAIST CS492D ``Design and Learning of Visual Generative Models'', impartida por el profesor Minhyuk Sung. El tema central de la clase es \textbf{Denoising Diffusion Implicit Models (DDIM)}, un trabajo hito para acelerar el proceso de generación de modelos difusos (Song et al., ICLR 2021).
+
+\subsection{Motivación: de DDPM a la muestreo acelerado}
+
+En las clases anteriores, ya hemos estudiado el marco básico de DDPM (Denoising Diffusion Probabilistic Models): mediante un proceso hacia adelante (forward process) que añade ruido gaussiano paso a paso, se convierte la distribución de datos en una distribución gaussiana estándar; y luego entrenando una red neuronal para aprender el proceso inverso (reverse process), se recupera los datos limpios desde el ruido.
+
+\begin{importantbox}{Cuello de botella central de DDPM: velocidad de muestreo}
+DDPM generalmente requiere un proceso iterativo de desruido con $T=1000$ pasos para generar una imagen de alta calidad. Cada paso necesita una propagación hacia adelante completa de la red neuronal, lo que hace que la velocidad de generación sea mucho más lenta que modelos de generación en un solo paso como GAN. Cómo reducir el número de pasos de muestreo sin sacrificar la calidad es uno de los desafíos centrales de la investigación sobre modelos difusos.
+\end{importantbox}
+
+El conferenciante introduce la motivación de investigación de DDIM contrastando las ventajas y desventajas de tres tipos principales de modelos generativos:
+
+\begin{table}[H]
+\centering
+\caption{Comparativa de características de los principales modelos generativos}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Modelo} & \textbf{Calidad de muestras} & \textbf{Diversidad} & \textbf{Velocidad de generación} \\
+\midrule
+GAN & Alta & Baja (colapso de modos) & Rápida (un paso) \\
+VAE & Baja & Alta & Rápida (un paso) \\
+DDPM & Alta & Alta & Lenta ($\sim$1000 pasos) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Los modelos difusos se desempeñan excelentemente tanto en calidad como en diversidad; su único punto débil es la velocidad de generación. DDIM es precisamente el primer avance importante para resolver este problema.
+
+\subsection{Relación entre Score-Based Models y DDPM}
+
+En la parte introductoria, el conferenciante repasa brevemente la relación entre score-based generative models y DDPM. Sus ideas centrales son altamente similares:
+
+\begin{knowledgebox}{Rol central de Score Function (función de puntuación)}
+Para la distribución de datos $q(\mathbf{x}_t)$, su score function se define como:
+$$
+\nabla_{\mathbf{x}_t} \log q(\mathbf{x}_t)
+$$
+En los modelos basados en puntuaciones (score-based models), entrenamos una red neuronal $s_\theta(\mathbf{x}_t, t)$ para aproximar este score function. Mediante muestreo iterativo con Langevin dynamics, podemos partir de cualquier distribución previa y acercarnos gradualmente a las regiones de alta densidad de la distribución de datos.
+\end{knowledgebox}
+
+El flujo básico de los modelos basados en puntuaciones es:
+\begin{enumerate}
+    \item Añadir diferentes niveles de ruido gaussiano a la distribución de datos original $q(\mathbf{x}_0)$, obteniendo una serie de distribuciones borrosas $q(\mathbf{x}_t)$.
+    \item Entrenar una red predictor de puntuaciones (score predictor), minimizando la pérdida L2 para coincidir con el score function en cada nivel de ruido.
+    \item Durante el muestreo, comenzar desde un alto nivel de ruido y reducir gradualmente el nivel de ruido utilizando annealed Langevin dynamics.
+\end{enumerate}
+
+\begin{warningbox}{Necesidad de ruido multiescala}
+Si solo se añade poca cantidad de ruido (varianza pequeña), el score function es casi cero en las regiones de baja densidad lejos de los puntos de datos; la red resulta difícil de aprender con precisión y tampoco puede proporcionar una guía de gradiente efectiva para mover los puntos de muestreo. Si solo se añade mucha cantidad de ruido (varianza grande), aunque cubre un amplio rango, la distribución borrosa difiere mucho de la distribución original. Por tanto, es imperativo utilizar un cronograma de ruido (noise schedule) multiescala que vaya de grande a pequeño: localizar primero de manera gruesa y luego recuperar con detalle —esto es precisamente la idea de diseño central compartida por DDPM y los modelos basados en puntuaciones.
+\end{warningbox}
+
+El conferenciante señala que el objetivo de entrenamiento de DDPM (pérdida de predicción de ruido $\|\boldsymbol{\epsilon} - \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t)\|^2$) es en realidad equivalente al objetivo de score matching. Existe la siguiente relación entre el score function y el predictor de ruido:
+
+$$
+\nabla_{\mathbf{x}_t} \log q(\mathbf{x}_t | \mathbf{x}_0) = -\frac{\boldsymbol{\epsilon}}{\sqrt{1 - \bar{\alpha}_t}}
+$$
+
+Donde $\boldsymbol{\epsilon}$ es el ruido añadido y $\bar{\alpha}_t$ es el parámetro acumulativo del cronograma de ruido. Por tanto, la red de predicción de ruido $\boldsymbol{\epsilon}_\theta$ está aprendiendo esencialmente una versión escalada del score function.
+
+\subsection{Advertencia: perspectiva de tiempo continuo}
+
+El conferenciante también menciona que cuando extendemos el proceso difuso al dominio de tiempo continuo, el proceso hacia adelante puede describirse mediante una ecuación diferencial estocástica (SDE):
+$$
+d\mathbf{x} = f(\mathbf{x}, t)\,dt + g(t)\,d\mathbf{w}
+$$
+Su proceso inverso también tiene una expresión SDE en forma cerrada y sigue dependiendo fundamentalmente del score function. Tanto DDPM como los modelos basados en puntuaciones pueden considerarse diferentes esquemas de discretización de este proceso continuo.
+
+\begin{knowledgebox}{Perspectivas distintas bajo un marco unificado}
+DDPM define el proceso hacia adelante e inverso partiendo de un modelo gráfico probabilístico (cadena de Markov); los modelos basados en puntuaciones aprenden el score function partiendo de Langevin dynamics. Ambos son matemáticamente equivalentes, siendo solo diferentes parametrizaciones del mismo marco. Esta perspectiva unificada (Song et al., ICLR 2021, ``Score-Based Generative Modeling through Stochastic Differential Equations'') sienta las bases teóricas para los métodos de aceleración posteriores como DDIM y DPM-Solver.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+En esta sección se repasó la equivalencia entre DDPM y los modelos basados en puntuaciones, aclarando el cuello de botella de velocidad de muestreo al que enfrentan los modelos difusos. DDPM requiere aproximadamente 1000 pasos iterativos para generar muestras de alta calidad, mientras que DDIM, que se introducirá en esta clase, redefine el proceso hacia adelante (extendiendo desde un proceso de Markov a uno no de Markov), lo que permite reducir el número de pasos a alrededor de 50 sin casi perder calidad.
+
+\section{La idea central de DDIM: un proceso forward no markoviano}
+
+\subsection{Repaso del proceso forward de DDPM}
+
+En DDPM, el proceso forward se define como una \textbf{cadena de Markov}:
+
+$$
+q(\mathbf{x}_{1:T} | \mathbf{x}_0) = \prod_{t=1}^{T} q(\mathbf{x}_t | \mathbf{x}_{t-1})
+$$
+
+donde la distribución de transición en cada paso es:
+$$
+q(\mathbf{x}_t | \mathbf{x}_{t-1}) = \mathcal{N}(\mathbf{x}_t; \sqrt{1-\beta_t}\,\mathbf{x}_{t-1},\, \beta_t \mathbf{I})
+$$
+
+De aquí se pueden deducir dos distribuciones clave:
+\begin{itemize}
+    \item \textbf{Distribución marginal}: $q(\mathbf{x}_t | \mathbf{x}_0) = \mathcal{N}(\mathbf{x}_t; \sqrt{\bar{\alpha}_t}\,\mathbf{x}_0, (1-\bar{\alpha}_t)\mathbf{I})$
+    \item \textbf{Distribución posterior}: $q(\mathbf{x}_{t-1} | \mathbf{x}_t, \mathbf{x}_0)$, también una distribución gaussiana (solución en forma cerrada)
+\end{itemize}
+
+\begin{importantbox}{Las distribuciones realmente necesarias en el ELBO}
+Al deducir la cota inferior variacional (ELBO), lo que necesitamos no es la propia distribución de transición forward $q(\mathbf{x}_t|\mathbf{x}_{t-1})$, sino:
+\begin{enumerate}
+    \item La distribución marginal $q(\mathbf{x}_t | \mathbf{x}_0)$, utilizada para muestrear los datos de entrenamiento.
+    \item La distribución posterior $q(\mathbf{x}_{t-1} | \mathbf{x}_t, \mathbf{x}_0)$, objetivo de ajuste del proceso inverso.
+\end{enumerate}
+Esta observación es el punto de partida clave de DDIM: dado que el ELBO solo depende de estas dos distribuciones, ¿podemos saltarnos la definición de la distribución de transición forward y definir directamente estas dos?
+\end{importantbox}
+
+\subsection{La idea de DDIM: definir directamente la distribución marginal y la posterior}
+
+La innovación central de DDIM radica en \textbf{invertir el orden de deducción}:
+
+\begin{table}[H]
+\centering
+\caption{Comparación del orden de deducción entre DDPM y DDIM}
+\begin{tabular}{ll}
+\toprule
+\textbf{DDPM} & \textbf{DDIM} \\
+\midrule
+Definir primero $q(\mathbf{x}_t|\mathbf{x}_{t-1})$ & Definir directamente $q(\mathbf{x}_t|\mathbf{x}_0)$ \\
+Deducir $q(\mathbf{x}_t|\mathbf{x}_0)$ & Definir directamente $q(\mathbf{x}_{t-1}|\mathbf{x}_t, \mathbf{x}_0)$ \\
+Deducir $q(\mathbf{x}_{t-1}|\mathbf{x}_t, \mathbf{x}_0)$ & La distribución de transición forward queda implícitamente determinada por los dos anteriores \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Concretamente, DDIM establece lo siguiente:
+
+\paragraph{Mantener la distribución marginal invariable.} Para todo $t$, DDIM requiere:
+$$
+q(\mathbf{x}_t | \mathbf{x}_0) = \mathcal{N}(\mathbf{x}_t; \sqrt{\bar{\alpha}_t}\,\mathbf{x}_0,\, (1-\bar{\alpha}_t)\mathbf{I})
+$$
+Esto es exactamente lo mismo que en DDPM.
+
+\paragraph{Redefinir la distribución posterior.} DDIM parametriza la distribución posterior como:
+$$
+q_\sigma(\mathbf{x}_{t-1} | \mathbf{x}_t, \mathbf{x}_0) = \mathcal{N}\left(\mathbf{x}_{t-1};\, \sqrt{\bar{\alpha}_{t-1}}\,\mathbf{x}_0 + \sqrt{1-\bar{\alpha}_{t-1}-\sigma_t^2}\cdot\frac{\mathbf{x}_t - \sqrt{\bar{\alpha}_t}\,\mathbf{x}_0}{\sqrt{1-\bar{\alpha}_t}},\, \sigma_t^2\mathbf{I}\right)
+$$
+
+Donde $\sigma_t$ es un hiperparámetro libre de elección que controla el grado de ruido inyectado en cada paso del proceso inverso.
+
+\begin{warningbox}{El significado de la no markovianidad}
+En el proceso forward de DDIM, la muestra de $\mathbf{x}_{t-1}$ depende de \textbf{ambos} $\mathbf{x}_t$ y $\mathbf{x}_0$ (no solo de $\mathbf{x}_t$). Esto rompe la hipótesis de Markov: el estado actual no solo depende del paso anterior, sino también de los datos originales. De aquí proviene el término ``Implicit'': la distribución de transición forward $q(\mathbf{x}_t|\mathbf{x}_{t-1})$ ya no se define explícitamente, sino que queda implícitamente determinada por la distribución marginal y la posterior.
+\end{warningbox}
+
+\subsection{Proceso de deducción: determinar coeficientes mediante inducción}
+
+El ponente detalló cómo determinar los coeficientes de la distribución posterior a través del método de inducción matemática.
+
+\paragraph{Restricción central.} Necesitamos cumplir que, para todo $t$, la $q(\mathbf{x}_{t-1}|\mathbf{x}_0)$ derivada mediante la distribución posterior $q(\mathbf{x}_{t-1}|\mathbf{x}_t, \mathbf{x}_0)$ y la distribución marginal $q(\mathbf{x}_t|\mathbf{x}_0)$ sea consistente con la distribución marginal de DDPM.
+
+\paragraph{Composición en forma cerrada de distribuciones gaussianas.} El ponente aprovechó un hecho matemático clave:
+
+\begin{knowledgebox}{Propiedad de marginalización de distribuciones gaussianas}
+Si la distribución previa $p(\mathbf{z})$ y la distribución de verosimilitud $p(\mathbf{x}|\mathbf{z})$ son ambas gaussianas, y la media de la verosimilitud es una función lineal de $\mathbf{z}$, entonces la distribución marginal $p(\mathbf{x}) = \int p(\mathbf{x}|\mathbf{z})\,p(\mathbf{z})\,d\mathbf{z}$ también es gaussiana, y su media y varianza pueden calcularse mediante una expresión en forma cerrada. Este es el fundamento matemático que permite realizar toda la deducción.
+\end{knowledgebox}
+
+Asumiendo que la media de la distribución posterior es una combinación lineal de $\mathbf{x}_0$ y $\mathbf{x}_t$:
+$$
+\mu_{t-1}(\mathbf{x}_t, \mathbf{x}_0) = w_0 \cdot \mathbf{x}_0 + w_t \cdot \mathbf{x}_t
+$$
+
+Igualando la media y la varianza de $q(\mathbf{x}_{t-1}|\mathbf{x}_0)$, se obtiene:
+$$
+w_0 = \sqrt{\bar{\alpha}_{t-1}} - \sqrt{\bar{\alpha}_t} \cdot \frac{\sqrt{1-\bar{\alpha}_{t-1}-\sigma_t^2}}{\sqrt{1-\bar{\alpha}_t}}, \quad
+w_t = \frac{\sqrt{1-\bar{\alpha}_{t-1}-\sigma_t^2}}{\sqrt{1-\bar{\alpha}_t}}
+$$
+
+\begin{warningbox}{Restricción de varianza: $\sigma_t$ no puede ser arbitrariamente grande}
+Dado que la varianza debe ser no negativa, $\sigma_t^2$ tiene un límite superior:
+$$
+\sigma_t^2 \leq 1 - \bar{\alpha}_{t-1}
+$$
+Cuando $\sigma_t^2$ alcanza su límite superior, la parte de varianza de la distribución posterior coincide exactamente con la distribución posterior de DDPM. Esto indica que DDPM es un caso particular de DDIM bajo una elección específica de varianza.
+\end{warningbox}
+
+\subsection{Invariancia del ELBO}
+
+\begin{importantbox}{El objetivo de entrenamiento permanece inalterado: no se requiere reentrenamiento}
+Dado que DDIM mantiene la distribución marginal $q(\mathbf{x}_t|\mathbf{x}_0)$ idéntica a la de DDPM, sus ELBOs (cotas inferiores variacionales) son equivalentes salvo un factor constante independiente de los parámetros del modelo. Esto implica que:
+\begin{enumerate}
+    \item La red de predicción de ruido $\boldsymbol{\epsilon}_\theta$ entrenada con el objetivo de DDPM puede usarse directamente en el proceso de muestreo de DDIM.
+    \item No se requiere ningún ajuste fino adicional ni reentrenamiento.
+    \item Se logra aceleración únicamente mediante la modificación de la estrategia de muestreo durante la inferencia.
+\end{enumerate}
+Esta es la característica más valiosa en términos prácticos de DDIM: \textbf{entrenar una vez, razonar de múltiples maneras}.
+\end{importantbox}
+
+Este fenómeno es bastante raro en el aprendizaje profundo; usualmente, después de entrenar un modelo, la forma de razonación queda fija. Sin embargo, para los modelos difusos, debido a su estructura especial de muestreo iterativo, podemos elegir flexiblemente estrategias de muestreo durante la fase de inferencia (markoviana vs no markoviana, estocástica vs determinista) sin modificar el proceso de entrenamiento.
+
+\subsection{Resumen de la sección}
+
+La idea central de DDIM es: definir directamente la distribución marginal y la posterior (en lugar de la distribución de transición forward), construyendo así un proceso forward no markoviano. Mediante inducción matemática y las propiedades de composición en forma cerrada de distribuciones gaussianas, se pueden deducir expresiones analíticas para los coeficientes de la distribución posterior. Lo fundamental es que la distribución marginal de DDIM coincide completamente con la de DDPM; por lo tanto, el ELBO permanece invariable y un modelo de DDPM ya entrenado puede usarse directamente para el muestreo de DDIM.
+\section{Proceso de muestreo de DDIM}
+
+\subsection{Fórmula general de muestreo}
+
+Dado una muestra ruidosa $\mathbf{x}_t$ en el paso temporal $t$, la fórmula de actualización por paso de DDIM es:
+
+$$
+\mathbf{x}_{t-1} = \sqrt{\bar{\alpha}_{t-1}}\,\underbrace{\hat{\mathbf{x}}_0(\mathbf{x}_t)}_{\text{datos limpios predichos}} + \sqrt{1-\bar{\alpha}_{t-1}-\sigma_t^2}\cdot\underbrace{\frac{\mathbf{x}_t - \sqrt{\bar{\alpha}_t}\,\hat{\mathbf{x}}_0(\mathbf{x}_t)}{\sqrt{1-\bar{\alpha}_t}}}_{\text{"dirección" hacia } \mathbf{x}_t} + \underbrace{\sigma_t\,\boldsymbol{\epsilon}_t}_{\text{ruido aleatorio}}
+$$
+
+donde $\hat{\mathbf{x}}_0(\mathbf{x}_t)$ es la estimación de $\mathbf{x}_0$ mediante una red de predicción de ruido:
+$$
+\hat{\mathbf{x}}_0(\mathbf{x}_t) = \frac{\mathbf{x}_t - \sqrt{1-\bar{\alpha}_t}\,\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t)}{\sqrt{\bar{\alpha}_t}}
+$$
+
+$\boldsymbol{\epsilon}_t \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$ es ruido gaussiano muestreado de manera independiente.
+
+\begin{importantbox}{Interpretación intuitiva de la fórmula de muestreo}
+La actualización por paso de DDIM puede descomponerse en tres componentes:
+\begin{enumerate}
+    \item \textbf{Componente señal}: $\sqrt{\bar{\alpha}_{t-1}}\,\hat{\mathbf{x}}_0$——escala según la relación señal-ruido en el instante $t-1$, basándose en la mejor estimación actual de los datos limpios
+    \item \textbf{Componente dirección}: vector que apunta desde $\hat{\mathbf{x}}_0$ hacia $\mathbf{x}_t$, conservando la "información direccional" del ruido
+    \item \textbf{Componente aleatorio}: $\sigma_t \boldsymbol{\epsilon}_t$——ruido inyectado adicionalmente, cuya magnitud está controlada por $\sigma_t$
+\end{enumerate}
+Cuando $\sigma_t=0$, el componente aleatorio desaparece y todo el proceso se vuelve determinista.
+\end{importantbox}
+
+\subsection{Equivalencia de tres predictores}
+
+El ponente señala que, al implementar el muestreo DDIM, se pueden utilizar tres parametrizaciones de red equivalentes:
+
+\begin{enumerate}
+    \item \textbf{Predictor de ruido} ($\boldsymbol{\epsilon}$-prediction): $\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t) \approx \boldsymbol{\epsilon}$, predice el ruido añadido
+    \item \textbf{Predictor de datos limpios} ($\mathbf{x}_0$-prediction): $\hat{\mathbf{x}}_{0,\theta}(\mathbf{x}_t, t) \approx \mathbf{x}_0$, predice directamente los datos originales
+    \item \textbf{Predictor de media} ($\boldsymbol{\mu}$-prediction): $\boldsymbol{\mu}_\theta(\mathbf{x}_t, t) \approx \boldsymbol{\mu}_{t-1}$, predice la media posterior
+\end{enumerate}
+
+\begin{knowledgebox}{Relación de conversión entre predictores}
+Los tres predictores pueden convertirse unos en otros mediante transformaciones lineales simples:
+$$
+\hat{\mathbf{x}}_0 = \frac{\mathbf{x}_t - \sqrt{1-\bar{\alpha}_t}\,\boldsymbol{\epsilon}_\theta}{\sqrt{\bar{\alpha}_t}}, \quad
+\boldsymbol{\epsilon}_\theta = \frac{\mathbf{x}_t - \sqrt{\bar{\alpha}_t}\,\hat{\mathbf{x}}_0}{\sqrt{1-\bar{\alpha}_t}}
+$$
+Independientemente de la parametrización utilizada en el interior de la red, el algoritmo de muestreo DDIM solo requiere una estimación de $\hat{\mathbf{x}}_0$. En la práctica, la parametrización $\boldsymbol{\epsilon}$-prediction es la forma más común (adoptada en el artículo original de DDPM), mientras que el $\mathbf{x}_0$-prediction también tiene aplicaciones en ciertos métodos mejorados.
+\end{knowledgebox}
+
+\subsection{Parametrización de $\sigma_t$ y casos especiales}
+
+La elección de $\sigma_t$ controla el grado de aleatoriedad durante el proceso de muestreo. El artículo DDIM introduce un parámetro $\eta \geq 0$ para unificar la parametrización:
+
+$$
+\sigma_t(\eta) = \eta \cdot \sqrt{\frac{1-\bar{\alpha}_{t-1}}{1-\bar{\alpha}_t}} \cdot \sqrt{1 - \frac{\bar{\alpha}_t}{\bar{\alpha}_{t-1}}}
+$$
+
+\begin{table}[H]
+\centering
+\caption{Valores especiales del parámetro $\eta$ y el comportamiento de muestreo correspondiente}
+\begin{tabular}{cll}
+\toprule
+$\eta$ & \textbf{Naturaleza del muestreo} & \textbf{Modelo equivalente} \\
+\midrule
+$0$ & Muestreo completamente determinista & DDIM (puramente determinista) \\
+$1$ & Muestreo aleatorio, varianza consistente con DDPM & Equivalente a DDPM \\
+$>1$ & Mayor aleatoriedad & Inyección de ruido más allá de DDPM \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{warningbox}{DDPM es un caso especial de DDIM}
+Cuando $\eta = 1$, la varianza de la distribución posterior $q_\sigma(\mathbf{x}_{t-1}|\mathbf{x}_t, \mathbf{x}_0)$ de DDIM es exactamente igual a la varianza posterior derivada en DDPM, $\tilde{\beta}_t = \frac{1-\bar{\alpha}_{t-1}}{1-\bar{\alpha}_t}\beta_t$. En este caso, DDIM se reduce al proceso de muestreo markoviano de DDPM. Sin embargo, dado que las ELBO de ambos son equivalentes, el uso de diferentes valores de $\eta$ para el muestreo no afecta el objetivo de entrenamiento—esto es clave para desacoplar el entrenamiento de la inferencia.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La fórmula de muestreo de DDIM se compone de tres términos: señal, dirección y aleatorio. El hiperparámetro $\sigma_t$ (o equivalentemente $\eta$) controla la magnitud de la aleatoriedad. $\eta=0$ proporciona muestreo determinista, mientras que $\eta=1$ degenera en DDPM. Independientemente de la elección de $\eta$, no es necesario volver a entrenar el modelo.
+\section{Muestreo determinístico: el caso particular de $\sigma_t = 0$}
+
+\subsection{De los procesos estocásticos a las mapeos determinísticos}
+
+Cuando $\sigma_t = 0$ (es decir, $\eta = 0$), la fórmula de muestreo de DDIM se reduce a:
+
+$$
+\mathbf{x}_{t-1} = \sqrt{\bar{\alpha}_{t-1}}\,\hat{\mathbf{x}}_0(\mathbf{x}_t) + \sqrt{1-\bar{\alpha}_{t-1}}\cdot\frac{\mathbf{x}_t - \sqrt{\bar{\alpha}_t}\,\hat{\mathbf{x}}_0(\mathbf{x}_t)}{\sqrt{1-\bar{\alpha}_t}}
+$$
+
+Esta regla de actualización es completamente determinística: no se inyecta ningún ruido aleatorio. Esto implica que:
+
+\begin{importantbox}{Propiedades centrales del muestreo determinístico}
+En el modo de muestreo determinístico de DDIM:
+\begin{enumerate}
+    \item Partiendo de la misma señal de ruidos inicial $\mathbf{x}_T$, tras recorrer todo el proceso inverso, se obtiene \textbf{siempre} el mismo resultado $\mathbf{x}_0$
+    \item Se establece un \textbf{mapeo biyectivo determinístico} entre el espacio de ruido $\mathbf{x}_T$ y el espacio de datos $\mathbf{x}_0$
+    \item Los resultados generados son totalmente reproducibles: basta con recordar la semilla del ruido inicial $\mathbf{x}_T$
+\end{enumerate}
+Esto contrasta fuertemente con el muestreo estocástico de DDPM: en DDPM, incluso partiendo del mismo $\mathbf{x}_T$, los resultados generados son diferentes cada vez debido a que se inyecta ruido aleatorio en cada paso.
+\end{importantbox}
+
+\subsection{Importancia práctica del muestreo determinístico}
+
+El muestreo determinístico ofrece varias ventajas prácticas importantes:
+
+\paragraph{Reproducibilidad.} En aplicaciones reales (como Stable Diffusion), cuando un usuario genera una imagen satisfactoria, es prácticamente imposible obtener exactamente el mismo resultado nuevamente bajo un modo de muestreo estocástico. Por el contrario, al usar el muestreo determinístico de DDIM, basta con registrar la semilla del ruido inicial para reproducir con precisión cualquier resultado generado.
+
+\paragraph{Espacio latente semántico.} El mapeo determinístico implica que cada punto en el espacio $\mathbf{x}_T$ corresponde de manera única a una imagen en el espacio de datos. Esto sienta las bases para operaciones dentro del espacio latente (como interpolación o edición).
+
+\paragraph{Relación con Neural ODE.} El DDIM determinístico puede entenderse como una discretización de una neural ODE:
+
+\begin{knowledgebox}{Relación entre DDIM y la ODE de flujo probabilístico}
+Cuando $\sigma_t = 0$, la actualización iterativa de DDIM corresponde a la discretización de Euler de la siguiente ecuación diferencial ordinaria (ODE):
+$$
+d\mathbf{x} = \left[f(\mathbf{x}, t) - \frac{1}{2}g(t)^2 \nabla_\mathbf{x} \log q_t(\mathbf{x})\right] dt
+$$
+Esta es la \textbf{ODE de flujo probabilístico} (probability flow ODE) propuesta por Song et al. (2021). La trayectoria de solución de la ODE es determinística y mantiene la distribución marginal idéntica a la de la SDE (ecuación diferencial estocástica). El uso de solucionadores de ODE de orden superior permite reducir aún más el número de pasos de muestreo.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El DDIM determinístico con $\sigma_t=0$ establece un mapeo determinístico desde el espacio de ruido hacia el espacio de datos, logrando una reproducibilidad exacta de los resultados generados y proporcionando las bases para operaciones en el espacio latente. Puede entenderse como una discretización de Euler de la ODE de flujo probabilístico; este vínculo proporciona la base teórica para utilizar posteriormente solucionadores de ODE de orden superior con el fin de acelerar el muestreo.
+\section{Aceleración de la generación: reducción del número de pasos de muestreo}
+
+\subsection{Estrategia de muestreo por subsecuencias}
+
+Otra contribución central de DDIM es la propuesta de una estrategia de \textbf{salto de pasos} (stride / subsequence sampling). Durante el entrenamiento, el modelo pudo haber utilizado $T=1000$ pasos temporales. Sin embargo, al momento del muestreo, no es necesario recorrer todos los pasos; en su lugar, se selecciona una subsecuencia.
+
+Específicamente, dado un conjunto original de pasos temporales $\{1, 2, \ldots, T\}$, seleccionamos una subsecuencia de tamaño $S < T$, denotada como $\tau = \{\tau_1, \tau_2, \ldots, \tau_S\}$, donde $\tau_S = T$. Durante el muestreo, las actualizaciones del proceso inverso solo se ejecutan en los pasos temporales de la subsecuencia $\tau$.
+
+\begin{importantbox}{Justificación matemática del salto de pasos}
+La fórmula de muestreo de DDIM depende únicamente de los valores de $\bar{\alpha}_t$ y $\bar{\alpha}_{t-1}$, sin requerir que los pasos temporales sean enteros consecutivos. Por lo tanto, podemos sustituir $t \to \tau_i$ y $t-1 \to \tau_{i-1}$ en la fórmula:
+$$
+\mathbf{x}_{\tau_{i-1}} = \sqrt{\bar{\alpha}_{\tau_{i-1}}}\,\hat{\mathbf{x}}_0(\mathbf{x}_{\tau_i}) + \sqrt{1-\bar{\alpha}_{\tau_{i-1}}-\sigma_{\tau_i}^2}\cdot\frac{\mathbf{x}_{\tau_i} - \sqrt{\bar{\alpha}_{\tau_i}}\,\hat{\mathbf{x}}_0(\mathbf{x}_{\tau_i})}{\sqrt{1-\bar{\alpha}_{\tau_i}}} + \sigma_{\tau_i}\boldsymbol{\epsilon}
+$$
+Esto es esencialmente ejecutar actualizaciones de DDIM en un esquema de ruido más grueso, lo cual es completamente válido matemáticamente.
+\end{importantbox}
+
+Por ejemplo, a partir de un modelo con $T=1000$ pasos, podemos seleccionar uniformemente $S=50$ pasos:
+$$
+\tau = \{20, 40, 60, \ldots, 980, 1000\}
+$$
+Esto reduce el número de pasos de muestreo desde 1000 hasta 50, acelerando el proceso 20 veces.
+
+\subsection{Ventajas del muestreo determinista con reducción de pasos}
+
+El conferencista presentó resultados experimentales del artículo de DDIM, revelando una ley empírica importante:
+
+\begin{importantbox}{El muestreo determinista es más robusto ante la reducción de pasos}
+Los experimentos demuestran (tomando como ejemplo la puntuación FID en CIFAR-10):
+\begin{itemize}
+    \item Al utilizar los 1000 pasos completos, DDPM ($\eta=1$, muestreo aleatorio) y DDIM ($\eta=0$, muestreo determinista) tienen un rendimiento comparable.
+    \item Cuando el número de pasos se reduce a 50-100, la degradación de calidad del DDIM determinista es significativamente menor que la de DDPM aleatorio.
+    \item Cuando el número de pasos se reduce aún más a 10-20, el DDIM determinista mantiene una calidad aceptable, mientras que la calidad del muestreo aleatorio disminuye drásticamente.
+\end{itemize}
+Explicación intuitiva: en el muestreo aleatorio, el ruido inyectado en cada paso acumula un error mayor cuando hay menos pasos; por el contrario, el muestreo determinista no inyecta ruido adicional, lo que hace que la acumulación de errores sea más controlable.
+\end{importantbox}
+
+\subsection{Métrica de evaluación FID}
+
+Al presentar los resultados experimentales, el conferencista introdujo la métrica FID (Fr\'{e}chet Inception Distance):
+
+\begin{knowledgebox}{Introducción a la métrica FID}
+FID mide la distancia entre la distribución de imágenes generadas y la distribución de imágenes reales. Los pasos específicos son:
+\begin{enumerate}
+    \item Extraer vectores de características de las imágenes reales y generadas utilizando una red Inception preentrenada.
+    \item Ajustar por separado distribuciones gaussianas para cada conjunto de características (media $\boldsymbol{\mu}$, covarianza $\boldsymbol{\Sigma}$).
+    \item Calcular la distancia Fr\'{e}chet entre ambas distribuciones gaussianas.
+\end{enumerate}
+FID \textbf{cuanto menor mejor}; esto indica que la distribución generada se acerca más a la distribución real. FID evalúa simultáneamente la calidad de las muestras (fidelidad) y su diversidad.
+\end{knowledgebox}
+
+\subsection{Hitos en la aceleración del muestreo}
+
+El conferencista mencionó la evolución de las rutas de desarrollo para acelerar el muestreo en modelos de difusión:
+
+\begin{table}[H]
+\centering
+\caption{Evolución de la aceleración del muestreo en modelos de difusión}
+\begin{tabular}{lcl}
+\toprule
+\textbf{Método} & \textbf{Pasos típicos} & \textbf{Estrategia} \\
+\midrule
+DDPM (2020) & $\sim$1000 & Muestreo estocástico de Markov \\
+DDIM (2021) & $\sim$50 & Muestreo determinista/semideterminista no markoviano \\
+DPM-Solver (2022) & $\sim$10-20 & Solucionador de ODE de orden superior \\
+Consistency Models / destilación & $\sim$1-4 & Destilación + restricciones de consistencia \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{knowledgebox}{De 1000 pasos a 1 paso: problemas abiertos}
+El conferencista señaló que lograr una generación de alta calidad en un solo paso sin necesidad de ajuste fino tendría un gran valor comercial y académico. La situación actual es la siguiente:
+\begin{itemize}
+    \item Reducir de 1000 pasos a 10-50 puede lograrse únicamente cambiando la estrategia de muestreo (como DDIM o DPM-Solver).
+    \item Una reducción adicional a 1-4 pasos requiere entrenamiento de destilación adicional (como Consistency Distillation, Progressive Distillation).
+    \item Lograr una generación de alta calidad en un solo paso mediante un único estadio de entrenamiento sigue siendo un problema abierto.
+\end{itemize}
+Tomando el modelo Flux como ejemplo, su versión estándar utiliza aproximadamente 20 pasos, mientras que la versión Schnell logró generar en 1-4 pasos mediante destilación.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+DDIM logra reducir el número de pasos de muestreo desde 1000 hasta aproximadamente 50 sin necesidad de volver a entrenar el modelo, gracias a su estrategia de muestreo por subsecuencias. El modo de muestreo determinista ($\eta=0$) muestra una mayor robustez ante la reducción del número de pasos. Este método constituye un trabajo pionero en el campo de la aceleración del muestreo en modelos de difusión; métodos posteriores como DPM-Solver y los modelos de consistencia han logrado reducir aún más este número a cifras individuales sobre esta base.
+\section{Operaciones semánticas en el espacio latente}
+
+\subsection{Codificación y decodificación deterministas}
+
+La mapeo biyectivo $\mathbf{x}_T \leftrightarrow \mathbf{x}_0$ establecido por la muestreo determinista de DDIM permite no solo generar $\mathbf{x}_0$ a partir de $\mathbf{x}_T$ (decodificar), sino también recuperar $\mathbf{x}_T$ a partir de $\mathbf{x}_0$ (codificar). El proceso de codificación se realiza ejecutando la dirección hacia adelante de DDIM:
+
+$$
+\mathbf{x}_{t+1} = \sqrt{\bar{\alpha}_{t+1}}\,\hat{\mathbf{x}}_0(\mathbf{x}_t) + \sqrt{1-\bar{\alpha}_{t+1}}\cdot\frac{\mathbf{x}_t - \sqrt{\bar{\alpha}_t}\,\hat{\mathbf{x}}_0(\mathbf{x}_t)}{\sqrt{1-\bar{\alpha}_t}}
+$$
+
+Esto significa que, para cualquier imagen real $\mathbf{x}_0$, podemos encontrar su ``punto correspondiente'' $\mathbf{x}_T$ en el espacio de ruido; ejecutando la decodificación DDIM a partir de dicho punto, se puede recuperar la imagen original con precisión.
+
+\begin{importantbox}{Estructura semántica del espacio latente de DDIM}
+Debido a la existencia del mapeo determinista, el espacio de ruido $\mathbf{x}_T$ se convierte efectivamente en un espacio latente con estructura semántica. En este espacio:
+\begin{itemize}
+    \item Representaciones similares de imágenes también son cercanas en el espacio latente
+    \item Las operaciones lineales en el espacio latente (como la interpolación) corresponden a cambios semánticos significativos en el espacio de datos
+    \item A diferencia del espacio latente de VAE (de baja dimensión), el espacio latente de DDIM tiene la misma dimensión que el espacio de datos
+\end{itemize}
+\end{importantbox}
+
+\subsection{Interpolación en el espacio latente}
+
+El artículo de DDIM muestra una aplicación interesante de la interpolación en el espacio latente. Dadas dos imágenes reales $\mathbf{x}_0^{(1)}$ y $\mathbf{x}_0^{(2)}$:
+
+\begin{enumerate}
+    \item Se obtienen $\mathbf{x}_T^{(1)}$ y $\mathbf{x}_T^{(2)}$ mediante codificación DDIM respectivamente
+    \item Se realiza una interpolación lineal esférica (SLERP) en el espacio latente:
+    $$
+    \mathbf{x}_T^{(\lambda)} = \frac{\sin((1-\lambda)\theta)}{\sin\theta}\,\mathbf{x}_T^{(1)} + \frac{\sin(\lambda\theta)}{\sin\theta}\,\mathbf{x}_T^{(2)}, \quad \lambda \in [0, 1]
+    $$
+    donde $\theta = \arccos\left(\frac{\langle\mathbf{x}_T^{(1)}, \mathbf{x}_T^{(2)}\rangle}{\|\mathbf{x}_T^{(1)}\|\,\|\mathbf{x}_T^{(2)}\|}\right)$
+    \item Se ejecuta la decodificación DDIM en el punto interpolado $\mathbf{x}_T^{(\lambda)}$ para obtener la imagen interpolada
+\end{enumerate}
+
+\begin{knowledgebox}{¿Por qué se usa interpolación esférica (SLERP) en lugar de lineal?}
+Dado que los vectores de ruido $\mathbf{x}_T$ en el espacio latente se muestrean de una distribución gaussiana estándar, en espacios de alta dimensión estos vectores se distribuyen aproximadamente uniformemente sobre una hiperesfera (la norma se concentra cerca de $\sqrt{d}$). La interpolación lineal (LERP) genera puntos intermedios con normas menores, desviándose del conjunto típico de la distribución gaussiana y lo que podría resultar en una disminución de la calidad. La interpolación esférica (SLERP) mantiene constante la norma del vector; los puntos intermedios generados permanecen en la hiperesfera, por lo que es más razonable.
+\end{knowledgebox}
+
+\subsection{Comparación con otros espacios latentes}
+
+\begin{table}[H]
+\centering
+\caption{Comparativa de características del espacio latente entre modelos diferentes}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Modelo} & \textbf{Dimensión del espacio latente} & \textbf{Codificación determinista} & \textbf{Calidad de interpolación} \\
+\midrule
+VAE & Baja dimensión & Aleatorio & Medio \\
+GAN & Baja dimensión & Generalmente sin codificador & Buena \\
+DDIM & Igual que los datos & Determinista & Buena \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{warningbox}{La precisión de la codificación DDIM depende del número de pasos}
+El proceso de codificación DDIM es esencialmente una aproximación numérica de la integración de ODE. Cuantos menos pasos se utilicen, mayor será el error numérico y menor la calidad de reconstrucción del ciclo ``codificación $\to$ decodificación''. En aplicaciones que requieren reconstrucción precisa (como la edición de imágenes), generalmente es necesario utilizar un mayor número de pasos (por ejemplo, entre 100 y 200) para garantizar la precisión de la codificación.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El muestreo determinista de DDIM construye un mapeo biyectivo desde el espacio de ruido hacia el espacio de datos, dotando al espacio de ruido de una estructura semántica. Mediante el flujo de codificación-interpolación-decodificación, es posible lograr una interpolación de imágenes de alta calidad. La interpolación lineal esférica (SLERP) resulta más adecuada para espacios latentes con distribución gaussiana que la interpolación lineal.
+\section{Resultados del experimento y análisis}
+
+\subsection{Comparación de FID bajo diferentes valores de $\eta$ y número de pasos}
+
+El artículo sobre DDIM realizó un ablitivo experimental sistemático en el conjunto de datos CIFAR-10, evaluando el impacto de $\eta$ y el número de pasos de muestreo $S$ sobre el FID.
+
+Las observaciones clave son las siguientes:
+
+\begin{enumerate}
+    \item \textbf{Todos los pasos ($S=1000$)}: Los valores de FID para todos los $\eta$ son bastante similares, aproximadamente 3-4. DDPM ($\eta=1$) es ligeramente mejor que DDIM determinista ($\eta=0$).
+    \item \textbf{Número medio de pasos ($S=50\sim100$)}: DDIM determinista ($\eta=0$) supera significativamente a DDPM ($\eta=1$), con una diferencia en FID que puede alcanzar 5-10.
+    \item \textbf{Pocos pasos ($S=10\sim20$)}: DDIM determinista aún mantiene una buena calidad (FID $\sim$10-15), mientras que el FID de DDPM se degrada drásticamente ($>$50).
+\end{enumerate}
+
+\begin{warningbox}{Compensación entre calidad y velocidad al reducir los pasos}
+Aunque DDIM determinista es más robusto al reducir el número de pasos, la calidad disminuirá inevitablemente si los pasos bajan demasiado. Esto se debe a que un tamaño de paso temporal mayor provoca saltos más grandes en cada actualización, lo que reduce la precisión de la red de predicción del ruido en regiones alejadas de la distribución de entrenamiento. Los experimentos del artículo sobre DDIM demuestran que aproximadamente $S=50$ pasos en CIFAR-10 logran una calidad comparable a los 1000 pasos de DDPM.
+\end{warningbox}
+
+\subsection{Observaciones cualitativas de la calidad de las muestras}
+
+El ponente también discutió algunas características cualitativas de las muestras generadas por DDIM:
+
+\begin{itemize}
+    \item Las imágenes generadas por DDIM determinista suelen ser ligeramente más ``nítidas'' (sharper) que las de DDPM, debido a la ausencia de inyección de ruido adicional.
+    \item La aleatoriedad de DDPM puede aportar, en ocasiones, mayor diversidad y una sensación de ``naturalidad''.
+    \item Cuando hay suficientes pasos ($\geq$50), la diferencia en la calidad visual entre ambos es mínima.
+\end{itemize}
+
+\subsection{Resumen de la sección}
+
+Los resultados del experimento validan la ventaja de DDIM al reducir el número de pasos de muestreo: la degradación de la calidad con una muestra determinista es más lenta al disminuir los pasos. Aproximadamente 50 pasos de DDIM pueden igualar la calidad de 1000 pasos de DDPM, logrando una aceleración de aproximadamente 20 veces.
+\section{Síntesis y ampliación}
+
+\subsection{Repaso de los puntos clave}
+
+DDIM es un trabajo fundacional para la aceleración de la muestreo en modelos de difusión, cuyos principales aportes se pueden resumir en los siguientes aspectos:
+
+\begin{enumerate}
+    \item \textbf{Proceso anterior no markoviano}: Al definir directamente la distribución de salto y la distribución a posteriori (en lugar de la distribución de transición anterior), se construyó un marco de difusión más general que DDPM. La distribución a posteriori introduce un parámetro libre $\sigma_t$ para controlar el nivel de aleatoriedad en el muestreo.
+
+    \item \textbf{Invariancia del ELBO}: Dado que la distribución de salto se mantiene consistente con DDPM, el objetivo de entrenamiento de DDIM es completamente equivalente al de DDPM. Esto significa que los modelos existentes de DDPM pueden utilizarse directamente para la muestreo con DDIM sin necesidad de ningún reentrenamiento.
+
+    \item \textbf{Muestreo determinista}: Cuando $\sigma_t = 0$, el proceso de muestreo se vuelve completamente determinista, estableciendo una correspondencia biyectiva entre el espacio de ruido y el espacio de datos. Esto aporta reproducibilidad, un espacio latente semántico y conexiones con solucionadores de EDO (ecuaciones diferenciales ordinarias).
+
+    \item \textbf{Generación acelerada}: Mediante estrategias de muestreo por subsecuencias, se puede reducir el número de pasos desde 1000 hasta aproximadamente 50, logrando una aceleración de 20 veces. El modo de muestreo determinista muestra mayor robustez al reducirse el número de pasos.
+
+    \item \textbf{Operaciones en el espacio latente}: La simetría codificación-decodificación de DDIM determinista hace posibles operaciones semánticas como la interpolación en el espacio latente.
+\end{enumerate}
+
+\begin{importantbox}{El impacto profundo de DDIM}
+DDIM no es solo un método práctico de aceleración de muestreo por sí mismo, sino que es más importante revelar un principio de diseño clave en los modelos de difusión: \textbf{el desacoplamiento entre entrenamiento e inferencia}. Una vez entrenado el modelo, durante la inferencia se pueden elegir libremente diferentes estrategias de muestreo (número de pasos, nivel de aleatoriedad, solucionadores EDO, etc.). Este principio ha sido heredado por casi todo el trabajo posterior en aceleración de modelos de difusión, incluidos DPM-Solver, Consistency Models y Progressive Distillation.
+\end{importantbox}
+
+\subsection{Direcciones futuras}
+
+Basado en el marco de DDIM, la investigación posterior avanzó desde múltiples direcciones para mejorar la eficiencia del muestreo en modelos de difusión:
+
+\begin{enumerate}
+    \item \textbf{Solucionadores EDO de orden superior} (DPM-Solver, DPM-Solver++): Al considerar el DDIM determinista como un método de Euler para una EDO de flujo probabilístico, el uso de solucionadores de orden superior (2.º, 3.er orden) permite obtener mayor precisión al mismo número de pasos o alcanzar la misma calidad con menos pasos.
+    \item \textbf{Marco continuo en tiempo para SDE/ODE} (Score SDE): Al extender DDPM/DDIM de tiempo discreto a tiempo continuo, se unifican los modelos basados en puntajes y los modelos de difusión.
+    \item \textbf{Distilación de conocimiento} (Progressive Distillation, Consistency Distillation): Mediante la distilación, se reduce aún más el número de pasos hasta 1-4.
+    \item \textbf{Flow Matching}: Se rediseñan las trayectorias de difusión desde una perspectiva de transporte óptimo para lograr trayectorias de muestreo más rectas y menos pasos.
+\end{enumerate}
+
+\subsection{Lecturas adicionales}
+
+\begin{itemize}
+    \item Song, J., Meng, C., \& Ermon, S. (2021). Denoising Diffusion Implicit Models. \textit{ICLR 2021}. \href{https://arxiv.org/abs/2010.02502}{arXiv:2010.02502}
+    \item Song, Y., Sohl-Dickstein, J., Kingma, D. P., Kumar, A., Ermon, S., \& Poole, B. (2021). Score-Based Generative Modeling through Stochastic Differential Equations. \textit{ICLR 2021}. \href{https://arxiv.org/abs/2011.13456}{arXiv:2011.13456}
+    \item Ho, J., Jain, A., \& Abbeel, P. (2020). Denoising Diffusion Probabilistic Models. \textit{NeurIPS 2020}. \href{https://arxiv.org/abs/2006.11239}{arXiv:2006.11239}
+    \item Lu, C., Zhou, Y., Bao, F., Chen, J., Li, C., \& Zhu, J. (2022). DPM-Solver: A Fast ODE Solver for Diffusion Probabilistic Model Sampling. \textit{NeurIPS 2022}. \href{https://arxiv.org/abs/2206.00927}{arXiv:2206.00927}
+    \item Song, Y., \& Dhariwal, P. (2023). Consistency Models. \textit{ICML 2023}. \href{https://arxiv.org/abs/2303.01469}{arXiv:2303.01469}
+\end{itemize}
+
+%% --- Fin del contenido --- %%
+
+\end{document}

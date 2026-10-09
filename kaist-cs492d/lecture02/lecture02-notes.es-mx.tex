@@ -1,0 +1,646 @@
+\documentclass[a4paper]{article}
+
+% Paquetes básicos
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+% FandolSong no cubre algunos caracteres de nombres (U+73FA); WenQuanYi Zen Hei sí.
+\usepackage[AutoFallBack=true]{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+\setCJKfallbackfamilyfont{\CJKrmdefault}{WenQuanYi Zen Hei}
+% polyglossia no traduce los nombres de listados.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\usepackage{float}
+
+% Cajas de resaltado
+\newtcolorbox{knowledgebox}[1]{
+    enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, attach boxed title to top left={yshift=-2mm, xshift=2mm},
+    boxrule=1pt, sharp corners
+}
+
+\newtcolorbox{importantbox}[1]{
+    enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black,
+    coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+\newtcolorbox{warningbox}[1]{
+    enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+% Listados
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    stringstyle=\color{red!60!black},
+    commentstyle=\color{green!60!black},
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    captionpos=b,
+    extendedchars=true
+}
+
+% Metadatos de la portada
+\newcommand{\notetitle}{DDPM: Modelo probabilista de difusión por desruido (primera parte)}
+\newcommand{\noteauthors}{Elaboradas a partir de la clase de Minhyuk Sung}
+\newcommand{\notedate}{Otoño de 2025}
+\newcommand{\videochannel}{Minhyuk Sung (KAIST)}
+\newcommand{\videopublishdate}{2025}
+\newcommand{\videoduration}{58 minutos}
+\newcommand{\videourl}{https://www.youtube.com/watch?v=qiFZQvcqTOo}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}
+\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}
+\vspace{0.5cm}
+{\large KAIST CS492D: Diffusion Models and Their Applications\par}
+\vspace{0.5cm}
+{\large Lecture 02\par}
+\vspace{0.8cm}
+{\large \noteauthors\par}
+\vspace{0.3cm}
+{\large \notedate\par}
+\vspace{1.2cm}
+
+\ifdefempty{\videocoverpath}{
+{\small Al generar las notas, indique la ruta local de la portada del video.\par}
+}{
+\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par
+}
+
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\ifdefempty{\videourl}{}{
+\textbf{Enlace del video}: \href{\videourl}{\nolinkurl{\videourl}}\par
+}
+\end{tcolorbox}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+%% --- Inicio del contenido --- %%
+
+\section{Introducción y repaso de la clase}
+
+Esta es la segunda clase del curso ``Diffusion Models and Their Applications'' de KAIST CS492D, impartida por el profesor Minhyuk Sung. En esta sesión partimos desde los fundamentos de los modelos generadores introducidos en la clase anterior (Lecture 01) para ir desgranando gradualmente la idea central de los \textbf{modelos de difusión probabilística de desnaturalización} (Denoising Diffusion Probabilistic Models, DDPM).
+
+En la clase anterior ya repasamos los siguientes conceptos clave:
+\begin{itemize}
+    \item Dado un conjunto de datos $\{x^{(i)}\}$, cómo considerar los datos como muestras de alguna distribución de probabilidad desconocida $p_{\text{data}}(x)$;
+    \item La tarea central de los modelos generadores: aprender un mapeo desde una distribución simple (usualmente la gaussiana estándar $\mathcal{N}(0, I)$) hasta la distribución de datos;
+    \item Las ideas básicas detrás de dos paradigmas de modelos generadores: GAN y VAE.
+\end{itemize}
+
+\begin{knowledgebox}{Marco unificado para los modelos generadores}
+La idea central de todos los modelos generadores puede resumirse así: encontrar un mapeo desde una \textbf{distribución previa} (prior distribution) simple $p(z) = \mathcal{N}(0, I)$ hasta la \textbf{distribución de datos} (data distribution) $p_{\text{data}}(x)$. El proceso generativo consiste en: primero muestrear $z$ a partir de $p(z)$ y luego transformar $z$ en una muestra del espacio de datos $x$ mediante una función de mapeo.
+\end{knowledgebox}
+
+\subsection{Repaso de los términos clave}
+
+Antes de entrar en DDPM, es necesario recordar los siguientes términos del marco bayesiano, los cuales atraviesan todo el curso:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Término} & \textbf{Símbolo} & \textbf{Significado} \\
+\midrule
+Distribución previa (Prior) & $p(z)$ & Distribución de las variables latentes, usualmente establecida como $\mathcal{N}(0, I)$ \\
+Verosimilitud (Likelihood) & $p_\theta(x|z)$ & Distribución condicional para generar datos dado una variable latente \\
+Distribución marginal (Marginal) & $p_\theta(x)$ & Probabilidad marginal de los datos $\int p_\theta(x|z)p(z)dz$ \\
+Distribución posterior (Posterior) & $p_\theta(z|x)$ & Distribución para inferir las variables latentes dado los datos \\
+\bottomrule
+\end{tabular}
+\caption{Términos clave en el marco bayesiano}
+\end{table}
+
+\subsection{Resumen de la sección}
+
+En esta sección se repasó el marco básico y los términos clave de los modelos generadores, sentando las bases para introducir posteriormente la derivación del ELBO en VAE y la expansión jerárquica de los modelos de difusión.
+\section{Repaso del modelo de variaciones autoencodificadoras (VAE)}
+
+\subsection{La idea central del VAE}
+
+El objetivo del VAE es aprender el decodificador $p_\theta(x|z)$ para maximizar la verosimilitud marginal de los datos $p_\theta(x)$. Sin embargo, calcular directamente la verosimilitud marginal requiere integrar sobre todas las posibles $z$, lo cual es inviable desde el punto de vista computacional:
+
+$$p_\theta(x) = \int p_\theta(x|z) p(z) \, dz$$
+
+Aunque podemos aproximar esta integral mediante estimación de Monte Carlo, esto requeriría muestrear grandes cantidades de $z$, con un costo computacional extremadamente alto.
+
+\begin{warningbox}{La verosimilitud marginal no puede calcularse directamente}
+Mediante la fórmula de Bayes $p_\theta(x) = \frac{p_\theta(x|z) p(z)}{p_\theta(z|x)}$, calcular la verosimilitud marginal requiere conocer también la distribución posterior $p_\theta(z|x)$, pero esta última es desconocida. Esto constituye un dilema de ``el huevo o la gallina'', y es precisamente la razón fundamental por la cual el VAE introduce una aproximación variacional de la posterior, denotada como $q_\phi(z|x)$.
+\end{warningbox}
+
+\subsection{ELBO: límite inferior de la evidencia}
+
+Dado que no se puede maximizar directamente $\log p_\theta(x)$, el VAE recurre a maximizar su límite inferior, conocido como \textbf{límite inferior de la evidencia} (Evidence Lower Bound, ELBO).
+
+La derivación del ELBO se basa en la desigualdad de Jensen. Para cualquier distribución $q_\phi(z|x)$:
+
+$$\log p_\theta(x) = \log \int p_\theta(x|z) p(z) \, dz$$
+
+Introduciendo $q_\phi(z|x)$ en la integral:
+
+$$= \log \int \frac{p_\theta(x|z) p(z)}{q_\phi(z|x)} q_\phi(z|x) \, dz = \log \mathbb{E}_{q_\phi(z|x)} \left[ \frac{p_\theta(x|z) p(z)}{q_\phi(z|x)} \right]$$
+
+Aplicando la desigualdad de Jensen (ya que $\log$ es una función cóncava):
+
+$$\geq \mathbb{E}_{q_\phi(z|x)} \left[ \log \frac{p_\theta(x|z) p(z)}{q_\phi(z|x)} \right] = \text{ELBO}$$
+
+\begin{importantbox}{Descomposición del ELBO}
+El ELBO puede descomponerse en dos términos:
+$$\text{ELBO} = \underbrace{\mathbb{E}_{q_\phi(z|x)}[\log p_\theta(x|z)]}_{\text{Término de reconstrucción}} - \underbrace{D_{\text{KL}}(q_\phi(z|x) \| p(z))}_{\text{Término de regularización KL}}$$
+
+\begin{itemize}
+    \item \textbf{Término de reconstrucción}: fomenta que el decodificador reconstruya con precisión la entrada $x$ a partir de la variable latente $z$, siendo esencialmente equivalente a la pérdida de reconstrucción de un autoencoder.
+    \item \textbf{Término de regularización KL}: alienta a que la aproximación variacional de la posterior, $q_\phi(z|x)$, se acerque lo más posible a la prior $p(z) = \mathcal{N}(0, I)$.
+\end{itemize}
+\end{importantbox}
+
+\subsection{Proceso de entrenamiento del VAE}
+
+El VAE entrena simultáneamente el codificador y el decodificador:
+
+\begin{itemize}
+    \item \textbf{Codificador} (Encoder): parametriza la aproximación variacional de la posterior $q_\phi(z|x) = \mathcal{N}(\mu_\phi(x), \sigma^2_\phi(x) I)$, mapeando los datos a la media y la varianza en el espacio latente.
+    \item \textbf{Decodificador} (Decoder): parametriza la verosimilitud $p_\theta(x|z) = \mathcal{N}(\mu_\theta(z), \sigma^2 I)$, mapeando las variables latentes de vuelta al espacio de los datos.
+\end{itemize}
+
+\begin{knowledgebox}{Truco de reparametrización (Reparameterization Trick)}
+La operación de muestreo $z \sim q_\phi(z|x)$ en sí misma no es diferenciable, pero mediante el truco de reparametrización se puede evitar este problema:
+
+$$z = \mu_\phi(x) + \sigma_\phi(x) \odot \epsilon, \quad \epsilon \sim \mathcal{N}(0, I)$$
+
+De esta manera, $z$ es diferenciable con respecto a $\mu_\phi$ y $\sigma_\phi$, permitiendo que el gradiente se propague correctamente hacia los parámetros del codificador $\phi$.
+\end{knowledgebox}
+
+En la fase de generación, solo se utiliza el decodificador: se muestrea $z$ desde $p(z) = \mathcal{N}(0, I)$ y luego se genera $x$ a través del decodificador $p_\theta(x|z)$. El codificador se emplea únicamente durante la fase de entrenamiento para aprender una distribución de verosimilitud más adecuada.
+
+\subsection{Las dos divergencias KL gaussianas en el VAE}
+
+Durante el entrenamiento del VAE, es necesario calcular la divergencia KL entre dos distribuciones gaussianas isotrópicas. Para $p = \mathcal{N}(\mu, \sigma^2 I)$ y $q = \mathcal{N}(0, I)$:
+
+$$D_{\text{KL}}(p \| q) = \frac{1}{2} \left( \|\mu\|^2 + \text{tr}(\sigma^2 I) - d - \log \det(\sigma^2 I) \right)$$
+
+$$= \frac{1}{2} \sum_{i=1}^{d} \left( \mu_i^2 + \sigma_i^2 - 1 - \log \sigma_i^2 \right)$$
+
+Donde $d$ es la dimensión de las variables latentes.
+
+\subsection{Compactación del ELBO y limitaciones del VAE}
+
+\begin{importantbox}{Condición de compactación del ELBO}
+El ELBO es igual a la verosimilitud logarítmica real si y solo si la aproximación variacional de la posterior coincide completamente con la verdadera posterior:
+$$\text{ELBO} = \log p_\theta(x) \iff q_\phi(z|x) = p_\theta(z|x)$$
+
+La diferencia entre ambas es exactamente: $\log p_\theta(x) - \text{ELBO} = D_{\text{KL}}(q_\phi(z|x) \| p_\theta(z|x))$, y esta brecha se denomina \textbf{brecha de holgura} (tightness gap).
+\end{importantbox}
+
+\begin{warningbox}{Limitación fundamental del VAE}
+El VAE modela tanto la distribución de verosimilitud $p_\theta(x|z)$ como la aproximación variacional de la posterior $q_\phi(z|x)$ como distribuciones gaussianas. Sin embargo, para distribuciones de datos complejas (como imágenes naturales), \textbf{que ambas la verosimilitud y la posterior sean gaussianas resulta matemáticamente imposible en la mayoría de los casos}. Esta simplificación excesiva provoca que las imágenes generadas por el VAE tiendan a ser borrosas.
+\end{warningbox}
+
+Esta limitación del VAE ha motivado directamente la exploración de modelos generativos más complejos, especialmente mediante la introducción de \textbf{estructuras jerárquicas} para aumentar la capacidad expresiva del modelo.
+
+\subsection{Resumen de la sección}
+
+El VAE elude el problema de la incalculabilidad de la verosimilitud marginal a través del ELBO; no obstante, su suposición gaussiana es demasiado simplista y limita la calidad generativa. Para mejorar la capacidad expresiva manteniendo la viabilidad computacional, el siguiente paso consiste en introducir una estructura jerárquica en el VAE.
+
+\section{De VAE a VAE jerárquico}
+
+\subsection{Motivación para agregar niveles}
+
+Las limitaciones de un VAE radican en que una única distribución gaussiana resulta difícil de ajustar a distribuciones de datos complejas. Una idea natural es: dejar de usar una sola variable latente $z$ e introducir \textbf{variables latentes múltiples} $x_1, x_2, \ldots, x_T$, formando así una estructura jerárquica.
+
+\begin{knowledgebox}{Intuición sobre cómo mejora la expresividad al agregar niveles}
+Una distribución gaussiana individual solo cuenta con dos grupos de parámetros: media y varianza, lo que limita su capacidad expresiva. Pero si tomamos el producto de múltiples distribuciones de transición gaussiana como la verosimilitud global, entonces aunque cada paso de transición siga siendo una gaussiana simple, \textbf{la distribución global puede ser mucho más compleja que una única gaussiana}. Esto es análogo a cómo un camino recto simple puede aproximar cualquier curva compleja mediante múltiples pequeños ajustes de dirección.
+\end{knowledgebox}
+
+\subsection{Cambio de notación}
+
+A partir de aquí, cambiamos el sistema de notación para adaptarlo al marco de los modelos de difusión:
+
+\begin{itemize}
+    \item $x_0$: punto de datos original (anteriormente $x$)
+    \item $x_1, x_2, \ldots, x_T$: variables latentes múltiples (anteriormente $z$)
+    \item $x_T$: ruido puro final, que sigue $\mathcal{N}(0, I)$
+\end{itemize}
+
+\begin{warningbox}{Recordatorio sobre el cambio de notación}
+Tenga cuidado con el cambio de notación de VAE a modelos de difusión: antes se usaba $z$ para las variables latentes y $x$ para los datos; ahora se utiliza uniformemente $x_t$ para representar las variables en distintos pasos temporales. Esto se debe que, en los modelos de difusión, todas las variables intermedias y los datos poseen \textbf{las mismas dimensiones}, pues residen en el mismo espacio. Distintos artículos pueden emplear sistemas de notación diferentes; al leerlos, es necesario prestar atención a esto.
+\end{warningbox}
+
+\subsection{Hipótesis de Markov}
+
+Para simplificar el entrenamiento del VAE jerárquico, introducimos la \textbf{hipótesis de Markov}: la muestreo de cada $x_t$ depende únicamente del paso anterior $x_{t-1}$, y no de estados anteriores más tempranos.
+
+$$q(x_t | x_{t-1}, x_{t-2}, \ldots, x_0) = q(x_t | x_{t-1})$$
+
+Bajo la hipótesis de Markov, toda la distribución conjunta puede descomponerse en el producto de distribuciones de transición:
+
+\textbf{Proceso generativo} (verosimilitud/proceso inverso):
+$$p_\theta(x_0, x_1, \ldots, x_T) = p(x_T) \prod_{t=1}^{T} p_\theta(x_{t-1} | x_t)$$
+
+\textbf{Proceso de codificación} (variational posterior/proceso hacia adelante):
+$$q(x_1, \ldots, x_T | x_0) = \prod_{t=1}^{T} q(x_t | x_{t-1})$$
+
+\begin{importantbox}{Importancia de la hipótesis de Markov}
+Sin asumir las propiedades de Markov, el muestreo de $x_t$ podría depender de todos los estados históricos $x_0, x_1, \ldots, x_{t-1}$, lo que haría que el entrenamiento fuera extremadamente complejo. La hipótesis de Markov simplifica enormemente los cálculos, permitiendo que ELBO sea descompuesto y optimizado eficazmente. En cursos posteriores se discutirán casos no markovianos (como DDIM).
+\end{importantbox}
+
+\subsection{Desafíos del VAE jerárquico}
+
+Aunque la estructura jerárquica incrementa la capacidad expresiva, aún enfrenta desafíos bajo el marco estándar de VAE:
+
+\begin{enumerate}
+    \item \textbf{Dificultad en el entrenamiento conjunto}: se requiere entrenar simultáneamente el codificador (aprendiendo la variational posterior $q_\phi$) y el decodificador (aprendiendo la verosimilitud $p_\theta$); cuanto más niveles haya, menos estable será el entrenamiento.
+    \item \textbf{Costo computacional elevado}: el término de consistencia en ELBO involucra múltiples variables aleatorias, lo que resulta costoso de calcular.
+\end{enumerate}
+
+Estos desafíos impulsaron las elecciones de diseño centrales de los modelos de difusión: \textbf{fijar el proceso hacia adelante y aprender únicamente el proceso inverso}.
+
+\subsection{Resumen de la sección}
+
+Mediante la introducción de variables latentes múltiples y la hipótesis de Markov, el VAE jerárquico mejora su capacidad expresiva. No obstante, entrenar conjuntamente codificador y decodificador sigue siendo difícil, lo que nos impulsa a buscar una solución que no requiera aprender un codificador: es decir, los modelos de difusión.
+
+
+
+\section{Modelos de difusión: proceso hacia adelante}
+
+\subsection{Dos decisiones de diseño clave}
+
+De VAE jerárquico a DDPM, hay dos simplificaciones de diseño clave:
+
+\begin{enumerate}
+    \item \textbf{Coincidencia dimensional}: todas las variables latentes $x_t$ y los datos $x_0$ tienen la misma dimensión. En un VAE estándar, la dimensión del espacio latente suele ser menor que la del espacio de datos, pero los modelos de difusión eligen dimensiones iguales.
+    \item \textbf{Proceso hacia adelante fijo}: la variacional posterior (proceso hacia adelante) $q(x_t|x_{t-1})$ no se parametriza mediante una red neuronal, sino que está predefinida. Esto significa que solo hay que aprender el proceso inverso $p_\theta(x_{t-1}|x_t)$.
+\end{enumerate}
+
+\begin{importantbox}{Diferencia fundamental entre modelos de difusión y VAE}
+En un VAE, tanto el codificador (proceso hacia adelante) como el decodificador (proceso inverso) \textbf{requieren aprendizaje}. En los modelos de difusión, el proceso hacia adelante está \textbf{predefinido} —simplemente añade ruido paso a paso sin ningún entrenamiento—. Lo único que hay que aprender es el proceso inverso (el proceso de eliminación de ruido). Esto simplifica enormemente el entrenamiento, ya que ya no se necesita optimizar conjuntamente dos redes.
+\end{importantbox}
+
+\subsection{Definición del proceso hacia adelante}
+
+El proceso hacia adelante (Forward Process) es el proceso de añadir ruido gaussiano a los datos $x_0$ paso a paso hasta convertirlos en puro ruido $x_T$. Su distribución de transición se define como:
+
+$$q(x_t | x_{t-1}) = \mathcal{N}(x_t; \sqrt{1 - \beta_t} \, x_{t-1}, \, \beta_t I)$$
+
+donde $\beta_t \in (0, 1)$ es un parámetro de \textbf{planificación del ruido} (noise schedule).
+
+\begin{importantbox}{Significado físico de la distribución de transición hacia adelante}
+En cada paso del proceso hacia adelante se hacen dos cosas:
+\begin{enumerate}
+    \item \textbf{Escalamiento}: multiplicar $x_{t-1}$ por $\sqrt{1-\beta_t}$ (menor que 1), haciendo que la señal decaiga gradualmente y que su media se acerque a cero.
+    \item \textbf{Añadir ruido}: añadir ruido gaussiano con varianza $\beta_t$.
+\end{enumerate}
+A medida que $t$ aumenta, $\beta_t$ crece gradualmente (siempre siendo un número pequeño), haciendo que la señal quede progresivamente sumergida en el ruido.
+\end{importantbox}
+
+Escribiendo esto en forma de muestreo, el proceso hacia adelante es equivalente a:
+
+$$x_t = \sqrt{1 - \beta_t} \, x_{t-1} + \sqrt{\beta_t} \, \epsilon_t, \quad \epsilon_t \sim \mathcal{N}(0, I)$$
+
+\subsection{Planificación del ruido (Noise Schedule)}
+
+Los parámetros $\beta_t$ deben cumplir las siguientes condiciones:
+
+\begin{itemize}
+    \item $\beta_t \in (0, 1)$ para todo $t$
+    \item $\beta_t$ es una función \textbf{no decreciente} respecto a $t$ (o al menos no decreciente)
+    \item Los valores de $\beta_t$ deben mantenerse pequeños (del orden de $10^{-4}$ a 0.02)
+\end{itemize}
+
+Las estrategias comunes de planificación del ruido incluyen:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Estrategia} & \textbf{Descripción} \\
+\midrule
+Planificación lineal (Linear) & $\beta_t$ crece linealmente desde $\beta_1$ hasta $\beta_T$ \\
+Planificación de coseno (Cosine) & Diseñada sobre una función coseno, con cambios lentos en los extremos \\
+Planificación constante & $\beta_t$ permanece invariable \\
+Planificación aprendible & $\beta_t$ como parámetro aprendible \\
+\bottomrule
+\end{tabular}
+\caption{Estrategias comunes de planificación del ruido}
+\end{table}
+
+\begin{knowledgebox}{¿Por qué $\beta_t$ necesita ser no decreciente?}
+Intuitivamente, el proceso hacia adelante debería ``destruir la información cada vez más rápido''. En las etapas tempranas, la señal sigue siendo fuerte y basta con poco ruido; en las etapas tardías, se requiere más ruido para asegurar que $x_T$ se aproxime suficientemente al puro ruido gaussiano. Un $\beta_t$ no decreciente garantiza que la tasa de adición de ruido no se ``invierta'', lo cual teóricamente asegura que el proceso hacia adelante converja finalmente a una distribución gaussiana estándar.
+\end{knowledgebox}
+
+\subsection{Simplificación de notación con $\alpha_t$}
+
+Para facilitar las derivaciones posteriores, definimos:
+
+$$\alpha_t = 1 - \beta_t$$
+
+Dado que $\beta_t$ es un número positivo no decreciente, $\alpha_t$ es no creciente y cumple $0 < \alpha_t < 1$.
+
+La distribución de transición hacia adelante puede reescribirse como:
+
+$$q(x_t | x_{t-1}) = \mathcal{N}(x_t; \sqrt{\alpha_t} \, x_{t-1}, \, (1 - \alpha_t) I)$$
+
+Además, definimos el \textbf{producto acumulado}:
+
+$$\bar{\alpha}_t = \prod_{s=1}^{t} \alpha_s$$
+
+Dado que cada $\alpha_s < 1$, a medida que $t$ aumenta, $\bar{\alpha}_t$ decrece monótonicamente y tiende a cero.
+
+\subsection{Solución en forma cerrada del proceso hacia adelante}
+
+Una ventaja clave del proceso hacia adelante jerárquico es que la distribución condicional desde $x_0$ hasta cualquier instante $x_t$ tiene una \textbf{solución en forma cerrada}, sin necesidad de muestrear paso a paso.
+
+\begin{importantbox}{Solución en forma cerrada del proceso hacia adelante (fórmula central)}
+$$q(x_t | x_0) = \mathcal{N}(x_t; \sqrt{\bar{\alpha}_t} \, x_0, \, (1 - \bar{\alpha}_t) I)$$
+
+Forma equivalente de muestreo:
+$$x_t = \sqrt{\bar{\alpha}_t} \, x_0 + \sqrt{1 - \bar{\alpha}_t} \, \epsilon, \quad \epsilon \sim \mathcal{N}(0, I)$$
+
+Esto significa que podemos obtener $x_t$ en cualquier instante desde $x_0 \textbf{en un solo paso}, sin necesidad de pasar por todos los pasos intermedios.
+\end{importantbox}
+
+\textbf{Lógica de la deducción}: utilizando la aditividad de las distribuciones gaussianas. Desplejando recursivamente $x_t = \sqrt{\alpha_t} x_{t-1} + \sqrt{1-\alpha_t} \epsilon_t$:
+
+$$x_t = \sqrt{\alpha_t} (\sqrt{\alpha_{t-1}} x_{t-2} + \sqrt{1-\alpha_{t-1}} \epsilon_{t-1}) + \sqrt{1-\alpha_t} \epsilon_t$$
+
+$$= \sqrt{\alpha_t \alpha_{t-1}} x_{t-2} + \sqrt{\alpha_t(1-\alpha_{t-1})} \epsilon_{t-1} + \sqrt{1-\alpha_t} \epsilon_t$$
+
+Dado que una combinación lineal de dos ruidos gaussianos independientes sigue siendo un ruido gaussiano:
+
+$$\sqrt{\alpha_t(1-\alpha_{t-1})} \epsilon_{t-1} + \sqrt{1-\alpha_t} \epsilon_t \sim \mathcal{N}(0, (1-\alpha_t\alpha_{t-1}) I)$$
+
+Aplicando repetidamente este proceso, finalmente obtenemos:
+
+$$x_t = \sqrt{\bar{\alpha}_t} x_0 + \sqrt{1-\bar{\alpha}_t} \epsilon$$
+
+\begin{knowledgebox}{Significado práctico de la solución en forma cerrada}
+La solución en forma cerrada es crucial durante el entrenamiento: en cada iteración de entrenamiento, necesitamos añadir ruido a $x_0$ para obtener $x_t$, y luego hacer que la red neuronal aprenda a eliminarlo. Si fuera necesario añadir el ruido secuencialmente paso a paso, la eficiencia del entrenamiento sería extremadamente baja. La solución en forma cerrada nos permite obtener directamente una versión ruidosa de cualquier instante mediante un único muestreo.
+\end{knowledgebox}
+
+\subsection{Comportamiento límite del proceso hacia adelante}
+
+Cuando $t \to T$ (con $T$ lo suficientemente grande), $\bar{\alpha}_T \to 0$, por lo tanto:
+
+$$q(x_T | x_0) \approx \mathcal{N}(x_T; 0, I)$$
+
+Esto significa que el proceso hacia adelante convertirá finalmente cualquier punto de datos $x_0$ en puro ruido cercano a una distribución gaussiana estándar. Esta propiedad garantiza que la \textbf{variacional posterior} del proceso hacia adelante maximice naturalmente el término de coincidencia con la prior en el ELBO.
+
+\begin{warningbox}{$T$ debe ser lo suficientemente grande}
+Si $T$ no es lo suficientemente grande o los $\beta_t$ están configurados inadecuadamente, $x_T$ podría aún retener información de $x_0$, sin acercarse lo bastante a $\mathcal{N}(0, I)$. Esto llevaría a una mayor pérdida en el término de coincidencia con la prior del ELBO, afectando la calidad generada. En la práctica, el artículo original de DDPM utiliza $T = 1000$.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El proceso hacia adelante de los modelos de difusión añade ruido gaussiano a los datos gradualmente mediante una planificación del ruido predefinida $\{\beta_t\}$. Su ventaja clave radica en: (1) no requiere entrenamiento, está completamente predefinido; (2) posee una solución en forma cerrada $q(x_t|x_0)$, permitiendo muestrear en un solo paso; (3) cuando $T$ es lo suficientemente grande, $x_T$ tiende naturalmente a una distribución gaussiana estándar.
+\section{Proceso inverso (Reverse Process)}
+
+\subsection{Definición del proceso inverso}
+
+El proceso inverso (Reverse Process) es el núcleo del proceso generativo: parte de ruido puro $x_T \sim \mathcal{N}(0, I)$ y va reduciendo el ruido paso a paso hasta obtener una muestra de datos $x_0$.
+
+La distribución conjunta del proceso inverso se define como:
+
+$$p_\theta(x_0, x_1, \ldots, x_T) = p(x_T) \prod_{t=1}^{T} p_\theta(x_{t-1} | x_t)$$
+
+Donde los parámetros de la distribución de transición inversa en cada paso se parametrizan como una gaussiana:
+
+$$p_\theta(x_{t-1} | x_t) = \mathcal{N}(x_{t-1}; \mu_\theta(x_t, t), \sigma_t^2 I)$$
+
+\begin{importantbox}{Significado físico del proceso inverso}
+El proceso inverso es la ``inversión temporal'' del proceso hacia adelante. El proceso hacia adelante añade ruido progresivamente, mientras que el proceso inverso lo elimina paso a paso. La tarea de la red neuronal $\mu_\theta(x_t, t)$ es: dado una imagen con ruido actual $x_t$ y el paso temporal $t$, predecir la media después de un paso de desruido. Obsérvese que la red neuronal necesita conocer la información de $t$, porque los niveles de ruido son diferentes en cada paso temporal.
+\end{importantbox}
+
+\subsection{Flujo de generación del proceso inverso}
+
+Dado un modelo entrenado, el proceso de generación es el siguiente:
+
+\begin{enumerate}
+    \item Muestrear $x_T \sim \mathcal{N}(0, I)$ desde una distribución gaussiana estándar.
+    \item Para $t = T, T-1, \ldots, 1$:
+    \begin{itemize}
+        \item Calcular $\mu_\theta(x_t, t)$ y $\sigma_t$ usando la red neuronal.
+        \item Muestrear $x_{t-1} \sim \mathcal{N}(\mu_\theta(x_t, t), \sigma_t^2 I)$.
+    \end{itemize}
+    \item Obtener finalmente la muestra generada $x_0$.
+\end{enumerate}
+
+\begin{warningbox}{Problema de velocidad de generación}
+El proceso inverso requiere ejecutar $T$ pasos de muestreo secuencial (en DDPM, $T = 1000$), y cada paso necesita una propagación hacia adelante de la red neuronal. Esto hace que la velocidad de generación de DDPM sea mucho más lenta que la de GAN (que solo requiere una propagación hacia adelante). Este es también el problema central que trabajos posteriores como DDIM o modelos de consistencia buscan resolver.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El proceso inverso es la única parte del modelo de difusión que necesita aprenderse. Al parametrizar la transición inversa de cada paso como una distribución gaussiana y usar una red neuronal para predecir su media, el modelo aprende a recuperar los datos progresivamente desde el ruido.
+
+
+\section{Derivación del ELBO en modelos de difusión}
+
+\subsection{ELBO de los modelos de difusión}
+
+De manera similar a VAE, el objetivo de entrenamiento de los modelos de difusión es maximizar una cota inferior para la verosimilitud logarítmica de los datos. Para un VAE jerárquico, el ELBO es:
+
+$$\log p_\theta(x_0) \geq \mathbb{E}_{q(x_{1:T}|x_0)} \left[ \log \frac{p_\theta(x_{0:T})}{q(x_{1:T}|x_0)} \right]$$
+
+\subsection{Primera descomposición del ELBO}
+
+Al expandir el ELBO, se obtienen tres tipos de términos:
+
+$$-\text{ELBO} = \underbrace{-\mathbb{E}_{q(x_1|x_0)}[\log p_\theta(x_0|x_1)]}_{\text{Término de reconstrucción } L_0} + \underbrace{D_{\text{KL}}(q(x_T|x_0) \| p(x_T))}_{\text{Término de ajuste al prior } L_T} + \underbrace{\sum_{t=2}^{T} L_{t-1}}_{\text{Término de consistencia}}$$
+
+Donde el término de consistencia es:
+
+$$L_{t-1} = D_{\text{KL}}(q(x_{t-1}|x_t, x_0) \| p_\theta(x_{t-1}|x_t))$$
+
+\begin{importantbox}{Significado de los tres términos del ELBO}
+\begin{enumerate}
+    \item \textbf{Término de reconstrucción $L_0$}: Mide la calidad de la reconstrucción de $x_0$ a partir de $x_1$, análogo al error de reconstrucción en VAE. En la práctica, $x_1$ está muy cerca de $x_0$ (solo se ha añadido una pequeña cantidad de ruido), por lo que este término suele ser pequeño.
+    \item \textbf{Término de ajuste al prior $L_T$}: Mide la distancia entre el punto final del proceso hacia adelante, $q(x_T|x_0)$, y el prior $p(x_T) = \mathcal{N}(0, I)$. Dado que el proceso hacia adelante es fijo y cuando $T$ es suficientemente grande $q(x_T|x_0) \approx \mathcal{N}(0,I)$, este término se acerca a cero e independientemente de $\theta$.
+    \item \textbf{Término de consistencia $L_{t-1}$}: Este es el \textbf{término central del entrenamiento}, que mide la diferencia entre el proceso inverso aprendido $p_\theta(x_{t-1}|x_t)$ y el verdadero ``proceso inverso de un paso'' $q(x_{t-1}|x_t, x_0)$.
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Simplificación bajo la hipótesis de Markov}
+
+Bajo la hipótesis de Markov, la descomposición del ELBO puede simplificarse aún más. La clave es que se cumple la siguiente igualdad:
+
+$$q(x_t | x_{t-1}, x_0) = q(x_t | x_{t-1})$$
+
+Esto se debe a que, en una cadena de Markov, dado $x_{t-1}$, $x_t$ y $x_0$ son condicionalmente independientes. Esta propiedad permite calcular la distribución condicional posterior $q(x_{t-1}|x_t, x_0)$ que aparece en el término de consistencia mediante la fórmula de Bayes (esto se derivará con detalle en las siguientes conferencias).
+
+\begin{knowledgebox}{Calculabilidad de la distribución condicional posterior}
+Aunque $q(x_{t-1}|x_t)$ en sí mismo es difícil de calcular (requiere integrar sobre todas las posibles $x_0$), la versión condicional $q(x_{t-1}|x_t, x_0)$ (donde se dan simultáneamente $x_t$ y $x_0$) tiene una solución gaussiana en forma cerrada. Esto se debe a que:
+\begin{itemize}
+    \item $q(x_t|x_{t-1})$ es gaussiana (transición hacia adelante)
+    \item $q(x_{t-1}|x_0)$ es gaussiana (solución en forma cerrada del proceso hacia adelante)
+    \item La condición de una gaussiana sigue siendo gaussiana
+\end{itemize}
+Esto permite calcular el término de consistencia con precisión como la divergencia KL entre dos gaussianas.
+\end{knowledgebox}
+
+\subsection{Satisfacción automática del término de ajuste al prior}
+
+La solución en forma cerrada del proceso hacia adelante nos indica:
+
+$$q(x_T | x_0) = \mathcal{N}(\sqrt{\bar{\alpha}_T} x_0, (1-\bar{\alpha}_T) I)$$
+
+Cuando $T$ es suficientemente grande, $\bar{\alpha}_T = \prod_{t=1}^T \alpha_t \to 0$ (ya que cada $\alpha_t < 1$), por lo tanto:
+
+$$q(x_T | x_0) \to \mathcal{N}(0, I) = p(x_T)$$
+
+Por consiguiente, $L_T = D_{\text{KL}}(q(x_T|x_0) \| p(x_T)) \to 0$.
+
+\begin{importantbox}{Objetivo de diseño del proceso hacia adelante}
+El proceso hacia adelante ha sido diseñado cuidadosamente para que, mediante la adición gradual de ruido y el escalado de la señal, después de un número suficiente de pasos, \textbf{sin importar qué datos iniciales $x_0$ sean}, el $x_T$ final se acerque a una distribución gaussiana estándar. Esto requiere conjuntamente que los $\beta_t$ no decrezcan y que $T$ sea suficientemente grande. El diseño del proceso hacia adelante hace que el término de ajuste al prior en el ELBO se satisfaga automáticamente, sin necesidad de optimización adicional.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+El ELBO de los modelos de difusión puede descomponerse en un término de reconstrucción, un término de ajuste al prior y un término de consistencia. El diseño astuto del proceso hacia adelante hace que el término de ajuste al prior tienda automáticamente a cero, y el término de reconstrucción suele ser también pequeño. Por lo tanto, el núcleo del entrenamiento reside en minimizar el término de consistencia —es decir, hacer que el proceso inverso $p_\theta$ coincida gradualmente con la verdadera distribución condicional posterior $q(x_{t-1}|x_t, x_0)$—.
+\section{Validación matemática del diseño del proceso de difusión}
+
+\subsection{De un paso a varios: Derivación de la solución cerrada}
+
+Ya sabemos que la transición en un solo paso es:
+
+$$x_t = \sqrt{\alpha_t} x_{t-1} + \sqrt{1 - \alpha_t} \epsilon_t$$
+
+Como ejemplo con $t=2$, desarrollamos dos pasos:
+
+$$x_2 = \sqrt{\alpha_2} x_1 + \sqrt{1-\alpha_2} \epsilon_2$$
+
+$$= \sqrt{\alpha_2}(\sqrt{\alpha_1} x_0 + \sqrt{1-\alpha_1} \epsilon_1) + \sqrt{1-\alpha_2} \epsilon_2$$
+
+$$= \sqrt{\alpha_1 \alpha_2} x_0 + \sqrt{\alpha_2(1-\alpha_1)} \epsilon_1 + \sqrt{1-\alpha_2} \epsilon_2$$
+
+Dado que $\epsilon_1, \epsilon_2$ son independientes e identicamente distribuidas (i.i.d.) según $\mathcal{N}(0, I)$:
+
+$$\sqrt{\alpha_2(1-\alpha_1)} \epsilon_1 + \sqrt{1-\alpha_2} \epsilon_2 \sim \mathcal{N}(0, [\alpha_2(1-\alpha_1) + (1-\alpha_2)] I)$$
+
+$$= \mathcal{N}(0, (1 - \alpha_1 \alpha_2) I)$$
+
+Por lo tanto $q(x_2 | x_0) = \mathcal{N}(\sqrt{\alpha_1 \alpha_2} x_0, (1 - \alpha_1 \alpha_2) I) = \mathcal{N}(\sqrt{\bar{\alpha}_2} x_0, (1-\bar{\alpha}_2) I)$。
+
+\begin{knowledgebox}{Aditividad de la distribución gaussiana}
+Si $a \sim \mathcal{N}(0, \sigma_1^2 I)$ y $b \sim \mathcal{N}(0, \sigma_2^2 I)$ son independientes, entonces $a + b \sim \mathcal{N}(0, (\sigma_1^2 + \sigma_2^2) I)$. Esta propiedad es la herramienta fundamental para derivar la solución cerrada.
+\end{knowledgebox}
+
+\subsection{Validación del comportamiento límite}
+
+Cuando $\bar{\alpha}_T \to 0$:
+
+$$q(x_T | x_0) = \mathcal{N}(\sqrt{\bar{\alpha}_T} x_0, (1-\bar{\alpha}_T)I) \to \mathcal{N}(0, I)$$
+
+Esto valida que el proceso de difusión convierte finalmente los datos en ruido gaussiano estándar, lo cual coincide con el término de prior requerido en el ELBO.
+
+\subsection{Resumen de la sección}
+
+Al desarrollar paso a paso las relaciones de recurrencia del proceso de difusión y aprovechar la aditividad de la distribución gaussiana, hemos validado la corrección de la solución cerrada y confirmado que, cuando $T$ es lo suficientemente grande, la salida del proceso de difusión se aproxima a una distribución gaussiana estándar.
+\section{Visión general completa de los modelos de difusión}
+
+\subsection{Simetría entre el proceso forward y el inverso}
+
+El marco completo de los modelos de difusión puede resumirse mediante la siguiente estructura simétrica:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+ & \textbf{Proceso forward (adición de ruido)} & \textbf{Proceso inverso (eliminación de ruido)} \\
+\midrule
+Dirección & $x_0 \to x_1 \to \cdots \to x_T$ & $x_T \to x_{T-1} \to \cdots \to x_0$ \\
+Distribución & $q(x_t | x_{t-1})$, predefinida & $p_\theta(x_{t-1} | x_t)$, por aprender \\
+¿Entrenamiento? & No & Sí \\
+Punto final & $x_T \approx \mathcal{N}(0, I)$ & $x_0 \sim p_{\text{data}}$ \\
+Función & Generar muestras ruidosas durante el entrenamiento & Generar muestras de datos durante la inferencia \\
+\bottomrule
+\end{tabular}
+\caption{Comparación entre el proceso forward y el inverso}
+\end{table}
+
+\subsection{¿Por qué son efectivos los modelos de difusión?}
+
+\begin{knowledgebox}{Comprensión de los modelos de difusión desde la perspectiva de VAE}
+Los modelos de difusión pueden entenderse como un tipo especial de VAE jerárquico, con las siguientes características clave:
+\begin{itemize}
+    \item El codificador (proceso forward) es fijo y no requiere aprendizaje.
+    \item Todas las capas tienen la misma dimensión.
+    \item La transición en cada paso es una perturbación gaussiana simple.
+    \item Mediante suficientes pasos, el producto de transiciones gaussianas simples puede expresar distribuciones muy complejas.
+\end{itemize}
+Este diseño logra un equilibrio elegante entre simplicidad y capacidad expresiva.
+\end{knowledgebox}
+
+\subsection{Próximo contenido}
+
+Esta clase establece el marco conceptual de DDPM; la siguiente clase (Lecture 03: DDPM Parte 2) profundizará en ello:
+
+\begin{itemize}
+    \item Derivación detallada del término de consistencia $L_{t-1}$
+    \item Expresión gaussiana cerrada para $q(x_{t-1}|x_t, x_0)$
+    \item Simplificación desde la predicción de la media hasta la \textbf{predicción de ruido} $\epsilon_\theta$
+    \item Objetivo final de entrenamiento de DDPM: una pérdida MSE ponderada simple
+    \item Algoritmos reales de entrenamiento y muestreo
+\end{itemize}
+
+\subsection{Resumen de la sección}
+
+Los modelos de difusión logran una potente capacidad generativa dentro del marco de VAE jerárquicos mediante un proceso forward fijo (adición de ruido) y un proceso inverso aprendido (eliminación de ruido). El diseño ingenioso del proceso forward hace que varios términos del ELBO se cumplan automáticamente o puedan calcularse eficientemente, enfocando el entrenamiento en el término de consistencia central.
+\section{Síntesis y ampliación}
+
+\subsection{Puntos clave}
+
+Esta clase parte de VAE y deriva progresivamente el marco básico de los modelos de difusión. Los puntos clave incluyen:
+
+\begin{enumerate}
+    \item \textbf{Limitaciones de VAE}: modelar la verosimilitud y la posterior como gaussianas es una simplificación excesiva, lo que limita la calidad generada.
+    \item \textbf{Enfoque jerárquico}: introduce variables latentes multinivel; cada nivel sigue siendo una gaussiana simple, pero la distribución global es más compleja.
+    \item \textbf{Suposición de Markov}: simplifica el cálculo del VAE jerárquico, permitiendo una descomposición eficiente del ELBO.
+    \item \textbf{Diseño del proceso hacia adelante}: agrega ruido gradualmente mediante un esquema de ruido predefinido $\{\beta_t\}$, lo cual tiene solución en forma cerrada.
+    \item \textbf{Aprendizaje del proceso inverso}: solo es necesario aprender el proceso de eliminación de ruido $p_\theta(x_{t-1}|x_t)$, evitando la dificultad del entrenamiento conjunto.
+    \item \textbf{Descomposición del ELBO}: el término de ajuste al prior se satisface automáticamente; el entrenamiento se centra en el término de consistencia.
+\end{enumerate}
+
+\subsection{Lecturas adicionales}
+
+\begin{itemize}
+    \item Ho, J., Jain, A., \& Abbeel, P. (2020). \textit{Denoising Diffusion Probabilistic Models}. NeurIPS 2020. --- Artículo original de DDPM.
+    \item Sohl-Dickstein, J., et al. (2015). \textit{Deep Unsupervised Learning using Nonequilibrium Thermodynamics}. ICML 2015. --- Artículo teórico que fundamenta los modelos de difusión.
+    \item Kingma, D. P. \& Welling, M. (2014). \textit{Auto-Encoding Variational Bayes}. ICLR 2014. --- Artículo original de VAE.
+    \item Luo, C. (2022). \textit{Understanding Diffusion Models: A Unified Perspective}. arXiv:2208.11970. --- Revisión desde una perspectiva unificada.
+    \item Nichol, A. Q. \& Dhariwal, P. (2021). \textit{Improved Denoising Diffusion Probabilistic Models}. ICML 2021. --- Mejoras sobre esquemas de ruido coseno y otros aspectos.
+\end{itemize}
+
+%% --- Fin del contenido --- %%
+
+\end{document}

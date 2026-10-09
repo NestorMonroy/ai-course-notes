@@ -1,0 +1,642 @@
+\documentclass[a4paper]{article}
+
+% Paquetes básicos
+% Español (México) con XeLaTeX: fontspec para fuentes Unicode, polyglossia
+% para la división silábica y los nombres del documento en la variante mexicana.
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setdefaultlanguage[variant=mexican]{spanish}
+% Los nombres chinos van como «pinyin (original)»: xeCJK da a los caracteres
+% Han su propia fuente; sin ella XeLaTeX los omite con un aviso.
+% FandolSong no cubre algunos caracteres de nombres (U+73FA); WenQuanYi Zen Hei sí.
+\usepackage[AutoFallBack=true]{xeCJK}
+\setCJKmainfont{FandolSong-Regular.otf}
+\setCJKfallbackfamilyfont{\CJKrmdefault}{WenQuanYi Zen Hei}
+% polyglossia no traduce los nombres de listados.
+\AtBeginDocument{\providecommand{\lstlistingname}{}\renewcommand{\lstlistingname}{Listado}%
+  \providecommand{\lstlistlistingname}{}\renewcommand{\lstlistlistingname}{Índice de listados}}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[most]{tcolorbox}
+\usepackage{etoolbox}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\usepackage{float}
+
+% Cajas de resaltado
+\newtcolorbox{knowledgebox}[1]{
+    enhanced, colback=blue!5!white, colframe=blue!75!black, colbacktitle=blue!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, attach boxed title to top left={yshift=-2mm, xshift=2mm},
+    boxrule=1pt, sharp corners
+}
+
+\newtcolorbox{importantbox}[1]{
+    enhanced, colback=yellow!10!white, colframe=yellow!80!black, colbacktitle=yellow!80!black,
+    coltitle=black, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+\newtcolorbox{warningbox}[1]{
+    enhanced, colback=red!5!white, colframe=red!75!black, colbacktitle=red!75!black,
+    coltitle=white, fonttitle=\bfseries, title={#1}, sharp corners
+}
+
+% Listados
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    stringstyle=\color{red!60!black},
+    commentstyle=\color{green!60!black},
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    captionpos=b,
+    extendedchars=true
+}
+
+% Metadatos de la portada
+\newcommand{\notetitle}{Clase 8 de KAIST CS492D: Solucionadores de EDO (DPM-Solver)}
+\newcommand{\noteauthors}{Elaboradas a partir de la clase de Minhyuk Sung}
+\newcommand{\notedate}{Otoño de 2025}
+\newcommand{\videochannel}{Minhyuk Sung (KAIST)}
+\newcommand{\videopublishdate}{2025}
+\newcommand{\videoduration}{55 minutos}
+\newcommand{\videourl}{https://www.youtube.com/watch?v=eKW5AAy5ae8}
+\newcommand{\videocoverpath}{cover.jpg}
+\newcommand{\repourl}{https://github.com/hqhq1025/ai-course-notes}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+{\Large Notas del curso\par}
+\vspace{1.2cm}
+{\huge\bfseries \notetitle\par}
+\vspace{0.8cm}
+{\large \noteauthors\par}
+\vspace{0.3cm}
+{\large \notedate\par}
+\vspace{1.2cm}
+
+\ifdefempty{\videocoverpath}{
+{\small Al generar las notas, indique la ruta local de la portada del video.\par}
+}{
+\includegraphics[width=0.82\textwidth,height=0.45\textheight,keepaspectratio]{\videocoverpath}\par
+}
+
+\vfill
+\begin{tcolorbox}[width=0.9\textwidth, colback=black!2!white, colframe=black!60, sharp corners]
+\textbf{Autor o canal del video}: \videochannel\par
+\textbf{Fecha de publicación}: \videopublishdate\par
+\textbf{Duración del video}: \videoduration\par
+\ifdefempty{\videourl}{}{
+\textbf{Enlace del video}: \href{\videourl}{\nolinkurl{\videourl}}\par
+}
+\end{tcolorbox}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+%% --- Inicio del contenido --- %%
+
+\section{Introducción y repaso de la clase}
+
+Esta es la octava clase del curso KAIST CS492D (Modelos de difusión y modelos de flujo), cuyo tema central es \textbf{cómo resolver eficientemente el proceso inverso ODE de los modelos de difusión}. El conferenciante Minhyuk Sung repuso primero los marcos de DDPM, DDIM y tiempo continuo SDE/ODE introducidos en clases anteriores, para luego plantear la pregunta clave de esta sesión: dado que el proceso inverso de un modelo de difusión puede describirse equivalentemente como una ecuación diferencial ordinaria (ODE), ¿podemos aprovechar la estructura especial de las ODE para diseñar solucionadores más eficientes y así obtener imágenes de alta calidad con muy pocos pasos de muestreo?
+
+\begin{knowledgebox}{Resumen de conocimientos previos}
+Para comprender esta clase se requieren los siguientes conceptos previos:
+\begin{itemize}
+    \item \textbf{DDPM} (Denoising Diffusion Probabilistic Models): modelo de difusión discreto basado en cadenas de Markov, que típicamente requiere $T=1000$ pasos para completar el muestreo.
+    \item \textbf{DDIM} (Denoising Diffusion Implicit Models): variante de muestreo determinista de DDPM, que permite saltar en subsecuencias durante el muestreo.
+    \item \textbf{Marco SDE/ODE}: formulación en tiempo continuo propuesta por Song et al., que describe el proceso de difusión como una ecuación diferencial estocástica (SDE) y proporciona una ODE equivalente de flujo de probabilidad (Probability Flow ODE).
+    \item \textbf{Score function}: $\nabla_{\mathbf{x}} \log p_t(\mathbf{x})$, calculable mediante una red de predicción de ruido $\epsilon_\theta$.
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Del DDPM al marco de tiempo continuo}
+
+En el DDPM, el proceso de difusión hacia adelante se define como:
+$$q(\mathbf{x}_t | \mathbf{x}_0) = \mathcal{N}(\mathbf{x}_t; \sqrt{\bar{\alpha}_t}\, \mathbf{x}_0, (1 - \bar{\alpha}_t)\, \mathbf{I})$$
+
+Donde:
+\begin{itemize}
+    \item $\bar{\alpha}_t = \prod_{s=1}^{t} (1 - \beta_s)$, es la tasa acumulativa de retención de señal.
+    \item $\beta_t$ es el parámetro de programación del ruido para cada paso.
+\end{itemize}
+
+En un marco más general bajo modelos de difusión variacional (Variational Diffusion Model, VDM), la distribución de salto hacia adelante se puede reescribir como:
+$$q(\mathbf{x}_t | \mathbf{x}_0) = \mathcal{N}(\mathbf{x}_t; \alpha_t \mathbf{x}_0, \sigma_t^2 \mathbf{I})$$
+
+\begin{warningbox}{Advertencia sobre confusión de símbolos}
+La definición de $\alpha$ varía entre diferentes artículos. En el artículo original de DDPM, $\alpha_t = 1 - \beta_t$; mientras que en los marcos VDM/DPM-Solver, $\alpha_t$ corresponde directamente al coeficiente de escala de señal $\sqrt{\bar{\alpha}_t}$. Al leer la literatura, es crucial prestar atención a las convenciones simbólicas del contexto para evitar confusiones.
+\end{warningbox}
+
+Muestrear $\mathbf{x}_t$ equivale a realizar una interpolación lineal entre los datos limpios $\mathbf{x}_0$ y el ruido gaussiano estándar $\boldsymbol{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$:
+$$\mathbf{x}_t = \alpha_t \mathbf{x}_0 + \sigma_t \boldsymbol{\epsilon}$$
+
+La definición de este marco requiere cumplir únicamente una restricción: la relación señal-ruido (Signal-to-Noise Ratio, SNR) $\frac{\alpha_t^2}{\sigma_t^2}$ debe decrecer monótonamente respecto al tiempo $t$; es decir, con el paso del tiempo, el ruido va tomando predominancia hasta que $\mathbf{x}_T$ se aproxima a una distribución gaussiana estándar.
+
+\subsection{Descripción dual de SDE y ODE}
+
+En el dominio de tiempo continuo, el proceso de difusión hacia adelante puede describirse mediante una SDE:
+$$d\mathbf{x} = f(t)\, \mathbf{x}\, dt + g(t)\, d\mathbf{w}$$
+
+Donde $f(t)$ es el coeficiente de deriva, $g(t)$ es el coeficiente de difusión y $\mathbf{w}$ es un proceso de Wiener estándar. Dada una SDE hacia adelante, la SDE inversa en tiempo correspondiente es:
+$$d\mathbf{x} = \left[f(t)\, \mathbf{x} - g(t)^2 \nabla_{\mathbf{x}} \log p_t(\mathbf{x})\right] dt + g(t)\, d\bar{\mathbf{w}}$$
+
+\begin{importantbox}{ODE de flujo de probabilidad (Probability Flow ODE)}
+Anderson (1982) demostró que para cualquier SDE inversa en el tiempo, existe una ODE determinista tal que ambas son completamente consistentes en la distribución marginal $p_t(\mathbf{x})$:
+$$\frac{d\mathbf{x}}{dt} = f(t)\, \mathbf{x} - \frac{1}{2} g(t)^2 \nabla_{\mathbf{x}} \log p_t(\mathbf{x})$$
+Esta es la ODE de flujo de probabilidad (PF-ODE). Dado que no posee un término estocástico de ruido, para un mismo punto inicial $\mathbf{x}_T$, la solución de la ODE es determinista. Esto sienta las bases para acelerar el muestreo mediante solucionadores de ODE.
+\end{importantbox}
+
+Utilizando la red de predicción de ruido $\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t) \approx -\sigma_t \nabla_{\mathbf{x}} \log p_t(\mathbf{x})$, se puede reformular la PF-ODE para que solo incluya $\boldsymbol{\epsilon}_\theta$.
+
+\subsection{Introducción de la función $\lambda$}
+
+Para simplificar las derivaciones posteriores, se define la función semiválida del log-SNR:
+$$\lambda_t = \frac{1}{2} \log \frac{\alpha_t^2}{\sigma_t^2} = \log \frac{\alpha_t}{\sigma_t}$$
+
+\begin{itemize}
+    \item $\lambda_t$ es una función estrictamente monótonamente decreciente de $t$ (ya que el SNR decrece monótonamente).
+    \item Mediante $\lambda_t$, muchas expresiones pueden simplificarse considerablemente.
+    \item $e^{\lambda_t} = \frac{\alpha_t}{\sigma_t}$, $e^{-\lambda_t} = \frac{\sigma_t}{\alpha_t}$.
+\end{itemize}
+
+Tras introducir $\lambda_t$, la función de deriva $f(t)$ de la SDE hacia adelante puede expresarse de manera más concisa en términos de $\lambda_t$, y los cambios de variables de integración posteriores se centrarán en $\lambda$.
+
+\subsection{Resumen de la sección}
+
+Esta sección establece una perspectiva unificada que va desde el DDPM/DDIM discreto hasta las SDE/ODE de tiempo continuo. Los puntos clave son: (1) el proceso inverso de los modelos de difusión puede expresarse equivalentemente como una ODE determinista; (2) dicha ODE posee una estructura semilineal, cuya parte lineal puede resolverse analíticamente; (3) la variable $\lambda_t$ proporciona una parametrización más conveniente.
+
+\end{ES>>>
+\section{Fundamentos para resolver EDOs}
+
+\subsection{¿Por qué se necesitan resolutores rápidos de EDOs}
+
+El proceso de muestreo de los modelos de difusión es equivalente a resolver la PF-EDO desde $t=T$ (ruido puro) hasta $t=0$ (datos limpios). Los métodos ingenuos —como el muestreo de 1000 pasos en DDPM— son esencialmente una discretización de Euler-Maruyama para las SDEs, requiriendo una propagación hacia adelante de la red neuronal en cada paso. En aplicaciones prácticas, deseamos comprimir el número de pasos desde cientos a 10$\sim$20, manteniendo al mismo tiempo la calidad de la imagen.
+
+\begin{importantbox}{Desafío central: muestreo de alta calidad con pocos pasos}
+Cada "paso" del resolutor de EDOs requiere llamar una vez a la red de predicción de ruido $\boldsymbol{\epsilon}_\theta$, lo que constituye el cuello de botella computacional. Por tanto, reducir el número de pasos de resolución = reducir las inferencias de la red = acelerar la generación. El objetivo es generar imágenes de alta calidad dentro de 10$\sim$20 evaluaciones de función (NFE, Number of Function Evaluations).
+\end{importantbox}
+
+\subsection{Método de Euler}
+
+Dada la EDO $\frac{d\mathbf{x}}{dt} = \mathbf{v}(\mathbf{x}, t)$, el método de Euler es la estrategia de integración numérica más sencilla:
+$$\mathbf{x}_{t+h} = \mathbf{x}_t + h \cdot \mathbf{v}(\mathbf{x}_t, t)$$
+
+Donde $h$ es el tamaño del paso. Intuitivamente, el método de Euler asume que el campo de velocidades $\mathbf{v}$ permanece constante en el intervalo $[t, t+h]$, usando la velocidad en el punto inicial para realizar una extrapolación lineal.
+
+\begin{knowledgebox}{Intuición geométrica del método de Euler}
+Imagina una curva en un plano bidimensional (la trayectoria real de la EDO). El método de Euler calcula la dirección tangente (campo de velocidades) en el punto actual y luego avanza un pequeño paso a lo largo de dicha tangente. A menor tamaño del paso, mayor precisión de la aproximación, pero se requieren más pasos. Cuando el tamaño del paso es grande, la aproximación lineal se desvía de la curva real, generando un error de truncamiento (truncation error). Para los modelos de difusión, la fórmula de muestreo de DDIM es en realidad una discretización de Euler para la PF-EDO.
+\end{knowledgebox}
+
+\subsection{Visión general de resolutores de EDO de orden superior}
+
+Para mantener la precisión con tamaños de paso mayores, el campo del análisis numérico ha desarrollado una gran cantidad de resolutores de orden superior:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Resolutor} & \textbf{Orden} & \textbf{NFE por paso} \\
+\midrule
+Euler (método de Euler) & 1 & 1 \\
+Heun (método de Euler mejorado/método de los trapecios) & 2 & 2 \\
+Runge-Kutta 4 (RK4) & 4 & 4 \\
+Dormand-Prince (DOPRI5) & 5 & 6 \\
+\bottomrule
+\end{tabular}
+\caption{Resolutores de EDO genéricos comunes y sus características}
+\end{table}
+
+\begin{warningbox}{Limitaciones de los resolutores genéricos}
+Los resolutores mencionados anteriormente son aplicables a \textbf{cualquier} EDO, pero no aprovechan la estructura especial de la PF-EDO. Por ejemplo, el Runge-Kutta 4 requiere 4 evaluaciones de red por paso, lo cual es costoso en escenarios de modelos de difusión. La innovación central de DPM-Solver radica en: aprovechar la estructura semilineal de la PF-EDO para lograr una precisión de orden superior bajo la premisa de realizar \textbf{solo 1 evaluación de red por paso}.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El método de Euler es la estrategia más básica para resolver EDOs y también es la forma equivalente al muestreo DDIM. Los resolutores de orden superior genéricos (como RK4) pueden mejorar la precisión, pero requieren múltiples evaluaciones de red por paso. El enfoque principal de esta conferencia posterior será cómo aprovechar la estructura especial de las EDOs de los modelos de difusión para diseñar resolutores de orden superior del tipo "almuerzo gratis".
+\section{Ecuaciones diferenciales ordinarias (EDO) lineales y soluciones exactas}
+
+\subsection{Solución analítica de EDO lineales simples}
+
+Antes de discutir las EDO del modelo de difusión, el conferenciante parte de la EDO lineal más simple para construir intuición. Considere una EDO escalar:
+$$\frac{dx}{dt} = p(t) \cdot x(t)$$
+
+donde $p(t)$ es una función conocida del tiempo. Suponga que $x(t) > 0$, divida ambos lados por $x(t)$:
+$$\frac{1}{x(t)} \frac{dx}{dt} = p(t)$$
+
+El lado izquierdo es exactamente $\frac{d}{dt} \ln x(t)$, por lo tanto:
+$$\ln x(t) - \ln x(s) = \int_s^t p(\tau)\, d\tau$$
+
+\begin{importantbox}{Solución exacta de EDO lineales}
+$$x(t) = x(s) \cdot \exp\left(\int_s^t p(\tau)\, d\tau\right)$$
+Esta solución es\textbf{analítica}: no requiere ninguna aproximación por discretización. Para EDO lineales, siempre podemos obtener una solución exacta mediante integración. Este hecho es la piedra angular clave para las derivaciones posteriores.
+\end{importantbox}
+
+\subsection{EDO semilineales y el método del factor integrante}
+
+La PF-ODE de los modelos de difusión no es puramente lineal, sino\textbf{semilineal}, con la forma:
+$$\frac{d\mathbf{x}}{dt} = p(t) \cdot \mathbf{x}(t) + q(t)$$
+
+donde $p(t) \cdot \mathbf{x}$ es la parte lineal y $q(t)$ es el término de desplazamiento no lineal (en los modelos de difusión, $q(t)$ contiene la salida de la red predictora del ruido).
+
+Para resolver una EDO semilineal, se introduce un\textbf{factor integrante}:
+$$\mu(t) = \exp\left(-\int_0^t p(\tau)\, d\tau\right)$$
+
+$\mu(t)$ es la "solución inversa" de la ecuación homogénea $\frac{dx}{dt} = p(t) \cdot x$. Multiplique ambos lados de la EDO por $\mu(t)$:
+$$\mu(t) \frac{dx}{dt} - \mu(t) p(t) x(t) = \mu(t) q(t)$$
+
+Utilizando la regla del producto para derivación, el lado izquierdo se simplifica a $\frac{d}{dt}\left[\mu(t) x(t)\right]$; al integrar, se obtiene:
+
+\begin{importantbox}{Solución exacta de EDO semilineales (Variación de constantes)}
+$$x(t) = \frac{\mu(s)}{\mu(t)} x(s) + \frac{1}{\mu(t)} \int_s^t \mu(\tau) q(\tau)\, d\tau$$
+\begin{itemize}
+    \item Primer término: Solución exacta de la parte lineal, depende únicamente del valor inicial $x(s)$ y puede calcularse analíticamente.
+    \item Segundo término: Integral de la parte no lineal, involucra a $q(\tau)$ (que contiene la salida de una red neuronal) y generalmente requiere aproximación numérica.
+\end{itemize}
+Esto es la forma básica del\textbf{integrador exponencial}: se trata la parte lineal con precisión exacta y solo se realiza una aproximación numérica para la parte no lineal.
+\end{importantbox}
+
+\begin{knowledgebox}{¿Por qué se llama "integrador exponencial"?}
+Debido a que la solución exacta de la parte lineal incluye la función exponencial $\exp(\cdot)$. El método de Euler tradicional realizaría una aproximación sobre toda la EDO (lineal + no lineal), mientras que el integrador exponencial solo aproxima la parte no lineal. En casos donde la parte lineal domina (como en la PF-ODE de los modelos de difusión), esta división mejora significativamente la precisión.
+\end{knowledgebox}
+
+\subsection{Solución exacta con término de desplazamiento constante}
+
+Como ejercicio, considere el caso con una constante $q$ (independiente de $t$):
+$$\frac{dx}{dt} = p(t) \cdot x(t) + c$$
+
+Al sustituir la fórmula de la solución general y simplificar, se puede obtener una expresión más compacta. El conferenciante llevó a los estudiantes en clase a derivar este proceso; la idea central fue sacar $c$ fuera del signo integral y luego simplificar utilizando las propiedades de $\mu(t)$.
+
+\subsection{Resumen de la sección}
+
+Las EDO lineales tienen soluciones analíticas; las EDO semilineales pueden resolverse exactamente en su parte lineal mediante el método del factor integrante, dejando solo la parte no lineal que requiere aproximación numérica. Este es el fundamento matemático de DPM-Solver.
+\section{Derivación de DPM-Solver}
+
+\subsection{Estructura semilineal de la PF-ODE}
+
+Volviendo a la PF-ODE de los modelos de difusión. Mediante el uso de la red predictora de ruido $\boldsymbol{\epsilon}_\theta$ y la parametrización del modelo de difusión variacional, la PF-ODE puede expresarse como:
+$$\frac{d\mathbf{x}}{dt} = \underbrace{f(t) \cdot \mathbf{x}(t)}_{\text{parte lineal}} + \underbrace{g(t) \cdot \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t)}_{\text{parte no lineal}}$$
+
+Donde:
+\begin{itemize}
+    \item $f(t)$: coeficiente de arrastre calculable analíticamente mediante $\alpha_t, \sigma_t$
+    \item $g(t)$: coeficiente difusivo correlacionado calculable analíticamente mediante $\alpha_t, \sigma_t$
+    \item $\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t)$: red predictora de ruido, que es la única parte no lineal (requiere evaluación de una red neuronal)
+\end{itemize}
+
+\begin{importantbox}{Observación central de DPM-Solver}
+La PF-ODE posee una estructura semilineal: la parte lineal $f(t) \cdot \mathbf{x}$ puede resolverse con \textbf{precisión} mediante un integrador exponencial; la única aproximación numérica necesaria involucra la integración no lineal relacionada con $\boldsymbol{\epsilon}_\theta$. Esto significa que podemos minimizar al máximo el error numérico.
+\end{importantbox}
+
+\subsection{Resolución mediante integrador exponencial}
+
+Aplicando la solución exacta de la ODE semilineal de la sección anterior y tomando $\lambda_t$ como variable de integración (sustituyendo el tiempo $t$), obtenemos:
+$$\mathbf{x}_t = \frac{\alpha_t}{\alpha_s} \mathbf{x}_s - \alpha_t \int_{\lambda_s}^{\lambda_t} e^{-\lambda}\, \hat{\boldsymbol{\epsilon}}_\theta(\lambda)\, d\lambda$$
+
+Donde:
+\begin{itemize}
+    \item $\frac{\alpha_t}{\alpha_s} \mathbf{x}_s$: solución exacta de la parte lineal
+    \item $\hat{\boldsymbol{\epsilon}}_\theta(\lambda) = \boldsymbol{\epsilon}_\theta(\mathbf{x}_{\tau(\lambda)}, \tau(\lambda))$: se considera a la red predictora de ruido como una función de $\lambda$
+    \item Intervalo de integración $[\lambda_s, \lambda_t]$: corresponde al tiempo $[s, t]$
+\end{itemize}
+
+\begin{knowledgebox}{Significado del cambio de variable $t \to \lambda$}
+Sustituir la variable de integración desde el tiempo $t$ por el log-SNR $\lambda$ ofrece dos ventajas: (1) simplifica las expresiones complejas de los coeficientes $\alpha_t, \sigma_t$, transformando el núcleo de la integral en un simple $e^{-\lambda}$; (2) $\lambda$ se distribuye uniformemente en el espacio de programación del ruido, constituyendo una variable de integración más natural. El ponente enfatiza que esta simplificación hace que la ODE, originalmente compleja, resulte sorprendentemente concisa.
+\end{knowledgebox}
+
+Tras una simplificación adicional, la fórmula central de DPM-Solver es:
+$$\mathbf{x}_t = \frac{\alpha_t}{\alpha_s} \mathbf{x}_s - \sigma_t \int_{\lambda_s}^{\lambda_t} e^{\lambda - \lambda_t}\, \boldsymbol{\epsilon}_\theta(\mathbf{x}_\lambda, \lambda)\, d\lambda$$
+
+Esta fórmula transforma el problema de resolver la ODE en: cómo aproximar la integral ponderada de la predicción del ruido. Las aproximaciones de distintos órdenes corresponden a DPM-Solver de distintos órdenes.
+
+\subsection{Aproximación de primer orden: DPM-Solver-1 es DDIM}
+
+La aproximación más simple asume que, dentro del intervalo de integración $[\lambda_s, \lambda_t]$, la predicción del ruido $\boldsymbol{\epsilon}_\theta$ es constante (desarrollo de Taylor de orden cero):
+$$\boldsymbol{\epsilon}_\theta(\mathbf{x}_\lambda, \lambda) \approx \boldsymbol{\epsilon}_\theta(\mathbf{x}_s, s) \quad \forall \lambda \in [\lambda_s, \lambda_t]$$
+
+Sustituyendo en la fórmula de la integral y calculando la integral definida de $e^{-\lambda}$, se obtiene:
+$$\mathbf{x}_t = \frac{\alpha_t}{\alpha_s} \mathbf{x}_s - \sigma_t (e^{h} - 1) \boldsymbol{\epsilon}_\theta(\mathbf{x}_s, s)$$
+
+Donde $h = \lambda_t - \lambda_s$.
+
+\begin{importantbox}{DDIM es DPM-Solver-1}
+Desarrollando la expresión anterior en términos de $\alpha_t, \sigma_t$, se verifica que esto coincide exactamente con la fórmula de muestreo determinista de DDIM! Es decir, DDIM no realiza una discretización de Euler \textbf{global} sobre la PF-ODE, sino que aprovecha la estructura semilineal para realizar una \textbf{integración exponencial}: trata la parte lineal con precisión y realiza solo una aproximación de orden cero sobre la predicción del ruido. Esto explica por qué DDIM funciona mejor que el método de Euler directo.
+\end{importantbox}
+
+\begin{warningbox}{Malentendido común: DDIM no es el método de Euler básico}
+Muchas personas creen que DDIM consiste en discretizar la PF-ODE mediante el método de Euler. En realidad, DDIM realiza una \textbf{integración exponencial} de primer orden sobre la PF-ODE: trata con precisión la parte lineal y aplica solo una aproximación de orden cero a la predicción del ruido no lineal. Esta sutil diferencia tiene implicaciones esenciales en la precisión, especialmente cuando se utilizan pocas iteraciones.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La derivación de DPM-Solver aprovecha la estructura semilineal de la PF-ODE: trata la parte lineal con precisión mediante un integrador exponencial y limita la aproximación numérica a la integración de la predicción del ruido. El DPM-Solver de primer orden es equivalente a DDIM.
+
+\section{DPM-Solver de orden superior}
+
+\subsection{Aproximación de segundo orden: DPM-Solver-2}
+
+La aproximación de primer orden asume que $\boldsymbol{\epsilon}_\theta$ es constante en todo el intervalo. La mejora natural consiste en utilizar una \textbf{expansión de Taylor de primer orden} (aproximación lineal), empleando las predicciones de ruido en dos puntos para ajustar la tendencia de cambio de $\boldsymbol{\epsilon}_\theta$.
+
+Los pasos del algoritmo DPM-Solver-2 son los siguientes:
+
+\textbf{Paso 1: Calcular el punto intermedio}
+
+Dado el paso temporal actual $s$ y el paso temporal objetivo $t$, seleccionar un punto temporal intermedio $r$ (generalmente el punto medio del intervalo) y calcular el valor intermedio con DPM-Solver de primer orden:
+$$\mathbf{u} = \frac{\alpha_r}{\alpha_s} \mathbf{x}_s - \sigma_r (e^{h_1} - 1) \boldsymbol{\epsilon}_\theta(\mathbf{x}_s, s)$$
+
+Donde $h_1 = \lambda_r - \lambda_s$.
+
+\textbf{Paso 2: Actualización utilizando la predicción de ruido en el punto intermedio}
+
+Reevaluar la predicción de ruido $\boldsymbol{\epsilon}_\theta(\mathbf{u}, r)$ en el punto intermedio $r$ y luego realizar una aproximación por interpolación lineal usando la información de dos puntos para integrar:
+$$\mathbf{x}_t = \frac{\alpha_t}{\alpha_s} \mathbf{x}_s - \sigma_t (e^{h} - 1) \boldsymbol{\epsilon}_\theta(\mathbf{x}_s, s) - \frac{\sigma_t}{2h_1}(e^{h} - 1 - h)\left[\boldsymbol{\epsilon}_\theta(\mathbf{u}, r) - \boldsymbol{\epsilon}_\theta(\mathbf{x}_s, s)\right]$$
+
+Donde $h = \lambda_t - \lambda_s$.
+
+\begin{importantbox}{La idea clave de la aproximación de segundo orden}
+DPM-Solver-2 requiere 2 evaluaciones de red por paso (en $s$ y en $r$), pero logra precisión de segundo orden. A diferencia del método de Heun general, DPM-Solver-2 aprovecha la estructura semilineal de PF-ODE, lo que resulta en mayor precisión para el mismo número de NFE.
+\end{importantbox}
+
+\subsection{Aproximaciones de tercer orden y superiores}
+
+Siguiendo el mismo razonamiento, se puede continuar con una expansión de Taylor de segundo orden para obtener DPM-Solver-3: seleccionar dos puntos intermedios en el intervalo y utilizar tres predicciones de ruido para construir una aproximación polinómica cuadrática del cambio de $\boldsymbol{\epsilon}_\theta$ en el espacio $\lambda$.
+
+\begin{knowledgebox}{Estructura recursiva}
+El aumento del orden en DPM-Solver tiene una estructura recursiva:
+\begin{itemize}
+    \item \textbf{DPM-Solver de orden $k$} requiere $k$ evaluaciones de red
+    \item Primero calcular $k-1$ puntos intermedios con un DPM-Solver de orden inferior
+    \item Utilizar todas las $k$ predicciones de ruido para construir una aproximación polinómica de grado $(k-1)$
+    \item Sustituir el polinomio en la fórmula de integral y realizar la integración analítica
+\end{itemize}
+En la práctica, los órdenes 2 y 3 son suficientes. Más allá del tercer orden, las ganancias disminuyen porque el error de aproximación inherente a la red de predicción de ruido se convierte en un cuello de botella.
+\end{knowledgebox}
+
+\subsection{Comparación de DPM-Solver por órdenes}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Método} & \textbf{NFE por paso} & \textbf{Orden de precisión} & \textbf{Observaciones} \\
+\midrule
+DDPM & 1 & Aprox. 0.5 orden & Euler-Maruyama discreción simple \\
+DDIM / DPM-Solver-1 & 1 & 1 orden & Integral exponencial + aproximación de ruido de orden cero \\
+DPM-Solver-2 & 2 & 2 orden & Integral exponencial + aproximación de ruido de primer orden \\
+DPM-Solver-3 & 3 & 3 orden & Integral exponencial + aproximación de ruido de segundo orden \\
+\bottomrule
+\end{tabular}
+\caption{Comparación de las características de los métodos DPM-Solver por órdenes}
+\end{table}
+
+\subsection{Resumen de la sección}
+
+Los DPM-Solver de orden superior logran mayor precisión al realizar aproximaciones polinómicas de alto orden de las predicciones de ruido en el espacio $\lambda$, aumentando solo ligeramente el costo de evaluaciones de red por paso. Esta construcción recursiva hace que el avance del primer al tercer orden sea conceptualmente muy natural.
+\section{DPM-Solver++ y mejoras prácticas}
+
+\subsection{De la predicción de ruido a la predicción de datos}
+
+La fórmula original de DPM-Solver se basa en la predicción de ruido $\boldsymbol{\epsilon}_\theta$. DPM-Solver++ propone una mejora clave: cambiar hacia la aproximación polinómica de la \textbf{predicción de datos} ($\hat{\mathbf{x}}_0$).
+
+Dado que $\mathbf{x}_t = \alpha_t \mathbf{x}_0 + \sigma_t \boldsymbol{\epsilon}$, se tiene:
+$$\hat{\mathbf{x}}_0(\mathbf{x}_t, t) = \frac{\mathbf{x}_t - \sigma_t \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t)}{\alpha_t}$$
+
+\begin{importantbox}{Mejora central de DPM-Solver++}
+DPM-Solver++ cambia el objeto de integración de $\boldsymbol{\epsilon}_\theta$ a $\hat{\mathbf{x}}_0$. Aunque son matemáticamente equivalentes, en un número finito de pasos, las variaciones de $\hat{\mathbf{x}}_0$ suelen ser más suaves que las de $\boldsymbol{\epsilon}_\theta$, lo que resulta en menores errores de aproximación polinómica. Los experimentos muestran que DPM-Solver++ es significativamente mejor que el DPM-Solver original con menos pasos (por ejemplo, entre 10 y 15 pasos).
+\end{importantbox}
+
+\begin{knowledgebox}{¿Por qué la predicción de datos es más suave?}
+Intuitivamente, $\hat{\mathbf{x}}_0$ es una "estimación de la imagen limpia después de eliminar el ruido", que converge gradualmente a la imagen final durante el proceso de muestreo. En contraste, $\boldsymbol{\epsilon}_\theta$ (la estimación del ruido) cambia con mayor intensidad a lo largo de los pasos temporales, especialmente en las zonas donde el nivel de ruido varía rápidamente. Por lo tanto, realizar una aproximación polinómica de bajo orden para $\hat{\mathbf{x}}_0$ es más razonable.
+\end{knowledgebox}
+
+\subsection{Métodos multietapa (Multistep Method)}
+
+Además de los métodos de un solo paso (donde cada punto intermedio se calcula desde cero), DPM-Solver++ también soporta \textbf{métodos multietapa}: utiliza las predicciones de ruido ya calculadas en pasos anteriores para construir aproximaciones de orden superior, sin necesidad de evaluaciones adicionales de la red.
+
+Por ejemplo, el DPM-Solver++ multietapa de segundo orden:
+\begin{enumerate}
+    \item En el paso $i$, se tienen $\boldsymbol{\epsilon}_\theta(\mathbf{x}_{t_i}, t_i)$ y $\boldsymbol{\epsilon}_\theta(\mathbf{x}_{t_{i-1}}, t_{i-1})$.
+    \item Se utiliza una extrapolación lineal de estos dos valores para aproximar la variación del ruido dentro del intervalo.
+    \item Se sustituye en la fórmula de integral exponencial para calcular $\mathbf{x}_{t_{i+1}}$.
+\end{enumerate}
+
+\begin{importantbox}{Ventajas de los métodos multietapa}
+Los métodos multietapa requieren solo 1 evaluación de red por paso (NFE=1), pero pueden alcanzar una precisión de orden 2 e incluso 3. El costo implica la necesidad de almacenar el búfer de predicciones de ruido de los pasos anteriores. Dado un presupuesto fijo de pasos, los métodos multietapa suelen ser la opción con mejor relación calidad-precio.
+\end{importantbox}
+
+\subsection{Estrategias de programación de pasos temporales}
+
+El rendimiento de DPM-Solver también está influenciado por la estrategia de selección de los pasos temporales. Las estrategias comunes incluyen:
+
+\begin{itemize}
+    \item \textbf{Pasos temporales uniformes}: dividir equidistantemente en $t \in [0, T]$.
+    \item \textbf{Pasos $\lambda$ uniformes}: dividir equidistantemente en $\lambda \in [\lambda_T, \lambda_0]$ — esto suele ser mejor porque la uniformidad en el espacio $\lambda$ se alinea mejor con la distribución del error numérico de las EDO.
+    \item \textbf{Paso adaptable}: ajustar dinámicamente el paso según la estimación del error (como en los métodos DOPRI5).
+\end{itemize}
+
+\begin{warningbox}{Una mala selección de pasos temporales reducirá gravemente el rendimiento}
+Al dividir uniformemente en el espacio $t$, el tamaño del paso en las regiones de bajo ruido (cuando $t$ se acerca a 0) resulta excesivamente grande en el espacio $\lambda$, lo que concentra el error de aproximación en los últimos pasos —y esto es exactamente la etapa crítica donde se determinan los detalles de la imagen. Por lo tanto, dividir uniformemente en el espacio $\lambda$ suele ser una elección por defecto más segura.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+DPM-Solver++ mejora la precisión en un número finito de pasos al realizar aproximaciones polinómicas sobre la predicción de datos (en lugar de la predicción de ruido) e introduce métodos multietapa para lograr una precisión de orden superior con el costo de 1 NFE por paso. La programación de los pasos temporales (especialmente la división uniforme en el espacio $\lambda$) también tiene un impacto importante en el rendimiento final.
+\section{Resultados experimentales y análisis de rendimiento}
+
+\subsection{Comparación de FID}
+
+El ponente mostró una comparación de la distancia de Fréchet Inception (FID) entre distintos métodos de muestreo en conjuntos de datos como CIFAR-10:
+
+\begin{itemize}
+    \item \textbf{DDPM} (1000 pasos): FID aproximadamente 3$\sim$4 (línea base)
+    \item \textbf{DDIM} (100 pasos): FID con degradación notable, aproximadamente 5$\sim$8
+    \item \textbf{DDIM} (10 pasos): FID empeora considerablemente, aproximadamente 20+
+    \item \textbf{DPM-Solver-2} (15$\sim$20 pasos): FID cercano al nivel de DDPM en 1000 pasos
+    \item \textbf{DPM-Solver-3} (10$\sim$15 pasos): FID alcanza e incluso supera al de DDPM en 1000 pasos
+\end{itemize}
+
+\begin{importantbox}{Resultados clave}
+Utilizando DPM-Solver-3, solo se requieren 15 pasos para alcanzar la calidad de muestreo de DDPM en 1000 pasos. Esto implica una aceleración de aproximadamente \textbf{70 veces}, y \textbf{sin necesidad de volver a entrenar el modelo} —logrado completamente mediante un solucionador ODE más eficiente durante la fase de inferencia—. Este es también uno de los puntos destacados que el ponente enfatiza reiteradamente: distintas perspectivas matemáticas (SDE $\to$ ODE $\to$ estructura semilineal $\to$ integradores exponenciales) pueden traducirse directamente en mejoras del rendimiento práctico.
+\end{importantbox}
+
+\subsection{Comportamiento de convergencia según el orden}
+
+\begin{knowledgebox}{Relación entre orden y número de pasos}
+\begin{itemize}
+    \item Cuando hay suficientes pasos ($>50$), las diferencias entre los distintos DPM-Solver son menores, ya que el error inherente al método de Euler ya es muy pequeño.
+    \item Con pocos pasos ($10\sim 20$), la ventaja de los métodos de orden superior es significativa; el segundo orden mejora un orden de magnitud respecto al primero.
+    \item Con muy pocos pasos ($<10$), el tercer orden aún ofrece mejoras sobre el segundo, aunque con rendimientos decrecientes.
+    \item Por encima del tercer orden, el error de aproximación intrínseco de la red ($\boldsymbol{\epsilon}_\theta \neq \boldsymbol{\epsilon}^*$) se convierte en un cuello de botella.
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Relación con otros métodos de aceleración}
+
+DPM-Solver pertenece a los métodos de aceleración de muestreo \textbf{Training-free} (sin entrenamiento adicional). Complementarios a este enfoque están:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Método} & \textbf{¿Requiere entrenamiento?} & \textbf{Enfoque central} \\
+\midrule
+DPM-Solver/DDIM & No & Mejor discretización de ODE \\
+Destilación progresiva (Progressive Distillation) & Sí & Un modelo estudiante imita a un maestro multietapa \\
+Modelos de consistencia (Consistency Models) & Sí & Aprendizaje directo del mapeo ruido $\to$ datos \\
+Flow Matching + Euler & No & Trayectorias más rectas; el método de Euler resulta más efectivo \\
+\bottomrule
+\end{tabular}
+\caption{Comparación de distintas estrategias de aceleración de muestreo}
+\end{table}
+
+\begin{knowledgebox}{Complementariedad entre DPM-Solver y Flow Matching}
+Flow Matching entrena para que las trayectorias ODE sean más rectas (cercanas a lineales), permitiendo que el método de Euler funcione muy bien. Por su parte, DPM-Solver busca soluciones numéricas más eficientes sobre trayectorias ODE dadas (posiblemente curvas). Ambos enfoques son ortogonales y complementarios: si la trayectoria ODE ya es suficientemente recta, la ventaja de DPM-Solver disminuye; sin embargo, para las trayectorias curvas típicas de los modelos difusivos estándar, el valor de DPM-Solver es muy significativo.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Los experimentos demuestran que DPM-Solver comprime el número de pasos de muestreo desde 1000 hasta 10$\sim$20 sin volver a entrenar el modelo, logrando aceleraciones de varias decenas de veces. Su ventaja central radica en aprovechar la estructura semilineal de las ODEs de los modelos difusivos, algo que los solucionadores genéricos de ODE no pueden hacer.
+
+\section{Profundización teórica: una perspectiva unificada desde DDIM hasta DPM-Solver}
+
+\subsection{Re-derivación de la fórmula de muestreo de DDIM}
+
+El docente llevó a los estudiantes a expandir término por término los resultados de DPM-Solver-1 para verificar que son equivalentes a DDIM:
+
+Partiendo de la fórmula de DPM-Solver-1:
+$$\mathbf{x}_t = \frac{\alpha_t}{\alpha_s} \mathbf{x}_s - \sigma_t (e^{h} - 1) \boldsymbol{\epsilon}_\theta(\mathbf{x}_s, s)$$
+
+donde $h = \lambda_t - \lambda_s = \log\frac{\alpha_t}{\sigma_t} - \log\frac{\alpha_s}{\sigma_s} = \log\frac{\alpha_t \sigma_s}{\sigma_t \alpha_s}$.
+
+Por tanto, $e^h = \frac{\alpha_t \sigma_s}{\sigma_t \alpha_s}$ y $e^h - 1 = \frac{\alpha_t \sigma_s - \sigma_t \alpha_s}{\sigma_t \alpha_s}$.
+
+Sustituyendo:
+$$\mathbf{x}_t = \frac{\alpha_t}{\alpha_s} \mathbf{x}_s - \sigma_t \cdot \frac{\alpha_t \sigma_s - \sigma_t \alpha_s}{\sigma_t \alpha_s} \cdot \boldsymbol{\epsilon}_\theta(\mathbf{x}_s, s)$$
+$$= \frac{\alpha_t}{\alpha_s} \mathbf{x}_s - \frac{\alpha_t \sigma_s - \sigma_t \alpha_s}{\alpha_s} \cdot \boldsymbol{\epsilon}_\theta(\mathbf{x}_s, s)$$
+
+\begin{importantbox}{Perspectiva unificada}
+Esta es precisamente la fórmula de muestreo de DDIM bajo parametrización de tiempo continuo. A través de esta derivación, observamos las conexiones profundas entre diferentes formas de entender los modelos de difusión:
+\begin{enumerate}
+    \item DDPM $\to$ DDIM (Song et al., 2020): de muestreo estocástico a muestreo determinista
+    \item SDE $\to$ PF-ODE (Song et al., 2021): de proceso estocástico a flujo determinista
+    \item PF-ODE $\to$ integral exponencial (Lu et al., 2022): de método numérico general a solucionador estructurado
+\end{enumerate}
+DDIM se sitúa exactamente en la posición de aproximación de primer orden de la última línea: no fue "inventado", sino que es un producto natural de la estructura ODE de los modelos de difusión.
+\end{importantbox}
+
+\subsection{Desarrollo de Taylor en el espacio $\lambda$}
+
+El marco unificado de los métodos de varios órdenes de DPM-Solver puede entenderse mediante el desarrollo de Taylor de $\boldsymbol{\epsilon}_\theta$ en el espacio $\lambda$:
+$$\boldsymbol{\epsilon}_\theta(\lambda) = \boldsymbol{\epsilon}_\theta(\lambda_s) + (\lambda - \lambda_s) \boldsymbol{\epsilon}_\theta'(\lambda_s) + \frac{(\lambda - \lambda_s)^2}{2} \boldsymbol{\epsilon}_\theta''(\lambda_s) + \cdots$$
+
+\begin{itemize}
+    \item \textbf{Corte de orden cero} ($\boldsymbol{\epsilon}_\theta \approx$ constante) $\to$ DPM-Solver-1 = DDIM
+    \item \textbf{Corte de primer orden} ($\boldsymbol{\epsilon}_\theta \approx$ lineal) $\to$ DPM-Solver-2
+    \item \textbf{Corte de segundo orden} ($\boldsymbol{\epsilon}_\theta \approx$ cuadrático) $\to$ DPM-Solver-3
+\end{itemize}
+
+Las derivadas de alto orden $\boldsymbol{\epsilon}_\theta'(\lambda_s)$ no pueden obtenerse analíticamente (ya que $\boldsymbol{\epsilon}_\theta$ es una red neuronal), pero pueden aproximarse mediante diferencias finitas: esta es la razón por la cual es necesario evaluar adicionalmente la red en puntos intermedios.
+
+\subsection{Resumen de la sección}
+
+Desde la perspectiva del desarrollo de Taylor, los métodos de varios órdenes de DPM-Solver forman una familia natural de precisión creciente. Se revela la identidad de DDIM como caso particular de primer orden, mientras que los métodos de alto orden realizan un ajuste polinomial más refinado de la predicción de ruido en el espacio $\lambda$.
+
+\section{Guía de implementación}
+
+\subsection{Configuración recomendada}
+
+Basado en las discusiones del conferenciante y la experiencia práctica con DPM-Solver, a continuación se presentan las configuraciones recomendadas para diferentes escenarios:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Escenario} & \textbf{Método recomendado} & \textbf{Pasos} \\
+\midrule
+Vista rápida / Aplicación interactiva & DPM-Solver++(2M) & 10$\sim$15 \\
+Generación de alta calidad & DPM-Solver++(2M) & 20$\sim$25 \\
+Máxima calidad (sin considerar velocidad) & DPM-Solver++(3M) & 25$\sim$50 \\
+\bottomrule
+\end{tabular}
+\caption{Configuraciones recomendadas de DPM-Solver para diferentes escenarios (2M = método multietapa de segundo orden, 3M = método multietapa de tercer orden)}
+\end{table}
+
+\subsection{Puntos clave de implementación}
+
+\begin{warningbox}{Trampas comunes durante la implementación}
+\begin{enumerate}
+    \item \textbf{Estabilidad numérica}: $e^{\lambda}$ puede desbordarse cuando los valores de $\lambda$ son grandes; es necesario utilizar el cálculo en log-space.
+    \item \textbf{Dirección del paso temporal}: En los modelos de difusión, el proceso "hacia adelante" implica añadir ruido ($t: 0 \to T$) y el "hacia atrás", eliminarlo ($t: T \to 0$). La dirección de resolución de la EDO es hacia atrás; $h = \lambda_t - \lambda_s$ suele ser un valor\textbf{ positivo} (ya que $\lambda$ aumenta a medida que se elimina el ruido).
+    \item \textbf{Precalentamiento del método multietapa}: El método multietapa de segundo orden no tiene historial en cache durante el primer paso, por lo que debe retroceder al método unietapa de primer orden.
+    \item \textbf{Compatibilidad con Classifier-free Guidance}: La guía sin clasificador altera la EDO efectiva; DPM-Solver++ cuenta con una adaptación específica para esto.
+\end{enumerate}
+\end{warningbox}
+
+\begin{knowledgebox}{Integración de DPM-Solver en frameworks principales}
+DPM-Solver y DPM-Solver++ han sido ampliamente integrados en las bibliotecas principales de modelos de difusión:
+\begin{itemize}
+    \item \textbf{Diffusers} (Hugging Face): \texttt{DPMSolverMultistepScheduler}
+    \item \textbf{k-diffusion}: como uno de los muestreadores por defecto.
+    \item \textbf{Stable Diffusion WebUI}: disponible en el menú desplegable de Sampler.
+\end{itemize}
+En la práctica, generalmente solo es necesario cambiar el scheduler/muestreador a DPM-Solver++ para disfrutar del efecto de aceleración, sin necesidad de modificar el modelo en sí.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El método multietapa de segundo orden (2M) de DPM-Solver++ es la opción predeterminada óptima para aplicaciones prácticas, equilibrando velocidad y calidad. Al implementarlo, se deben prestar atención a detalles como la estabilidad numérica y el precalentamiento del método multietapa.
+
+
+\section{Síntesis y ampliación}
+
+\subsection{Repaso de los puntos clave}
+
+Esta clase gira en torno a "cómo resolver eficientemente la ODE inversa de los modelos de difusión", con las siguientes contribuciones principales:
+
+\begin{enumerate}
+    \item \textbf{Descubrimiento de una estructura semilineal}: El término derecho de la PF-ODE se puede descomponer en una parte lineal (que se puede resolver exactamente) y una parte no lineal (que requiere aproximación numérica), lo que sienta las bases para una resolución eficiente.
+    \item \textbf{Aplicación de integradores exponenciales}: Mediante el método del factor integrante, se trata la parte lineal con precisión, limitando la aproximación numérica únicamente a la integración de la predicción del ruido.
+    \item \textbf{Parametrización en el espacio $\lambda$}: Realizando un cambio de variable con log-SNR, se simplifica enormemente la expresión de la integral.
+    \item \textbf{Reinterpretación de DDIM}: DDIM es un caso particular de primer orden de DPM-Solver, no del método de Euler ingenuo.
+    \item \textbf{Construcción recursiva de métodos de alto orden}: Realizando una aproximación polinómica de alto orden a la predicción del ruido en el espacio $\lambda$, se obtiene un aumento significativo de precisión a cambio de pocas NFE adicionales.
+    \item \textbf{DPM-Solver++}: Se convierte la aproximación polinómica para realizar predicciones de datos, mejorando aún más la precisión con pasos limitados.
+\end{enumerate}
+
+\subsection{Una perspectiva más amplia}
+
+\begin{knowledgebox}{Por qué es tan importante la comprensión matemática}
+El ponente enfatizó repetidamente en el curso que todas estas aceleraciones se logran bajo el prerrequisito de \textbf{no modificar el modelo entrenado}. Esto refleja profundamente un principio: la comprensión matemática de la estructura del problema puede traducirse directamente en mejoras de rendimiento práctico. Desde DDPM hasta DDIM y luego DPM-Solver, cada paso representa una comprensión más profunda del mismo proceso de difusión.
+\end{knowledgebox}
+
+\subsection{Desarrollos futuros}
+
+Tras DPM-Solver, la aceleración del muestreo en modelos de difusión ha seguido evolucionando rápidamente:
+
+\begin{itemize}
+    \item \textbf{Modelos de consistencia} (Consistency Models, Song et al., 2023): Aprenden un mapeo directo desde el ruido hasta los datos, permitiendo la generación en un solo paso.
+    \item \textbf{Destilación progresiva} (Progressive Distillation, Salimans \& Ho, 2022): Comprime procesos de múltiples pasos en pocos pasos mediante destilación de conocimiento.
+    \item \textbf{Flow Matching} (Lipman et al., 2022): Diseña trayectorias de transporte más rectas, permitiendo que el método de Euler simple funcione de manera eficiente.
+    \item \textbf{Rectified Flow} (Liu et al., 2022): Hace que las trayectorias de la ODE tiendan a ser rectas mediante operaciones de reflujo.
+\end{itemize}
+
+\subsection{Lecturas adicionales}
+
+\begin{itemize}
+    \item Lu, C., et al. (2022). \textit{DPM-Solver: A Fast ODE Solver for Diffusion Probabilistic Model Sampling in Around 10 Steps}. NeurIPS 2022.
+    \item Lu, C., et al. (2022). \textit{DPM-Solver++: Fast Solver for Guided Sampling of Diffusion Probabilistic Models}. arXiv:2211.01095.
+    \item Song, J., et al. (2020). \textit{Denoising Diffusion Implicit Models}. ICLR 2021.
+    \item Song, Y., et al. (2021). \textit{Score-Based Generative Modeling through Stochastic Differential Equations}. ICLR 2021.
+    \item Karras, T., et al. (2022). \textit{Elucidating the Design Space of Diffusion-Based Generative Models}. NeurIPS 2022.
+\end{itemize}
+
+%% --- Fin del contenido --- %%
+
+\end{document}
