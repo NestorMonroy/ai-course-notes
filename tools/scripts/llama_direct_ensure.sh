@@ -22,9 +22,10 @@
 # =============================================================================
 set -uo pipefail
 
-# El carril de esta VM (ES-A): los lotes 27–33 son de ES-B y ES-C
-# (es-mx-n-vm-analysis-20261008T015000), así que el lazo no pasa del 26.
-from=26 to=26
+# El carril de esta VM (ES-A): el lote 26 quedó asentado el 2026-10-09 y ES-B
+# y ES-C entregaron los lotes 27–33 sin modelo (es-mx-n-vm-analysis-20261008T015000,
+# «Auditoría y consolidación»), así que el 9B local los toma.
+from=27 to=33
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --from) from="$2"; shift 2 ;;

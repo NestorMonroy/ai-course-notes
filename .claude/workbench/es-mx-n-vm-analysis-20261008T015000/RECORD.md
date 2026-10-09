@@ -204,3 +204,14 @@ declara aquí.
 Con eso, los lotes 27–33 siguen sin traducir y el único carril local que traduce es el de
 ES-A (lote 26). Una VM trabajadora queda útil sólo con acceso a thyrox y el 9B traído sin
 429 (autenticación de Docker Hub o espejo).
+
+## Lote 26 asentado; ES-A toma los lotes 27–33 con el 9B local (2026-10-09T19:39Z)
+
+- Lote 26 kaist-cs492d: 164/164 fragmentos traducidos por `qwen35-9b-es-mx`, 15/15 notas
+  ensambladas. Salió `Exitval 3` (tope de 4 iteraciones con señales abiertas: 37 filas en
+  `triage.tsv` que piden juicio, no otra vuelta del modelo) y quedó asentado en
+  `.claude/cache/ola/llama-direct.settled`, que impide relanzarlo cada cinco minutos.
+- Lotes 27–33 (1372 fragmentos, preparados por ES-B y ES-C sin modelo): los toma este
+  carril, sólo con el modelo local. `llama_direct_ensure.sh` cambia su tramo por defecto a
+  27–33 para que un reinicio de la VM lo relance ahí. Ningún carril remoto vivo (medido:
+  0 procesos de `pool_proxy` o `headless-pool`).
