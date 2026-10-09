@@ -1,0 +1,89 @@
+\section{Rectified Flow y trayectorias rectas}
+
+Esta sección es la parte más importante de esta clase desde el punto de vista de su aplicación; el conferenciante detalló exhaustivamente las ideas de Rectified Flow (flujo corregido), sus métodos de entrenamiento y la técnica para enderezar las trayectorias mediante Reflow.
+
+\subsection{Definición de Rectified Flow}
+
+Rectified Flow es un caso especial de Flow Matching, donde el mapeo del flujo condicional se define como una \textbf{interpolación lineal} entre $\mathbf{x}_0$ y $\mathbf{x}_1$:
+
+$$\psi_t(\mathbf{x}_0 \mid \mathbf{x}_1) = (1 - t)\, \mathbf{x}_0 + t\, \mathbf{x}_1$$
+
+El campo vectorial condicional (velocidad) correspondiente es extremadamente conciso:
+
+$$u_t(\mathbf{x}_t \mid \mathbf{x}_0, \mathbf{x}_1) = \mathbf{x}_1 - \mathbf{x}_0$$
+
+Es decir: la velocidad condicional es constante y su dirección siempre apunta en línea recta desde $\mathbf{x}_0$ hacia $\mathbf{x}_1$.
+
+\begin{importantbox}{Proceso de entrenamiento de Rectified Flow}
+El proceso de entrenamiento de Rectified Flow es extremadamente conciso:
+\begin{enumerate}
+    \item Muestrear del distribución de datos $\mathbf{x}_1 \sim p_{\text{data}}$
+    \item Muestrear de la distribución de referencia $\mathbf{x}_0 \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$
+    \item Muestrear uniformemente el tiempo $t \sim \mathcal{U}(0, 1)$
+    \item Calcular el punto intermedio $\mathbf{x}_t = (1-t)\mathbf{x}_0 + t\mathbf{x}_1$
+    \item Calcular la velocidad objetivo $v^* = \mathbf{x}_1 - \mathbf{x}_0$
+    \item Minimizar $\mathcal{L} = \| v_\theta(\mathbf{x}_t, t) - v^* \|^2$
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Trayectorias condicionales vs.\ trayectorias marginales}
+
+Este es el punto clave para comprender las limitaciones de Rectified Flow. Aunque cada par $(\mathbf{x}_0, \mathbf{x}_1)$ tiene una \textbf{trayectoria condicional} estrictamente recta, las trayectorias generadas por el \textbf{campo vectorial marginal} que produce el modelo después del entrenamiento generalmente \textbf{no son} rectas.
+
+\begin{warningbox}{Las líneas rectas condicionales no equivalen a líneas rectas marginales}
+Consideremos un ejemplo bidimensional: la distribución de origen tiene dos grupos gaussianos, y la distribución objetivo también tiene dos grupos gaussianos. La trayectoria condicional entre cada par $(\mathbf{x}_0, \mathbf{x}_1)$ es efectivamente una línea recta; sin embargo, dado que $\mathbf{x}_0$ y $\mathbf{x}_1$ se emparejan de manera \textbf{aleatoria e independiente}, en ciertos puntos intermedios $\mathbf{x}_t$, la velocidad condicional podría apuntar hacia direcciones muy diferentes (hacia arriba o hacia abajo). Después del entrenamiento, la red neuronal devuelve el \textbf{promedio} (esperanza) de estas velocidades condicionales; como resultado, puede que ni apunte hacia arriba ni hacia abajo, sino hacia una dirección promedio entre ambas. Por lo tanto, la trayectoria marginal se curva.
+\end{warningbox}
+
+**Consecuencias de las trayectorias curvas**: si la trayectoria marginal es curva, se requieren suficientes pasos temporales al resolver la EDO para rastrear con precisión la trayectoria. Cuantos menos pasos, mayor será el error de discretización y peor la calidad generada. En el caso ideal, si todas las trayectorias marginales fueran rectas, bastaría con un \textbf{único paso} para ir directamente de $\mathbf{x}_0$ a $\mathbf{x}_1$.
+
+\subsection{Reflow: enderezar las trayectorias mediante ajuste fino}
+
+Para hacer que las trayectorias marginales se acerquen más a líneas rectas, Liu et al.\ (2023) propusieron la técnica de \textbf{Reflow} (reflujo):
+
+\begin{enumerate}
+    \item \textbf{Fase 1}: Entrenar normalmente un modelo de Rectified Flow (1-Rectified Flow)
+    \item \textbf{Generar datos emparejados}: Usando el modelo entrenado, partir de $\mathbf{x}_0 \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$ y generar $\mathbf{x}_1$ resolviendo completamente la EDO; registrar los pares $(\mathbf{x}_0, \mathbf{x}_1)$
+    \item \textbf{Fase 2}: Volver a entrenar el modelo con estos datos emparejados (2-Rectified Flow)
+    \item Se puede continuar iterando: generar nuevos pares con 2-Rectified Flow y entrenar 3-Rectified Flow, y así sucesivamente
+\end{enumerate}
+
+\begin{importantbox}{¿Por qué funciona Reflow?}
+La intuición central de por qué Reflow logra enderezar las trayectorias es:
+\begin{itemize}
+    \item En la fase 1, $\mathbf{x}_0$ y $\mathbf{x}_1$ son emparejamientos aleatorios muestreados de manera \textbf{independente}, sin relación correspondiente
+    \item Después del entrenamiento en la fase 1, el modelo ya ha aprendido un mapeo (curvo) de $\mathbf{x}_0$ a $\mathbf{x}_1$
+    \item En la fase de Reflow, los pares $(\mathbf{x}_0, \mathbf{x}_1)$ ya no son aleatorios; provienen de un \textbf{mapeo determinista} definido por el modelo. Ya existe una relación correspondiente razonable entre estos pares
+    \item Volver a entrenar con estos ``pares significativos'' reduce drásticamente las intersecciones y conflictos de las trayectorias, haciendo que la trayectoria marginal se enderece naturalmente
+\end{itemize}
+\end{importantbox}
+
+Los experimentos demuestran:
+\begin{itemize}
+    \item \textbf{1-Rectified Flow}: la trayectoria marginal muestra una curvatura notable
+    \item \textbf{2-Rectified Flow}: la trayectoria se endereza significativamente
+    \item \textbf{3-Rectified Flow}: la trayectoria es casi una línea recta
+\end{itemize}
+
+\subsection{Trayectorias rectas y generación con pocos pasos}
+
+La ventaja directa de las trayectorias rectas es que permite realizar la generación con un número \textbf{muy reducido} de pasos de resolución de EDO:
+
+\begin{itemize}
+    \item Si la trayectoria es una línea recta perfecta, basta predecir una vez la velocidad $v_\theta(\mathbf{x}_0, 0)$ en el punto inicial $\mathbf{x}_0$ y avanzar en esa dirección hasta el final; esto constituye la \textbf{generación de un solo paso}
+    \item Incluso si la trayectoria se acerca a ser recta pero no es perfecta, una resolución de Euler con 2--4 pasos obtiene resultados de alta calidad
+    \item Comparación: los modelos de difusión estándar suelen requerir 20--100 pasos para obtener una calidad equivalente
+\end{itemize}
+
+\begin{knowledgebox}{De GAN a difusión y luego a modelos de flujo de un solo paso}
+El conferenciante señaló un ciclo interesante en el desarrollo de los modelos generativos:
+\begin{itemize}
+    \item \textbf{Era de GAN/VAE}: generación de un solo paso, rápida pero limitada en calidad/diversidad
+    \item \textbf{Era de los modelos de difusión}: iteración multietapa, con una mejora sustancial en la calidad a costa de la velocidad
+    \item \textbf{Rectified Flow + Reflow}: mediante el ajuste fino se regresa a la generación de un solo paso o con pocos pasos, manteniendo al mismo tiempo una alta calidad
+\end{itemize}
+Se trata de una vía de desarrollo que asciende en forma de ``hélice''.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Rectified Flow define el mapeo del flujo mediante interpolación lineal, lo que hace que el entrenamiento sea extremadamente conciso. Sin embargo, los emparejamientos aleatorios provocan que la trayectoria marginal se curve, requiriendo múltiples pasos de resolución de EDO. La técnica Reflow logra ``enderezar'' eficazmente la trayectoria marginal utilizando datos generados por el propio modelo para el ajuste fino, lo que posibilita una generación con pocos pasos e incluso con un solo paso.
