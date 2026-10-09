@@ -49,6 +49,11 @@ if [[ ! -s "$WAVE/batches.txt" ]]; then
     exit 2
 fi
 
+# Una ola anterior que murió a mitad (reinicio del anfitrión) deja su joblog con
+# la cabecera sola: Parallel escribe la fila al terminar el trabajo. Se registra
+# en su `interrupted.tsv` antes de lanzar esta.
+python3 "$(dirname "$LOOP")/wave_interruptions.py" "$(dirname "$WAVE")" "$WAVE"
+
 # Un lote que choca con el límite de la cuenta (`advance` sale con 5) deja la
 # marca `limite`, y los que aún no arrancan salen con 5 sin llamar al modelo:
 # en la ola 2 los siete lotes siguieron lanzando `claude -p` contra el límite.
