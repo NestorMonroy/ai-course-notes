@@ -1,0 +1,71 @@
+\section{Introducción y repaso de la clase}
+
+Esta es la octava clase del curso KAIST CS492D (Modelos de difusión y modelos de flujo), cuyo tema central es \textbf{cómo resolver eficientemente el proceso inverso ODE de los modelos de difusión}. El conferenciante Minhyuk Sung repuso primero los marcos de DDPM, DDIM y tiempo continuo SDE/ODE introducidos en clases anteriores, para luego plantear la pregunta clave de esta sesión: dado que el proceso inverso de un modelo de difusión puede describirse equivalentemente como una ecuación diferencial ordinaria (ODE), ¿podemos aprovechar la estructura especial de las ODE para diseñar solucionadores más eficientes y así obtener imágenes de alta calidad con muy pocos pasos de muestreo?
+
+\begin{knowledgebox}{Resumen de conocimientos previos}
+Para comprender esta clase se requieren los siguientes conceptos previos:
+\begin{itemize}
+    \item \textbf{DDPM} (Denoising Diffusion Probabilistic Models): modelo de difusión discreto basado en cadenas de Markov, que típicamente requiere $T=1000$ pasos para completar el muestreo.
+    \item \textbf{DDIM} (Denoising Diffusion Implicit Models): variante de muestreo determinista de DDPM, que permite saltar en subsecuencias durante el muestreo.
+    \item \textbf{Marco SDE/ODE}: formulación en tiempo continuo propuesta por Song et al., que describe el proceso de difusión como una ecuación diferencial estocástica (SDE) y proporciona una ODE equivalente de flujo de probabilidad (Probability Flow ODE).
+    \item \textbf{Score function}: $\nabla_{\mathbf{x}} \log p_t(\mathbf{x})$, calculable mediante una red de predicción de ruido $\epsilon_\theta$.
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Del DDPM al marco de tiempo continuo}
+
+En el DDPM, el proceso de difusión hacia adelante se define como:
+$$q(\mathbf{x}_t | \mathbf{x}_0) = \mathcal{N}(\mathbf{x}_t; \sqrt{\bar{\alpha}_t}\, \mathbf{x}_0, (1 - \bar{\alpha}_t)\, \mathbf{I})$$
+
+Donde:
+\begin{itemize}
+    \item $\bar{\alpha}_t = \prod_{s=1}^{t} (1 - \beta_s)$, es la tasa acumulativa de retención de señal.
+    \item $\beta_t$ es el parámetro de programación del ruido para cada paso.
+\end{itemize}
+
+En un marco más general bajo modelos de difusión variacional (Variational Diffusion Model, VDM), la distribución de salto hacia adelante se puede reescribir como:
+$$q(\mathbf{x}_t | \mathbf{x}_0) = \mathcal{N}(\mathbf{x}_t; \alpha_t \mathbf{x}_0, \sigma_t^2 \mathbf{I})$$
+
+\begin{warningbox}{Advertencia sobre confusión de símbolos}
+La definición de $\alpha$ varía entre diferentes artículos. En el artículo original de DDPM, $\alpha_t = 1 - \beta_t$; mientras que en los marcos VDM/DPM-Solver, $\alpha_t$ corresponde directamente al coeficiente de escala de señal $\sqrt{\bar{\alpha}_t}$. Al leer la literatura, es crucial prestar atención a las convenciones simbólicas del contexto para evitar confusiones.
+\end{warningbox}
+
+Muestrear $\mathbf{x}_t$ equivale a realizar una interpolación lineal entre los datos limpios $\mathbf{x}_0$ y el ruido gaussiano estándar $\boldsymbol{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$:
+$$\mathbf{x}_t = \alpha_t \mathbf{x}_0 + \sigma_t \boldsymbol{\epsilon}$$
+
+La definición de este marco requiere cumplir únicamente una restricción: la relación señal-ruido (Signal-to-Noise Ratio, SNR) $\frac{\alpha_t^2}{\sigma_t^2}$ debe decrecer monótonamente respecto al tiempo $t$; es decir, con el paso del tiempo, el ruido va tomando predominancia hasta que $\mathbf{x}_T$ se aproxima a una distribución gaussiana estándar.
+
+\subsection{Descripción dual de SDE y ODE}
+
+En el dominio de tiempo continuo, el proceso de difusión hacia adelante puede describirse mediante una SDE:
+$$d\mathbf{x} = f(t)\, \mathbf{x}\, dt + g(t)\, d\mathbf{w}$$
+
+Donde $f(t)$ es el coeficiente de deriva, $g(t)$ es el coeficiente de difusión y $\mathbf{w}$ es un proceso de Wiener estándar. Dada una SDE hacia adelante, la SDE inversa en tiempo correspondiente es:
+$$d\mathbf{x} = \left[f(t)\, \mathbf{x} - g(t)^2 \nabla_{\mathbf{x}} \log p_t(\mathbf{x})\right] dt + g(t)\, d\bar{\mathbf{w}}$$
+
+\begin{importantbox}{ODE de flujo de probabilidad (Probability Flow ODE)}
+Anderson (1982) demostró que para cualquier SDE inversa en el tiempo, existe una ODE determinista tal que ambas son completamente consistentes en la distribución marginal $p_t(\mathbf{x})$:
+$$\frac{d\mathbf{x}}{dt} = f(t)\, \mathbf{x} - \frac{1}{2} g(t)^2 \nabla_{\mathbf{x}} \log p_t(\mathbf{x})$$
+Esta es la ODE de flujo de probabilidad (PF-ODE). Dado que no posee un término estocástico de ruido, para un mismo punto inicial $\mathbf{x}_T$, la solución de la ODE es determinista. Esto sienta las bases para acelerar el muestreo mediante solucionadores de ODE.
+\end{importantbox}
+
+Utilizando la red de predicción de ruido $\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t) \approx -\sigma_t \nabla_{\mathbf{x}} \log p_t(\mathbf{x})$, se puede reformular la PF-ODE para que solo incluya $\boldsymbol{\epsilon}_\theta$.
+
+\subsection{Introducción de la función $\lambda$}
+
+Para simplificar las derivaciones posteriores, se define la función semiválida del log-SNR:
+$$\lambda_t = \frac{1}{2} \log \frac{\alpha_t^2}{\sigma_t^2} = \log \frac{\alpha_t}{\sigma_t}$$
+
+\begin{itemize}
+    \item $\lambda_t$ es una función estrictamente monótonamente decreciente de $t$ (ya que el SNR decrece monótonamente).
+    \item Mediante $\lambda_t$, muchas expresiones pueden simplificarse considerablemente.
+    \item $e^{\lambda_t} = \frac{\alpha_t}{\sigma_t}$, $e^{-\lambda_t} = \frac{\sigma_t}{\alpha_t}$.
+\end{itemize}
+
+Tras introducir $\lambda_t$, la función de deriva $f(t)$ de la SDE hacia adelante puede expresarse de manera más concisa en términos de $\lambda_t$, y los cambios de variables de integración posteriores se centrarán en $\lambda$.
+
+\subsection{Resumen de la sección}
+
+Esta sección establece una perspectiva unificada que va desde el DDPM/DDIM discreto hasta las SDE/ODE de tiempo continuo. Los puntos clave son: (1) el proceso inverso de los modelos de difusión puede expresarse equivalentemente como una ODE determinista; (2) dicha ODE posee una estructura semilineal, cuya parte lineal puede resolverse analíticamente; (3) la variable $\lambda_t$ proporciona una parametrización más conveniente.
+
+\end{ES>>>
