@@ -1,0 +1,114 @@
+\section{Guía mediante la función de recompensa: derivación en estilo RL}
+
+\subsection{Planteamiento del problema: muestreo con recompensa}
+
+Supongamos que tenemos un modelo de difusión preentrenado cuya distribución aprendida de los datos es $p_0(x_0)$. Además, disponemos de una función de recompensa continua y diferenciable $r(x_0)$; cuando la salida $x_0$ se ajusta más a las preferencias del usuario, el valor de $r(x_0)$ es mayor.
+
+\begin{importantbox}{El problema inverso es un caso particular de la guía mediante función de recompensa}
+Todos los problemas inversos pueden considerarse como casos particulares de la guía mediante función de recompensa. Basta con definir:
+$$r(x_0) = -\| y - \mathcal{A}(x_0) \|^2$$
+Es decir, utilizar el negativo de la pérdida L2 como función de recompensa. Cuanto más cerca esté la salida $x_0$ de la observación $y$ tras pasar por la transformación $\mathcal{A}$, mayor será la recompensa.
+\end{importantbox}
+
+El alcance de la guía mediante función de recompensa va mucho más allá de los problemas inversos. Por ejemplo:
+
+\begin{itemize}
+    \item \textbf{Generación de movimiento}: definir una función de recompensa para que las trayectorias generadas eviten colisiones con objetos en el escenario
+    \item \textbf{Generación de moléculas}: definir una función de recompensa para que las estructuras moleculares generadas posean propiedades de acoplamiento específicas
+    \item \textbf{Cualquier modelo discriminador diferenciable}: siempre que exista un modelo de puntuación diferenciable, se puede utilizar su salida como función de recompensa
+\end{itemize}
+
+\subsection{Maximización de la recompensa bajo restricción KL}
+
+Queremos definir una nueva distribución de datos $p_0^*(x_0)$ tal que las muestras $x_0$ extraídas de ella no solo tengan alta recompensa, sino que también se desvíen poco de la distribución original. Formalizado como el siguiente problema de optimización:
+
+$$p_0^* = \arg\max_{p} \; \mathbb{E}_{x_0 \sim p}[r(x_0)] - \frac{1}{\beta} D_{\mathrm{KL}}(p \| p_0)$$
+
+Donde $\beta > 0$ controla el equilibrio entre la maximización de la recompensa y la desviación de la distribución:
+\begin{itemize}
+    \item A mayor $\beta$, se prioriza más la maximización de la recompensa, pero podrían generarse muestras poco realistas
+    \item A menor $\beta$, la distribución se acerca más a la original, aunque la recompensa podría ser insuficientemente alta
+\end{itemize}
+
+\begin{knowledgebox}{Conexión con RLHF}
+Esta fórmula tiene una forma idéntica a la del RLHF (Reinforcement Learning from Human Feedback) en el ámbito de los LLM. En RLHF, $p_0$ es la distribución del modelo SFT, $r$ es la salida del modelo de recompensa y $\beta$ es el coeficiente de penalización KL. La guía en tiempo de inferencia para modelos de difusión y el RLHF para LLM resuelven esencialmente el mismo problema matemático.
+\end{knowledgebox}
+
+\subsection{Solución cerrada de la distribución óptima}
+
+El problema de optimización anterior tiene solución cerrada. Mediante multiplicadores de Lagrange y cálculo variacional, se puede demostrar que la distribución óptima es:
+
+$$p_0^*(x_0) = \frac{1}{Z_0} p_0(x_0) \exp(\beta \cdot r(x_0))$$
+
+Donde $Z_0 = \int p_0(x_0) \exp(\beta \cdot r(x_0)) dx_0$ es la constante de normalización (función de partición). Se observa que la nueva distribución realiza un reponderado sobre la distribución original según $\exp(\beta \cdot r(x_0))$: la densidad de probabilidad en las regiones de alta recompensa se amplifica, mientras que la de baja recompensa se comprime.
+
+\begin{knowledgebox}{Perspectiva desde los modelos de energía}
+La forma de $p_0^*(x_0)$ corresponde exactamente a un modelo basado en energía (Energy-Based Model), cuya función de energía es:
+$$E(x_0) = -\log p_0(x_0) - \beta \cdot r(x_0)$$
+La distribución de datos original proporciona la ``energía previa'', mientras que la función de recompensa aporta la ``energía condicional''. $\beta$ controla el peso relativo entre ambas, similar al parámetro de temperatura inversa en la física estadística. Cuando $\beta \to 0$, $p_0^* \to p_0$ (retorno a la distribución original); cuando $\beta \to \infty$, $p_0^*$ se concentra alrededor del punto con mayor recompensa.
+\end{knowledgebox}
+
+\subsection{Distribución en pasos intermedios y función de valor óptima}
+
+\begin{importantbox}{Desafío central: los pasos intermedios}
+El proceso generativo de los modelos de difusión implica un desruido multietapa desde $x_T$ hasta $x_0$. Para muestrear de $p_0^*$, no solo necesitamos conocer $p_0^*$, sino también la distribución en cada paso intermedio $p_t^*(x_t)$. Esto requiere definir y calcular la función de valor óptima $V^*(x_t, t)$.
+\end{importantbox}
+
+Análogamente al papel que desempeña la función de recompensa $r(x_0)$ en la distribución final, la distribución en los pasos intermedios se puede expresar como:
+
+$$p_t^*(x_t) = \frac{1}{Z_t} p_t(x_t) \exp(\beta \cdot V^*(x_t, t))$$
+
+Donde $V^*(x_t, t)$ es la función de valor óptima (optimal value function), que representa la recompensa futura esperada obtenida partiendo desde $x_t$ y siguiendo una estrategia óptima.
+
+\begin{warningbox}{La función de valor no tiene solución analítica}
+A diferencia de la distribución final, la función de valor óptima en los pasos intermedios $V^*(x_t, t)$ no posee forma analítica. Esto se debe a que implica calcular la esperanza sobre todas las trayectorias futuras posibles, lo cual no puede realizarse directamente. Por tanto, es necesario introducir aproximaciones.
+\end{warningbox}
+
+\subsection{Aproximación de Tweedie para la función de valor}
+
+Bajo inspiración en el pensamiento de la aproximación de Tweedie utilizado en DPS, se puede aproximar la función de valor óptima como:
+
+$$V^*(x_t, t) \approx r(\hat{x}_0(x_t))$$
+
+Es decir, sustituir la función de recompensa con la estimación de Tweedie de $x_0$ en el momento actual. El significado de esta aproximación es que la ``recompensa futura esperada'' en los pasos intermedios puede reemplazarse por la ``recompensa instantánea de la estimación óptima actual''.
+
+Aunque se trata de una aproximación bastante gruesa, posee un valor práctico importante:
+
+\begin{itemize}
+    \item No requiere entrenar una red neuronal de valor adicional
+    \item Solo es necesario utilizar el modelo de difusión existente (que proporciona la estimación de Tweedie) y la función de recompensa
+    \item El costo computacional se reduce a una sola propagación hacia adelante (estimación de Tweedie) + una evaluación de la función de recompensa + una propagación hacia atrás (cálculo del gradiente)
+\end{itemize}
+
+El ponente también mencionó que, teóricamente, podría entrenarse una red neuronal dedicada para aprender la función de valor óptima $V^*(x_t, t)$, pero este método suele ser poco estable en la práctica. Por ello, aunque la aproximación de Tweedie es sencilla, constituye actualmente la solución más práctica.
+
+\begin{warningbox}{Niveles de aproximación de la función de valor}
+De lo exacto a lo grueso, existen las siguientes formas de aproximar la función de valor:
+\begin{enumerate}
+    \item \textbf{Cálculo exacto}: requiere calcular la esperanza sobre todas las trayectorias futuras; el cálculo no es factible
+    \item \textbf{Entrenamiento de una red de valores}: entrenar $V_\phi(x_t, t)$ para aproximar $V^*$; requiere grandes cantidades de datos de entrenamiento y tiempo, además de que puede ser inestable
+    \item \textbf{Estimación de Monte Carlo}: muestrear múltiples trayectorias partiendo desde $x_t$ y tomar la recompensa promedio. Mayor costo computacional pero más preciso
+    \item \textbf{Estimación en un solo paso de Tweedie}: $V^*(x_t, t) \approx r(\hat{x}_0(x_t))$, la más simple pero con el mayor error
+\end{enumerate}
+DPS y la mayoría de los métodos de guía en tiempo de inferencia adoptan la cuarta opción, ya que no requiere ningún entrenamiento adicional.
+\end{warningbox}
+
+\subsection{Obtención de la fórmula equivalente a DPS}
+
+Bajo dicha aproximación, el gradiente de la función puntual de la nueva distribución se convierte en:
+
+$$\nabla_{x_t} \log p_t^*(x_t) = \underbrace{\nabla_{x_t} \log p_t(x_t)}_{\text{gradiente puntual original}} + \underbrace{\beta \cdot \nabla_{x_t} r(\hat{x}_0(x_t))}_{\text{gradiente de la recompensa futura esperada}}$$
+
+\begin{importantbox}{Interpretación RL de DPS}
+Al tomar la función de recompensa como $r(x_0) = -\| y - \mathcal{A}(x_0) \|^2$, la expresión anterior se reduce inmediatamente a la fórmula de DPS. Por tanto, DPS puede entenderse desde dos perspectivas:
+\begin{itemize}
+    \item \textbf{Perspectiva bayesiana}: puntual condicional = puntual marginal + gradiente de verosimilitud condicional
+    \item \textbf{Perspectiva RL}: puntual de la estrategia óptima = puntual de la estrategia original + gradiente de la recompensa futura esperada
+\end{itemize}
+Ambas son matemáticamente equivalentes, pero la perspectiva RL ofrece un marco más general, donde la función de recompensa no se limita a los problemas inversos.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Mediante la maximización de la recompensa con restricción KL, podemos definir una nueva distribución objetivo. Una vez que estimamos la función de valor óptima mediante la aproximación de Tweedie, se puede derivar una fórmula de guía completamente equivalente a DPS. La perspectiva RL proporciona un marco teórico más general para la guía en tiempo de inferencia.
+
