@@ -1,0 +1,72 @@
+\section{LoRA: adaptación de rango bajo}
+
+\subsection{El dilema del ajuste fino con todos los parámetros}
+
+Cuando deseamos adaptar un modelo de difusión preentrenado a un estilo específico o a un sujeto particular (como generar fotografías de una persona concreta), el método más directo es ajustar finamente todos los parámetros del modelo. Sin embargo, esto plantea problemas graves:
+
+\begin{itemize}
+    \item El U-Net de Stable Diffusion tiene aproximadamente 860M de parámetros; el ajuste fino con todos los parámetros requiere una gran cantidad de memoria gráfica (VRAM).
+    \item Ajustar finamente un modelo grande con pocos datos (por ejemplo, 5--20 imágenes) provoca fácilmente \textbf{sobreajuste}.
+    \item Cada versión personalizada necesita almacenar los pesos completos del modelo (varios GB), lo que incrementa el costo de despliegue.
+    \item El ajuste fino puede dañar las capacidades generales aprendidas por el modelo preentrenado (\textbf{olvido catastrófico}).
+\end{itemize}
+
+\subsection{La idea central de LoRA}
+
+LoRA (Low-Rank Adaptation) se basa en una hipótesis clave: \textbf{las actualizaciones de peso provocadas por el ajuste fino residen en un subespacio de rango bajo}.
+
+Para una matriz de pesos $W_0 \in \mathbb{R}^{d \times k}$ dentro del modelo preentrenado, LoRA descompone la actualización en el producto de dos matrices de rango bajo:
+
+$$
+W = W_0 + \Delta W = W_0 + B \cdot A
+$$
+
+donde $B \in \mathbb{R}^{d \times r}$, $A \in \mathbb{R}^{r \times k}$ y $r \ll \min(d, k)$ es el rango.
+
+\begin{importantbox}{Eficiencia de parámetros de LoRA}
+Tomando como ejemplo una matriz de pesos de $1024 \times 1024$:
+\begin{itemize}
+    \item Ajuste fino con todos los parámetros: $1024 \times 1024 = 1,048,576$ parámetros entrenables.
+    \item LoRA ($r=4$): $1024 \times 4 + 4 \times 1024 = 8,192$ parámetros entrenables.
+    \item Reducción de parámetros: \textbf{128 veces}.
+\end{itemize}
+En los modelos de difusión, generalmente se aplica LoRA solo a las matrices $W_Q$, $W_K$, $W_V$, $W_O$ de las capas de atención, reduciendo aún más el número total de parámetros entrenables.
+\end{importantbox}
+
+\subsection{Aplicación de LoRA en modelos de difusión}
+
+Estrategia de inicialización y entrenamiento de LoRA:
+
+\begin{itemize}
+    \item $A$ se inicializa con ruido gaussiano aleatorio, mientras que $B$ se inicializa como una matriz nula.
+    \item Al comenzar el entrenamiento, $\Delta W = BA = 0$, garantizando que la salida inicial sea consistente con el modelo preentrenado.
+    \item Solo se entrena $A$ y $B$, manteniendo congelados todos los parámetros originales $W_0$.
+    \item Durante la inferencia, $\Delta W$ puede combinarse de nuevo en $W_0$, sin \textbf{aumentar ningún retraso de inferencia}.
+\end{itemize}
+
+Escenarios de uso típicos:
+\begin{itemize}
+    \item \textbf{Adaptación de estilo}: entrenar un LoRA con obras de un artista específico para generar imágenes en ese estilo.
+    \item \textbf{Personalización de sujetos} (DreamBooth + LoRA): entrenar con varias fotos de un objeto o persona específica para generar nuevas imágenes de ese sujeto.
+    \item \textbf{Inyección de conceptos}: enseñar al modelo a comprender nuevos conceptos visuales (como el logo de una marca específica).
+\end{itemize}
+
+\begin{warningbox}{Selección del rango de LoRA}
+El rango $r$ es el hiperparámetro más crítico de LoRA:
+\begin{itemize}
+    \item Si $r$ es demasiado pequeño (por ejemplo, 1--2): la capacidad expresiva es insuficiente y el resultado del ajuste fino es pobre.
+    \item Si $r$ es demasiado grande (por ejemplo, 128+): se acerca al ajuste fino con todos los parámetros, perdiendo la ventaja de eficiencia de parámetros.
+    \item Recomendación práctica: para modelos de difusión, $r = 4 \sim 32$ suele ser una buena elección.
+    \item Para tareas de adaptación de estilo, $r$ puede ser más pequeño (4--8); para tareas con condiciones complejas, $r$ necesita ser mayor (16--32).
+\end{itemize}
+\end{warningbox}
+
+\begin{knowledgebox}{Combinabilidad de LoRA}
+Una característica elegante de LoRA es su \textbf{combinabilidad}: múltiples módulos LoRA pueden combinarse dinámicamente durante la inferencia. Por ejemplo, un LoRA controla el estilo y otro controla el sujeto; ambos pueden cargarse simultáneamente y mezclar sus pesos para lograr "un artista específico pintando a una persona específica". Esto convierte a LoRA en la base de un ecosistema personalizado impulsado por la comunidad —existen miles de modelos LoRA en plataformas como Civitai—.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+LoRA reduce drásticamente el número de parámetros y la carga computacional requerida para el ajuste fino mediante descomposición de rango bajo, haciendo posible adaptar modelos de difusión a gran escala con pocos datos en GPUs de nivel consumidor. Su estrategia de inicialización nula (similar en espíritu a ControlNet) garantiza que el ajuste fino no degrade las capacidades preentrenadas, mientras que la combinación de parámetros durante la inferencia elimina sobrecostes adicionales de latencia.
+
+\newpage
