@@ -1,0 +1,122 @@
+\section{Causal-JEPA: creando necesidad de interacción mediante object masking}
+
+Causal-JEPA no estima primero un causal graph fijo y luego realiza mensajes pasados sobre él. Durante el entrenamiento elimina parte de las histories de los objects, exponiendo al modelo a una tarea de finalización similar a counterfactuals: ¿cuáles objetos vecinos, acciones e historias son suficientes para recuperar un objeto cuya información propia es invisible? Esta tarea convierte el reasoning de interacción de algo ``posiblemente útil'' en algo ``necesario para reducir la pérdida''.
+
+\subsection{El contraejemplo del plátano: por qué ocultar solo un instante no basta}
+
+Si solo se oculta un frame futuro del plátano, el modelo puede seguir extrapolando la velocidad a lo largo de su propia historia, ignorando completamente si fue mordido por otro objeto. Un cómic de tres paneles ilustra este atajo de manera exagerada: el problema real no es ``cómo se verá en el siguiente frame'', sino ``quién decide sus cambios cuando se le quita su propia trayectoria''.
+
+\lecturefigure{slide-017.jpg}{Contraejemplo del plátano: la historia propia del objeto permite al predictor saltarse el razonamiento de interacción}{CS25 V6 official deck, p.~17}
+
+\teachervoice{00:14:23--00:16:30, en clase se explicó con un cómic la motivación del object masking: si el objeto objetivo es siempre visible en la historia, el modelo puede aprender solo self-dynamics; al ocultar el estado del objeto a través del tiempo, se fuerza al modelo a leer las entidades externas que ejercen influencia sobre él.}
+
+\begin{importantbox}{¿qué papel juega el masking aquí?}
+El data augmentation ordinario se preocupa por la robustez; el masking en C-JEPA funciona más como una intervención de observabilidad: durante el entrenamiento se retira parte de la latent history del objeto objetivo, pero se conservan otros objetos, acciones y un mínimo ancla de identidad. Si el modelo quiere recuperar el objetivo, debe buscar contextos relevantes para la interacción.
+\end{importantbox}
+
+\subsection{Por qué el predictor utiliza atención bidireccional}
+
+El causal Transformer en DINO-WM predice hacia el futuro desde el pasado a lo largo del tiempo, lo cual es adecuado para un rollout autoregresivo convencional; C-JEPA, sin embargo, durante el entrenamiento también debe completar los objetos que están ocultos dentro de la ventana histórica, por lo que permite que los tokens históricos no ocultos interactúen entre sí de manera bidireccional. Esta bidireccionalidad solo actúa sobre la latent completion dentro de la ventana de entrenamiento y no implica que la inferencia esté mirando el futuro real.
+
+\lecturefigure{slide-018.jpg}{Flujo de información en Causal Transformer versus masked Transformer bidireccional}{CS25 V6 official deck, p.~18}
+
+\begin{warningbox}{bidireccional no significa fuga de datos}
+Durante el entrenamiento, los tokens del futuro también se reemplazan por tokens de mask; el predictor solo puede ver su posición y pistas de identidad, pero no la latent real del objetivo. Durante la inferencia, toda la historia es completamente visible y el futuro sigue oculto, por lo que el modelo solo puede hacer rollout desde el pasado y las acciones. Para juzgar si hay fuga, hay que ver si el target value entra en la entrada, no solo si la atención es bidireccional.
+\end{warningbox}
+
+\subsection{De una sola trayectoria de objeto a múltiples objetos ocultos}
+
+La construcción más directa consiste en seleccionar un objeto y ocultar todos sus slots tanto en la ventana histórica como en las posiciones futuras. Así, el predictor sigue sabiendo la posición temporal, pero pierde la autotraectoria del objeto. Ocultando aún más varios objetos se incrementa la dificultad de la tarea, pero si también se eliminan las pistas de identidad, el modelo ni siquiera sabrá a qué objeto corresponde cada token de mask; el objetivo de entrenamiento se convertiría en un emparejamiento de conjuntos mal planteado.
+
+\lecturefigure{slide-019.jpg}{Paso 1: ocultando la historia y el futuro de un objeto a lo largo del eje temporal}{CS25 V6 official deck, p.~19}
+
+\lecturefigure{slide-020.jpg}{Paso 2: ocultando simultáneamente múltiples objetos, exponiendo ambigüedad en la identidad}{CS25 V6 official deck, p.~20}
+
+\lecturefigure{slide-021.jpg}{Solo el encoding posicional temporal no puede responder qué objeto ocupa cada slot}{CS25 V6 official deck, p.~21}
+
+\[
+M_\tau\subseteq\{1,\ldots,N\},
+\qquad
+S_\tau^m=\{s_\tau^i\mid i\in M_\tau\},
+\qquad
+S_\tau^c=\{s_\tau^j\mid j\notin M_\tau\}.
+\]
+Donde, $M_\tau$ es el conjunto de índices de slots ocultos en el instante $\tau$, $S_\tau^m$ son los estados del objeto maskiado y $S_\tau^c$ es el contexto visible. $N$ es el número de slots; un mismo objeto puede entrar en el conjunto de mask a través de múltiples pasos temporales para suprimir el atajo de self-dynamics.
+
+\begin{lstlisting}[language=Python,caption={Pseudocódigo mínimo para object masking a través del tiempo}]
+masked = slots.clone()
+for object_id in sampled_objects:
+    identity = project(slots[first_time, object_id])
+    for time_id in history_and_future:
+        masked[time_id, object_id] = identity + mask_token[time_id]
+predicted = predictor(masked, actions)
+loss = mse(predicted[mask_positions], slots[mask_positions])
+\end{lstlisting}
+
+\subsection{Los slots son un conjunto: cómo elimina la ancla de identidad el permutación entre videos}
+
+El slot 2 en Video A podría rastrear un objeto verde, mientras que el slot 2 en Video B podría rastrear un objeto azul; el índice del slot no puede usarse como ID de clase a través de muestras. C-JEPA conserva el estado del objeto del instante inicial $t_0$ como ancla de identidad y luego lo proyecta sumándolo al embedding de mask temporalmente dependiente. Así, cada token de mask expresa ``el estado desconocido que continúa desde ese objeto inicial dentro de este video, ubicado en el instante $\tau$''.
+
+\lecturefigure{slide-022.jpg}{El orden de los slots puede permutarse arbitrariamente entre diferentes videos}{CS25 V6 official deck, p.~22}
+
+\lecturefigure{slide-023.jpg}{Ancla de identidad más embedding de mask temporal define la identidad del objeto predecible}{CS25 V6 official deck, p.~23}
+
+\[
+\tilde z_\tau^i=\phi(z_{t_0}^i)+e_\tau.
+\]
+Donde, $\tilde z_\tau^i$ es el token de mask que reemplaza el estado real del objeto, $z_{t_0}^i$ es la ancla de identidad del instante inicial más visible, $\phi$ es una proyección lineal, $e_\tau$ es la combinación del embedding de mask aprendible y el encoding posicional temporal, e $i$ representa la trayectoria del objeto dentro del mismo video.
+
+\teachervoice{00:16:30--00:20:36, el docente enfatiza que la representación object-centric es un set y no una lista. Conservar el primer paso temporal no es para revelar movimiento, sino para dar a los tokens de mask una identidad estable dentro del video; aún así, no se asume consistencia en el orden de los slots entre videos.}
+
+\subsection{Por qué las acciones deberían ser nodos independientes}
+
+Copiar y concatenar el mismo vector de acción a cada token de objeto es sencillo de implementar, pero oculta ``quiénes son afectados directamente por la acción'' dentro de características de alta dimensión. C-JEPA trata la acción como un token/nodo independiente que interactúa con los objetos en el gráfico de atención: el predictor puede aprender que la acción afecta primero a los puntos de control, y estos empujan luego al objeto objetivo, sin requerir que cada objeto lleve una copia idéntica de la acción.
+
+\lecturefigure{slide-024.jpg}{Condición de acción: ¿copiada y concatenada a todos los slots o como nodo independiente?}{CS25 V6 official deck, p.~24}
+
+\lecturefigure{slide-025.jpg}{El token de acción entra en el gráfico de interacción de objetos a lo largo del tiempo}{CS25 V6 official deck, p.~25}
+
+\begin{knowledgebox}{Uso por primera vez: variable auxiliar}
+En esta clase, la auxiliary variable se refiere a una condición observable que no pertenece al estado visual del objeto, como la acción $a_t$ y la propiocepción $p_t$. Afectan la transición de estados pero no deberían ser malinterpretadas como parte de la apariencia del objeto. Como token independiente permiten que la atención aprenda relaciones condicionales y facilitan el análisis de qué objetos dependen realmente de la acción.
+\end{knowledgebox}
+
+\subsection{Objetivo de entrenamiento completo: fusión de finalización histórica y predicción futura}
+
+Causal-JEPA completo primero extrae los slots objetivo en la historia y el futuro usando un object-centric encoder congelado, luego reemplaza a los objetos históricos seleccionados y todas las posiciones futuras, y finalmente hace que el predictor bidireccional recupere simultáneamente la historia oculta y prediga el futuro. El primer término suprime self-dynamics; el segundo mantiene el verdadero modelado de mundo hacia adelante; durante la inferencia no se oculta la historia, solo se hace rollout del futuro.
+
+\lecturefigure{slide-026.jpg}{Estructura completa de Causal-JEPA: ocultación de objetos, condición de acción y predicción conjunta latente}{CS25 V6 official deck, p.~26}
+
+\[
+\hat Z_{\mathcal T}=f_\theta(\bar Z_{\mathcal T},U_{\mathcal T}),
+\qquad
+\mathcal{L}_{\text{mask}}
+=\mathbb{E}\!\left[
+\sum_{\tau\in\mathcal T}\sum_{i=1}^{N}
+\mathbf{1}[\bar z_\tau^i\neq z_\tau^i]
+\left\|\hat z_\tau^i-z_\tau^i\right\|_2^2
+\right].
+\]
+Donde, $\mathcal T$ cubre la ventana histórica y el horizonte futuro, $\bar Z_{\mathcal T}$ es la secuencia de entrada reemplazada, $U_{\mathcal T}$ son variables auxiliares como las acciones, $f_\theta$ es el predictor, $\hat z_\tau^i$ es el slot predicho y $z_\tau^i$ es el objetivo dado por el encoder congelado; el indicador selecciona solo las posiciones ocultas.
+
+\[
+\mathcal{L}_{\text{mask}}
+=\underbrace{\mathbb{E}\!\left[\|\hat z_\tau^i-z_\tau^i\|_2^2\mid i\in M,\tau\le t\right]}_{\mathcal{L}_{\text{history}}}
++\underbrace{\mathbb{E}\!\left[\|\hat Z_\tau-Z_\tau\|_2^2\mid\tau>t\right]}_{\mathcal{L}_{\text{future}}}.
+\]
+Donde, $\mathcal{L}_{\text{history}}$ es el error de finalización del objeto histórico, $\mathcal{L}_{\text{future}}$ es el error de predicción del estado futuro, $M$ es el conjunto de objetos seleccionados y $t$ es el instante actual. Ambos términos comparten el predictor, por lo que las pistas de interacción deben soportar simultáneamente la finalización y el rollout.
+
+\teachervoice{00:20:36--00:22:38, Hazel dice explícitamente que C-JEPA no recupera el causal graph verdadero; el propósito del nodo de acción y del object masking es hacer que el predictor dependa de variables relevantes para la interacción bajo el objetivo de entrenamiento.}
+
+\subsection{Tres problemas de evaluación corresponden a tres patrones de fallo}
+
+Antes de entrar en los resultados, el orador divide primero los experimentos en reasoning, planning/control y physical plausibility. Este orden es importante: VQA puede verificar relaciones counterfactuals pero no prueba que el controlador sea eficiente; la tasa de éxito en Push-T puede verificar la interfaz de decisión pero no prueba que el rollout sea físicamente razonable; las trayectorias cualitativas de PHYRE pueden exponer atajos de correlación, pero no necesariamente dan un rendimiento general en tareas.
+
+\lecturefigure{slide-027.jpg}{Las tres evaluaciones de Causal-JEPA: razonamiento, planificación y credibilidad física}{CS25 V6 official deck, p.~27}
+
+\begin{importantbox}{Triángulo de evidencia}
+Una conclusión fuerte sobre un modelo del mundo debería responder simultáneamente: \textbf{¿se pueden leer las relaciones?} (reasoning), \textbf{¿se puede usar la predicción para seleccionar acciones?} (control) y \textbf{¿sigue obedeciendo a la dinámica después de intervenciones fuera de distribución?} (plausibility). Los tres conjuntos de experimentos en esta clase proporcionan evidencia local; no pueden fusionarse en el juicio incondicional ``el modelo ha comprendido el mundo''.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Causal-JEPA usa slots de objetos como unidades de estado, elimina la self-history del objeto objetivo mediante ocultación a través del tiempo y resuelve el problema de permutación en conjuntos de slots mediante una ancla de identidad. Su loss incluye simultáneamente la finalización histórica y la predicción futura, haciendo que el reasoning de interacción sea necesario para reducir el error de entrenamiento. El capítulo siguiente verificará si este sesgo estructural realmente mejora el reasoning counterfactual, la eficiencia de planificación y la plausibilidad del rollout.
