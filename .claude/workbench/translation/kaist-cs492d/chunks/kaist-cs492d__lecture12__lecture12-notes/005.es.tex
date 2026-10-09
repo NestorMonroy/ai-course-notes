@@ -1,0 +1,120 @@
+\section{Más allá del problema inverso: aplicaciones diversificadas}
+
+\subsection{Aplicaciones extendidas en el dominio de las imágenes}
+
+El poder de la guía durante la inferencia va mucho más allá de resolver problemas inversos. Siempre que se pueda definir una función de recompensa diferenciada adecuada, es posible guiar a un modelo preentrenado para generar salidas que cumplan con diversas condiciones. A continuación, se presentan algunos escenarios de aplicación típicos.
+
+\begin{knowledgebox}{De problemas inversos a la guía general}
+Los problemas inversos son solo un caso particular de la guía mediante funciones de recompensa. Las condiciones para aplicar el marco de guía general son:
+\begin{enumerate}
+    \item Contar con un modelo preentrenado de difusión o flujo (proposer)
+    \item Poder definir una función de recompensa/pérdida diferenciada (verifier)
+    \item La función de recompensa puede codificar las condiciones que el usuario desea que cumpla la salida
+\end{enumerate}
+Cualquier problema que satisfaga estas tres condiciones puede ser abordado mediante guía durante la inferencia.
+\end{knowledgebox}
+
+\subsection{Generación de imágenes panorámicas}
+
+Los modelos de difusión de imágenes preentrenados suelen generar imágenes con una resolución fija (por ejemplo, $512 \times 512$). ¿Cómo aprovechar un modelo preentrenado para generar imágenes panorámicas de mayor tamaño?
+
+\textbf{Idea central}: dividir el lienzo grande en múltiples ventanas superpuestas (cada una con un tamaño igual a la resolución de entrenamiento del modelo), ejecutar el proceso de desruido en paralelo sobre todas las ventanas y, al mismo tiempo, garantizar la consistencia en las regiones superpuestas mediante la guía.
+
+En concreto:
+\begin{enumerate}
+    \item Colocar múltiples ventanas superpuestas sobre el lienzo grande
+    \item Ejecutar el desruido de difusión de manera independiente para cada ventana
+    \item Definir la función de recompensa: las ventanas adyacentes deben producir valores de píxel idénticos en las regiones superpuestas
+    \item La función de recompensa puede definirse simplemente como la distancia L2 de la región superpuesta (o una pérdida de estilo más avanzada)
+    \item Después de cada paso de desruido, actualizar todas las ventanas basándose en el gradiente de la consistencia de superposición
+\end{enumerate}
+
+\begin{importantbox}{Espacio canónico y espacio de instancia}
+Este tipo de aplicaciones de sincronización introduce dos conceptos:
+\begin{itemize}
+    \item \textbf{Espacio canónico}: el espacio donde se encuentra los datos generados finalmente (por ejemplo, el lienzo completo de la imagen panorámica o el espacio de textura de un objeto 3D)
+    \item \textbf{Espacio de instancia}: el espacio en el que opera cada proceso de difusión de manera independiente (por ejemplo, una sola ventana o una imagen 2D de un solo punto de vista)
+\end{itemize}
+El proceso de generación se realiza en paralelo en múltiples espacios de instancia, logrando la sincronización mediante restricciones de consistencia en el espacio canónico.
+\end{importantbox}
+
+En la implementación práctica, la forma más sencilla de sincronización (idéntica a DPS) es:
+
+\begin{enumerate}
+    \item Muestrear todos los $x_T$ en el espacio canónico
+    \item Proyectar el ruido del espacio canónico a cada espacio de instancia
+    \item Realizar un paso de desruido de manera independiente en cada espacio de instancia
+    \item Proyectar el resultado desruidido de vuelta al espacio canónico
+    \item Tomar el promedio en las regiones superpuestas (o actualizar basándose en el gradiente de la pérdida L2)
+    \item Proyectar nuevamente el resultado actualizado a cada espacio de instancia y continuar con el siguiente paso
+\end{enumerate}
+
+\begin{warningbox}{Promedio simple vs. guía por gradiente}
+La forma más ingenua de sincronización consiste directamente en tomar el promedio en las regiones superpuestas. Aunque esta manera es sencilla, puede provocar desenfoque e inconsistencia. El uso de una guía basada en gradientes al estilo DPS (definiendo la consistencia L2 o una pérdida de estilo como función de recompensa) suele lograr mejores resultados, ya que permite que el modelo sea ``consciente'' de las restricciones de consistencia en cada paso de desruido.
+\end{warningbox}
+
+\subsection{Imágenes panorámicas de 360 grados}
+
+La misma idea puede extenderse a la generación de imágenes panorámicas de 360 grados. Desplegar la esfera como múltiples proyecciones planas superpuestas y ejecutar procesos de difusión de manera independiente en cada proyección, logrando una coordinación global mediante restricciones de consistencia en la esfera.
+
+\subsection{Generación de texturas 3D}
+
+Dada la geometría superficial de un modelo 3D (mesh), ¿cómo aprovechar un modelo de difusión de imágenes 2D para generarle texturas? Se trata de un problema extremadamente práctico: los modelos 3D son omnipresentes en videojuegos, cine y realidad virtual, mientras que la creación manual de texturas resulta laboriosa y costosa.
+
+\begin{enumerate}
+    \item Renderizar la superficie 3D desde múltiples puntos de vista (proyectada a 2D), obteniendo una imagen 2D parcialmente visible por cada punto de vista
+    \item Ejecutar el desruido de difusión sobre la imagen 2D de cada punto de vista (operación en el espacio de instancia)
+    \item Proyectar los resultados 2D de vuelta a la superficie 3D (mapeado al espacio canónico)
+    \item Asegurar mediante una función de recompensa que las regiones superpuestas en la superficie 3D desde diferentes puntos de vista sean consistentes
+\end{enumerate}
+
+En este caso, el espacio canónico es el espacio de texturas sobre la superficie 3D (espacio UV), mientras que el espacio de instancia corresponde al espacio de imágenes 2D de cada punto de vista. La función de proyección $\pi_i$ mapea un punto en la superficie 3D a las coordenadas 2D del $i$-esimo punto de vista, y la función de reproyección $\pi_i^{-1}$ mapea píxeles 2D de vuelta a la superficie 3D.
+
+\begin{importantbox}{Restricciones de sincronización en la generación de texturas 3D}
+Supóngase que se observa un objeto 3D desde $K$ puntos de vista $\{v_1, \ldots, v_K\}$, donde la imagen renderizada 2D para cada punto de vista $v_i$ es $I_i$. Para cualquier punto $p$ en la superficie 3D, si es visible tanto desde el punto de vista $v_i$ como desde $v_j$, debe cumplirse:
+$$\text{color en } \pi_i(p) = \text{color en } \pi_j(p)$$
+Esta restricción puede formalizarse como una función de recompensa:
+$$r = -\sum_{i < j} \sum_{p \in \text{overlap}(v_i, v_j)} \| I_i(\pi_i(p)) - I_j(\pi_j(p)) \|^2$$
+\end{importantbox}
+
+\subsection{Generación de imágenes ambiguas (ilusiones visuales)}
+
+Una aplicación interesante consiste en generar ``imágenes ambiguas'' —una imagen que presenta significados completamente distintos bajo diferentes transformaciones:
+\begin{itemize}
+    \item En posición normal es un óleo de grupo de personas; al invertirla, se convierte en el retrato de un anciano
+    \item En posición normal es una maceta con plantas verdes; al invertirla, se transforma en un retrato de Einstein
+\end{itemize}
+
+\begin{knowledgebox}{Formalización de imágenes ambiguas}
+Generar imágenes ambiguas puede considerarse como un problema de sincronización:
+\begin{itemize}
+    \item Espacio canónico: el espacio de la imagen original
+    \item Espacios de instancia: los puntos de vista originales y transformados (por ejemplo, invertidos o rotados)
+    \item Restricción: solo existe una imagen en el espacio canónico, pero cumple con descripciones de texto distintas en cada uno de los dos espacios de instancia
+\end{itemize}
+\end{knowledgebox}
+
+\subsection{Zoom infinito (Infinite Zooming)}
+
+Otra aplicación notable es la generación de videos de ``zoom infinito'' utilizando modelos de difusión de imágenes: desde una galaxia, pasando por detalles en un plato, hasta el interior de un edificio. Esto se logra definiendo espacios de instancia para diferentes niveles de zoom e imponiendo restricciones de consistencia en las regiones superpuestas entre niveles adyacentes.
+
+Concretamente, cada nivel de zoom corresponde a un espacio de instancia; la ``región superpuesta'' entre niveles adyacentes es la imagen completa del nivel de mayor zoom y la región central del nivel de menor zoom. Al garantizar la consistencia en estas áreas, se logra un efecto visualmente coherente de zoom infinito.
+
+\begin{knowledgebox}{Estructura jerárquica del zoom infinito}
+El zoom infinito puede entenderse como un problema de sincronización jerárquico:
+\begin{itemize}
+    \item Nivel 0: la vista más macroscópica (por ejemplo, toda la galaxia)
+    \item Nivel 1: una versión ampliada de la región central del nivel 0
+    \item Nivel 2: una ampliación adicional de la región central del nivel 1
+    \item $\ldots$
+\end{itemize}
+Cada nivel constituye un espacio de instancia independiente que utiliza el mismo modelo preentrenado de imágenes para el desruido. La relación de consistencia entre niveles adyacentes se define mediante correspondencias de escala, asegurando que el contenido visual de la imagen ampliada coincida con la región central del nivel superior.
+\end{knowledgebox}
+
+\subsection{Ensamblaje de secuencias largas para generación de movimiento}
+
+Para la generación de movimiento, los modelos preentrenados suelen producir solo secuencias cortas. Mediante técnicas de sincronización similares, es posible unir múltiples segmentos de movimiento corto en una secuencia larga, garantizando al mismo tiempo transiciones suaves.
+
+\subsection{Resumen de la sección}
+
+Las aplicaciones de la guía durante la inferencia van mucho más allá de los problemas inversos. A través de la definición de funciones de recompensa adecuadas y restricciones de sincronización, se puede aprovechar modelos de imágenes 2D preentrenados para generar contenido que excede el dominio de entrenamiento, como mapas panorámicos, texturas 3D e imágenes ambiguas. La idea central radica en la separación y sincronización entre el espacio canónico y el espacio de instancia.
