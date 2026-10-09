@@ -12,8 +12,10 @@
 #             (Ollama 0.35 con llama-server dentro, fuera del coordinador)
 #   modelo    `/api/show` lo encuentra → no se toca; si no, `/api/create`
 #             desde el blob montado (el GGUF de thyrox/.thyrox/models)
-#   lazo      un `llama_direct_loop.sh` vivo → no se toca; si no, se lanza
-#             desde --from con su log en .claude/cache/ola/
+#   lazo      un `llama_direct_loop.sh` vivo → no se toca; un tramo asentado
+#             (`llama-direct.settled` con el mismo --from/--to: una vuelta
+#             sin avance, lo que queda pide juicio) → no se relanza; si no,
+#             se lanza desde --from con su log en .claude/cache/ola/
 #
 # Uso: llama_direct_ensure.sh [--from N]
 # Exit 0 todo en marcha · 3 el servidor no respondió tras lanzarlo.
@@ -74,8 +76,13 @@ else
         && echo "llama_direct_ensure: modelo $MODEL creado"
 fi
 
+# Un tramo que el lazo ya asentó (una vuelta sin avance) no se relanza: lo que
+# queda en él pide juicio. Otro --from/--to, o retirar la marca, lo reabre.
+SETTLED="$CONSUMER/.claude/cache/ola/llama-direct.settled"
 if pgrep -f '[l]lama_direct_loop.sh' > /dev/null; then
     echo "llama_direct_ensure: lazo ya activo"
+elif [[ -f "$SETTLED" ]] && gawk -F'\t' -v a="$from" -v b="$to" '$1 == a && $2 == b {ok = 1} END {exit !ok}' "$SETTLED"; then
+    echo "llama_direct_ensure: lazo ya asentado en los lotes $from-$to ($(cut -f3 "$SETTLED")); no se relanza"
 else
     log="$CONSUMER/.claude/cache/ola/llama-direct-$(date -u +%Y%m%dT%H%M%SZ).log"
     # setsid: el lazo no pertenece al grupo de procesos de quien llama, así que

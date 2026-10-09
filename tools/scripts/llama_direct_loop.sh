@@ -31,6 +31,7 @@ PLAN=".claude/workbench/translation/plan.tsv"
 [[ -n "$to" ]] || to=$(gawk -F'\t' 'NR > 1 {n = $1} END {print n}' "$PLAN")
 export TRANSLATION_RUNNER="$HERE/llama_direct_runner.py"
 URL="${LLAMA_DIRECT_URL:-http://127.0.0.1:11500}"
+SETTLED="${LLAMA_DIRECT_SETTLED:-.claude/cache/ola/llama-direct.settled}"
 
 # Fragmentos ya traducidos en todo el plan: la medida del avance de una vuelta.
 translated_count() {
@@ -54,5 +55,12 @@ for (( round = 1; round <= max_rounds; round++ )); do
     done
     after=$(translated_count)
     echo "llama_direct_loop: vuelta $round: $before → $after fragmentos traducidos" >&2
-    (( after > before )) || break
+    if (( after <= before )); then
+        # Sin avance en una vuelta entera: lo que queda pide juicio, no otra
+        # vuelta del modelo. La marca le dice a llama_direct_ensure.sh que no
+        # relance el lazo sobre el mismo tramo cada cinco minutos.
+        printf '%s\t%s\t%s\t%s\n' "$from" "$to" "$(date -u +%FT%TZ)" "$after" > "$SETTLED"
+        echo "llama_direct_loop: lotes $from-$to sin avance; asentado en $SETTLED" >&2
+        break
+    fi
 done
