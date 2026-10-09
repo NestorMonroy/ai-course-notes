@@ -1,0 +1,85 @@
+\section{Score Distillation Sampling (SDS)}
+
+\subsection{Idea central: usar la función de pérdida del modelo de difusión como métrica de alineación}
+
+La intuición central de SDS es sorprendentemente simple: \textbf{utilizar directamente la función de pérdida de entrenamiento del modelo de difusión como una medida de calidad generativa}.
+
+\begin{importantbox}{Insight clave de SDS}
+Una vez completado el entrenamiento del modelo de difusión, para datos reales $x_0$ dentro de la distribución de entrenamiento, la pérdida de predicción de ruido convergerá a un valor muy pequeño:
+$$
+\mathcal{L}_{\text{diffusion}}(x_0) = \mathbb{E}_{t, \epsilon}\left[\| \epsilon_\phi(x_t, t, c) - \epsilon \|_2^2\right] \approx \text{valor pequeño}
+$$
+Esto significa que podemos utilizar esta pérdida al revés: \textbf{si una imagen hace que la predicción de ruido del modelo de difusión preentrenado sea pequeña, entonces esa imagen se acerca a la distribución real de datos}.
+\end{importantbox}
+
+\subsection{Flujo algorítmico de SDS}
+
+El proceso de optimización de SDS consta de cuatro pasos que se ejecutan en bucle en cada iteración:
+
+\begin{enumerate}
+    \item \textbf{Renderizado}: Renderizar la representación 3D actual desde una perspectiva aleatoria $\pi$ para obtener una imagen 2D
+    $$x_0 = g(\theta, \pi)$$
+
+    \item \textbf{Adición de ruido hacia adelante}: Muestrear aleatoriamente el paso de tiempo $t$ y el ruido $\epsilon$, y ejecutar el proceso hacia adelante en la imagen renderizada
+    $$x_t = \sqrt{\bar{\alpha}_t}\, x_0 + \sqrt{1 - \bar{\alpha}_t}\, \epsilon$$
+
+    \item \textbf{Predicción de ruido}: Utilizar el modelo de difusión preentrenado para predecir el ruido
+    $$\hat{\epsilon} = \epsilon_\phi(x_t, t, c)$$
+    donde $c$ es la condición textual (por ejemplo, ``una bulldozer'')
+
+    \item \textbf{Propagación hacia atrás}: Calcular la pérdida $\| \hat{\epsilon} - \epsilon \|_2^2$ y propagar el gradiente a través de la función de renderizado $g$ hasta los parámetros de la representación 3D $\theta$
+\end{enumerate}
+
+\subsection{Derivación del gradiente y aproximación de Jacobiano}
+
+Calculando el gradiente sobre la función de pérdida anterior respecto a $\theta$ y aplicando la regla de la cadena, obtenemos:
+
+$$
+\nabla_\theta \mathcal{L} = (\hat{\epsilon} - \epsilon) \cdot \underbrace{\frac{\partial \hat{\epsilon}}{\partial x_t}}_{\text{Jacobiano del U-Net}} \cdot \frac{\partial x_t}{\partial x_0} \cdot \frac{\partial g(\theta, \pi)}{\partial \theta}
+$$
+
+Los tres factores corresponden respectivamente a:
+\begin{itemize}
+    \item $(\hat{\epsilon} - \epsilon)$: residuo de la predicción de ruido
+    \item $\frac{\partial \hat{\epsilon}}{\partial x_t}$: Jacobiano de la red que predice el ruido (U-Net)
+    \item $\frac{\partial x_t}{\partial x_0} \cdot \frac{\partial g}{\partial \theta}$: derivadas del proceso hacia adelante y de la función de renderizado
+\end{itemize}
+
+\begin{importantbox}{Simplificación central del gradiente de SDS}
+En la práctica, \textbf{el Jacobiano del U-Net $\frac{\partial \hat{\epsilon}}{\partial x_t}$ se aproxima como una matriz identidad} (es decir, se ignora directamente). Esto trae dos grandes beneficios:
+
+\begin{enumerate}
+    \item \textbf{Ahorro de cómputo}: Calcular el Jacobiano del U-Net requiere realizar una propagación hacia atrás para todos los parámetros de la red; esta es la parte con mayor costo computacional de todo el flujo. Saltarla permite ahorrar significativamente tiempo y memoria gráfica.
+    \item \textbf{Calidad prácticamente inalterada}: Los experimentos demuestran que la calidad generativa es casi idéntica independientemente de si se incluye o no el término del Jacobiano.
+\end{enumerate}
+
+El gradiente simplificado de SDS es:
+$$
+\nabla_\theta \mathcal{L}_{\text{SDS}} \approx \mathbb{E}_{t,\epsilon}\left[w(t)(\hat{\epsilon} - \epsilon) \frac{\partial g(\theta, \pi)}{\partial \theta}\right]
+$$
+donde $w(t)$ es una función de peso relacionada con el paso de tiempo.
+\end{importantbox}
+
+\begin{warningbox}{SDS carece de garantías teóricas estrictas}
+El profesor Minhyuk Sung señala explícitamente que SDS es un método ``muy práctico pero sin una explicación teórica perfecta''. No se deriva como el gradiente óptimo desde alguna función objetivo definida, sino que es un diseño heurístico práctico. No obstante, su rendimiento en experimentos es excelente.
+\end{warningbox}
+
+\subsection{¿Por qué se llama ``Score Distillation''?}
+
+\begin{knowledgebox}{Interpretación del nombre: Score Distillation Sampling}
+\textbf{Score} (puntuación): La predicción de ruido aprendida por el modelo de difusión $\epsilon_\phi$ está estrechamente relacionada con la función score $\nabla_x \log p(x)$ de la distribución de datos. El residuo de la predicción de ruido $(\hat{\epsilon} - \epsilon)$ proporciona esencialmente una dirección sobre ``cómo debería ajustarse los datos para acercarse más a la distribución real''.
+
+\textbf{Distillation} (destilación): Distilamos el conocimiento aprendido por el modelo de difusión preentrenado (en forma de score/predicción de ruido) hacia una nueva representación (por ejemplo, un modelo 3D).
+
+\textbf{Sampling}: Todo el proceso puede verse como un proceso de muestreo especial: no se realiza en el espacio de imágenes, sino que se ``muestra'' en el espacio de parámetros $\theta$ mediante descenso de gradiente una representación 3D que haga que todas las vistas renderizadas se acerquen a la distribución real de imágenes.
+\end{knowledgebox}
+
+\subsection{Requisito clave de SDS: renderizado diferenciable}
+
+El gradiente de SDS debe propagarse hacia atrás a través de la función de renderizado $g$ hasta los parámetros de la representación 3D $\theta$; por lo tanto, \textbf{la función de renderizado debe ser diferenciable}. Esto es precisamente donde radica la importancia del Neural Rendering: tanto NeRF como 3D Gaussian Splatting proporcionan tuberías de renderizado diferenciables.
+
+\subsection{Resumen de la sección}
+
+SDS logra un diseño ingenioso que utiliza la función de pérdida de los modelos de difusión preentrenados como objetivo de optimización para la generación multimodal. Su simplificación central (ignorar el Jacobiano del U-Net) hace que el algoritmo sea tanto eficiente como efectivo. Aunque carece de un análisis teórico completo, ha logrado resultados impresionantes en la práctica.
+
+\newpage
