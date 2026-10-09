@@ -1,0 +1,100 @@
+\section{Modelos de difusión latentes: Modelos de difusión latentes}
+
+\subsection{El cuello de botella computacional de la difusión en espacio de píxeles}
+
+En todos los modelos de difusión discutidos anteriormente, el proceso de difusión se realiza directamente en \textbf{espacio de píxeles}: todas las variables intermedias $x_t$ tienen las mismas dimensiones que la imagen original. Para imágenes de alta resolución (como $512\times512\times3$ o mayores), esto conlleva un costo computacional y de memoria enorme.
+
+\begin{warningbox}{El costo de entrenar directamente en espacio de píxeles}
+Tomemos Stable Diffusion como ejemplo; su conjunto de datos de entrenamiento, LAION-5B, contiene aproximadamente 5.8 mil millones de imágenes. Si se entrena un modelo de difusión de alta resolución directamente en el espacio de píxeles:
+\begin{itemize}
+    \item Entrenar con una \textbf{GPU única} toma aproximadamente \textbf{2--3 años}
+    \item Generar 10,000 imágenes (con una GPU única) toma aproximadamente \textbf{un día}
+\end{itemize}
+Todas las variables intermedias y la salida deben mantener las mismas dimensiones; esta es una desventaja estructural de los modelos de difusión en comparación con GAN.
+\end{warningbox}
+
+\subsection{Arquitectura de dos etapas: compresión + difusión}
+
+La idea central de los Modelos de Difusión Latentes (LDM) consiste en mover el proceso de difusión desde el espacio de píxeles hacia un \textbf{espacio latente de baja dimensión}:
+
+\textbf{Primera etapa: Entrenamiento del autoencoder de imágenes}
+\begin{itemize}
+    \item Codificador $\mathcal{E}$: Comprime la imagen de alta resolución $x \in \mathbb{R}^{H\times W\times 3}$ en una representación latente de baja dimensión $z = \mathcal{E}(x) \in \mathbb{R}^{h\times w\times c}$
+    \item Decodificador $\mathcal{D}$: Reconstruye la imagen a partir de la representación latente $\hat{x} = \mathcal{D}(z) \approx x$
+    \item Tasa de compresión: Generalmente $h = H/8$, $w = W/8$, reduciendo las dimensiones espaciales 64 veces
+\end{itemize}
+
+\textbf{Segunda etapa: Entrenamiento del modelo de difusión en el espacio latente}
+\begin{itemize}
+    \item Todas las operaciones de difusión (añadir ruido, eliminar ruido, cálculo del score) se realizan en el espacio $z$
+    \item La red predictora de ruido toma como entrada $z_t$ (en lugar de $x_t$) y devuelve una estimación de ruido de la misma dimensión que $z_t$
+    \item Una vez completada la generación, los resultados se mapean de nuevo al espacio de píxeles mediante el decodificador $\mathcal{D}$
+\end{itemize}
+
+\begin{importantbox}{Las ventajas clave de Latent Diffusion}
+\begin{enumerate}
+    \item \textbf{Eficiencia computacional}: Ejecutar la difusión en un espacio latente de $64\times64$ es aproximadamente 64 veces más rápido que hacerlo en el espacio de píxeles de $512\times512$
+    \item \textbf{Riqueza semántica}: El espacio latente, entrenado mediante un autoencoder, ya codifica información semántica de alto nivel; los modelos de difusión pueden centrarse más en la estructura semántica que en los detalles de píxeles
+    \item \textbf{Modularidad}: El autoencoder y el modelo de difusión pueden entrenarse e intercambiarse de forma independiente
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Selección del autoencoder}
+
+El autoencoder utilizado en LDM no es un VAE estándar (su peso de regularización de divergencia KL suele ser alto, sacrificando la calidad de reconstrucción), sino que se asemeja más a un \textbf{autoencoder convencional}, optimizando principalmente la calidad de reconstrucción:
+
+\begin{itemize}
+    \item Uso de una regularización de divergencia KL con pesos bajos para garantizar la regularidad del espacio latente
+    \item Inclusión de pérdida perceptual y pérdida adversarial para mejorar la calidad de reconstrucción
+    \item El codificador-decodificador generalmente adopta una arquitectura convolucional, admitiendo entradas de resolución arbitraria
+\end{itemize}
+
+\begin{knowledgebox}{¿Por qué no usar un VAE estándar?}
+La regularización KL del VAE estándar incentiva que el espacio latente se acerque a una distribución normal estándar, lo que daña la calidad de reconstrucción. En LDM, el objetivo principal del autoencoder es la \textbf{compresión sin pérdidas} —mantener la mayor cantidad posible de información de la imagen mientras se reduce drásticamente la dimensión—. Por ello, se prefiere una regularización más débil para que el espacio latente conserve más detalles.
+\end{knowledgebox}
+
+\subsection{Mecanismo de inyección condicional}
+
+En la arquitectura de LDM, la información condicional (texto, imagen, mapas semánticos) se inyecta en U-Net mediante un mecanismo de \textbf{atención cruzada}:
+
+\begin{enumerate}
+    \item La información condicional $y$ (por ejemplo, texto) se mapea primero a vectores de embedding mediante un codificador condicional (como el CLIP text encoder)
+    \item En cada bloque de atención de U-Net, las características de $z_t$ actúan como Query y los embeddings condicionales como Key y Value
+    \item La salida de la atención cruzada fusiona la información espacial de $z_t$ con la información semántica condicional
+\end{enumerate}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Componente} & \textbf{Dimensiones de entrada} & \textbf{Función} \\
+\midrule
+Codificador de imágenes $\mathcal{E}$ & $512\times512\times3 \to 64\times64\times4$ & Píxeles$\to$espacio latente \\
+U-Net predictora de ruido & $64\times64\times4 + \text{tiempo} + \text{cond}$ & Estimación del score \\
+Codificador condicional (CLIP) & texto $\to \mathbb{R}^{77\times768}$ & Texto$\to$embedding \\
+Decodificador de imágenes $\mathcal{D}$ & $64\times64\times4 \to 512\times512\times3$ & Espacio latente$\to$píxeles \\
+\bottomrule
+\end{tabular}
+\caption{Componentes centrales de Stable Diffusion y sus dimensiones}
+\end{table}
+
+\subsection{Arquitectura de Stable Diffusion}
+
+Stable Diffusion es la implementación más conocida de LDM, desarrollada en colaboración entre CompVis (LMU Munich) y Stability AI. Su arquitectura completa incluye:
+
+\begin{enumerate}
+    \item \textbf{Codificador/Decodificador VAE}: Muestreo espacial a 8 veces, espacio latente de 4 canales
+    \item \textbf{U-Net con atención cruzada}: Aproximadamente 860 millones de parámetros, que incluye bloques ResNet + bloques Transformer
+    \item \textbf{CLIP text encoder}: Codifica el prompt de texto en una secuencia de embeddings de token de $77\times768$
+    \item \textbf{Soporte para CFG}: Durante el entrenamiento, se reemplaza la condición de texto con una cadena vacía con una probabilidad del 10\%
+\end{enumerate}
+
+\begin{knowledgebox}{De U-Net a Transformer}
+Los LDM tempranos (incluidos Stable Diffusion v1/v2) utilizaban U-Net como red predictora de ruido. La tendencia reciente es pasar a arquitecturas puras basadas en Transformer (como DiT), debido a su mayor facilidad de escalabilidad y consistencia con el stack tecnológico de NLP. Stable Diffusion 3 ya adopta la arquitectura MM-DiT (Multimodal Diffusion Transformer).
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+Los Modelos de Difusión Latentes transforman el problema de difusión en un espacio de píxeles de alta dimensión a uno en un espacio latente de baja dimensión mediante un diseño de dos etapas: "compresión primero, luego difusión". Esto reduce drásticamente los costos computacionales manteniendo la calidad de generación. Esta arquitectura se ha convertido en el paradigma estándar para modelos modernos de generación de imágenes/vídeo (Stable Diffusion, DALL-E 3, Sora, etc.) y representa una innovación tecnológica clave para llevar los modelos de difusión desde prototipos académicos hacia aplicaciones industriales.
+
+\newpage
