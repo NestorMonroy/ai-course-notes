@@ -1,0 +1,112 @@
+\section{El supuesto oculto de la atención: los datos deben estar en el nivel de abstracción correcto}
+
+Se malinterpreta frecuentemente "Attention is all you need" como que cualquier secuencia cruda cortada por posiciones puede enviarse directamente a un Transformer. Los sistemas reales casi siempre tienen un encoder, un patchifier o un tokenizer que convierten señales crudas de alta resolución en unidades menos numerosas, más estables y con mayor contenido semántico. Este capítulo eleva el \texttt{preprocessing} desde una nota al pie de ingeniería hasta un \textit{architecture contract}: la atención es responsable de los tokens que recibe, pero no tiene libertad para redefinirlos automáticamente.
+
+\subsection{Mito: datos crudos directamente en Transformer}
+
+El siguiente diagrama simplificado está diseñado deliberadamente para ser tentador: la entrada entra al Transformer y la salida aparece naturalmente. Este pipeline parece válido a nivel de API, pero oculta todo el trabajo de representación de los datos. El conferencista lo llama mito no porque el Transformer sea débil, sino porque las aplicaciones exitosas suelen transformar primero los datos crudos en una representación adecuada para comparar token por token.
+
+\lecturefigure{slide-016.jpg}{Mito: entregar cualquier dato crudo directamente al Transformer}{Grabación oficial de Stanford, 00:23:00--00:23:29}
+
+\subsection{Realidad: la atención está entre el encoder y el decoder}
+
+El pipeline real suele ser \texttt{encoder} $\rightarrow$ \texttt{Transformer} $\rightarrow$ \texttt{decoder}. La función del encoder no es solo reducir la resolución, sino mapear señales locales, ruidosas o continuas a un nivel de abstracción con el que la atención puede comparar efectivamente. El texto rojo en el diagrama, "right level of abstraction", es la frase central de la segunda mitad de la clase.
+
+\lecturefigure{slide-017.jpg}{Realidad: la atención generalmente actúa sobre representaciones ya pre-comprimidas}{Grabación oficial de Stanford, 00:23:30--00:23:59}
+
+\begin{importantbox}{La atención es "beholden" a la tokenización}
+La atención \texttt{Softmax} puede remezclar las representaciones de los tokens, pero no puede revocar información perdida por la segmentación inicial, ni puede dividir automáticamente un token en múltiples unidades direccionables sin aumentar la longitud de la secuencia. Por lo tanto, la resolución, los límites y el contenido semántico de las unidades de entrada cambian profundamente la dificultad de aprendizaje del modelo.
+\end{importantbox}
+
+\subsection{Modalidades perceptuales: el patchifier crea tokens visuales primero}
+
+Vision Transformer no aplica atención global a cada píxel, sino que corta la imagen en parches, los proyecta linealmente a tokens y luego los ingresa al Transformer. El \texttt{Patch size} determina el costo computacional y el detalle: un parche más pequeño aumenta la resolución pero alarga la secuencia; un parche más grande reduce el costo de atención pero puede mezclar varios objetos o límites.
+
+\lecturefigure{slide-018.jpg}{Las modalidades perceptuales (imagen, video, audio) pasan primero por un patchifier}{Grabación oficial de Stanford, 00:24:00--00:24:29}
+
+Si la imagen tiene dimensiones $H,W$ y el \texttt{patch size} es $P\times P$, entonces el número de tokens es aproximadamente
+\[
+L_{\mathrm{vision}}=\frac{H}{P}\frac{W}{P}.
+\]
+Reducir $P$ a la mitad duplicaría el número de tokens, aumentando el trabajo par a par de la atención completa en aproximadamente dieciséis veces. El cuello de botella aquí no es que los datos visuales "no puedan usar Transformer", sino que la resolución cruda debe organizarse primero en un flujo de tokens manejable.
+
+\subsection{Modalidades discretas: el tokenizer define las unidades lingüísticas primero}
+
+Aunque el lenguaje y las secuencias genéticas parecen ya discretos, \texttt{character}, \texttt{byte} o \texttt{base pair} a menudo no son las unidades de modelado más útiles. Byte Pair Encoding (BPE, codificación de pares de bytes) combina símbolos de bajo nivel en tokens más largos mediante reglas de fusión frecuentes; esto acorta la secuencia e inyecta un sesgo inductivo de límites y patrones repetitivos.
+
+\lecturefigure{slide-019.jpg}{El lenguaje y la genómica a menudo pasan primero por un tokenizer antes de ir al Transformer}{Grabación oficial de Stanford, 00:24:30--00:24:59}
+
+\begin{knowledgebox}{Primera aparición: Token, Tokenizer y Vocabulario}
+Un \term{Token} es la unidad discreta que el modelo procesa y direcciona en un momento dado; un \term{tokenizer} mapea una cadena cruda a un id de token; un \term{vocabulary} es el conjunto finito de tokens disponibles. Un token BPE no debe ser necesariamente una palabra completa ni posee automáticamente "significado real", pero suele contener estructuras repetitivas como palabras, raíces, prefijos, sufijos y límites de espacio en blanco, por lo que está más cerca de las unidades composables con las que la atención se desempeña bien que un solo carácter.
+\end{knowledgebox}
+
+\subsection{Los problemas de tokenización existen realmente, pero también son prácticos para la ingeniería}
+
+La lista de Karpathy muestra casos límite del tokenizer: ortografía, números, espacios en blanco y cadenas raras. El conferencista no afirma que estos problemas hagan que los LLM actuales sean inutilizables; por el contrario, admite que la ingeniería de datos y los trucos con prompts pueden arreglar muchas de estas manifestaciones. La motivación de investigación es: si un modelo puede aprender las unidades desde los datos crudos de extremo a extremo, no es necesario congelar heurísticas humanas permanentemente en la entrada de datos.
+
+\lecturefigure{slide-020.jpg}{Sin tokenización: la tensión entre usabilidad práctica e ideal extremo-a-extremo}{Grabación oficial de Stanford, 00:25:00--00:26:39}
+
+\teachervoice{00:25:18--00:26:39, Gu explica el problema bajo la lección amarga: la ingeniería de características puede ser efectiva a escala actual, pero los sistemas más generales que aprenden automáticamente desde datos crudos suelen beneficiarse más del escalamiento a largo plazo.}
+
+\begin{warningbox}{"Sin tokenizer" no significa eliminar el preprocessing}
+Un modelo \texttt{Tokenizer-free} aún requiere embedding de bytes, un encoder local, enrutamiento, reducción de resolución y decoder. La diferencia radica en si estos pasos se aprenden conjuntamente con el modelo de lenguaje o pueden cambiar según el contexto, más que en que el sistema carezca por completo de transformaciones de representación.
+\end{warningbox}
+
+\subsection{Evidencia a nivel de carácter/byte: gastar más cómputo de atención no cierra la brecha}
+
+Este diagrama compara MambaByte con LlamaByte. El eje horizontal es el número de bytes entrenados y el eje vertical es la pérdida de validación; los modelos y FLOPs están ajustados lo mejor posible. Primero comparamos MambaByte (azul) con atención por ventana deslizante (morada), luego con la línea base de atención global discontinua: incluso usando más cómputo, la curva de atención global no alcanza a MambaByte, lo que indica que la brecha no es solo "atención demasiado lenta".
+
+\lecturefigure{slide-021.jpg}{Modelado del lenguaje a nivel de carácter/byte: curvas de escalamiento de MambaByte vs línea base de atención}{Grabación oficial de Stanford, 00:26:40--00:28:49}
+
+La métrica común a nivel de byte, bits per byte (BPB, bits por byte), se define como
+\[
+\mathrm{BPB}=-\frac{1}{L\ln 2}\sum_{t=1}^{L}\ln p(x_t\mid x_{<t}).
+\]
+Donde $L$ es el número de bytes y $p(x_t\mid x_{<t})$ es la probabilidad condicional del byte correcto. Cuanto menor sea el BPB, mejor; comparado con la perplexidad a nivel de token, evita problemas de unidades inconsistentes al comparar diferentes tokenizers, aunque sigue estando influenciado por el conjunto de datos, la longitud del contexto y el presupuesto del modelo.
+
+\begin{knowledgebox}{Lectura de la figura: primero las condiciones emparejadas, luego la atención global}
+La primera conclusión es que los modelos recurrentes tienen curvas más bajas bajo condiciones de tamaño y datos iguales; la segunda capa es que incluso con más FLOPs, la atención global no invierte el resultado. La figura no prueba que todas las tareas a nivel de byte estén gobernadas por SSM, pero apoya la idea de que "la resolución de entrada cambia la eficiencia de modelado de la atención".
+\end{knowledgebox}
+
+\subsection{Evidencia del ADN: la brecha es aún más notable sin un tokenizer estilo lenguaje natural}
+
+Las secuencias de ADN tienen solo unos pocos símbolos de base; un solo par de bases generalmente no es una unidad semántica de alto nivel direccionable independientemente. El ajuste de parámetros en el diagrama muestra que, bajo esta configuración autorregresiva del genoma humano, Mamba alcanza resultados similares con aproximadamente un tercio de los parámetros de Transformer++. Aquí se debe leer "eficiencia de parámetros en esta tarea y métrica", no "todas las SSM son tres veces mejores que Transformer en el ADN".
+
+\lecturefigure{slide-022.jpg}{Escalamiento del modelo de lenguaje de ADN: comparación de eficiencia de parámetros entre Mamba y Transformer++}{Grabación oficial de Stanford, 00:28:50--00:29:29}
+
+\begin{warningbox}{Las curvas transversales no pueden extrapolarse directamente}
+El alfabeto, las dependencias de largo alcance y el objetivo de evaluación del preentrenamiento del genoma difieren del lenguaje natural. Que una arquitectura domine la predicción del siguiente par de bases no implica automáticamente que también domine la interpretación de variantes, la regulación génica o las tareas clínicas; las capacidades downstream deben verificarse por separado.
+\end{warningbox}
+
+\subsection{Tokens efectivos: ¿qué unidad merece ser caché?}
+
+El conferencista plantea dos preguntas prácticas. Primero, ¿vale la pena cachear una representación para cada unidad de entrada? Segundo, ¿tiene sentido prestar atención dura a una sola unidad? Las subpalabras suelen ser morfemas composables, mientras que los caracteres y las bases del ADN rara vez son unidades semánticas independientes, y los parches visuales dependen de si contienen objetos, texturas o fondo vacío. Esta lista de verificación es más transferible que "usar siempre cierta arquitectura".
+
+\lecturefigure{slide-023.jpg}{Tokens efectivos para atención: valor de caché, atención dura y granularidad modal}{Grabación oficial de Stanford, 00:29:30--00:32:59}
+
+La atención estándar se puede escribir como
+\[
+\operatorname{Attn}(q,K,V)
+=\sum_{i=1}^{L}\alpha_i v_i,
+\qquad
+\alpha_i=\frac{\exp(q^\top k_i/\sqrt d)}{\sum_j\exp(q^\top k_j/\sqrt d)}.
+\]
+Donde $q$ es la consulta actual, $k_i,v_i$ son la clave y valor del $i$-ésimo token, $d$ es la dimensión de la cabeza y $\alpha_i$ son los pesos de atención suave. La heurística de atención dura se refiere a esto: si una decisión razonable requiere frecuentemente concentrar el peso en pocas unidades, cachear por token es natural; si las propias unidades tienen mucho ruido o poco contenido semántico, puede ser más racional que el modelo comprima primero y luego busque.
+
+\begin{importantbox}{Un diagnóstico arquitectónico accionable}
+En lugar de preguntar "¿Transformer o SSM es más avanzado?", pregunte: \textbf{¿mis unidades de datos actuales merecen ser cachéadas a largo plazo? ¿Merece una unidad individual ser recuperada con precisión?} Si la respuesta suele ser no, priorice compresión aprendida, jerarquía, encoder local o capa recurrente; si la respuesta suele ser sí, la base de datos de tokens de atención tiene gran valor.
+\end{importantbox}
+
+\subsection{Por qué los modelos compresivos son comunes en multimodalidad}
+
+Los anillos del diagrama clasifican las aplicaciones tempranas de Mamba por dominio; visión/imagen ocupan la mayor parte, mientras que lenguaje/NLP es solo una parte. Esta distribución no puede usarse como benchmark de rendimiento porque incluye tendencias de seguimiento y trabajos con distintos niveles de madurez; funciona mejor como señal de demanda: en visión, series temporales, audio y robótica, las personas carecen generalmente de heurísticas de tokenización tan maduras como BPE.
+
+\lecturefigure{slide-024.jpg}{Aplicación modal amplia de los modelos compresivos: no solo lenguaje}{Grabación oficial de Stanford, 00:33:00--00:34:09}
+
+\teachervoice{00:32:59--00:34:12, Gu mantiene explícitamente el escepticismo: algunas aplicaciones de Mamba pueden ser solo seguir la moda; pero dado que audio, series temporales y visión son difíciles de tokenizar bien, la compresión natural se vuelve un sesgo inductivo atractivo.}
+
+\subsection{Resumen de la sección}
+
+El poder de la atención se basa en tokens adecuados. El patchifier y el tokenizer realizan simultáneamente reducción de resolución, adición de límites e introducción de unidades semánticas; cuando faltan estas heurísticas, cachear carácter por carácter, byte por byte, base por base o parche por parche puede desperdiciar capacidad y aumentar distractores. Las curvas de bytes y ADN apoyan la interacción arquitectura-resolución, pero no permiten generalizar un único ganador. El próximo capítulo introduce H-Net: convertir "comprimir primero en tokens efectivos" de una regla offline a un proceso aprendible internamente del modelo.
+
+
