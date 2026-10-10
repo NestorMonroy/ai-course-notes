@@ -1,0 +1,122 @@
+\section{Mecanismo RLP: política de pensamiento, línea base contrafactual y ganancia de información}
+
+El pipeline completo de RLP consta de cuatro partes interdependientes: la política de pensamiento genera el rollout, la línea base sin pensar proporciona predicciones contrafactuales, la recompensa de ganancia de información mide el beneficio del pensamiento y el EMA (Promedio Móvil Exponencial) permite que la línea base siga de manera estable a la política. Mirar solo la fórmula final hace que se pierdan las condiciones de ingeniería como el prompt, el muestreo, los gradientes de parada y la cronología de las actualizaciones.
+
+\subsection{Primero observe dos rutas en el diagrama de flujo global}
+
+Una entrada del contexto entra en la línea base sin pensar, obteniendo $p_\phi(x_t\mid x_{<t})$; la otra ruta entra en la política de pensamiento, primero se muestrea $c_t$, luego se obtiene $p_\theta(x_t\mid x_{<t},c_t)$. La diferencia entre dos probabilidades log (log probability) forma la recompensa, y esta recompensa actualiza la política de los tokens de pensamiento, mientras que el NTP estándar sigue entrenando al modelo para predecir el token real.
+
+\lecturefigure{slide-026.jpg}{Visión general del RLP: dos rutas de predicción, recompensa de ganancia de información y actualización de políticas}{Grabación oficial de Stanford, 00:32:34--00:33:00}
+
+\begin{knowledgebox}{Lectura de la figura: no interprete las dos redes como sistemas permanentemente independientes}
+En el diagrama, $\theta$ y $\phi$ representan dos estados de parámetros: la política es la red actual y la línea base es su copia con retraso en EMA. Comparten la misma arquitectura; la línea base no es un verificador externo entrenado por separado. La réplica con retraso proporciona una referencia contrafactual que cambia lentamente.
+\end{knowledgebox}
+
+\subsection{El contrato de prompt define el espacio de exploración}
+
+El prompt mostrado en clase requiere que el modelo se centre en el siguiente paso de razonamiento, sin saltar directamente a la respuesta final en caja ni repetir la pregunta u outputear metadatos. Esto indica que "hacer pensar al modelo" no es neutral: el prompt define la longitud del pensamiento, el estilo y el espacio de exploración. Si el prompt cambia, también cambian la distribución de recompensas y el cómputo del rollout.
+
+\lecturefigure{slide-027.jpg}{Contrato de prompt para generar thought}{Grabación oficial de Stanford, 00:33:00--00:33:19}
+
+\begin{lstlisting}[caption={Versión simplificada de enseñanza del prompt RLP thought}]
+Prompt:
+  Razone sobre el siguiente paso útil para predecir el próximo token.
+  No salte a una respuesta final en caja.
+  No repita la pregunta, los metadatos del contexto ni los comentarios.
+  Produzca un pensamiento conciso que pueda ayudar a la predicción del siguiente token.
+\end{lstlisting}
+
+\begin{warningbox}{El prompt también es un hiperparámetro del algoritmo}
+La longitud del pensamiento, la temperatura de muestreo, el número de rollouts, el token de parada y la redacción del prompt alteran el costo de exploración y las señales aprendibles. Omitir estos detalles e informar solo que se "usa chain-of-thought" hará que los resultados de replicación pierdan comparabilidad.
+\end{warningbox}
+
+\subsection{Política de pensamiento: primero generar acción, luego predecir token}
+
+Dado un prompt y un contexto, la política muestrea múltiples rollouts de pensamiento. Cada pensamiento concatenado con el contexto predice el siguiente token real; por tanto, un solo rollout genera simultáneamente la probabilidad de acción y la probabilidad del token. La optimización relativa al grupo puede comparar múltiples pensamientos en la misma posición entre sí, reduciendo la necesidad de entrenar un modelo de valor separado.
+
+\lecturefigure{slide-028.jpg}{Generación de rollout de razonamiento y predicción del siguiente token mediante la política de pensamiento}{Grabación oficial de Stanford, 00:33:19--00:34:02}
+
+Para el $i$-ésimo rollout, denotemos el pensamiento como $c_t^{(i)}$; entonces su puntuación razonada es
+\[
+S_{\mathrm{pred}}^{(i)}
+=\log p_\theta(x_t\mid x_{<t},c_t^{(i)}).
+\]
+Donde, $i=1,\ldots,G$, $G$ es el número de pensamientos muestreados en cada posición. Una $S_{\mathrm{pred}}$ alta no significa que el texto del pensamiento sea correcto por sí mismo, sino que indica que ayuda al modelo a asignar mayor probabilidad al token real.
+
+\subsection{Línea base sin pensar: se requiere un contrafactual con el mismo contexto}
+
+Si solo maximizamos la puntuación razonada, el modelo podría obtener altas puntuaciones aprovechando tokens que de todas formas son fáciles. La línea base utiliza el mismo contexto pero no considera el pensamiento, estimando lo fácil que ya era ese token "sin exploración". Por tanto, la recompensa se centra en el incremento aportado por el pensamiento y no en la verosimilitud absoluta del token.
+
+\lecturefigure{slide-029.jpg}{La línea base sin thinking proporciona un contrafactual basado solo en contexto}{Grabación oficial de Stanford, 00:34:02--00:34:25}
+
+\begin{importantbox}{Función del contrafactual}
+Si un mismo $x_t$ era prácticamente seguro por sí mismo, entonces $p_\phi$ ya es alto y un pensamiento común difícilmente obtendría una gran recompensa; si algún pensamiento elimina realmente la ambigüedad, el aumento relativo de $p_\theta$ frente a $p_\phi$ será significativo. La línea base separa la "simplidad del problema" de la "eficacia del razonamiento".
+\end{importantbox}
+
+\subsection{Ganancia de información: relación log-verosimilitud}
+
+La recompensa central del RLP es la diferencia en la probabilidad log entre el predictor razonado y la línea base sin pensar para el token real. Un valor positivo indica que el pensamiento mejora la predicción, cero significa que no contribuye y un valor negativo indica que el pensamiento engaña al modelo. El artículo trata la recompensa como una constante al calcular la actualización de la política, evitando propagar los gradientes a través de ambos evaluadores para evitar un acoplamiento descontrolado del objetivo.
+
+\lecturefigure{slide-030.jpg}{Diagrama completo del cálculo de la recompensa de ganancia de información}{Grabación oficial de Stanford, 00:34:25--00:35:34}
+
+\[
+r_t^{(i)}
+=\log p_\theta(x_t\mid x_{<t},c_t^{(i)})
+-\log p_\phi(x_t\mid x_{<t}).
+\]
+Donde, $r_t^{(i)}$ es la recompensa del $i$-ésimo pensamiento en la posición $t$; $p_\theta$ es la probabilidad de predicción tras añadir el pensamiento; $p_\phi$ es la línea base basada solo en contexto; $x_t$ es siempre el token real del corpus. Esta magnitud es similar a una relación log-verosimilitud punto por punto, no a la esperanza completa del conjunto de datos de la información mutua de Shannon.
+
+\teachervoice{00:34:25--00:35:34, el orador enfatiza: la recompensa solo es positiva cuando el pensamiento "contribuye significativamente"; los pensamientos basura pueden obtener cero o valores negativos. Esta aclaración verbal se acerca más a la esencia del método que decir simplemente "el modelo genera CoT".}
+
+\begin{warningbox}{La ganancia de información no equivale a la verdad}
+Un pensamiento erróneo pero estadísticamente relacionado con el corpus de entrenamiento también podría aumentar la probabilidad de algún token; un pensamiento correcto pero redundante o con redacción inadecuada podría tener una recompensa muy baja. El RLP optimiza la utilidad predictiva, sin optimizar directamente la veracidad (truthfulness), fidelidad o seguridad.
+\end{warningbox}
+
+\subsection{Recompensa densa no binaria y ventaja relativa al grupo}
+
+La ganancia de información define una puntuación para un solo pensamiento, pero la optimización de la política también necesita convertir múltiples rollouts en crédito relativo; esta sección transita desde la recompensa hacia la ventaja, explicando por qué el RLP no necesita entrenar un modelo de valor adicional para cada token. Diferente a las recompensas escasas que dan 0/1 solo en la respuesta final, la recompensa del RLP es un número real y puede calcularse en cualquier posición seleccionada del documento. Para los $G$ rollouts en una misma posición, se puede construir una ventaja usando el promedio y la desviación estándar dentro del grupo, otorgando actualizaciones positivas a aquellos rollouts que "ayudan más que otros pensamientos del mismo grupo".
+
+\lecturefigure{slide-031.jpg}{El RLP utiliza recompensa token-level densa y no binaria}{Grabación oficial de Stanford, 00:35:34--00:35:45}
+
+\[
+A_t^{(i)}
+=\frac{r_t^{(i)}-\bar r_t}{\operatorname{std}(r_t)+\epsilon},
+\qquad
+\bar r_t=\frac{1}{G}\sum_{i=1}^{G}r_t^{(i)}.
+\]
+Donde, $A_t^{(i)}$ es la ventaja relativa al grupo, $G$ es el número de rollouts y $\epsilon$ evita división por cero cuando la varianza es muy pequeña. El RLP real utiliza una actualización proxy recortada (clipped surrogate) para los tokens de pensamiento y entrelaza esto con el entrenamiento estándar de verosimilitud.
+
+\subsection{Línea base EMA: debe seguir sin perseguir al unísono}
+
+Si la línea base está completamente congelada, pierde gradualmente su valor de referencia; si por el contrario se sincroniza completamente con la política en cada paso, podría hacer que el objetivo de recompensa se desvíe rápidamente. El Promedio Móvil Exponencial (EMA) ofrece un compromiso con una actualización lenta: la línea base mantiene lo "suficientemente nuevo", pero intencionalmente queda atrás, mitigando así el hacking de recompensas y el arranque autoinestable.
+
+\lecturefigure{slide-032.jpg}{Ubicación de la actualización de la línea base no-think con retraso en EMA}{Grabación oficial de Stanford, 00:35:45--00:36:31}
+
+\[
+\phi\leftarrow \tau\phi+(1-\tau)\theta,
+\qquad 0<\tau<1.
+\]
+Donde, $\theta$ son los parámetros de la política de pensamiento actual y $\phi$ son los parámetros de la línea base; $\tau$ es el decaimiento del EMA. Cuanto más cercano esté $\tau$ a 1, más estable pero antigua será la línea base; cuanto menor sea, más rápido seguirá, aunque el objetivo contrafactual será más propenso a oscilar.
+
+\begin{lstlisting}[caption={Pseudocódigo simplificado para un paso de entrenamiento del RLP}]
+document = sample_general_pretraining_document()
+t = random_token_position(document)
+context, target = document[:t], document[t]
+
+thoughts = policy.sample_thoughts(context, group_size=G)
+baseline_logp = no_think_ema.log_prob(target, context)
+rewards = []
+for thought in thoughts:
+    reasoned_logp = policy.log_prob(target, context, thought)
+    rewards.append(stop_gradient(reasoned_logp - baseline_logp))
+
+advantages = group_normalize(rewards)
+update_thought_policy_clipped(thoughts, advantages)
+update_standard_next_token_loss(document)
+ema_update(no_think_ema, policy, decay=tau)
+\end{lstlisting}
+
+\subsection{Resumen de la sección}
+
+El ciclo cerrado del RLP es: la política muestrea pensamientos, la línea base ofrece un contrafactual sin pensar, la relación log-verosimilitud forma una recompensa densa, la ventaja relativa al grupo actualiza los tokens de pensamiento, el EMA estabiliza la línea base y, simultáneamente, el NTP sigue aprendiendo del documento. Si falta cualquier componente, el método podría degenerarse en una imitación común de CoT o en un autorecompensado inestable.
+
