@@ -1,0 +1,96 @@
+\section{Paralelismo de tensor y paralelismo de secuencia: descomposición del cálculo matricial}
+
+El paralelismo de tensor (TP, Tensor Parallelism) permite que múltiples ranks procesen conjuntamente una misma capa sobre el mismo \textbf{lote}. No depende de aumentar el batch global; por ello puede superar los límites impuestos por DP en el eje de muestras. El costo es que las operaciones colectivas ingresan al camino crítico de cada bloque Transformer y, habitualmente, deben ejecutarse dentro de dominios topológicos de alta velocidad como NVLink o NVSwitch.
+
+\subsection{Motivación: misma entrada, división de la dimensión oculta}
+
+La escalabilidad de DP finalmente se ve limitada por el límite superior del batch global: seguir aumentando los ranks haría que cada micro-batch por tarjeta fuera demasiado pequeño o alteraría las estadísticas del batch necesarias para la optimización. Por ello, en esta sección se cambia a usar la dimensión oculta interna del modelo como nuevo eje de división, permitiendo completar el cálculo de la misma capa conjuntamente sin aumentar el número de muestras. Mientras que DP hace que cada tarjeta vea un lote diferente, TP hace que cada tarjeta vea la misma entrada, pero solo guarda y calcula una parte de los pesos, los gradientes y el estado del optimizador. La activación completa se replica o no dependiendo de si se usa TP puro o TP más paralelismo de secuencia.
+
+\lecturefigure{slide-049.jpg}{Motivación de TP: mantener el batch constante, dividir el modelo a lo largo de la dimensión oculta}{CS25 V6 official deck, p.~49}
+
+\subsection{De un producto matricial a dos productos matriciales}
+
+La corrección de TP no debe entenderse basándose en "el marco lo manejará", sino derivándola desde el GEMM mínimo. Primero se ve dónde puede cortarse un producto matricial y luego cómo dos productos matriciales adyacentes permiten que el sharding de la primera operación se convierta directamente en la entrada de la segunda, posponiendo así una costosa agregación. Para $Y=XW$, se puede dividir a lo largo de las columnas de salida de $W$: $W=[W_1,\ldots,W_P]$, donde cada rank calcula $Y_r=XW_r$ y finalmente se concatenan las columnas para formar $Y$. Esto es column-parallel; si los pesos de la siguiente capa están divididos a lo largo de las filas de entrada, cada rank calcula una suma parcial local y luego se realiza un all-reduce para obtener el resultado completo.
+
+\[
+H_r=XW^{(1)}_r,
+\qquad
+Z=\sum_{r=1}^{P} H_rW^{(2)}_r.
+\]
+Donde $X$ es la entrada idéntica en los ranks de TP, $W^{(1)}_r$ es el sharding de columnas de la primera matriz, $H_r$ es el sharding local de la dimensión oculta, $W^{(2)}_r$ es el sharding de filas correspondiente a la segunda matriz y $Z$ es el resultado completo tras el all-reduce. No es necesario hacer un all-gather primero para las activaciones intermedias; la comunicación se retrasa hasta después de los dos productos matriciales.
+
+\lecturefigure{slide-052.jpg}{Dos productos matriciales: column-parallel seguido de row-parallel, requiriendo solo un all-reduce}{CS25 V6 official deck, p.~52}
+
+El paso hacia atrás (backward) es la misma descomposición aplicada a los productos matriciales transpuestos. La clase conserva específicamente la suposición de "gradiente del mismo origen": si los gradientes de salida no son consistentes entre ranks, la multiplicación local no puede recuperar resultados equivalentes en una sola tarjeta; el paralelismo de secuencia posterior eliminaría esta sincronización implícil y frágil mediante colectivas explícitas.
+
+\lecturefigure{slide-053.jpg}{TP backward: multiplicación matricial transpuesta y suposición de sincronización de gradientes upstream}{CS25 V6 official deck, p.~53}
+
+\subsection{MLP y Attention son instancias de descomposición matricial}
+
+La proyección up del MLP Transformer puede realizarse en column-parallel; la función de activación se ejecuta sobre el sharding local de la dimensión oculta; la proyección down realiza row-parallel; y al final se hace un all-reduce. De este modo, cada rank solo guarda una parte de las dimensiones anchas intermedias y asume aproximadamente $1/P$ del cómputo principal de GEMM.
+
+\lecturefigure{slide-056.jpg}{TP de MLP: división por columnas en la proyección up y por filas en la proyección down}{CS25 V6 official deck, p.~56}
+
+En Attention, las cabezas Q/K/V pueden dividirse a lo largo de las cabezas o la dimensión oculta; se completa la atención localmente y luego se reduce la suma parcial de la proyección de salida. Si es necesaria comunicación adicional interna en la atención depende del layout de las cabezas, la combinación GQA/MQA, las combinaciones de paralelismo de secuencia/contexto y la implementación específica.
+
+\lecturefigure{slide-059.jpg}{TP de Attention: división de QKV y proyección de salida}{CS25 V6 official deck, p.~59}
+
+\lecturefigure{slide-060.jpg}{Ventajas y desventajas de TP: ahorra memoria del modelo y cómputo, pero las colectivas entran en el camino crítico de cada capa}{CS25 V6 official deck, p.~60}
+
+\begin{knowledgebox}{Lectura de la figura: los cortes horizontales y verticales en los diagramas de TP corresponden a diferentes colectivas}
+El column-parallel distribuye las características de salida entre los ranks; las activaciones intermedias mantienen naturalmente los shardings de la dimensión oculta. El row-parallel empareja las características de entrada con las filas de pesos; cada rank obtiene una parte de la misma suma del espacio de salida y debe realizar un all-reduce. El diagrama de MLP utiliza este par de cortes para envolver la no linealidad; el diagrama de Attention mapea las cabezas Q/K/V y la proyección de salida al mismo patrón. Al leer las figuras, primero busque "qué columna o fila posee cada rank" y luego decida si los resultados requieren concat, sum o mantenerse fragmentados; si se memoriza el número de all-reduce antes que nada, es muy fácil equivocarse al implementar bloques personalizados como GQA o MoE.
+\end{knowledgebox}
+
+\teachervoice{00:23:42--00:30:38, en clase primero se deduce TP mediante dos productos matriciales y luego se mapea a MLP y attention; el punto clave no es memorizar las figuras, sino identificar la combinación de column-parallel, row-parallel y all-reduce, así como los requisitos del backward respecto a los gradientes upstream.}
+
+\subsection{¿Por qué aún se necesita Paralelismo de Secuencia?}
+
+El TP puro suele recuperar activaciones completas en regiones como residual, dropout y layer norm, asumiendo que todos los ranks ejecutan el mismo trabajo. Estas activaciones replicadas consumirían mucha HBM bajo secuencias largas o micro-batches grandes. El paralelismo de secuencia (SP) divide estas activaciones a lo largo de la dimensión de secuencia, permitiendo que cada rank maneje posiciones de token diferentes en las regiones no TP.
+
+\lecturefigure{slide-062.jpg}{Motivación de TP+SP: evitar la replicación de grandes activaciones en regiones residual/layer-norm}{CS25 V6 official deck, p.~62}
+
+La álgebra clave es
+\[
+\operatorname{AllReduce}(x)
+=\operatorname{AllGather}(\operatorname{ReduceScatter}(x)).
+\]
+Donde $x$ es la suma parcial local de cada rank; reduce-scatter completa la suma y deja el sharding de secuencia en diferentes ranks, mientras que all-gather restaura el layout antes de ingresar a las regiones TP que requieren entrada dividida por dimensión oculta. El volumen total de comunicación es del mismo orden que el original all-reduce, pero ya no hay réplica completa de las activaciones intermedias.
+
+\lecturefigure{slide-065.jpg}{TP+SP: alternancia entre layouts de hidden-shard y sequence-shard}{CS25 V6 official deck, p.~65}
+
+En el paso hacia atrás (backward), los roles de all-gather y reduce-scatter se invierten. Por lo tanto, la sincronización de gradientes en regiones como layer norm ya no depende de una identidad implícita donde "todos los ranks hagan exactamente el mismo trabajo"; las colectivas asumen directamente la corrección.
+
+\lecturefigure{slide-066.jpg}{TP+SP backward: emparejamiento de all-gather y reduce-scatter}{CS25 V6 official deck, p.~66}
+
+\lecturefigure{slide-067.jpg}{Compromiso final de TP+SP: activaciones más eficientes, pero la comunicación sigue estando en el camino crítico del bloque}{CS25 V6 official deck, p.~67}
+
+\begin{warningbox}{El paralelismo de secuencia (SP) es diferente al paralelismo de contexto (CP)}
+En esta sección, SP suele ir emparejado con TP, alternando los layouts hidden/sequence en diferentes regiones dentro de una capa con el objetivo de evitar activaciones replicadas. El CP posterior divide la propia secuencia de atención a través de grupos de dispositivos más grandes para contextos ultra largos y requiere intercambio de K/V entre ranks. Ambos nombres contienen "secuencia", pero su alcance y los patrones de comunicación son distintos.
+\end{warningbox}
+
+\subsection{Escribir el eje de paralelismo como una malla de dispositivos}
+
+Se han discutido por separado los grupos DP y TP, pero en un entrenamiento real, un mismo rank pertenece simultáneamente a múltiples grupos. En esta sección se escribe explícitamente "a lo largo de qué eje comunicar" usando una malla de dispositivos (device mesh), evitando que las colectivas globales con world-size rompan la semántica de otros fragmentos. DP y TP pueden verse como una malla bidimensional: el sharding de datos varía a lo largo del eje DP y se replica a lo largo del eje TP; el sharding del modelo varía a lo largo del eje TP y se replica a lo largo del eje DP. Las colectivas deben ejecutarse en el grupo de procesos correcto; un grupo incorrecto mezclaría dimensiones que deberían ser independientes.
+
+\lecturefigure{slide-068.jpg}{Combinación de DP y TP: los ejes de datos y modelo son mutuamente ortogonales}{CS25 V6 official deck, p.~68}
+
+\lecturefigure{slide-069.jpg}{Interfaz de código: selección del eje de colectiva sobre una malla de dispositivos}{CS25 V6 official deck, p.~69}
+
+\begin{lstlisting}[language=Python,caption={Selección del grupo de procesos DP/TP sobre una malla de dispositivos bidimensional}]
+mesh = init_device_mesh(
+    "cuda", (dp_size, tp_size), mesh_dim_names=("dp", "tp")
+)
+dp_group = mesh.get_group("dp")
+tp_group = mesh.get_group("tp")
+
+all_reduce(gradients, group=dp_group)   # combinar sharding de datos
+all_reduce(partial_outputs, group=tp_group)  # combinar sharding del modelo
+\end{lstlisting}
+
+\teachervoice{00:37:52--00:41:22, en clase se sugiere limitar TP a un solo nodo o dominio de enlaces rápidos y expresar las relaciones combinadas mediante grupos de procesos/malla de dispositivos. El layout de paralelismo no es un problema puramente matemático; desplegar el mismo fragmento en una red lenta carecería totalmente de sentido.}
+
+\subsection{Resumen de la sección}
+
+TP descompone el cálculo matricial entre múltiples ranks y SP fragmenta aún más las activaciones fuera de las regiones TP. Superan los límites del batch global impuestos por DP, pero introducen comunicaciones en el camino crítico de cada capa. La siguiente categoría, Paralelismo de Pipeline (Pipeline Parallelism), no corta matrices sino que asigna capas a lo largo de la profundidad de la red y transforma el problema en un cronograma de micro-batch.
+
+
