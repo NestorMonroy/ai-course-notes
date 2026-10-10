@@ -1,0 +1,67 @@
+\section{De «cuántos datos» a «cómo construir la mezcla óptima»}
+
+La escala de los datos sigue aumentando, pero el texto generado por humanos no es infinito. Por ello, el ingeniería de preentrenamiento no puede limitarse a preguntar «¿cuántas más páginas web podemos capturar?», sino que debe interrogar si cada token vale la pena aparecer, cuántas veces debe hacerlo y en qué etapa del entrenamiento: temprana o tardía. La clave aquí es modelar por separado los pesos de mezcla (mixture weights) y el orden temporal; de lo contrario, se mezclan dos fuentes distintas de beneficios.
+
+\subsection{Hay muchas fuentes de datos, pero lo verdaderamente escaso son las oportunidades de entrenamiento efectivas}
+
+Las fuentes como documentos legales, libros, artículos académicos, páginas web y materiales matemáticos presentan diferencias enormes en formato, calidad, escala y grado de repetición. Que un gran corpus tenga muchos tokens no implica que tenga alto valor de entrenamiento; del mismo modo, que un corpus pequeño sea de alta calidad no garantiza que el muestreo infinito evitará el sobreajuste. La primera figura ilustra la diversidad de los datos y la segunda muestra el crecimiento de la escala frente al horizonte de datos generados por humanos; ambas explican por qué se vuelve necesaria la optimización de la receta (recipe optimization).
+
+\lecturefigure{slide-006.jpg}{Composición multifuente de los datos de preentrenamiento para LLMs}{Grabación oficial de Stanford, 00:06:28--00:06:51}
+
+Al interpretar la figura, separe primero «fuentes» de «muestras». Un rastreo web (Web crawl) puede representar la mayoría de los tokens, pero su distribución interna de calidad es muy amplia; por el contrario, los artículos o documentos legales tienen una escala menor, pero pueden proporcionar señales de alta densidad en capacidades específicas. La estrategia de mezcla no consiste en pegar una etiqueta permanente a cada fuente, sino asignar presupuestos combinando filtrado, dominio, dificultad, número de repeticiones y validación downstream.
+
+\lecturefigure{slide-007.jpg}{Crecimiento de la escala de tokens de entrenamiento frente al horizonte de datos generados por humanos}{Grabación oficial de Stanford, 00:06:51--00:07:49}
+
+\begin{knowledgebox}{Lectura de la figura: ¿cómo interpretar la curva de crecimiento azul?}
+El eje horizontal representa el tiempo y el vertical la cantidad de datos consumidos para entrenar el modelo. Los puntos históricos y la banda de predicción destacan la transición desde los cientos de billones de tokens de la era de GPT-3 hacia los decenas de billones de trillones. Esto respalda el juicio de recursos según el cual «aumentar simplemente nuevos textos humanos se volverá cada vez más difícil», pero no prueba que un año específico agote exactamente los datos, ni considera el valor de los datos sintéticos, multimodales, trayectorias de interacción y la repetición del entrenamiento.
+\end{knowledgebox}
+
+\subsection{Dos preguntas: peso y orden}
+
+Ante el mismo conjunto de fuentes, deben responderse dos problemas ortogonales. Primero, \textbf{cómo ponderar}: con qué probabilidad se extrae cada fuente dentro de un lote (batch). Segundo, \textbf{cómo ordenar}: si esa probabilidad cambia conforme avanza el entrenamiento. El primero constituye la mezcla (blend) y el segundo el currículo (curriculum). Si solo se reporta la proporción total final sin indicar el orden temporal, los lectores externos no podrán replicar la distribución real de entrenamiento.
+
+\lecturefigure{slide-008.jpg}{Dos preguntas para maximizar el potencial de los datos: cómo ponderar y cómo ordenar}{Grabación oficial de Stanford, 00:07:49--00:08:22}
+
+\begin{importantbox}{Diferencia matemática entre Blend y Curriculum}
+Sea $D_1,\ldots,D_K$ el conjunto de fuentes de datos. Un blend fijo utiliza pesos constantes $w_k$, cumpliendo $w_k\ge 0$ y $\sum_k w_k=1$; un currículo, en cambio, emplea $w_k(s)$ que varían con el progreso del entrenamiento $s\in[0,1]$. Incluso si la cantidad total de tokens integrada a lo largo de todas las fases es idéntica, diferentes funciones $w_k(s)$ pueden generar modelos distintos.
+\end{importantbox}
+
+\subsection{Estimación de calidad, estimación de epochs y creación del blend}
+
+El primer paso para obtener una mezcla óptima es la estimación de calidad: evaluar la efectividad de cada fuente en las capacidades objetivo mediante reglas, clasificadores, rúbricas de LLM o evaluación humana. El segundo paso es la estimación de epochs: determinar cuándo el beneficio marginal se vuelve negativo al repetir cierto dominio 1, 2, 4 o 6 veces. Los pesos finales dependen tanto de la calidad como del número de repeticiones posibles; «alta calidad» no equivale a una licencia de reproducción infinita.
+
+\lecturefigure{slide-009.jpg}{Tres pasos para una mezcla de datos óptima: estimación de calidad, estimación de repeticiones y construcción del blend}{Grabación oficial de Stanford, 00:08:22--00:09:29}
+
+Si $N_k$ es el número único de tokens en la fuente $k$, se planean $e_k$ repeticiones y el presupuesto total es $B$, entonces un peso pedagógico puede expresarse como
+\[
+w_k=\frac{q_k e_k N_k}{\sum_j q_j e_j N_j},
+\qquad
+\sum_k w_k=1.
+\]
+En esta fórmula, $q_k$ denota el coeficiente de calidad empírico, $e_k$ el número estimado de epochs repetibles y $N_k$ la escala de la fuente. Las recetas reales suelen incorporar además un piso de dominio (domain floor), temperatura, deduplicación y límites de muestreo; por tanto, esta ecuación es un marco conceptual y no la única implementación posible en la literatura.
+
+\begin{lstlisting}[caption={Versión pedagógica del pseudocódigo para el abanico de calidad y repeticiones a nivel de dominio}]
+for domain in domains:
+    quality_score = evaluate_quality_classifier(domain)
+    for repeats in [1, 2, 4, 6]:
+        candidate = reallocate_budget(
+            base_blend, add=(domain, repeats), remove="low_quality_crawl"
+        )
+        model = train_small_proxy(candidate, fixed_token_budget)
+        record(domain, repeats, downstream_score(model))
+
+best_repeats = choose_before_diminishing_returns(records)
+final_blend = assemble_domain_level_weights(quality_score, best_repeats)
+\end{lstlisting}
+
+\teachervoice{00:25:17--00:26:45, el orador añade en las preguntas y respuestas: el abanico de conteo de repeticiones traslada el presupuesto desde el rastreo de baja calidad hacia el dominio objetivo, lo cual generalmente se hace por categoría de dominio, no ejecutando un conjunto costoso de experimentos para cada fuente de datos independiente.}
+
+\begin{warningbox}{La Calidad no es una propiedad intrínseca del documento}
+Un mismo documento puede tener distinto valor según la fluidez del lenguaje, el razonamiento matemático, la generación de código o la búsqueda legal. Clasificadores como FineWeb-Edu solo otorgan un puntaje educativo bajo una rúbrica específica; el ingeniero de entrenamiento debe registrar la rúbrica, la versión del modelo, los umbrales, la composición de dominios y la validación downstream, ya que sin ello «alta calidad» no puede ser revisada.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La botella de cuello en los datos desplaza el foco de la investigación desde «capturar más» hacia «distribuir mejor». Los pesos del blend responden qué porcentaje ocupa cada tipo de dato, mientras que el currículo indica cuándo aparecen; la estimación de calidad y la estimación de epochs miden respectivamente la densidad de señal y el límite superior de repeticiones. El capítulo próximo concretará $w_k(s)$ variable en el tiempo mediante un preentrenamiento de dos fases (two-phase pretraining).
+
+
