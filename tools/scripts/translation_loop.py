@@ -357,8 +357,8 @@ def collect_results(out_dir: Path, targets: dict[str, str]) -> list[str]:
     missing = []
     index = out_dir / "index.tsv"
     rows = [l.split("\t", 1) for l in index.read_text(encoding="utf-8").splitlines() if l.strip()] if index.is_file() else []
-    for n, zh in rows:
-        result_file = out_dir / f"{n}.json"
+    for key, zh in rows:
+        result_file = out_dir / f"{key}.json"
         try:
             data = json.loads(result_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -443,9 +443,9 @@ def cmd_usage(args) -> int:
         for line in index.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
-            n, zh = line.split("\t", 1)
+            key, zh = line.split("\t", 1)
             try:
-                usage = json.loads((index.parent / f"{n}.json").read_text(encoding="utf-8")).get("usage", {})
+                usage = json.loads((index.parent / f"{key}.json").read_text(encoding="utf-8")).get("usage", {})
             except (OSError, ValueError):
                 usage = {}
             counts = {c: int(usage.get(USAGE_KEYS[c], 0) or 0) for c in COMPONENTS}
@@ -456,7 +456,7 @@ def cmd_usage(args) -> int:
                 han_sum, letter_sum = han_sum + han, letter_sum + letters
             # GNU Time deja «%M %e %U %S» en `<n>.time` (THYROX 5f7cda74). Sin el
             # archivo el ítem no se midió: «-», no un cero.
-            timing = (index.parent / f"{n}.time")
+            timing = (index.parent / f"{key}.time")
             # Si el comando falló, GNU Time antepone «Command exited with non-zero
             # status N» (ola 6: 710 de 786): los números van en la última línea,
             # y lo que no se entienda es «-», nunca una excepción que tumbe el ciclo.

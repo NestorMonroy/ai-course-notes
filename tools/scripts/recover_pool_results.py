@@ -57,9 +57,9 @@ def recover(batch: str) -> tuple[int, int]:
         if index is None:
             continue
         for line in index.read_text(encoding="utf-8").splitlines():
-            n, _, zh = line.partition("\t")
+            key, _, zh = line.partition("\t")
             target = targets.get(zh)
-            result_file = out_dir / f"{n}.json"
+            result_file = out_dir / f"{key}.json"
             if not target or Path(target).exists() or not result_file.is_file():
                 continue
             correction = Path(zh.replace(".zh.tex", ".correccion.md"))

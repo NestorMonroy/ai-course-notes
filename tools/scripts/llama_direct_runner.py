@@ -4,8 +4,10 @@
 Se declara como ``TRANSLATION_RUNNER`` de ``translation_loop.py``: recibe la
 misma línea de comando que ``headless-pool`` (sólo lee ``--prompt``, ``--out``
 y ``--timeout``; el resto se ignora) y las rutas de los fragmentos por stdin,
-una por línea. Por cada fragmento escribe ``<n>.json`` con ``result`` y una
-fila ``<n>\t<ruta>`` en ``index.tsv``: el contrato que ``collect_results`` lee.
+una por línea. Por cada fragmento escribe ``<clave>.json`` con ``result`` y una
+fila ``<clave>\t<ruta>`` en ``index.tsv``: el contrato que ``collect_results`` lee.
+La clave nombra el fragmento (``response_name``), no su posición en la entrada:
+un ordinal no dice qué respuesta es ni sobrevive a otra ejecución del lote.
 
 El servidor es ``llama-server`` (llama.cpp b11277) en una unidad propia del
 consumidor (``thyrox-bg start llama-server-es-mx``), con el thinking y el
@@ -95,7 +97,7 @@ def cached_result(out_dir: Path, zh: Path) -> dict | None:
 
     `collect_results` escribe los `.es.tex` sólo cuando el runner termina el
     lote entero; un reinicio del anfitrión a mitad tira lo traducido. Aquí se
-    recupera de los `<n>.json` de ejecuciones anteriores, salvo que una
+    recupera de las respuestas de ejecuciones anteriores, salvo que una
     corrección (`.correccion.md`) sea más nueva que esa respuesta: entonces la
     retraducción es lo que se pide.
     """
@@ -105,10 +107,10 @@ def cached_result(out_dir: Path, zh: Path) -> dict | None:
         if index.parent == out_dir:
             continue
         for line in index.read_text(encoding="utf-8").splitlines():
-            n, _, path = line.partition("\t")
+            key, _, path = line.partition("\t")
             if path != str(zh):
                 continue
-            result_file = index.parent / f"{n}.json"
+            result_file = index.parent / f"{key}.json"
             try:
                 record = json.loads(result_file.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -123,6 +125,17 @@ def cached_result(out_dir: Path, zh: Path) -> dict | None:
             if text is not None and not loop.structure_problem(zh.read_text(encoding="utf-8"), text):
                 return {**record, "reused_from": str(result_file)}
     return None
+
+
+def response_name(zh: Path) -> str:
+    """Clave de la respuesta de un fragmento: nota, fragmento y qué es.
+
+    ``chunks/cs25-v6__lecture02__lecture02-notes/004.zh.tex`` da
+    ``cs25-v6__lecture02__lecture02-notes__004.response``. Las ejecuciones
+    anteriores con ordinales siguen legibles: los lectores toman la clave
+    de la primera columna de ``index.tsv`` sin interpretarla.
+    """
+    return f"{zh.parent.name}__{zh.name.removesuffix('.zh.tex')}.response"
 
 
 def thinking_in_text(content: str) -> int:
@@ -186,15 +199,16 @@ def main(argv: list[str]) -> int:
     items = [Path(line.strip()) for line in sys.stdin if line.strip()]
     failed = 0
     with (args.out / "index.tsv").open("w", encoding="utf-8") as index:
-        for n, zh in enumerate(items, start=1):
-            index.write(f"{n}\t{zh}\n")
+        for position, zh in enumerate(items, start=1):
+            key = response_name(zh)
+            index.write(f"{key}\t{zh}\n")
             index.flush()
             started = time.monotonic()
             reused = cached_result(args.out, zh)
             if reused is not None:
                 reused["duration_s"] = 0.0
-                (args.out / f"{n}.json").write_text(json.dumps(reused, ensure_ascii=False), encoding="utf-8")
-                print(f"llama-direct: {n}/{len(items)} reutilizado {zh.name}", file=sys.stderr, flush=True)
+                (args.out / f"{key}.json").write_text(json.dumps(reused, ensure_ascii=False), encoding="utf-8")
+                print(f"llama-direct: {position}/{len(items)} reutilizado {zh.name}", file=sys.stderr, flush=True)
                 continue
             try:
                 reply = chat(url, model, build_message(template, zh), timeout, api)
@@ -212,8 +226,8 @@ def main(argv: list[str]) -> int:
                 failed += 1
                 record = {"result": "", "subtype": f"error: {error}", "model": model, "runtime": "llama-direct"}
             record["duration_s"] = round(time.monotonic() - started, 1)
-            (args.out / f"{n}.json").write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
-            print(f"llama-direct: {n}/{len(items)} {record['duration_s']}s "
+            (args.out / f"{key}.json").write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+            print(f"llama-direct: {position}/{len(items)} {record['duration_s']}s "
                   f"{'error' if 'subtype' in record else record['usage']['output_tokens']} {zh.name}",
                   file=sys.stderr, flush=True)
     return 1 if failed else 0

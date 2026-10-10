@@ -10,7 +10,7 @@
 #   → artefacto del modelo: el blob GGUF montado tiene el SHA del catálogo
 #   → runtime: el contenedor del servidor corre la imagen de Ollama POR DIGEST
 #   → residencia: /api/ps tiene ese modelo cargado
-#   → respuestas reales: el `model` de cada <n>.json del último translate/ del
+#   → respuestas reales: el `model` de cada respuesta (<clave>.json) del último translate/ del
 #     lote es el pedido, con runtime llama-direct
 #   → ningún resultado nombra un modelo remoto (claude, anthropic, gpt, gemini)
 #
@@ -87,9 +87,9 @@ sys.path.insert(0, sys.argv[2])
 import llama_direct_runner as runner, translation_loop as loop
 run = Path(sys.argv[1])
 for line in (run / "index.tsv").read_text(encoding="utf-8").splitlines():
-    n, _, zh = line.partition("\t")
+    key, _, zh = line.partition("\t")
     try:
-        record = json.loads((run / f"{n}.json").read_text(encoding="utf-8"))
+        record = json.loads((run / f"{key}.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         continue
     if record.get("runtime") != "llama-direct" or record.get("subtype"):
