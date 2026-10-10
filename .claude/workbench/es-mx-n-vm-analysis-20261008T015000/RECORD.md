@@ -215,3 +215,37 @@ ES-A (lote 26). Una VM trabajadora queda útil sólo con acceso a thyrox y el 9B
   carril, sólo con el modelo local. `llama_direct_ensure.sh` cambia su tramo por defecto a
   27–33 para que un reinicio de la VM lo relance ahí. Ningún carril remoto vivo (medido:
   0 procesos de `pool_proxy` o `headless-pool`).
+
+## El carril pasa a llama-server, configurado por la ficha Qwen3.5-9B (2026-10-10T06:2xZ)
+
+Integrada `feature/fresh-clone-bootstrap` en thyrox (`42f9e1729`). Conflicto en el store:
+`H-THYROX-599` existía con dos hallazgos distintos (el nuestro de los huérfanos de
+Ollama y el de `declaredCapabilitiesOf` de model-eval-campaign); el de la base conserva el
+número y el nuestro pasa a **H-THYROX-642** (forma de H-THYROX-26).
+
+Por qué Ollama hasta hoy: thyrox no ofrecía la unidad `llama-server` (runtime de GGUF =
+Ollama, `RUNTIME_BY_FORMAT`) y faltaba lo que VM U midió para arrancarla
+(`LD_LIBRARY_PATH=/app`, H-THYROX-639). Medido antes de cambiar: en 203 respuestas de
+Ollama la mediana es 3.78 caracteres por token de salida (mínimo 2.7): sin razonamiento
+oculto. Ciega a: un razonamiento corto mezclado con una salida larga.
+
+Configuración frente a la ficha (`Qwen3.5-9B.txt` subida por el ejecutor):
+
+| Ficha | Qué exige | En la unidad |
+|---|---|---|
+| l.162, l.400, l.436 | piensa por defecto; sin `/nothink`; se apaga con `chat_template_kwargs` | `--jinja --chat-template-kwargs '{"enable_thinking":false}'` |
+| l.282 = l.581 | no-thinking general: 0.7/0.8/20/0.0, presence 1.5, repetition 1.0 | flags del servidor; `/props` lo confirma |
+| l.585 | salida 32 768 | `-n 32768`, `-c 40960` |
+| l.172 | ≥ 128K para preservar el thinking | no aplica: thinking apagado; 128K no cabe en la unidad de 9 GiB (W §4) |
+| l.584 | presence alto puede mezclar idiomas | se mantiene 1.5; vigilar `prose:english` y `parity:residual-han` |
+| l.198, l.530 | MTP, YaRN | el GGUF no trae `nextn`; contexto < 262 144 |
+
+Lo que la medición corrigió: `/props` daba `reasoning_format: none`, así que un `<think>`
+habría llegado en `content` y `thinking_chars` habría marcado 0 sin poder verlo. Ahora
+`--reasoning-format deepseek` lo separa a `reasoning_content`, y el runner cuenta además
+cualquier `<think>` que llegue en el texto.
+
+Por qué `thinking_chars` debe ser 0: la traducción es una tarea general (perfil l.282), en
+CPU cada token de razonamiento cuesta lo mismo que uno de salida (~3 tok/s), y el thinking
+pide ≥ 128K de contexto (l.172), que esta unidad no admite. 0 es la prueba de que la
+configuración del servidor se aplicó, no un supuesto.

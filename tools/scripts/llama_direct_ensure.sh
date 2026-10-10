@@ -66,7 +66,11 @@ if alive; then
 elif [[ "$RUNTIME" == llama-server ]]; then
     # Perfil de la ficha Qwen3.5-9B «Instruct (non-thinking) for general tasks» fijado
     # en el servidor (propuesta de VM W, qwen35-card-vm-w.md §5): el cliente no lo
-    # reenvía. LD_LIBRARY_PATH=/app porque sin él el binario sale 127 (H-THYROX-639);
+    # reenvía. Ficha: thinking activo por defecto (l.162), se apaga sólo por
+    # chat_template_kwargs (l.400, l.436); muestreo l.282 = l.581; salida 32 768
+    # (l.585), con contexto 40 960 para que quepan prompt y salida. El razonamiento
+    # se separa a reasoning_content (--reasoning-format deepseek): con «none», un
+    # <think> iría al texto y la medida thinking_chars no lo vería. LD_LIBRARY_PATH=/app porque sin él el binario sale 127 (H-THYROX-639);
     # LLAMA_ARG_THINK y no REASONING_FORMAT, que b11277 ignora (H-THYROX-638).
     export LD_LIBRARY_PATH=/app
     port="${URL##*:}"
@@ -74,8 +78,8 @@ elif [[ "$RUNTIME" == llama-server ]]; then
         --kind workbench --image "$IMAGE" --network host \
         --mount "$GGUF:/model.gguf:ro" --env LD_LIBRARY_PATH --cpus 4 --memory-mib 9216 -- \
         -m /model.gguf --alias "$MODEL" --host 127.0.0.1 --port "$port" \
-        -c 32768 -np 1 -n 12288 --cache-type-k q8_0 --cache-type-v q8_0 -fa on \
-        --jinja --chat-template-kwargs '{"enable_thinking":false}' \
+        -c 40960 -np 1 -n 32768 --cache-type-k q8_0 --cache-type-v q8_0 -fa on \
+        --jinja --chat-template-kwargs '{"enable_thinking":false}' --reasoning-format deepseek \
         --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0 --presence-penalty 1.5 --repeat-penalty 1.0)
     # La primera carga lee 5.6 GB del disco: con la caché fría tarda minutos.
     for _ in $(seq 300); do alive && break; sleep 2; done

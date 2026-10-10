@@ -36,8 +36,9 @@ import translation_loop as loop  # noqa: E402
 DEFAULT_URL = "http://127.0.0.1:11600"
 DEFAULT_API = "openai"
 DEFAULT_MODEL = "qwen35-9b-es-mx"
-CONTEXT_TOKENS = 32768
-MAX_OUTPUT_TOKENS = 12288
+# Ficha Qwen3.5-9B l.585: salida de 32 768; el contexto deja sitio al prompt.
+CONTEXT_TOKENS = 40960
+MAX_OUTPUT_TOKENS = 32768
 # «Instruct (or non-thinking) mode for general tasks» de la guía Qwen3.5-9B-GGUF —
 # Llama.cpp Guides: enable_thinking=false (`think: false`) y su muestreo completo.
 SAMPLING_PROFILE = "instruct-non-thinking-general"
@@ -124,6 +125,19 @@ def cached_result(out_dir: Path, zh: Path) -> dict | None:
     return None
 
 
+def thinking_in_text(content: str) -> int:
+    """Caracteres de razonamiento que llegaron dentro del texto, no separados.
+
+    Si el servidor no separa el razonamiento, el bloque `<think>` viene en el
+    contenido; contarlo aquí impide que «thinking apagado» se lea por omisión.
+    """
+    start = content.find("<think>")
+    if start < 0:
+        return 0
+    end = content.find("</think>", start)
+    return (end if end >= 0 else len(content)) - start
+
+
 def post(url: str, body: dict, timeout: int) -> dict:
     request = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
                                      headers={"Content-Type": "application/json"})
@@ -190,7 +204,7 @@ def main(argv: list[str]) -> int:
                     "server": "llama-server" if api == "openai" else "ollama",
                     "sampling_profile": SAMPLING_PROFILE,
                     # El thinking tiene que venir apagado; su tamaño lo prueba en cada respuesta.
-                    "thinking_chars": len(reply["thinking"]),
+                    "thinking_chars": len(reply["thinking"]) + thinking_in_text(reply["content"]),
                     "usage": {"input_tokens": reply["input_tokens"], "output_tokens": reply["output_tokens"]},
                     "done_reason": reply["done_reason"],
                 }
