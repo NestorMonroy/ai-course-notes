@@ -33,7 +33,7 @@ export TRANSLATION_RUNNER="$HERE/llama_direct_runner.py"
 URL="${LLAMA_DIRECT_URL:-http://127.0.0.1:11600}"
 # La salud según el runtime que sirve: llama-server (/health) u Ollama (/api/version).
 [[ "${LLAMA_DIRECT_API:-openai}" == ollama ]] && HEALTH="$URL/api/version" || HEALTH="$URL/health"
-SETTLED="${LLAMA_DIRECT_SETTLED:-.claude/cache/ola/llama-direct.settled}"
+SETTLED="${LLAMA_DIRECT_SETTLED:-.claude/cache/waves/llama-direct.settled}"
 
 # Fragmentos ya traducidos en todo el plan: la medida del avance de una vuelta.
 translated_count() {

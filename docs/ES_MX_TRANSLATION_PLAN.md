@@ -366,7 +366,7 @@ historial. Se lee, en este orden: este plan (secciones 6, 9.1 y ésta),
 
 ```bash
 uv run --locked bash tools/scripts/translate_wave.sh --from N --to M --jobs 2 --compile \
-    > .claude/cache/ola/ola-K-$(date -u +%Y%m%dT%H%M%SZ).log 2>&1   # como tarea en segundo plano del cliente
+    > .claude/cache/waves/wave-K-$(date -u +%Y%m%dT%H%M%SZ).log 2>&1   # como tarea en segundo plano del cliente
 ```
 
 Se lanza como tarea en segundo plano del cliente y se recoge por su

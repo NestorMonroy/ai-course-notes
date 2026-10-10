@@ -15,7 +15,7 @@
 #   lazo      un `llama_direct_loop.sh` vivo → no se toca; un tramo asentado
 #             (`llama-direct.settled` con el mismo --from/--to: una vuelta
 #             sin avance, lo que queda pide juicio) → no se relanza; si no,
-#             se lanza desde --from con su log en .claude/cache/ola/
+#             se lanza desde --from con su log en .claude/cache/waves/
 #
 # Uso: llama_direct_ensure.sh [--from N]
 # Exit 0 todo en marcha · 3 el servidor no respondió tras lanzarlo.
@@ -121,13 +121,13 @@ fi
 
 # Un tramo que el lazo ya asentó (una vuelta sin avance) no se relanza: lo que
 # queda en él pide juicio. Otro --from/--to, o retirar la marca, lo reabre.
-SETTLED="$CONSUMER/.claude/cache/ola/llama-direct.settled"
+SETTLED="$CONSUMER/.claude/cache/waves/llama-direct.settled"
 if pgrep -f '[l]lama_direct_loop.sh' > /dev/null; then
     echo "llama_direct_ensure: lazo ya activo"
 elif [[ -f "$SETTLED" ]] && gawk -F'\t' -v a="$from" -v b="$to" '$1 == a && $2 == b {ok = 1} END {exit !ok}' "$SETTLED"; then
     echo "llama_direct_ensure: lazo ya asentado en los lotes $from-$to ($(cut -f3 "$SETTLED")); no se relanza"
 else
-    log="$CONSUMER/.claude/cache/ola/llama-direct-$(date -u +%Y%m%dT%H%M%SZ).log"
+    log="$CONSUMER/.claude/cache/waves/llama-direct-$(date -u +%Y%m%dT%H%M%SZ).log"
     # setsid: el lazo no pertenece al grupo de procesos de quien llama, así que
     # sobrevive a que el cliente detenga ese comando.
     export LLAMA_DIRECT_URL="$URL" LLAMA_DIRECT_API="$API" LLAMA_DIRECT_MODEL="$MODEL"
