@@ -39,3 +39,12 @@ retiró con `thyrox-bg register` + `wait-jobs kill`. Disponible tras eso: 15 GiB
 campo es el valor por petición del slot, no el del servidor, y no se usa como evidencia; la
 prueba del thinking apagado es `thinking_chars` en cada respuesta, que suma `reasoning_content`
 y cualquier `<think>` llegado en el texto.
+
+## VM creada (06:35Z)
+
+| VM | Sesión | Rama (ai-course-notes y thyrox) | Base | Encargo |
+|---|---|---|---|---|
+| ES-D | `session_01CX2J5JgpDq2doj9q5vS5H6` | `feature/es-mx-vm-d-local-thinking-audit` | `9d0eb56e` · `acce34bc2` | `prompts/vm-d.md` |
+
+Riesgos heredados de ES-B y ES-C, declarados en el encargo: el clasificador de permisos rehusó
+añadir thyrox a ES-B, y Docker Hub respondió 429 a ES-C al traer el 9B.
