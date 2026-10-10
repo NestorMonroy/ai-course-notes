@@ -1,0 +1,74 @@
+\section{Estado autoregresivo: base de datos, cerebro e híbrido}
+
+La capítulo anterior explicó cómo se construye el estado recurrente; en este capítulo se orienta hacia cómo cambia el comportamiento del modelo. La postura de Gu es que cualquier modelo autoregresivo lleva consigo un estado de paso a paso (stepwise state), y las diferencias arquitectónicas pueden reducirse primero a «qué se guarda en el estado y cómo se accede a él». Esta abstracción coloca a los transformadores y a los SSM en el mismo sistema de coordenadas, haciendo que el recall, el seguimiento de estado (state tracking), la interacción en línea (online interaction) y el diseño híbrido sean simplemente diferentes facetas del mismo problema.
+
+\subsection{Cada modelo autoregresivo tiene un estado}
+
+Para generadores genéricos, se puede escribir el paso $t$ como:
+\[
+s_t=U_\theta(s_{t-1},x_t),
+\qquad
+p(x_{t+1}\mid x_{\le t})=R_\theta(s_t).
+\]
+Donde, $s_t$ es el estado autoregresivo, $U_\theta$ es la actualización y $R_\theta$ es la lectura. El $s_t$ de los SSM es un estado recurrente de forma fija; el $s_t$ de los transformadores incluye además el caché KV de todas las capas. Ambos cumplen con la descripción de una máquina de estados, aunque su espacio de estados y formas de acceso son radicalmente diferentes.
+
+\lecturefigure{slide-012.jpg}{Abstracción clave: todos los modelos autoregresivos pueden verse como portadores de un estado de paso a paso}{Grabación oficial de Stanford, 00:16:20--00:17:19}
+
+\begin{importantbox}{El estado es «lo que queda en la memoria entre pasos»}
+Esta definición es más amplia que si el modelo tiene o no una capa recurrente. Un transformador no es un RNN tradicional en su grafo de red, pero en el bucle de decodificación autoregresivo sigue pasando el caché KV de un paso al siguiente, por lo que también tiene estado. Comparar modelos usando esta definición evita confundir las etiquetas del grafo de cómputo con la esencia de las capacidades.
+\end{importantbox}
+
+\subsection{Base de datos versus cerebro: una analogía útil pero peligrosa}
+
+El caché del transformador funciona como una base de datos: cada token histórico tiene su propia entrada y una nueva consulta puede realizar búsqueda por contenido sobre cualquier registro. El estado comprimido fijo de los SSM se parece más a la memoria de trabajo humana: la nueva experiencia reescribe continuamente el mismo estado; algunos detalles pueden perderse, pero el sistema puede operar en línea constantemente. En las imágenes, «base de datos» y «cerebro» no son juicios de valor, sino una comparación entre indexación precisa y compresión distribuida.
+
+\lecturefigure{slide-013.jpg}{Analogía a gran escala: los transformadores son como bases de datos, los SSM como estados cerebrales comprimidos}{Grabación oficial de Stanford, 00:17:20--00:18:39}
+
+\teachervoice{En la Q\&A entre 01:01:22 y 01:03:31, Gu advierte activamente que estas analogías cerebrales son «muy, muy gruesas»; él mismo no es neurocientífico. El cerebro humano se usa solo como una heurística existencial para demostrar que un estado en línea limitado puede soportar inteligencia; no se puede usar para probar la plausibilidad biológica de los SSM.}
+
+\begin{warningbox}{Alcance de la analogía}
+«Base de datos» no significa que los transformadores ejecuten realmente SQL; «cerebro» tampoco implica que los SSM repliquen circuitos neuronales. Esta analogía solo describe la interfaz de memoria: uno conserva registros por posición y soporta acceso preciso, mientras que el otro escribe la historia en un estado distribuido limitado. No hay evidencia para inferencias biológicas, sobre la conciencia o la AGI que vayan más allá de esta interfaz.
+\end{warningbox}
+
+\subsection{Las dos caras del SSM: procesamiento en línea y pérdida de recuperación}
+
+El estado fijo permite que la recurrencia reciba flujos de datos continuamente mediante una interfaz constante, lo cual es adecuado para el habla, control, series temporales y agentes interactivos. Sin embargo, esa misma compresión debilita la evidencia a granularidad fina para citas exactas, recall asociativo, aguja en un heno (needle-in-a-haystack) y preguntas generales (general QA). Al leer las figuras, se debe considerar los puntos verdes de ventaja y los grises de desventaja como dos caras del mismo mecanismo, no como fenómenos de benchmark mutuamente inconexos.
+
+\lecturefigure{slide-014.jpg}{Resumen temprano de compromisos: conflicto entre procesamiento en línea con estado y recuperación a granularidad fina}{Grabación oficial de Stanford, 00:18:40--00:19:39}
+
+Se puede expresar este conflicto usando la intuición del cuello de botella informativo: si la capacidad de $s_t$ es limitada, mientras que la información relevante para tareas contenida en el pasado $x_{\le t}$ crece constantemente, la actualización $U_\theta$ debe elegir qué estadísticas conservar. Para tareas de control, las dinámicas recientes y un estado suficiente de baja dimensión pueden ser suficientes; para tareas de citas textuales, cualquier compresión irreversible podría borrar la respuesta.
+
+\begin{knowledgebox}{El seguimiento de estado y la recuperación no son la misma capacidad}
+El seguimiento de estado requiere actualizar continuamente «en qué estado se encuentra ahora», por ejemplo contadores, posiciones en juegos o variables latentes de sistemas de control; la recuperación requiere recuperar con precisión algún hecho antiguo a partir de un contexto largo. Un estado limitado puede ser muy hábil en lo primero pero débil en lo segundo. El objetivo principal de Mamba-3 es precisamente mejorar el seguimiento de estados complejos, aunque esto aún no equivale a obtener una base de datos completa de tokens.
+\end{knowledgebox}
+
+\subsection{Híbrido: permitir que el estado comprimido haga el procesamiento principal y que la atención realice búsquedas externas}
+
+Si la compresión interna y la búsqueda externa precisa son complementarias, el sistema más natural es el híbrido. Las figuras listan H3, Jamba, Zamba, Samba y otros que entrelazan capas recurrentes/lineales con capas de atención. El ponente utiliza la intuición de «cerebro + bloc de notas» (scratchpad) para explicar por qué una red podría necesitar muchas capas comprimidas, complementadas luego con pocas capas de atención para realizar búsquedas exactas.
+
+\lecturefigure{slide-015.jpg}{Modelos híbridos: entrelazar SSM y atención, cuestionando la proporción razonable de capas}{Grabación oficial de Stanford, 00:20:00--00:21:39}
+
+\begin{lstlisting}[caption={Pseudocódigo didáctico de un pila híbrida con atención insertada periódicamente}]
+def build_hybrid_stack(depth, attention_period):
+    layers = []
+    for layer_index in range(depth):
+        if (layer_index + 1) % attention_period == 0:
+            layers.append(AttentionBlock())
+        else:
+            layers.append(RecurrentBlock())
+    return layers
+\end{lstlisting}
+
+\teachervoice{Entre 00:20:31 y 00:21:26, los trabajos tempranos obtenían una relación SSM-atención de aproximadamente 10:1 en perplexity. Para 2026, el ponente observa que los nuevos modelos suelen usar al menos 3:1 o 4:1. Este cambio por sí solo indica que la relación no es constante, sino que deriva con el modelo, el entrenamiento y los objetivos de capacidad.}
+
+\begin{warningbox}{No escriba 10:1 como una ley óptima}
+La proporción depende del ancho de la capa, el tamaño del estado, el tipo de atención, los datos de entrenamiento, el tokenizador, el presupuesto de parámetros y la evaluación. Más importante aún, los experimentos antiguos se centraron principalmente en la perplexity; cuando se necesita recuperación, uso de herramientas o alineación multimodal, la frecuencia óptima de atención puede ser completamente diferente. La práctica razonable es tratar la proporción como un punto de partida para ablation.
+\end{warningbox}
+
+\begin{importantbox}{La compresión puede ser una capacidad, no solo un compromiso}
+Varias ablations híbridas prefieren más capas lineales/recurrentes incluso sin considerar la velocidad, lo que debilita la explicación de que el estado limitado sirve solo para ahorrar potencia de cómputo. La compresión obliga al modelo a formar resúmenes relevantes para la tarea, lo cual puede ayudar en el seguimiento de estado y la construcción de abstracciones; las ablations posteriores de la etapa externa de H-Net darán evidencia más directa.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+El estado autoregresivo reduce diferentes arquitecturas a una interfaz unificada. El caché tipo base de datos de los transformadores es hábil para el recall a granularidad fina; el estado comprimido tipo cerebro de los SSM es hábil para actualizaciones en línea, pero sacrifica la recuperación precisa. El híbrido no es un plato combinado de compromisos, sino una división del trabajo entre dos primitivas de memoria. En el capítulo siguiente se indagará más: ¿por qué la atención es tan sensible a la «granularidad y semántica» de los tokens?
