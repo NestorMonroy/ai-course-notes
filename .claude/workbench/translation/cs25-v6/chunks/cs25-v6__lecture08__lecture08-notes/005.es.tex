@@ -1,0 +1,92 @@
+\section{Transfusion: un mismo Transformer, dos predicciones de mundos}
+
+El diseño de Transfusion captura una separación clave: \textbf{el ordenamiento a nivel de secuencia puede ser unificado, pero la pérdida a nivel de modalidad no necesita serlo}. El texto sigue haciendo predicción autoregresiva del siguiente token, mientras que las imágenes realizan desruido por difusión en un espacio latente continuo. De este modo se preserva el contexto multimodal mixto y se evita generar imagen token por token mediante un vocabulario VQ.
+
+\subsection{Del código discreto al latente de imagen continuo}
+
+El cuello de botella de Chameleon proviene de la cuantización; por ello, en esta sección primero cambiamos el espacio objetivo de las imágenes y luego discutimos cómo compartir el backbone con el texto. Al leer la diapositiva 027, trata "Transformador compartido" y "latente de imagen continuo" como dos decisiones de diseño independientes.
+
+\lecturefigure{slide-027.jpg}{Transfusion alberga tokens de texto y latentes de imagen en un único Transformer}{Diapositiva oficial 27; Transfusion arXiv 2408.11039v1}
+
+\begin{knowledgebox}{Lectura de la figura: backbone compartido, distribución objetivo no compartida}
+El bloque de texto sigue siendo tokens discretos; el bloque de imagen está constituido por parches latentes continuos. El Transformer permite que ambas clases de posiciones se condicione mutuamente, pero los cabezales de salida y la pérdida dependen de la modalidad seleccionada. En otras palabras, lo que se unifica es la mezcla de contextos y el backbone de parámetros, no se exige que la imagen también prediga una categoría de vocabulario.
+\end{knowledgebox}
+
+En la difusión, el latente limpio $z_0$ se va añadiendo ruido progresivamente:
+$$
+z_t=\sqrt{\bar\alpha_t}\,z_0+\sqrt{1-\bar\alpha_t}\,\epsilon,
+\qquad \epsilon\sim\mathcal{N}(0,I).
+$$
+El modelo predice el ruido basándose en el contexto multimodal mixto, el paso temporal $t$ y el latente ruidoso $z_t$:
+$$
+\mathcal{L}_{\text{diff}}
+=\mathbb{E}_{z_0,t,\epsilon}
+\left[\left\|\epsilon-\epsilon_\theta(z_t,t,\text{context})\right\|_2^2\right].
+$$
+$\bar\alpha_t$ controla cuánta señal limpia se conserva; $\epsilon_\theta$ es el desruidor. Al generar, se comienza desde el ruido e iterando la inversión inversa se obtiene el latente de imagen, que luego pasa por un decodificador para recuperar los píxeles.
+
+\subsection{Cómo funciona la pérdida conjunta}
+
+Una vez establecido el latente continuo, el siguiente paso es explicar cómo entran dos escalas de tiempo en el mismo ciclo de entrenamiento. Esta sección conecta la autoregresión de secuencias con el desruido por difusión y aclara que el ponderado de pérdidas es un diseño de optimización, no una simple suma simbólica.
+
+\lecturefigure{slide-028.jpg}{Transfusion coloca la pérdida de texto autoregresiva y la pérdida de imagen por difusión en el mismo modelo}{Diapositiva oficial 28; Clase 00:17:25--00:18:35}
+
+\begin{knowledgebox}{Lectura de la figura: distinguiendo las dos líneas temporales}
+El texto realiza predicciones de izquierda a derecha a lo largo de las posiciones de la secuencia; el bloque de imagen, por su parte, restaura progresivamente desde el latente ruidoso siguiendo el tiempo de difusión dentro del propio bloque. Ambas "tiempos" no deben confundirse: la posición de la secuencia determina la condición causal entre bloques, mientras que el paso de difusión decide el progreso de desruido del latente de imagen. El Transformer compartido recibe ambos, pero la supervisión de cada posición proviene de objetivos distintos.
+\end{knowledgebox}
+
+El objetivo conjunto puede abstraerse como
+$$
+\mathcal{L}_{\text{Transfusion}}
+=\mathcal{L}_{\text{AR-text}}+\lambda_{\text{img}}\mathcal{L}_{\text{diff-image}}.
+$$
+$\lambda_{\text{img}}$ se utiliza para equilibrar la escala de los gradientes. Si el bloque de imagen es muy largo o la pérdida de difusión tiene valores mayores, no realizar una normalización podría hacer que los gradientes de imagen dominen al backbone; por el contrario, un peso demasiado bajo provocaría que el modelo degenerara en un modelo de texto con un cabezal generador débil.
+
+\begin{lstlisting}[caption={Objetivo conjunto consciente de la modalidad al estilo Transfusion}]
+def transfusion_loss(hidden, batch):
+    text_loss = cross_entropy(
+        text_head(hidden[batch.text_mask]),
+        batch.text_targets,
+    )
+    noise = normal_like(batch.image_latents)
+    noisy = add_noise(batch.image_latents, noise, batch.steps)
+    pred = image_head(hidden, noisy, batch.steps)
+    image_loss = mse(pred, noise)
+    return text_loss + batch.image_weight * image_loss
+\end{lstlisting}
+
+\teachervoice{00:17:49--00:18:35, el docente resume Transfusion como "combinar modelado de lenguaje autoregresivo y generación de imágenes por difusión en un único Transformer". Este modelo único no implica una única pérdida; es precisamente permitir objetivos distintos lo que evita presionar a la imagen para que se comporte como una clasificación textual}.
+
+\subsection{¿Qué deben demostrar los ejemplos cualitativos?}
+
+Una vez validado el mecanismo, aún es necesario verificar las salidas reales del modelo. En esta sección, usando la diapositiva 029, aplicamos un modo de lectura más estricto: primero contrastar las restricciones del prompt, luego examinar los detalles visuales y finalmente aclarar que la evidencia cualitativa no puede responder a preguntas estadísticas.
+
+\lecturefigure{slide-029.jpg}{Ejemplos de generación multimodal mixta en Transfusion}{Diapositiva oficial 29; Transfusion arXiv 2408.11039v1}
+
+\begin{knowledgebox}{Lectura de la figura: verificar primero la fidelidad de las instrucciones, luego la calidad visual}
+Cada ejemplo prueba simultáneamente los objetos, relaciones y estilos del prompt, así como el entrelazamiento. Al leer la figura, primero verifique si el modelo generó las entidades y el diseño solicitados, luego examine los detalles, texturas y consistencia. Los ejemplos estéticos respaldan la afirmación de que "el modelo puede producir este tipo de salida", pero no pueden responder a tasas de éxito promedio, distribución de fallos, memorización en datos de entrenamiento o sensibilidad al prompt.
+\end{knowledgebox}
+
+\begin{warningbox}{Límite de evidencia de muestras cualitativas}
+Un pequeño conjunto de muestras curadas no puede demostrar superioridad a escala de distribución. Es necesario compararlo con las líneas base Dense/VQ bajo datos emparejados, FLOPs, pasos de muestreo y protocolo humano; de lo contrario, una mejor imagen podría provenir de un decodificador más fuerte, un muestreo más largo o selección. Los resultados posteriores de MoT proporcionan simultáneamente la curva de pérdida, CLIP, FID y puntuación de descripción, ofreciendo un nivel de evidencia mayor, aunque aún no constituyen una evaluación completa del producto.
+\end{warningbox}
+
+\subsection{La comprensión y la generación siguen utilizando representaciones de imagen distintas}
+
+La sección anterior solo abordó la calidad de generación; esta vuelve a la segunda línea principal del seminario: ¿los latentes generados también son adecuados para la comprensión? La respuesta sigue siendo negativa o, al menos, no resuelta; por ello, el problema abierto en la diapositiva 030 es clave para transitar desde Transfusion hacia una arquitectura consciente de modalidades.
+
+\lecturefigure{slide-030.jpg}{Contribución de Transfusion y separación entre representación de comprensión y generación}{Diapositiva oficial 30; Clase 00:19:22--00:20:25}
+
+\begin{knowledgebox}{Lectura de la figura: la tercera es un problema abierto, no un detalle de implementación}
+Las dos primeras líneas demuestran que el enfoque conjunto AR/difusión supera a la ruta de generación VQ; la tercera indica que los latentes VAE son insuficientemente efectivos para la comprensión de imágenes. Muchos sistemas utilizan por ello un codificador semántico continuo para la comprensión y otro conjunto de latentes generativos para la salida de imagen. El modelo se unifica en las capas del backbone, pero la capa de representación sigue divergiendo; este es precisamente el ejemplo de que "multimodal nativo" no equivale a "compartir completamente todos los componentes".
+\end{knowledgebox}
+
+\begin{importantbox}{El compartir objetivos y el compartir representaciones son dos ejes independientes}
+Se puede compartir el backbone pero usar pérdidas distintas; se puede compartir el codificador de entrada pero usar decodificadores de salida distintos; también es posible emplear dos representaciones de imagen para la comprensión y la generación, alineándolas luego en una capa semántica intermedia. Al revisar el diseño, se deben registrar por separado $R_{\text{understand}}$, $R_{\text{generate}}$ y $L_m$, sin ocultar estas diferencias bajo el rótulo de "modelo unificado".
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Transfusion demuestra que unificar el contexto de secuencias con objetivos específicos de modalidad puede coexistir. Resuelve el problema de "cómo generar imágenes continuas", pero no resuelve automáticamente la comprensión de imágenes. En el siguiente capítulo se preguntará: incluso si se eligen adecuadamente la representación y la pérdida, ¿ocurrirá aún un conflicto de capacidad al enviar todos los tokens al mismo conjunto de parámetros del Transformer?
+
+
