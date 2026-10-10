@@ -1,0 +1,84 @@
+\section{Combinación de cinco dimensiones: del "qué paralelismos soportar" al "qué tipo de distribución elegir"}
+
+Los cinco capítulos anteriores dividieron el problema a lo largo de los ejes batch, hidden/sequence, layer, context y expert. Un verdadero *ultra-scale run* utilizará múltiples ejes simultáneamente en el *device mesh*: un eje se encarga de la capacidad, otro del throughput, algunos cubren únicamente atención o MoE, y otros están restringidos al dominio de interconexión rápida (fast fabric).
+
+\subsection{Cómo combinarse los cinco ejes}
+
+El tamaño mundial total (*world size*) puede expresarse como el producto de varios grados de paralelismo:
+\[
+P_{\mathrm{world}}
+=P_{\mathrm{DP}}P_{\mathrm{TP}}P_{\mathrm{PP}}P_{\mathrm{CP}}P_{\mathrm{EP}}.
+\]
+Donde cada $P$ corresponde al tamaño de paralelismo de datos (data), tensor, pipeline, contexto y expert, respectivamente. Este producto solo describe el espacio de numeración de rangos (*ranks*); si la operación es eficiente también depende del mapeo de cada eje a la topología física, las colectivas por eje, los *micro-batches* y la estructura del modelo.
+
+\lecturefigure{slide-099.jpg}{Five-D parallelism: combinación de cinco ejes de corte en un mismo gráfico de entrenamiento}{CS25 V6 official deck, p.~99}
+
+\lecturefigure{slide-100.jpg}{Repaso general: DP, TP/SP, PP, CP, EP}{CS25 V6 official deck, p.~100}
+
+\begin{knowledgebox}{Lectura de la figura: los cinco ejes no se distribuyen equitativamente en las GPUs}
+En el gráfico de combinación, cada color cubre una región de la red diferente: DP/ZeRO atraviesa todo el estado del entrenamiento; TP/SP actúa principalmente dentro de cada bloque denso (dense block); PP cruza etapas de capas (*layer stages*); CP solo modifica la distribución de datos de atención para secuencias largas; EP entra únicamente en los bloques MoE. Por ello, la descomposición multiplicativa del *world size* no arroja una respuesta única. El principio común es colocar las colectivas TP más frecuentes y sensibles a latencia dentro del dominio del nodo más rápido, mapear DP/PP a dominios más grandes y decidir CP/EP según la presencia de secuencias largas o MoE. Cualquier cambio en el tamaño de un eje afecta inversamente al tamaño del *micro-batch*, las activaciones, el tamaño de los mensajes de comunicación y el equilibrio de carga.
+\end{knowledgebox}
+
+El *device mesh* lógico también debe aterrizar en máquinas físicas. Asumiendo que cada nodo tiene ocho GPUs, interconectadas internamente por NVSwitch (totalmente conectadas) y entre nodos mediante InfiniBand más lento, entonces TP=8 suele ser más natural que distribuir TP=16 a través de dos nodos, porque las colectivas de cada bloque Transformer se mantienen dentro del dominio rápido. DP puede cruzar más nodos porque los *buckets* de gradientes son grandes y es fácil superponerlos con el paso hacia atrás (*backward*). Las etapas de PP tienen una frecuencia menor de mensajes en los límites de etapa y también pueden cruzar nodos, aunque debe evitarse asignar capas altamente desbalanceadas a diferentes etapas. Si EP cruza nodos dependerá del tejido *all-to-all*, el número de expertos y la carga de enrutamiento. Este mapeo no tiene reglas absolutas, pero sí un objetivo estable: colocar las comunicaciones más frecuentes, sincronizadas y difíciles de ocultar en la capa de topología de menor latencia, y empujar comunicaciones más dispersas o pipelinizables a rangos más grandes.
+
+Por tanto, antes de aumentar el *world size*, se deben dibujar dos gráficos: uno del *mesh* lógico marcando cada objeto de corte por eje y las colectivas; otro de la topología física marcando nodos, interconexión rápida, NIC y sobrecarga (*oversubscription*). Solo cuando los lados frecuentes de ambos gráficos coinciden es probable que aumentar los rangos mejore el throughput en lugar de amplificar esperas de sincronización.
+
+Esta es también la razón por la cual el curso enfatiza la topología al final de las preguntas y respuestas: los algoritmos de paralelismo ofrecen cálculos factibles, pero la red física determina si vale la pena ejecutarlos.
+
+\begin{knowledgebox}{Tabla de decisiones de paralelismo en cinco dimensiones}
+\begin{tabularx}{\linewidth}{L{0.12\linewidth} L{0.16\linewidth} L{0.18\linewidth} X}
+\toprule
+Eje & Corte principal & Comunicación/cronograma clave & Uso exclusivo para ciertos problemas \\
+\midrule
+DP/ZeRO & batch y estado de entrenamiento & all-reduce, reduce-scatter, all-gather & Necesario throughput o partición de estado, y global batch extensible \\
+TP/SP & hidden y distribución de activaciones & all-reduce por capa / RS / AG & Matriz por capa o activación requiere cómputo en dispositivos de interconexión rápida \\
+PP & profundidad de capas & P2P activation/gradient, 1F1B & Modelo divisible en etapas y micro-batch suficiente para llenar la pipeline \\
+CP & longitud de secuencia & intercambio anular K/V por capa & La memoria de secuencia de un solo contexto ultra-largo es el cuello de botella \\
+EP & expertos / tokens enrutados & all-to-all, balanceo de carga & Modelo con MoE; parámetros de experto y enrutamiento de tokens requieren dispositivos cruzados \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{De la hoja de trucos a un flujo de selección ejecutable}
+
+La sección anterior dio el reparto lógico de los cinco ejes, pero los equipos de ingeniería aún deben convertirlo en una secuencia de depuración y búsqueda ejecutable. Esta sección comienza con las restricciones de capacidad más duras e incorpora gradualmente muestras, topología y condiciones estructurales, con el objetivo de eliminar ejes innecesarios lo antes posible, en lugar de buscar todas las combinaciones de paralelismo a la vez. El valor de la hoja de trucos oficial no es dar respuestas fijas, sino obligar al ingeniero a reducir el espacio secuencialmente: primero preguntar si el modelo y el estado del optimizador caben, luego si el global batch permite DP, después meter TP en el dominio de interconexión rápida, usar PP para profundidad y activar CP solo para contextos largos y EP solo para MoE.
+
+\lecturefigure{slide-101.jpg}{Hoja de trucos Ultra-Playbook: elegir estrategia de paralelismo según restricciones}{CS25 V6 official deck, p.~101}
+
+\begin{importantbox}{Orden de selección recomendado}
+Primero, establecer un libro mayor de picos para parámetros, optimizador, gradientes y activaciones. Segundo, seleccionar el ZeRO stage mínimo que cumpla la capacidad. Tercero, usar DP para aprovechar al máximo el global batch permitido. Cuarto, aumentar TP/SP dentro del nodo. Quinto, añadir PP si la profundidad del modelo aún excede los límites. Sexto, introducir CP o EP solo por contextos largos o MoE respectivamente. Finalmente, buscar el tamaño de cada eje con topología real y profiler, en lugar de copiar configuraciones de papers.
+\end{importantbox}
+
+El sistema de entrenamiento incluye también *data loader*, gestor de checkpoints, orquestador, tolerancia a fallos, tejido de red (*network fabric*) y almacenamiento. Si las diapositivas solo dibujan colectivas de capas del modelo, ignorarán problemas comunes en ejecuciones reales como hambre de entrada, pausas de guardado, fallos de nodos y tiempos de recuperación.
+
+\lecturefigure{slide-102.jpg}{Visión general de la infraestructura de entrenamiento: más allá del gráfico computacional hay datos, almacenamiento y orquestación}{CS25 V6 official deck, p.~102}
+
+\begin{knowledgebox}{Lectura de la figura: baja utilización de GPUs no siempre indica problema de paralelismo del modelo}
+El gráfico de infraestructura coloca la tarea de entrenamiento entre ingestión de datos, preprocesamiento en anfitrión (*host*), runtime distribuido, checkpoint/almacenamiento y orquestación. Si el *data loader* es insuficiente, cambiar el tamaño de TP no arregla la hambre de entrada; si los ciclos de checkpoint bloquean a todos los rangos, aumentar los micro-batches de pipeline solo acumulará más estado antes de pausar; si un nodo falla repetidamente, incluso el throughput instantáneo máximo puede perder frente a una configuración más estable y con recuperación más rápida. Para validar una ejecución *ultra-scale*, se debe registrar simultáneamente tokens/s, utilización de FLOPs del modelo, throughput de red, pausa en checkpoint, tiempo de reinicio, espera de datos y tasa de fallos, para distinguir entre "el gráfico del modelo no está lleno" y "el sistema periférico ahoga al gráfico del modelo".
+\end{knowledgebox}
+
+\begin{warningbox}{Mantener un marco de comparación fijo al buscar distribuciones de paralelismo}
+Diferentes distribuciones pueden cambiar el tamaño del micro-batch, acumulación de gradientes, *activation checkpointing*, forma del núcleo (*kernel shape*) y precisión numérica; si estas variables cambian simultáneamente, las diferencias en throughput no son atribuibles. Los experimentos confiables deben fijar el global batch efectivo, longitud de secuencia, optimizador y objetivo de entrenamiento, medir primero cambios por eje individual y luego buscar combinaciones conjuntas; al reportar resultados se debe dar tanto la HBM pico como el tiempo por paso, porcentaje de comunicación e indicadores de convergencia, en lugar de solo una "velocidad de aceleración".
+\end{warningbox}
+
+\subsection{Preguntas y respuestas: equilibrio de carga, equivalencia matemática y distribución automática}
+
+Las preguntas y respuestas de clase añadieron tres reglas que no se escribieron completamente en la diapositiva. Primero, el router MoE debe suprimir desequilibrios extremos; se puede usar pérdida auxiliar o sesgo sin pérdida auxiliar (*auxiliary-loss-free bias*); el objetivo no es promediar cada token, sino evitar que pocos rangos sean los *stragglers* globales. Segundo, el paralelismo correcto solo reordena la operación forward/backward equivalente; teóricamente no debería cambiar la ley de escalado; si la convergencia es claramente diferente, se debe verificar primero precisión numérica, orden de colectivas, números aleatorios, *loss scaling* o errores de programación. Tercero, no existe una "distribución óptima automática" independiente del hardware.
+
+\teachervoice{00:57:18--00:59:34，Q\&A explica que loss de balanceo de carga y router bias pueden mejorar distribución de tokens; si la estrategia de paralelismo se implementa correctamente, debe mantener el significado matemático por tarjeta individual y no tratar cambios de convergencia como efectos inevitables del paralelismo mismo.}
+
+\teachervoice{00:59:34--01:01:34，El preprocesamiento de datos en CPU puede ocultarse con workers paralelos; el paralelismo automático aún requiere ingresar tamaño del modelo, GBS, longitud de secuencia y dominios de red/NVLink/NVSwitch. La respuesta final de clase es dependiente de la topología, no una proporción 5D fija.}
+
+\begin{warningbox}{La "equivalencia matemática" aún no garantiza identidad bit a bit}
+La suma de punto flotante no cumple la ley conmutativa; diferentes árboles de colectivas, orden de buckets, precisión mixta y corte de números aleatorios causan diferencias numéricas; superposición asíncrona también puede exponer carreras (*race*) o buffers obsoletos (*stale buffer*). En ingeniería se debe exigir equivalencia estadística en la curva de pérdida, norma del gradiente e indicadores finales, no esperar consistencia bit a bit entre distribuciones.
+\end{warningbox}
+
+\subsection{Responsabilidad energética en el entrenamiento escalado}
+
+Las reglas de selección anteriores optimizan tiempo, memoria y red, pero el libro mayor de recursos tiene una dimensión que no se puede omitir al final: los acelerador-horas reales consumidos y la energía ineficiente causada por fallos, inactividad o baja utilización. Esta sección reinterpreta la eficiencia del sistema como un límite de responsabilidad, en lugar de dejar el problema energético fuera del centro de datos. La página final devuelve el impacto energético al diseño del sistema: mejorar MFU, reducir ejecuciones fallidas, evitar etapas altas innecesarias, elegir escala adecuada de modelo/datos y aumentar eficiencia de checkpoint y recuperación son tanto optimización de costos como reducción de consumo energético ineficiente. La responsabilidad no significa detener la escalabilidad, sino hacer que cada GPU-hour sea responsable de objetivos de aprendizaje claros.
+
+\lecturefigure{slide-105.jpg}{Aviso final: al escalar a miles de GPUs se debe incluir el impacto energético}{CS25 V6 official deck, p.~105}
+
+\subsection{Resumen de la sección}
+
+El paralelismo en cinco dimensiones no son cinco arquitecturas mutuamente excluyentes, sino una descomposición de recursos en el mismo *device mesh*. Una distribución correcta parte de capacidad y equivalencia matemática, se cierra mediante mapeo de topología, cronograma de colectivas y validación con profiler; una distribución incorrecta transformará un problema de memoria en uno más costoso de red, burbujeo (*bubble*) o *straggler*.

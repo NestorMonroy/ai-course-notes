@@ -1,0 +1,71 @@
+\section{Paralelismo experto: enrutamiento de tokens y all-to-all en MoE}
+
+La mezcla de expertos (Mixture-of-Experts, MoE) permite activar solo una minoría de expertos por cada token, lo que expande los parámetros totales sin incrementar desproporcionadamente las FLOPs por token. El paralelismo experto (EP, expert parallelism) coloca a los expertos en diferentes rangos; el resultado del enrutamiento determina hacia dónde debe enviarse cada token, de modo que la comunicación y la forma de los mensajes dependen de los datos.
+
+\subsection{Dividir expertos, no atención}
+
+El bloque MoE sigue conteniendo atención compartida, router, dispatch, MLP experto y combine. EP solo divide a los expertos; si cada rango EP aún procesara exactamente los mismos datos, la atención compartida repetiría cálculos, por lo que en la práctica los grupos de EP suelen fragmentar también los datos.
+
+\lecturefigure{slide-088.jpg}{Motivación de EP: qué partes de MoE pueden dividirse entre dispositivos}{CS25 V6 oficial, p.~88}
+
+\lecturefigure{slide-089.jpg}{Paso 1: distribuir expertos a diferentes GPUs}{CS25 V6 oficial, p.~89}
+
+\lecturefigure{slide-090.jpg}{Problema de enrutamiento: cómo llegan los tokens al experto remoto}{CS25 V6 oficial, p.~90}
+
+\subsection{All-to-all, dispatch y combine}
+
+All-to-all permite que cada rango envíe mensajes distintos a cada otro rango. A diferencia de all-reduce, donde «todos reciben el mismo resultado reducido», el objetivo de all-to-all es reordenar: antes de la comunicación se empaquetan los tokens por experto de destino; después de la comunicación, cada rango recibe los tokens que corresponden a sus expertos locales.
+
+\lecturefigure{slide-091.jpg}{All-to-all: cada proceso envía mensajes distintos a cada otro proceso}{CS25 V6 oficial, p.~91}
+
+\lecturefigure{slide-092.jpg}{Dispatch de MoE: agrupar los tokens enrutados al mismo experto en el rango donde reside}{CS25 V6 oficial, p.~92}
+
+Tras el cálculo del experto se debe ejecutar un all-to-all inverso para devolver los resultados al orden original de los tokens; este paso se llama combine. La semántica mínima de forward puede escribirse como
+\[
+y_i=\sum_{e\in\operatorname{TopK}(r(x_i))}p_{i,e}E_e(x_i).
+\]
+Donde, $x_i$ es la representación del token, $r$ es el router, $p_{i,e}$ es el peso con el que el token $i$ se asigna al experto $e$, y $E_e$ es el MLP experto; TopK determina los pocos expertos realmente activados. El dispatch/combine cambia la ubicación de los datos, pero no altera este resultado ponderado.
+
+\lecturefigure{slide-094.jpg}{Flujo de datos completo de EP: atención compartida, dispatch, experto, combine}{CS25 V6 oficial, p.~94}
+
+\subsection{El verdadero desafío: tamaños de mensaje dinámicos y sincronización CPU--GPU}
+
+Cada experto recibe un número variable de tokens que solo se conoce tras calcular el router. Si la biblioteca de comunicación requiere que la CPU lea primero los conteos, asigne buffers y luego inicie la operación colectiva, la GPU esperará en la ruta crítica. Implementaciones como DeepEP y HybridEP utilizan InfiniBand, RDMA, SM dedicados y buffers preasignados para reducir este tipo de sincronización. Esto también implica que el rendimiento del algoritmo depende del hardware y las capacidades de red concretas.
+
+\lecturefigure{slide-095.jpg}{Dificultad de EP: el router decide buffers dinámicos; la sincronización CPU--GPU entra en la ruta crítica}{CS25 V6 oficial, p.~95}
+
+\begin{knowledgebox}{Lectura de la figura: los cuellos de botella de EP ocurren antes que el GEMM}
+El router verde asigna expertos rápidamente, pero el número de tokens por destino es dinámico. El remitente debe reordenar los tokens por experto; el receptor debe conocer el desplazamiento del buffer; y la biblioteca de comunicación debe elegir entre NVLink/NVSwitch dentro del nodo e InfiniBand entre nodos. Los intervalos en que la CPU espera contajes de GPU hacen que incluso un GEMM de expertos posterior más rápido no pueda recuperar ese retraso. Por ello, EP de alto rendimiento requiere simultáneamente metadatos del lado de la GPU, memoria preasignada o simétrica, RDMA, enrutamiento sensible a la topología y equilibrio de carga; «el cálculo experto es disperso» no equivale a «la comunicación del sistema es dispersa».
+\end{knowledgebox}
+
+\lecturefigure{slide-096.jpg}{Ventajas y desventajas de EP: un eje de división necesario para MoE, pero también una all-to-all de alta intensidad}{CS25 V6 oficial, p.~96}
+
+\teachervoice{00:51:42--00:53:56, el docente señala que mucha lentitud en el entrenamiento de MoE proviene del preprocesamiento de dispatch y del soporte hardware, no solo del GEMM de expertos. Sin soporte adecuado de InfiniBand/RDMA o bibliotecas, la throughput reportada en papers públicos de EP no siempre es reproducible.}
+
+\begin{warningbox}{El número promedio de tokens no representa al rango más lento}
+Si el router envía muchos tokens al mismo experto, ese rango se convierte en un straggler (atrasado), y su cómputo y comunicación frenan a todos los demás; otros rangos, aunque estén libres, deben esperar. Factores como capacity factor, dropping de tokens, pérdida auxiliar de equilibrio de carga o sesgo libre de pérdida auxiliar implican compensaciones entre calidad, equilibrio y determinismo; no basta con mirar el promedio de expertos por token.
+\end{warningbox}
+
+\subsection{Ocultar la comunicación de EP dentro del cronograma de PP}
+
+En la sección anterior se confirmó que la all-to-all de EP es difícil de eliminar desde un solo bloque MoE; el siguiente paso es buscar cálculos independientes de ella. Este apartado regresa a la línea de tiempo de múltiples micro-lotes de PP, entrelazando tareas de diferentes batches y stages, para que esperar comunicaciones no signifique dispositivos inactivos. Las soluciones prácticas combinan EP con PP/1F1B: cuando un micro-lote azul realiza dispatch/combine, la GPU puede ejecutar forward/backward de otro stage para un micro-lote verde. Así no se reducen los bytes de all-to-all, sino que se llenan las esperas con trabajo independiente.
+
+\lecturefigure{slide-097.jpg}{EP+PP: usar cómputo de otro micro-lote para ocultar dispatch/combine}{CS25 V6 oficial, p.~97}
+
+\begin{lstlisting}[language=Python,caption={Cronograma conceptual de superposición entre comunicación EP y cómputo de otro micro-lote}]
+dispatch_blue = all_to_all_async(route(tokens_blue))
+backward_green = pipeline_stage.backward(microbatch_green)
+tokens_blue_local = dispatch_blue.wait()
+expert_blue = local_experts(tokens_blue_local)
+combine_blue = all_to_all_async(expert_blue)
+forward_green = pipeline_stage.forward(next_green)
+output_blue = combine_blue.wait()
+\end{lstlisting}
+
+\teachervoice{00:53:56--00:55:42, la clase resume la solución práctica como «usar el cómputo de pipeline de un batch para ocultar la comunicación de expertos de otro batch». Esto indica que el núcleo del paralelismo 5D es una planificación conjunta transversal a los ejes, no activar interruptores de configuración uno por uno.}
+
+\subsection{Resumen de la sección}
+
+EP sirve solo a la capa de expertos MoE mediante all-to-all para dispatch/combine de tokens. Sus dificultades son enrutamiento dinámico, desequilibrio de carga, redes de ruta crítica y sincronización CPU--GPU; combinado con PP puede ocultar parte de la comunicación, pero no elimina las restricciones del hardware y del rango más lento.
+
+
