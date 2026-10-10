@@ -7,9 +7,12 @@ y ``--timeout``; el resto se ignora) y las rutas de los fragmentos por stdin,
 una por línea. Por cada fragmento escribe ``<n>.json`` con ``result`` y una
 fila ``<n>\t<ruta>`` en ``index.tsv``: el contrato que ``collect_results`` lee.
 
-El servidor es el Ollama 0.35 que corre llama-server dentro de una unidad
-propia del consumidor (``thyrox-bg start llama-direct-es-mx``). No pide
-admisión ni lee cualificaciones: el modelo lo fija ``LLAMA_DIRECT_MODEL``.
+El servidor es ``llama-server`` (llama.cpp b11277) en una unidad propia del
+consumidor (``thyrox-bg start llama-server-es-mx``), con el thinking y el
+muestreo fijados al arrancarla: el cliente sólo manda el mensaje y el tope de
+salida (``LLAMA_DIRECT_API=openai``, ``/v1/chat/completions``). La ruta
+anterior, Ollama 0.35 con ``/api/chat``, queda con ``LLAMA_DIRECT_API=ollama``.
+No pide admisión ni lee cualificaciones: el modelo lo fija ``LLAMA_DIRECT_MODEL``.
 Las correcciones (``NNN.correccion.md``) también pasan por aquí, así que el
 mismo servidor traduce y corrige.
 
@@ -30,7 +33,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import translation_loop as loop  # noqa: E402
 
-DEFAULT_URL = "http://127.0.0.1:11500"
+DEFAULT_URL = "http://127.0.0.1:11600"
+DEFAULT_API = "openai"
 DEFAULT_MODEL = "qwen35-9b-es-mx"
 CONTEXT_TOKENS = 32768
 MAX_OUTPUT_TOKENS = 12288
@@ -120,23 +124,45 @@ def cached_result(out_dir: Path, zh: Path) -> dict | None:
     return None
 
 
-def chat(url: str, model: str, message: str, timeout: int) -> dict:
-    body = json.dumps({
-        "model": model, "stream": False, "think": False,
-        "messages": [{"role": "user", "content": message}],
-        "options": {"num_ctx": CONTEXT_TOKENS, "num_predict": MAX_OUTPUT_TOKENS, **SAMPLING},
-    }).encode("utf-8")
-    request = urllib.request.Request(f"{url}/api/chat", data=body, headers={"Content-Type": "application/json"})
+def post(url: str, body: dict, timeout: int) -> dict:
+    request = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
+                                     headers={"Content-Type": "application/json"})
     # El servidor es local: sin el proxy de salida del entorno.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
+def chat(url: str, model: str, message: str, timeout: int, api: str = DEFAULT_API) -> dict:
+    """Una respuesta normalizada: content, thinking, tokens y motivo de cierre."""
+    messages = [{"role": "user", "content": message}]
+    if api == "ollama":
+        reply = post(f"{url}/api/chat", {
+            "model": model, "stream": False, "think": False, "messages": messages,
+            "options": {"num_ctx": CONTEXT_TOKENS, "num_predict": MAX_OUTPUT_TOKENS, **SAMPLING},
+        }, timeout)
+        msg = reply.get("message", {})
+        return {"content": msg.get("content", ""), "thinking": msg.get("thinking", "") or "",
+                "model": reply.get("model", model), "input_tokens": reply.get("prompt_eval_count", 0),
+                "output_tokens": reply.get("eval_count", 0), "done_reason": reply.get("done_reason")}
+    # llama-server: thinking (`--chat-template-kwargs`) y muestreo vienen del arranque de la
+    # unidad; aquí no se reenvían, para que la configuración tenga un solo dueño.
+    reply = post(f"{url}/v1/chat/completions", {
+        "model": model, "stream": False, "messages": messages, "max_tokens": MAX_OUTPUT_TOKENS,
+    }, timeout)
+    choice = (reply.get("choices") or [{}])[0]
+    msg = choice.get("message", {})
+    usage = reply.get("usage", {})
+    return {"content": msg.get("content", "") or "", "thinking": msg.get("reasoning_content", "") or "",
+            "model": reply.get("model", model), "input_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": usage.get("completion_tokens", 0), "done_reason": choice.get("finish_reason")}
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     url = os.environ.get("LLAMA_DIRECT_URL", DEFAULT_URL).rstrip("/")
     model = os.environ.get("LLAMA_DIRECT_MODEL", DEFAULT_MODEL)
+    api = os.environ.get("LLAMA_DIRECT_API", DEFAULT_API)
     # El --timeout del ciclo (900 s) es el de un ítem agéntico. En CPU, a unos
     # 4 tokens/s, un fragmento de 5.9 KB lo agotó con prefill y salida; aquí
     # manda el plazo propio, y el del ciclo sólo si es mayor.
@@ -157,13 +183,16 @@ def main(argv: list[str]) -> int:
                 print(f"llama-direct: {n}/{len(items)} reutilizado {zh.name}", file=sys.stderr, flush=True)
                 continue
             try:
-                reply = chat(url, model, build_message(template, zh), timeout)
+                reply = chat(url, model, build_message(template, zh), timeout, api)
                 record = {
-                    "result": close_markers(reply.get("message", {}).get("content", "")),
-                    "model": model, "runtime": "llama-direct", "sampling_profile": SAMPLING_PROFILE,
-                    "usage": {"input_tokens": reply.get("prompt_eval_count", 0),
-                              "output_tokens": reply.get("eval_count", 0)},
-                    "done_reason": reply.get("done_reason"),
+                    "result": close_markers(reply["content"]),
+                    "model": model, "served_model": reply["model"], "runtime": "llama-direct",
+                    "server": "llama-server" if api == "openai" else "ollama",
+                    "sampling_profile": SAMPLING_PROFILE,
+                    # El thinking tiene que venir apagado; su tamaño lo prueba en cada respuesta.
+                    "thinking_chars": len(reply["thinking"]),
+                    "usage": {"input_tokens": reply["input_tokens"], "output_tokens": reply["output_tokens"]},
+                    "done_reason": reply["done_reason"],
                 }
             except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
                 failed += 1

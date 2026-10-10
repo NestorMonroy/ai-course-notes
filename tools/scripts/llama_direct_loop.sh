@@ -30,7 +30,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLAN=".claude/workbench/translation/plan.tsv"
 [[ -n "$to" ]] || to=$(gawk -F'\t' 'NR > 1 {n = $1} END {print n}' "$PLAN")
 export TRANSLATION_RUNNER="$HERE/llama_direct_runner.py"
-URL="${LLAMA_DIRECT_URL:-http://127.0.0.1:11500}"
+URL="${LLAMA_DIRECT_URL:-http://127.0.0.1:11600}"
+# La salud según el runtime que sirve: llama-server (/health) u Ollama (/api/version).
+[[ "${LLAMA_DIRECT_API:-openai}" == ollama ]] && HEALTH="$URL/api/version" || HEALTH="$URL/health"
 SETTLED="${LLAMA_DIRECT_SETTLED:-.claude/cache/ola/llama-direct.settled}"
 
 # Fragmentos ya traducidos en todo el plan: la medida del avance de una vuelta.
@@ -41,7 +43,7 @@ translated_count() {
 for (( round = 1; round <= max_rounds; round++ )); do
     before=$(translated_count)
     for (( n = from; n <= to; n++ )); do
-        if ! curl -sf --noproxy '*' "$URL/api/version" > /dev/null; then
+        if ! curl -sf --noproxy '*' "$HEALTH" > /dev/null; then
             echo "llama_direct_loop: el servidor $URL no responde; se detiene en el lote $n" >&2
             exit 4
         fi
