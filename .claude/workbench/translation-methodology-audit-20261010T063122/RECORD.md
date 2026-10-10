@@ -48,3 +48,11 @@ y cualquier `<think>` llegado en el texto.
 
 Riesgos heredados de ES-B y ES-C, declarados en el encargo: el clasificador de permisos rehusó
 añadir thyrox a ES-B, y Docker Hub respondió 429 a ES-C al traer el 9B.
+
+## Primera respuesta del carril sobre llama-server (06:40Z)
+
+`cs25-v6/translate/20261010T063315/2.json` (`009.zh.tex`): `server llama-server`,
+`served_model qwen35-9b-es-mx`, `thinking_chars 0`, `done_reason stop`, 3275 tokens de entrada
+y 1151 de salida en 428.9 s; aceptada por `extract_translation` y `structure_problem`.
+Ritmo de 2.7 tokens de salida por segundo con el prefill incluido, frente a la mediana de
+3.05 con Ollama (52 respuestas): n = 1, no permite concluir.
