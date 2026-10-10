@@ -1,0 +1,768 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+\usepackage{multicol}
+
+\renewcommand{\notetitle}{Lecture 06: Diferentes patrones de generalización entre parámetros y contexto — Cómo cerrar la brecha de generalización latente}
+\renewcommand{\noteauthors}{Basado en el taller oficial de Andrew Lampinen, diapositivas oficiales de 50 páginas y subtítulos en inglés creados manualmente}
+\renewcommand{\notedate}{CS25 V6 · Apuntes con prioridad al código del 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{Clase: 2026-05-07; Subida: 2026-05-20}
+\renewcommand{\videoduration}{1:12:30 (paleo hasta aprox. 45:30, después Q\&A)}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=dJtHauhRasc}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.97\textwidth,height=0.47\textheight,keepaspectratio]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\let\standardtableofcontents\tableofcontents
+\renewcommand{\tableofcontents}{%
+  \begingroup
+  \small
+  \setlength{\parskip}{0pt}
+  \standardtableofcontents
+  \endgroup
+}
+
+\begin{document}
+
+\makecscover
+
+\section{Un mismo modelo, dos canales de aprendizaje}
+
+Esta clase parte de una pregunta que parece sencilla pero es fundamental: cuando un modelo de lenguaje recibe nueva información, ¿produce el mismo tipo de conocimiento accesible \textbf{escribiéndola en los parámetros} o \textbf{dejándola en el contexto}? Ambas rutas permiten que el modelo se comporte como si hubiera «aprendido» en la tarea actual, pero los experimentos controlados de Lampinen y colaboradores muestran que, en pruebas que requieren reorganizar relaciones—como reversal, syllogism, codebook o alternative goal—ambas exhiben patrones de generalización significativamente distintos.
+
+\subsection{El objeto de estudio no es solo el Transformer, también incluye al propio sistema de aprendizaje}
+
+La clase sitúa primero la pregunta en un marco común entre la inteligencia natural y la artificial. No se trata de inferir mecanismos cerebrales a partir de un experimento con Transformers, sino de aprovechar la controlabilidad de los sistemas artificiales: los investigadores pueden introducir \textbf{la misma nueva información} tanto en el contexto como en los parámetros y observar cómo cambian las predicciones posteriores. En humanos, es difícil controlar con precisión hacia qué tipo de sistema de memoria ha entrado una experiencia; en los modelos, esta intervención puede repetirse, eliminarse (ablation) y cuantificarse.
+
+\lecturefigure{slide-002.jpg}{Inferir principios computacionales del sistema de aprendizaje a partir de la generalización del modelo de lenguaje}{Diapositiva oficial de Stanford CS25 V6, clase 06, pág. 2}
+
+\teachervoice{00:01:06--00:02:18，el docente enfatiza que se trata de un método de ciencia cognitiva: el valor de los modelos no reside únicamente en su desempeño como objetos de prueba, sino también en su capacidad de ser sistemas de aprendizaje sujetos a intervenciones controladas. Las analogías con la inteligencia natural deben establecerse después de estos experimentos con modelos y no consistir en asignar nombres de regiones cerebrales directamente a componentes del modelo.}
+
+\begin{importantbox}{Pregunta central de esta clase}
+Dada la misma experiencia $D$, si un modelo aprende $D$ mediante actualización de parámetros, ¿podría realizar inferencias igualmente flexibles sobre las \textbf{relaciones no explícitamente escritas} que si se introduce $D$ directamente en el contexto? Si no es así, ¿provienen las diferencias de la capacidad, la optimización, la forma de acceso o la disponibilidad de la representación del conocimiento?
+\end{importantbox}
+
+\subsection{Aprendizaje paramétrico y aprendizaje in-contexto}
+
+El aprendizaje paramétrico comprime grandes cantidades de muestras en los pesos mediante la minimización de una función de pérdida durante el entrenamiento; el aprendizaje in-contexto (in-context learning, ICL) no actualiza los pesos, sino que utiliza hechos, ejemplos y documentos dentro del prompt durante una sola pasada de inferencia hacia adelante. Ambos pueden modificar la salida, pero corresponden a diferentes ciclos de vida de la información: el primero es persistente y amortizable, aunque la experiencia quede altamente comprimida; el segundo es efímero, ocupa la ventana de contexto, pero conserva más detalles locales.
+
+\lecturefigure{slide-003.jpg}{Las dos rutas de aprendizaje en modelos de lenguaje: optimización paramétrica y uso del contexto}{Diapositiva oficial de Stanford CS25 V6, clase 06, pág. 3}
+
+El aprendizaje paramétrico se puede expresar como
+$$
+\theta' = \arg\min_{\theta}\sum_{(x,y)\in D}\mathcal{L}\!\left(f_{\theta}(x),y\right),
+$$
+donde:
+\begin{itemize}
+  \item $D$ es el nuevo conjunto de datos de entrenamiento;
+  \item $f_{\theta}$ es un modelo de lenguaje con parámetros $\theta$;
+  \item $\mathcal{L}$ es la pérdida siguiente al token o la tarea;
+  \item $\theta'$ son los nuevos parámetros que retienen la información por más tiempo tras absorber los datos.
+\end{itemize}
+
+ICL mantiene los parámetros invariables:
+$$
+p(y\mid x,D)=f_{\theta}\!\left(y\mid \operatorname{concat}(D,x)\right).
+$$
+En este caso, $D$ no se comprime dentro de $\theta$, sino que participa directamente en la predicción como parte del grafo de cálculo actual. Por ello, «qué sabe el modelo» debe descomponerse en dos preguntas: si la información existe y si puede reorganizarse y activarse bajo el objetivo actual.
+
+\begin{knowledgebox}{Glosario: ¿en qué difieren realmente las dos formas de «aprender»?}
+\begin{tabularx}{\textwidth}{L{0.22\textwidth}X X}
+\toprule
+Dimensión & Aprendizaje paramétrico & Aprendizaje in-contexto \\
+\midrule
+Ubicación de la información & Pesos y representaciones internas & Secuencia actual de tokens y sus activaciones \\
+Duración & Se conserva a través de múltiples solicitudes & Generalmente válido solo en el contexto actual \\
+Alcance de integración & Integración estadística a través de millones de muestras de entrenamiento & Limitado por la ventana de contexto y la calidad de la recuperación \\
+Conservación de detalles & Comprimidos mediante optimización, pueden quedar ligados al formato original de la tarea & La experiencia original se conserva más íntegra y puede releerse bajo nuevos objetivos \\
+Costo principal & Entrenamiento, actualización y gestión de versiones & Tokens de inferencia, caché KV, recuperación y latencia \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{Experimentos controlados: cambiar solo la fuente de la información}
+
+El método clave de esta clase no es comparar dos modelos distintos, sino fijar el modelo, los datos y las pruebas, variando únicamente el canal de entrada de la información. Los investigadores pueden construir entidades y relaciones que el modelo nunca vio durante el preentrenamiento, introducir todo el conjunto de nuevos datos en el contexto, o realizar un ajuste fino con los mismos datos, para luego probar por separado hechos directos, relaciones inversas, razonamiento compuesto y estructuras latentes. Este diseño separa la «fuente de la información» del tamaño del modelo, el conocimiento del mundo y los corpus de entrenamiento.
+
+\lecturefigure{slide-004.jpg}{Experimento controlado que inyecta la misma información novel en el contexto o en los parámetros}{Diapositiva oficial de Stanford CS25 V6, clase 06, pág. 4}
+
+\begin{lstlisting}[language=Python,caption={Pseudocódigo para comparación controlada con los mismos datos pero distintos canales de información}]
+dataset = build_novel_relations()
+tests = build_forward_and_latent_tests(dataset)
+
+icl_model = frozen_model
+icl_scores = evaluate(icl_model, context=dataset, tests=tests)
+
+ft_model = finetune(copy(frozen_model), dataset)
+ft_scores = evaluate(ft_model, context=None, tests=tests)
+
+compare(icl_scores, ft_scores, by=["forward", "reversal", "composition"])
+\end{lstlisting}
+
+\lecturefigure{slide-005.jpg}{Ruta de la clase: medir primero las diferencias, luego comparar tres esquemas de puente y finalmente discutir la inteligencia natural}{Diapositiva oficial de Stanford CS25 V6, clase 06, pág. 5}
+
+\begin{warningbox}{No equiparar directamente «saber responder» con «haber formado el mismo tipo de conocimiento»}
+El hecho de que dos sistemas respondan correctamente en la distribución de entrenamiento o en preguntas explícitas no implica que su conocimiento interno tenga la misma capacidad de reorganización. Lo verdaderamente distintivo es si el rendimiento se mantiene cuando se invierte la dirección de la pregunta, se cambia el objetivo, se altera el idioma, se añade una relación adicional o cuando se exige llamar a conclusiones que solo estaban implícitas durante el entrenamiento.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+En este capítulo se establecen las variables causales para toda la clase: la misma información entra al modelo ya sea por los parámetros o por el contexto. El aprendizaje paramétrico es bueno para integrar estadísticamente grandes cantidades de experiencias a largo plazo; ICL permite que pocas experiencias participen directamente en el cálculo actual con una riqueza de detalles mayor. A continuación no se trata de averiguar qué camino es «más inteligente», sino de identificar qué tipo de pruebas expone las diferencias entre ellas en cuanto a la disponibilidad del conocimiento.
+
+
+\section{Brecha de generalización latente: ¿por qué la maldición de la inversión expone el problema primero}
+
+La entrada más clara es la \textbf{maldición de la inversión} (reversal curse). Si un modelo aprende que «Daphne Barrington dirigió A Journey Through Time», los humanos suelen considerar que preguntar «¿Quién dirigió esta película?» es simplemente una consulta inversa de la misma relación; sin embargo, los LLM ajustados con datos (fine-tuned) a menudo solo pueden responder siguiendo la dirección en que se entrenaron. Lo extraño es que, al escribir el mismo hecho nuevo en el contexto del chat, el modelo puede usar esa inversión fácilmente.
+
+\subsection{La maldición de la inversión y contraejemplos en el chat}
+
+Sea $R(a,b)$ una relación binaria que representa «$a$ tiene una relación con $b$ en la dirección dada durante el entrenamiento». Una pregunta inversa requiere que el modelo llame a
+$$
+R(a,b)\Longrightarrow R^{-1}(b,a).
+$$
+Aquí:
+\begin{itemize}
+  \item $R$ es la relación original, como «dirigió» o «contiene»;
+  \item $R^{-1}$ es la relación con dirección de consulta opuesta;
+  \item La información lógica no aumenta; lo que cambia es la dirección de acceso y la forma de salida.
+\end{itemize}
+
+\lecturefigure{slide-007.jpg}{Maldición de la inversión tras el ajuste fino}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 7}
+
+\teachervoice{00:03:30--00:04:21, el docente señala que lo verdaderamente sorprendente no es la maldición de la inversión en sí misma, sino que «en el chat esto resulta muy fácil». Incluso antes había considerado la inversión como una línea base sencilla (easy baseline) que podrían completar modelos débiles; este contraste llevó a comparar directamente los parámetros con el contexto.}
+
+\lecturefigure{slide-008.jpg}{El modelo puede realizar directamente la misma relación inversa dentro del contexto}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 8}
+
+\begin{importantbox}{La contradicción central no es la falta de hechos, sino la dirección en que se invocan}
+Un modelo ajustado con datos (fine-tuned) ya ha demostrado recordar los hechos en preguntas directas; el fracaso ocurre cuando el objetivo no entrena directamente el acceso inverso. El éxito del aprendizaje por contexto (ICL) indica que la misma arquitectura posee la capacidad computacional para realizar dicha transformación mientras la información sigue estando en el contexto.
+\end{importantbox}
+
+\subsection{¿Por qué el hecho de que el ICL se parezca al descenso de gradiente no debe cerrar el debate}
+
+Algunos trabajos teóricos han encontrado, en configuraciones lineales específicas, de optimización óptima o constructivas, que el cálculo hacia adelante del transformer puede realizar actualizaciones similares al \textbf{descenso de gradiente}. Por ello, la diapositiva 10 plantea intencionalmente una pregunta retórica: si el ICL se asemeja mecánicamente a cierta forma de optimización, ¿por qué, después de actualizar realmente los parámetros, el modelo resulta menos flexible? La respuesta es que la \textbf{similitud algorítmica local} no equivale a \textbf{representaciones finales, compresión e interfaces de acceso idénticas}.
+
+\lecturefigure{slide-009.jpg}{Pregunta de investigación: ¿inducen los parámetros y el contexto una generalización diferente?}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 9}
+
+\lecturefigure{slide-010.jpg}{Analogía limitada entre el ICL y el descenso de gradiente}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 10}
+
+\begin{warningbox}{El ICL $\simeq$ descenso de gradiente no es un teorema de equivalencia global}
+Estos resultados suelen depender de la distribución de tareas, la construcción del modelo y supuestos de algoritmos óptimos. Aunque una activación hacia adelante ejecute un paso de cálculo similar a la optimización, no se puede deducir que esto implique obtener las mismas representaciones paramétricas tras un entrenamiento prolongado, los mismos cuellos de botella de información, la misma reversibilidad o la misma generalización fuera de distribución (out-of-distribution).
+\end{warningbox}
+
+\subsection{Los mismos datos: ¿insertar todo el lote en el contexto o realizar un ajuste fino completo}
+
+Para evitar la confusión de que «el ICL solo vio hechos relevantes seleccionados artificialmente», los experimentos insertaron todo el nuevo conjunto de datos en un contexto largo, en lugar de proporcionar solo ejemplos few-shot. Otro grupo de modelos realizó un ajuste fino (fine-tuning) sobre los mismos datos. Las pruebas incluyeron tanto direcciones explícitas como consultas latentes que no aparecieron directamente durante el entrenamiento, para distinguir entre memoria, recuperación y transformación de relaciones.
+
+\lecturefigure{slide-011.jpg}{Protocolo de contraste entre el ajuste fino y el ICL con todo el conjunto de datos}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 11}
+
+Se puede definir una brecha de generalización latente simplificada:
+$$
+\Delta_{\text{latent}}=
+\operatorname{Acc}_{\text{ICL}}(T_{\text{latent}})
+-\operatorname{Acc}_{\text{FT}}(T_{\text{latent}}).
+$$
+Donde:
+\begin{itemize}
+  \item $T_{\text{latent}}$ son pruebas donde la respuesta no aparece directamente en forma objetivo en los datos de entrenamiento;
+  \item $\operatorname{Acc}_{\text{ICL}}$ es la precisión cuando todo el conjunto de datos está en el contexto;
+  \item $\operatorname{Acc}_{\text{FT}}$ es la precisión tras usar los mismos datos para ajustar fino (fine-tuning);
+  \item $\Delta_{\text{latent}}>0$ describe solo las diferencias del experimento actual, no una constante universal para todas las tareas.
+\end{itemize}
+
+\lecturefigure{slide-012.jpg}{Gran diferencia entre el ICL y el ajuste fino en el conjunto de datos de inversión}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 12}
+
+Al leer este gráfico de barras, primero distinga entre \textbf{forward} (hacia adelante) e \textbf{inversión} (reversal). El modelo ajustado con datos no es completamente amnésico en la dirección forward; sus problemas se concentran en la inversión de relaciones. El ICL, incluso cargando todo el conjunto de datos, recupera las consultas inversas de manera significativa. El gráfico apoya la idea de que «las formas de acceso y reorganización son diferentes», pero no explica por separado qué variable interpretable falta realmente en los parámetros.
+
+\begin{knowledgebox}{Lectura del gráfico: primero compare la misma dirección de prueba, luego el camino de aprendizaje}
+No interprete las barras azules, grises y amarillas simplemente como una jerarquía de fortaleza de tres modelos. En primer lugar, observe la condición forward para confirmar que cada método absorbió los hechos explícitos; en segundo lugar, verifique dónde caen (drop) bajo la condición de inversión; solo en tercer lugar compare las diferencias relativas entre el ICL y el ajuste fino. Solo así puede separar «no haber aprendido los hechos» de «no haber aprendido a invocarlos en sentido inverso».
+\end{knowledgebox}
+
+\lecturefigure{slide-013.jpg}{El test del silogismo también muestra la ventaja del contexto}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 13}
+
+El \textbf{silogismo} requiere deducir «No hay zamp que sean plusk» a partir de «Todos los zamp son snaff» y «Ningún snaff es plusk». Esto no es simplemente invertir un fraseo, sino combinar dos proposiciones explícitas para obtener una conclusión no escrita. La ventaja del ICL se extiende así desde la inversión direccional hasta la composición de relaciones.
+
+\lecturefigure{slide-014.jpg}{Conclusión de la primera fase: el ICL generaliza mejor en varias pruebas latentes}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 14}
+
+\teachervoice{00:08:55--00:12:15, el docente enfatizó especialmente que el ICL no recibe solo un hecho recuperado, sino todo el conjunto de datos; el tamaño de la diferencia varía según los modelos y las tareas, pero los patrones cualitativos de inversión y silogismo aparecen repetidamente.}
+
+\subsection{¿Por qué el texto de internet entrena al ICL pero no genera el mismo comportamiento paramétrico}
+
+El texto de internet contiene naturalmente estructuras locales como «dar contexto primero y luego preguntar» o «definir entidades antes que hacer referencias y combinaciones». Por ello, los modelos de lenguaje practican con frecuencia durante el preentrenamiento la creación temporal de relaciones a partir del contexto. La dificultad de la diapositiva 15 radica en: si esta capacidad ya existe, ¿por qué, después de ajustar fino (fine-tune) con nuevas relaciones, el modelo no transfiere las mismas reglas de transformación al conocimiento paramétrico? Esto indica que las reglas de aprendizaje no solo deciden qué se guarda, sino cómo está disponible la información como interfaz.
+
+\lecturefigure{slide-015.jpg}{La estructura del contexto es común, pero tras el ajuste fino aún no se aprende la misma generalización}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 15}
+
+\begin{knowledgebox}{Una explicación laboral: separación entre habilidad (skill) y contenido}
+El preentrenamiento puede haber formado en los parámetros una \textbf{habilidad} de «cómo leer el contexto y combinar las relaciones dentro de él». Cuando los nuevos hechos permanecen en el contexto, esta habilidad puede actuar directamente sobre ellos. El ajuste fino escribe el contenido en los parámetros; ahora el modelo necesita otra interfaz para exponer ese conocimiento paramétrico nuevamente a dicha habilidad. Si la representación no forma direcciones estables y accesibles, las capacidades de razonamiento existentes quedan inutilizadas.
+\end{knowledgebox}
+
+\subsection{El entrenamiento desde cero también falla: no es un ajuste accidental del modelo antiguo}
+
+Una refutación natural sería que los modelos de preentrenamiento ya tienen representaciones fijas y que el fallo de inversión se debe a que poco ajuste fino (fine-tuning) provoca el problema; quizás, si se entrenara desde cero, la red aprendería relaciones simétricas. El curso prueba esto con un modelo pequeño de unos 20 millones de parámetros, 20.000 relaciones sintéticas y inversiones reservadas para prueba (held-out). Los tokens sintéticos no tienen significado en inglés y el modelo no puede adivinar respuestas usando conocimiento del mundo.
+
+\lecturefigure{slide-016.jpg}{Hipótesis: quizás el preentrenamiento desde cero pueda aprender la relación latente}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 16}
+
+\lecturefigure{slide-017.jpg}{Experimento de inversión desde cero: dirección de entrenamiento vs. relación inversa reservada}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 17}
+
+Si en el conjunto de entrenamiento se proporcionan direcciones tanto directas como inversas para la mayoría de las relaciones, pero se ocultan las inversiones de una pequeña parte, se puede escribir la prueba como
+$$
+D_{\text{train}}=D_{\text{forward}}\cup D_{\text{reverse,seen}},
+\qquad
+T=D_{\text{reverse,heldout}}.
+$$
+Aquí el modelo ya ha visto la ley general de que «las relaciones pueden expresarse en ambas direcciones», pero aún debe transferir esa regla a entidades concretas reservadas para la prueba (held-out). Los resultados muestran que el aprendizaje paramétrico sigue siendo débil frente a inversiones latentes específicas de instancias, mientras que colocar la definición correspondiente en el contexto permite completar el codificado.
+
+\teachervoice{00:13:24--00:14:02, al responder una pregunta del curso, el docente aclaró que en las condiciones desde cero (from-scratch) el modelo no conoce inglés; la entrada son solo tokens sintéticos. Este control excluye la explicación de que el modelo completa respuestas basándose en nombres, sentido común o semántica del preentrenamiento.}
+
+\subsection{Codebook: expansión de la consulta inversa a combinaciones tipo traducción}
+
+La tarea \textbf{Codebook} define primero un mapeo de índices a caracteres y luego proporciona varios ejemplos de codificación. Las pruebas explícitas solo requieren usar índices entrenados directamente; las pruebas latentes exigen combinar definiciones y reglas de codificación para manejar índices que no aparecen en los muestras de entrenamiento. Se acerca más a un lenguaje temporal, traducción simbólica y protocolos de herramientas que simplemente invertir oraciones de lenguaje natural. Comparado con la inversión, esta tarea eleva «la dirección de la relación» a «leer definiciones primero y luego ejecutar programas», permitiendo verificar si el modelo trata las definiciones como reglas reutilizables en lugar de solo ajustar pares entrada-salida vistos.
+
+\lecturefigure{slide-018.jpg}{Índices entrenados vs. índices latentes en Codebook}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 18}
+
+Si el codebook es $c:k\mapsto v$, la codificación de una cadena puede escribirse como
+$$
+\operatorname{Encode}_{c}(s_1\cdots s_n)
+=\bigl(c^{-1}(s_1),\ldots,c^{-1}(s_n)\bigr).
+$$
+Donde:
+\begin{itemize}
+  \item $c$ es el mapeo de índices a símbolos;
+  \item $c^{-1}$ es la inversión del mapeo para recuperar índices desde los símbolos;
+  \item La prueba latente exige combinar «el mapeo de definición» con «la ejecución de codificación», no repetir muestras de entrenamiento.
+\end{itemize}
+
+\lecturefigure{slide-019.jpg}{Incluso entrenando desde cero, cierta estructura latente sigue teniendo una generalización inestable}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 19}
+
+\begin{importantbox}{Qué excluye y qué no excluye el experimento de entrenamiento desde cero}
+Excluye la explicación simple de que «el modelo antiguo solo no se adapta a los nuevos hechos» y demuestra que la existencia de estructura general en la distribución de entrenamiento no garantiza que cada instancia esté codificada de manera reorganizativa. No prueba que todas las arquitecturas, optimizadores, tamaños de datos o reglas de aprendizaje fallen necesariamente; por el contrario, convierte «cómo aprender estructuras latentes accesibles» en un problema algorítmico para etapas posteriores.
+\end{importantbox}
+
+\subsection{Contenido explícito, información latente e información utilizable}
+
+El curso presenta a continuación la compresión conceptual más importante. El \textbf{contenido explícito} de una experiencia es lo declarado directamente en la superficie; la \textbf{información latente} son las relaciones que se pueden deducir de esas declaraciones pero que no se escribieron en forma de preguntas futuras; la \textbf{información utilizable} añade aún una capa condicional: ¿puede el modelo convertir esa relación latente en una salida correcta bajo el objetivo actual?
+
+\lecturefigure{slide-020.jpg}{Estructura latente compartida por reversal, multi-hop, objetivos alternativos y cross-lingual}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 20}
+
+\begin{knowledgebox}{Lectura del gráfico: cuatro ejemplos comparten la misma estructura de información}
+Al leer el gráfico, no memorice los nombres de las tareas uno por uno; busque en cambio patrones comunes: a la izquierda o arriba se da la experiencia explícita, y a la derecha o abajo se prueba un objetivo que no fue escrito directamente. La inversión (reversal) cambia la dirección, multi-hop aumenta la profundidad de combinación, objetivos alternativos cambian el propósito de acción y cross-lingual cambia el idioma de expresión; todos prueban si la experiencia puede reinterpretarse.
+\end{knowledgebox}
+
+\begin{knowledgebox}{Glosario del primer uso: aprendizaje latente}
+\begin{tabularx}{\textwidth}{L{0.23\textwidth}X X}
+\toprule
+Término & Significado & Ejemplo \\
+\midrule
+Contenido explícito & Proposiciones o objetivos que aparecen directamente en la experiencia & «X es el padre de Y» \\
+Información latente & Información implícita en el contenido explícito pero no escrita en forma de prueba & «¿Quién es el padre de Y?» puede obtenerse invirtiendo la relación \\
+Generalización latente & Uso de información latente bajo nuevas direcciones, combinaciones o objetivos & Inferir nieto a partir de dos relaciones de padre \\
+Información utilizable & Información que el modelo puede acceder y usar para salida en su ruta computacional actual & El hecho existe en los parámetros, pero debe poder activarse por la condición del objetivo \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\lecturefigure{slide-021.jpg}{Los parámetros integran más; el contexto expone experiencias con más detalle}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 21}
+
+Este gráfico no debe leerse como «los parámetros son malos y el contexto es bueno». La ventaja de los parámetros es la integración a través de documentos, compresión y amortización; la ventaja del contexto es exponer experiencias limitadas en forma relativamente completa al modelo. La tensión real es entre \textbf{amplitud} (breadth) y \textbf{flexibilidad}: ¿al cubrir más experiencias se sacrifica la capacidad de reinterpretar una experiencia única bajo objetivos futuros desconocidos?
+
+\subsection{¿Por qué los datos reales ocultan el fracaso: atajo de co-ocurrencia}
+
+En corpus naturales, palabras como «eagle», «bird» y «wing» aparecen frecuentemente juntas. Incluso si el modelo no ejecuta un silogismo estricto, puede responder correctamente que «las águilas tienen alas» basándose en la co-ocurrencia de palabras. Por ello, una precisión no nula en la práctica no prueba automáticamente el razonamiento sistemático; podría provenir de rutas estadísticas efectivas pero diferentes.
+
+\lecturefigure{slide-022.jpg}{La co-ocurrencia puede sortear la inversión explícita o la inferencia silogística}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 22}
+
+Se puede dividir groseramente la señal de predicción en
+$$
+\log p(y\mid x)=S_{\text{stat}}(x,y)+S_{\text{rel}}(x,y)+\varepsilon,
+$$
+donde:
+\begin{itemize}
+  \item $S_{\text{stat}}$ representa señales estadísticas como frecuencia de palabras, similitud de entidades y co-ocurrencia;
+  \item $S_{\text{rel}}$ representa señales de relaciones como transformación direccional, combinación y aplicación de reglas;
+  \item $\varepsilon$ agrupa factores no modelados. Esta ecuación es una descomposición didáctica, no un modelo generativo identificable que se afirme en la literatura.
+\end{itemize}
+
+\begin{warningbox}{Las atajos estadísticos no son «trampa», pero cambian el significado de la evidencia}
+Las leyes estadísticas suelen mejorar el rendimiento esperado en el mundo real y no deben eliminarse solo porque no sean lógica formal. El problema es que, si el objetivo de evaluación es validar inversión o composición, las pistas de co-ocurrencia en los datos permitirían al modelo saltarse el mecanismo a probar. Los experimentos controlados deben eliminar estos atajos; los sistemas de despliegue deberían aprovechar simultáneamente el razonamiento estadístico y estructural.
+\end{warningbox}
+
+\teachervoice{00:18:39--00:21:26, el docente primero mencionó que la co-ocurrencia puede ocultar fallos latentes, y luego corrigió explícitamente una interpretación excesiva: las estructuras estadísticas en sí mismas son muy útiles; el curso no defiende que los modelos deban basarse únicamente en lógica pura.}
+
+\lecturefigure{slide-023.jpg}{Sin pistas asociativas, ¿cómo enseña el modelo la relación latente?}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 23}
+
+\subsection{Resumen de la sección}
+
+La inversión (reversal), el silogismo y Codebook indican conjuntamente que recordar contenido explícito no implica poder convertir esa misma experiencia en cualquier forma necesaria para objetivos futuros. El ICL es más flexible en estas tareas controladas, pero su ventaja no es un teorema universal; la co-ocurrencia, semántica y habilidades de recuperación en corpus reales alteran los resultados. El siguiente paso no es elegir simplemente el contexto, sino transferir el cálculo flexible del contexto a sistemas escalables.
+
+
+\section{Puente 1: Transformación de los datos de entrenamiento con In-Context Augmentation}
+
+La primera ruta de puente se completa antes del entrenamiento: dado que el modelo puede observar reversal, missing link y multi-hop implication en el context, primero haga explícitas estas relaciones dentro del context y luego fine-tune con los datos ampliados. Esta estrategia amortiza un proceso de inferencia costoso fuera de línea hacia los parámetros, siendo adecuada para escenarios donde las familias de problemas futuros sean relativamente predecibles.
+
+\subsection{Offline vs Online: división arquitectónica primero}
+
+La diapositiva 25 divide la propuesta en dos categorías. Los métodos Train-time/offline generan conclusiones complementarias antes del entrenamiento, haciendo que la inferencia posterior sea más barata; los métodos test-time/online conservan las experiencias originales y recuperan o regeneran información cuando surgen las preguntas, cubriendo un espectro más abierto pero siendo más costosos por solicitud. Esta división es más importante que los nombres específicos de los algoritmos, ya que determina la gobernanza de datos, el latencia, el almacenamiento en caché, la evaluación y los métodos de recuperación ante fallos.
+
+\lecturefigure{slide-025.jpg}{Las dos grandes familias para cerrar la brecha latent: augmentation offline y recuperación online}{Diapositiva oficial p. 25 del curso Stanford CS25 V6 Lecture 06}
+
+\begin{importantbox}{Pregunte primero si los futuros problemas son enumerables}
+Si los tipos de consulta futuras son estables, el entrenamiento se puede reejecutar y la latencia de inferencia es sensible, la augmentation offline tiene atractivo; si los objetivos cambian constantemente, los detalles de cada experiencia individual son importantes o se requiere rastrear evidencia original ante errores, entonces la recuperación/regeneración online es más adecuada.
+\end{importantbox}
+
+\subsection{Algoritmo: conécte primero los documentos y luego fine-tune}
+
+La in-context augmentation coloca el corpus completo o fragmentado en el context, exigiendo al modelo reescribir el documento actual, conectar otros documentos y completar relaciones inversas e implicaciones transversales a documentos. Los resultados generados se combinan con los datos originales para proceder al fine-tuning. La clave aquí no es un simple paraphrase, sino permitir que las habilidades ICL existentes conviertan la latent relation en una señal de supervisión directa.
+
+\lecturefigure{slide-026.jpg}{Enfoque 1: el pipeline de entrenamiento de in-context augmentation}{Diapositiva oficial p. 26 del curso Stanford CS25 V6 Lecture 06}
+
+\begin{lstlisting}[language=Python,caption={Marco de implementación mínima para in-context augmentation}]
+augmented = []
+for document in corpus:
+    context = retrieve_related_documents(corpus, document)
+    prompt = build_connection_prompt(context, document)
+    implications = teacher_model.generate(prompt)
+    augmented.extend(validate_and_deduplicate(implications))
+
+finetune_dataset = corpus + augmented
+student = finetune(base_model, finetune_dataset)
+\end{lstlisting}
+
+\lecturefigure{slide-027.jpg}{Conectar un documento individual con el corpus global para generar conclusiones entrenables directamente}{Diapositiva oficial p. 27 del curso Stanford CS25 V6 Lecture 06}
+
+Al analizar este ejemplo, rastree tres capas de objetos: los documentos originales solo escriben hechos locales; el context global proporciona otra relación; y el modelo de augmentation genera conclusiones transversales a documentos como "Dax can zarp". El estudiante final no necesita escanear todo el corpus nuevamente durante la prueba, ya que dicha conclusión se ha convertido en un objetivo de entrenamiento.
+
+\subsection{Resultados: augmented fine-tuning puede igualar o superar ICL}
+
+En familias de problemas como reversal y syllogism que ya han sido cubiertas por augmentation, el fine-tuning con datos ampliados puede igualar al ICL, siendo incluso mejor en algunos configuraciones. Esto no es misterioso: los resultados de razonamiento del ICL se convierten en más supervisión directa, otorgando al estudiante la dirección de objetivos que faltaba en el fine-tuning original.
+
+\lecturefigure{slide-028.jpg}{Augmented fine-tuning iguala o supera al ICL en reversal y syllogism}{Diapositiva oficial p. 28 del curso Stanford CS25 V6 Lecture 06}
+
+\lecturefigure{slide-029.jpg}{Conclusión: el ICL puede funcionar como un expansor de relaciones para los datos de entrenamiento}{Diapositiva oficial p. 29 del curso Stanford CS25 V6 Lecture 06}
+
+En la grabación de audio [00:24:17--00:27:21], el docente denomina a ambos resultados como "muy buenos pero diferentes": el ICL realiza un razonamiento flexible directamente durante la prueba; la augmentation genera conexiones con el ICL primero y luego destila esas conexiones en los parámetros. La ventaja de este último solo se aplica a las familias de problemas que han sido expandidas.
+
+\begin{knowledgebox}{Por qué augmented fine-tuning puede superar al ICL directo}
+El ICL directo debe recuperar y combinar información en un context largo cada vez, sufriendo de efectos de posición, interferencia y capacidades de recuperación del context; la augmentation puede generar múltiples direcciones, deduplicar y filtrar, y luego reforzar la misma conclusión mediante optimización multi-etapa. Por tanto, "superar al ICL" no indica que el aprendizaje de parámetros sea inherentemente más flexible, sino que la pipeline offline ha construido una distribución de supervisión más directa para la tarea objetivo.
+\end{knowledgebox}
+
+\subsection{No desde cero: lo que cambia es la accesibilidad}
+
+La diapositiva 30 responde anticipadamente a las dudas de teoría de la información: si la augmentation solo lee los datos originales, ¿cómo puede "obtener más información"? La respuesta correcta es que no crea nueva ground-truth; utiliza el conocimiento previo existente del modelo y el razonamiento del context para reescribir las conclusiones implícitas en los datos originales como muestras explícitas. Al comprender estas dos páginas, debe distinguir entre semantic implication y independent evidence: la primera puede ser expandida mediante cálculos, mientras que la segunda sigue debiendo provenir de observaciones reales o fuentes confiables; la augmentation solo puede mejorar la representación y el acceso, no reemplazar la recolección de evidencia.
+
+\lecturefigure{slide-030.jpg}{Pregunta: ¿la augmentation genera información desde nothing?}{Diapositiva oficial p. 30 del curso Stanford CS25 V6 Lecture 06}
+
+\lecturefigure{slide-031.jpg}{Respuesta: convertir la latent implication en supervisión explícita}{Diapositiva oficial p. 31 del curso Stanford CS25 V6 Lecture 06}
+
+Si el amplificador $A$ es determinístico para los datos $D$, entonces
+$$
+H\!\left(A(D)\mid D\right)=0.
+$$
+Donde:
+\begin{itemize}
+  \item $A(D)$ son las reescrituras, relaciones inversas o conclusiones combinadas derivadas de $D$;
+  \item $H(\cdot\mid\cdot)$ es la entropía condicional;
+  \item Esta fórmula indica que, dado los datos originales, una augmentation determinística no agrega información aleatoria independiente nueva;
+  \item La generación real de LLMs es estocástica e inyecta el conocimiento previo del modelo y errores, por lo tanto se debe verificar la factuality y no tratar todos los nuevos tokens como nueva evidencia.
+\end{itemize}
+
+\begin{warningbox}{“La información ya está en los datos” no equivale a “la generación es necesariamente correcta”}
+Las conclusiones válidas de Syllogism y las conexiones hallucinadas pueden ser escritas fluidamente por el modelo. Las pipelines de producción deben registrar los documentos fuente, tipos de razonamiento, modelos generadores y versiones del prompt, y filtrar usando reglas, verificadoros, muestreo cruzado o inspección manual; de lo contrario, la expansión latent solidificará errores también dentro de los parámetros.
+\end{warningbox}
+
+\subsection{Límite fundamental: no se puede enumerar con anticipación cada futuro uso}
+
+Los métodos offline deben adivinar qué preguntará el futuro. Un investigador que lee un artículo hoy no puede escribir con anticipación el significado de esa experiencia para todos los temas, objetivos y combinaciones futuros; el número de relaciones crece con las combinaciones de documentos y objetivos potenciales. La diapositiva 32 ilustra esto con el ejemplo de "quizás una tesis doctoral futura lo use", explicando que la augmentation completa es inviable en un mundo abierto. Un límite más profundo es que los propios objetivos cambian: la forma disponible de un mismo hecho para recuperación, planificación, explicación, contrafactual y auditoría de seguridad no es idéntica, por lo tanto generar con anticipación varios paraphrases fijos no puede cubrir las necesidades computacionales futuras.
+
+\lecturefigure{slide-032.jpg}{Pre-aumentar datos para cada objetivo futuro no es escalable}{Diapositiva oficial p. 32 del curso Stanford CS25 V6 Lecture 06}
+
+Asumiendo que el corpus tiene $N$ experiencias y cada inferencia combina a lo sumo $k$ experiencias, el número potencial de combinaciones alcanza aproximadamente
+$$
+\sum_{i=1}^{k}\binom{N}{i},
+$$
+donde $N$ es el número de experiencias y $k$ la profundidad de combinación permitida. Los problemas reales también incluyen objetivos, idioma y formato de salida, ampliando aún más el espacio. Por tanto, la augmentation offline requiere conocimiento previo de tareas y presupuesto, no una expansión infinita.
+
+\subsection{Resumen de la sección}
+
+El valor de la in-context augmentation reside en transformar las latent relation que se forman fácilmente dentro del context en supervisión explícita, y trasladar el cálculo durante la prueba al momento del entrenamiento. Es adecuada para familias de problemas predecibles, pero asume costos de generación, verificación, inflación de datos y deriva del modelo; el límite más importante es la incapacidad de prever todos los usos futuros de cada experiencia. Esto es precisamente el punto de partida para la recuperación episódica online.
+\section{Puente 2: traer experiencias al Contexto mediante Episodic Retrieval}
+
+La segunda ruta de puente no anticipa todas las conclusiones por adelantado, sino que preserva experiencias más completas. Cuando surgen nuevas preguntas, el sistema recupera episodios relevantes y los reintegra en el contexto para que el modelo utilice sus habilidades ICL existentes e interprete según el objetivo actual. Este método transforma "uso futuro desconocido" en "si se pueden encontrar las experiencias correctas durante la prueba".
+
+\subsection{Memoria episódica de oracle: demostrar valor primero, reconocer luego que la recuperación no está resuelta}
+
+El recuperador del curso es una memoria episódica de oracle: garantiza recuperar al menos una experiencia relevante, aunque mezcle varias distracciones. Este diseño divide intencionalmente el problema: primero se pregunta "si una experiencia relevante regresa al contexto, ¿se recupera la generalización latente?", en lugar de resolver simultáneamente embebido, índice, clasificación por relevancia y recencia junto con los controles de permisos.
+
+\lecturefigure{slide-033.jpg}{Enfoque 2: recuperación episódica de oracle restaura experiencias relevantes durante la prueba}{Diapositiva oficial de Stanford CS25 V6 Lecture 06 p. 33}
+
+Una vez definida el conjunto de recuperación $M_q$, las métricas comunes son
+$$
+\operatorname{Recall}@k=\frac{|M_q^{(k)}\cap R_q|}{|R_q|},
+\qquad
+\operatorname{Precision}@k=\frac{|M_q^{(k)}\cap R_q|}{k}.
+$$
+donde:
+\begin{itemize}
+  \item $R_q$ es el conjunto de experiencias relevantes para la pregunta $q$;
+  \item $M_q^{(k)}$ son las primeras $k$ experiencias devueltas por el recuperador;
+  \item la configuración de oracle garantiza un recall alto, pero permite que la precisión no sea perfecta;
+  \item por ello, los experimentos prueban si el modelo puede utilizar al menos una memoria correcta entre las distracciones.
+\end{itemize}
+
+\begin{lstlisting}[language=Python,caption={Separación de responsabilidades en el experimento de recuperación episódica de oracle}]
+memories = store_training_experiences(dataset)
+
+def answer(query):
+    relevant = oracle_pick_at_least_one(memories, query)
+    distractors = sample_irrelevant(memories, count=4)
+    context = shuffle(relevant + distractors)
+    return frozen_model.generate(context=context, query=query)
+\end{lstlisting}
+
+\teachervoice{00:29:09--00:29:31, el docente llama directamente a este sistema de recuperación como "tramposa": tiene recall perfecto, aunque la precisión no lo sea. Este reconocimiento no debilita el experimento, sino que aclara que solo prueba una proposición condicional: si un episodio relevante regresa al contexto, efectivamente tiene valor.}
+
+\subsection{Resultados: reversal y codebook se recuperan}
+
+El foco de la comparación en las gráficas no es la condición forward, porque tanto el aprendizaje de parámetros como la recuperación episódica pueden manejar direcciones explícitas; lo verdaderamente diferenciador son la condición reversal y la condición de codebook latente. Un sistema con recuperación puede acercarse a una generalización flexible estilo ICL incluso al ver memorias distractores simultáneamente.
+
+\lecturefigure{slide-034.jpg}{Beneficios de la recuperación episódica en las pruebas de reversal y codebook latente}{Diapositiva oficial de Stanford CS25 V6 Lecture 06 p. 34}
+
+\begin{knowledgebox}{Lectura de la figura: condiciones explícitas para calibrar, condiciones latentes para distinguir mecanismos}
+En ambos grupos de gráficas, primero se deben observar las condiciones explicit / trained para confirmar que el aprendizaje de parámetros y la recuperación pueden completar al menos las tareas básicas; luego se revisan las condiciones reversal o codebook latente. Si solo estas últimas marcan diferencia significativa, la evidencia respalda un uso flexible, no que la recuperación simplemente provee más datos de entrenamiento o un modelo base más fuerte.
+\end{knowledgebox}
+
+\lecturefigure{slide-035.jpg}{Conclusión: traer experiencias al contexto puede recuperar su valor latente}{Diapositiva oficial de Stanford CS25 V6 Lecture 06 p. 35}
+
+\begin{importantbox}{La recuperación cambia el entorno computacional}
+Los parámetros podrían retener hechos, pero no exponer de manera estable la dirección necesaria para completar la transformación actual; la recuperación episódica presenta las experiencias originales como tokens nuevamente, permitiendo que el modelo invoque los circuitos de razonamiento por contexto ya entrenados. No se escriben más hechos permanentemente en los parámetros, sino que se reconstruye un mundo local computable para el objetivo actual.
+\end{importantbox}
+
+\subsection{Relación con RAG: no solo buscar respuestas, sino también experiencias reinterpretables}
+
+El RAG ordinario suele describirse como la recuperación de documentos que contienen respuestas; aquí nos interesa más recuperar experiencias \textbf{de las cuales se pueden deducir respuestas}. Por ejemplo, si un documento solo dice "X es padre de Y", pero la pregunta es "¿Quién fue padre de Y?", el recuperador no necesita almacenar una respuesta inversa pregenerada, sino que basta con devolver la relación original al contexto.
+
+\begin{knowledgebox}{Diferencias entre recuperación episódica y RAG factual convencional}
+\begin{tabularx}{\textwidth}{L{0.24\textwidth}X X}
+\toprule
+Dimensión & Objetivo común en RAG factual & Recuperación episódica en esta clase \\
+\midrule
+Objeto de recuperación & Párrafos con respuesta directa o similares & Experiencias originales relevantes al objetivo actual \\
+Responsabilidad de generación & Extraer, sintetizar y citar hechos & Reinterpretar direcciones, combinar relaciones y cambiar objetivos \\
+Riesgos clave & Documentos faltantes, orden incorrecto, citas falsas & Conservar suficiente detalle relacional además de la relevancia \\
+Estado experimental & Evaluación con recuperadores reales & El curso aísla el valor de la recuperación usando oracle \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\teachervoice{00:30:41--00:31:24, el docente vincula esta tarea con la generación aumentada por recuperación, pero señala que el enfoque es permitir que el contexto realice razonamiento nuevamente sobre relaciones latentes difíciles de invocar en los parámetros, no solo consultar una respuesta factual.}
+
+\begin{warningbox}{Los resultados de oracle no pueden convertirse directamente en promesas de producto}
+Un sistema real debe resolver reformulación de consultas, deriva del embebido, contaminación por memoria a largo plazo, permisos y privacidad, validez temporal, experiencias conflictivas y presupuestos de recall/latencia. Si el recall disminuye, la arquitectura episódica conceptualmente correcta también fallará porque "la memoria no regresó".
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La recuperación episódica evita enumerar offline todos los usos futuros posibles, devolviendo experiencias relevantes al contexto solo cuando surge un objetivo. El experimento con oracle demostró que esta interfaz computacional puede recuperar el valor latente del reversal y del codebook, aunque no resuelve un recuperador universal. La tercera ruta indaga aún más: si el modelo no accede a una memoria externa, ¿puede generar por sí mismo la información necesaria durante la prueba?
+
+
+\section{Puente 3: Aprender a regenerar información durante la prueba mediante RL}
+
+El enfoque de RL asume que los parámetros del modelo aún contienen los "fragmentos" necesarios para completar la tarea, pero no se explicitan automáticamente en el contexto actual. Por lo tanto, se entrena una política de razonamiento (reasoning policy) que permite al modelo recordar, reformular o combinar información relevante dentro de su cadena de pensamiento (chain of thought) antes de generar la respuesta. Esto convierte la recuperación implícita en una acción ejecutada durante la prueba por el propio modelo.
+
+\subsection{Regeneración: Reescribir el conocimiento de los parámetros hacia el propio contexto}
+
+La frase clave de la diapositiva 36 es que el modelo ya conoce los fragmentos (pieces), pero debe aprender a regenerar la información necesaria dentro del CoT sin depender de una recuperación externa. No se debe misticificar el concepto de CoT; simplemente implica un cálculo adicional de tokens. El problema real es si la recompensa (reward) del RL puede incentivar que estos tokens transporten premisas útiles en lugar de generar monólogos redundantes.
+
+\lecturefigure{slide-036.jpg}{Enfoque 3: Regenerar información necesaria dentro del CoT mediante RL}{Diapositiva oficial de Stanford CS25 V6, Clase 06, p. 36}
+
+Se puede formular el objetivo de la estrategia como
+$$
+J(\pi_{\phi})=
+\mathbb{E}_{q\sim Q,\,z\sim\pi_{\phi}(\cdot\mid q)}
+\left[r\!\left(q,z,a(z,q)\right)\right],
+$$
+donde:
+\begin{itemize}
+  \item $q$ es la pregunta;
+  \item $z$ son los tokens intermedios de razonamiento/recuerdo generados por el modelo;
+  \item $a(z,q)$ es la respuesta final derivada de esos tokens;
+  \item $r$ representa la corrección de la respuesta o la recompensa de la tarea;
+  \item $\pi_{\phi}$ es la política de razonamiento actualizada mediante RL.
+\end{itemize}
+
+\begin{lstlisting}[language=Python,caption={Bucle de entrenamiento abstracto para aprender test-time regeneration con RL}]
+for query, answer in rl_dataset_A:
+    reasoning = policy.sample(query)
+    prediction = policy.answer(query, reasoning)
+    reward = task_reward(prediction, answer)
+    policy.update(reasoning, reward)
+
+evaluate(policy, heldout_dataset_B)
+\end{lstlisting}
+
+\subsection{Transferencia A/B: ¿Se aprende la respuesta de la tarea o la política de razonamiento general?}
+
+En el experimento, primero se inyectan dos conjuntos de datos de nuevo conocimiento (A y B) en los parámetros del modelo, y luego solo se realiza RL sobre A. Si la prueba latente con tenues (held-out latent test) de B también mejora, esto indica que la política no está simplemente memorizando respuestas específicas de A, sino aprendiendo un proceso transferible de "cómo reexpresar la información de los parámetros dentro del contexto". La línea base de aumento (Augmentation baseline) solo expande A y sirve para distinguir entre una mayor cobertura de datos y una transferencia de razonamiento.
+
+\lecturefigure{slide-037.jpg}{Realizar RL únicamente en el conjunto de datos A, seguido de pruebas con tenues latentes del conjunto de datos B}{Diapositiva oficial de Stanford CS25 V6, Clase 06, p. 37}
+
+\lecturefigure{slide-038.jpg}{La política de RL transfiere sus mejoras a las tenues silogísticas del conjunto de datos B}{Diapositiva oficial de Stanford CS25 V6, Clase 06, p. 38}
+
+El punto central en la figura es la barra de generalización de razonamiento (reasoning-generalization bar) coloreada en rojo: aumentar solo A no mejora automáticamente a B, pero la política de razonamiento entrenada en A permite transferencias parciales a la estructura de B. Esto respalda la idea de "aprender el proceso" en lugar de simplemente "aumentar muestras", aunque el alcance de la transferencia sigue dependiendo de la similitud estructural y la cobertura de la recompensa.
+
+\begin{knowledgebox}{No confundir los dos tipos de transferencia}
+La \textbf{transferencia de conocimiento} consiste en llevar hechos de A a B; por el contrario, la \textbf{transferencia de política de razonamiento} implica aprender una operación en A y ejecutarla posteriormente sobre diferentes hechos en B. El curso se centra en esta última opción; por lo tanto, los conjuntos de datos deben estar aislados y las tenues latentes objetivo (held-out target) de B no pueden filtrarse durante el entrenamiento con RL.
+\end{knowledgebox}
+
+\subsection{El verdadero reversal sigue siendo difícil}
+
+El RL no resuelve la brecha latente por completo. En el caso del silogismo, el modelo puede aprender un procedimiento general consistente en "escribir primero las proposiciones relevantes y luego combinarlas". Sin embargo, para un verdadero reversal, si la representación de los parámetros no proporciona un índice válido desde los objetos hacia los sujetos, el modelo podría verse obligado a enumerar relaciones candidatas hasta encontrar una coincidencia. La enumeración es viable en espacios sintéticos pequeños, pero resulta inaceptable en espacios de entidades abiertas.
+
+\lecturefigure{slide-039.jpg}{La mejora de RL sobre true reversal depende de estrategias casi exhaustivas}{Diapositiva oficial de Stanford CS25 V6, Clase 06, p. 39}
+
+\lecturefigure{slide-040.jpg}{La regeneración por RL mejora ciertos problemas, pero no es una solución universal}{Diapositiva oficial de Stanford CS25 V6, Clase 06, p. 40}
+
+\teachervoice{00:34:44--00:35:10, el docente aclara que el reversal se beneficia poco de esta estrategia de recuperación en contexto; para resolverlo mediante RL, a menudo es necesario reconstruir todas las relaciones posibles. El curso establece esto como un límite del método, evitando empaquetar una mejora promedio como un éxito integral.}
+
+\begin{warningbox}{Más tokens durante la prueba no garantizan obtener información correcta}
+Si la representación de los parámetros carece de índices accesibles, una cadena de pensamiento (CoT) extensa podría estar simplemente realizando búsquedas repetidas en un espacio mayor. La evaluación debe registrar el número de tokens necesarios para el éxito, la escala de enumeración de candidatos, las trayectorias de error y las condiciones de parada, en lugar de reportar únicamente la precisión final permitida tras un presupuesto infinito.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El RL permite entrenar una política de regeneración durante la prueba que re-explicita parcialmente el conocimiento de los parámetros y facilita su transferencia a estructuras latentes similares en diferentes conjuntos de datos; no obstante, está limitada por la recompensa, la cobertura estructural y el costo de búsqueda. En particular, el reversal revela un problema fundamental: si el conocimiento no está organizado para un acceso inverso, los tokens de razonamiento pueden compensar, pero no pueden crear índices gratuitamente.
+\section{Elección de ingeniería para tres esquemas de puente}
+
+La clase vuelve a presentar las tres rutas bajo la misma perspectiva sistémica en las diapositivas 41--42. No son enfoques mutuamente excluyentes: el \texttt{augmentation} puede generar direcciones de alta frecuencia, el \texttt{retrieval} preserva experiencias de cola larga y el \texttt{RL} trata estructuras que no pueden recuperarse directamente pero que se pueden reconstruir mediante procesos generales. El verdadero diseño del trabajo consiste en asignar la capacidad de cómputo para entrenamiento, almacenamiento, latencia de inferencia y responsabilidad por recuperación de errores.
+
+\subsection{Marco unificado: convertir \texttt{latent information} en el contexto actual}
+
+Las tres rutas realizan esencialmente la misma tarea: antes de generar una respuesta, hacer que las relaciones necesarias para la tarea ingresen a la computación actual en una forma utilizable. La diferencia radica únicamente en el momento y el soporte. El \texttt{augmentation} explicita y escribe los parámetros antes del entrenamiento; el \texttt{retrieval} recupera desde una memoria externa durante la prueba; el \texttt{RL} genera un conjunto de trabajo interno a partir de los parámetros durante la prueba.
+
+\lecturefigure{slide-041.jpg}{Las tres rutas de puente aprovechan el razonamiento in-context}{Diapositiva oficial Stanford CS25 V6 Lecture 06, p. 41}
+
+\begin{importantbox}{Abstracción unificada: Construcción del Contexto}
+Se puede expresar el sistema como $C_q=B(D,M,\theta,q)$: el puente $B$ construye el contexto de trabajo $C_q$ basándose en los datos de entrenamiento $D$, la memoria externa $M$, los parámetros del modelo $\theta$ y la pregunta $q$. Cada uno de los tres métodos coloca la carga computacional principal en la construcción de datos fuera de línea, la recuperación externa en línea o la generación interna en línea.
+\end{importantbox}
+
+\subsection{Cómputo, cobertura y dependencias}
+
+Las pros y contras de la diapositiva 42 no deben leerse simplemente como "quién tiene mayor precisión". El \texttt{augmentation} en tiempo de entrenamiento incrementa los costos de generación y entrenamiento, pero abarata el despliegue; el \texttt{retrieval} es gratuito durante el entrenamiento, pero exige un sistema de memoria confiable e incrementa la I/O y los tokens por cada solicitud; el \texttt{RL} puede permitir transferencia entre distribuciones de aumento explícito, pero tanto el entrenamiento como la inferencia requieren cómputo adicional de rollout, siendo débil respecto a la reversibilidad.
+
+\lecturefigure{slide-042.jpg}{Comparación de beneficios y costos del Augmentation, Retrieval y RL}{Diapositiva oficial Stanford CS25 V6 Lecture 06, p. 42}
+
+\begin{knowledgebox}{Lectura de la figura: ninguna columna domina en todas las dimensiones}
+Esta página no es un ranking de métodos, sino una frontera de Pareto. El \texttt{augmentation} cambia cómputo de entrenamiento por baja latencia; el \texttt{retrieval} cambia sistema externo por cobertura abierta; el pensamiento \texttt{RL thinking} cambia generación adicional por transferencia de proceso. Al seleccionar, primero se deben fijar las restricciones del negocio y luego buscar soluciones aceptables, en lugar de inferir una arquitectura unificada a partir de la barra más alta de algún benchmark.
+\end{knowledgebox}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Tabla de decisiones de ingeniería para los tres esquemas de puente}
+\begin{tabularx}{\textwidth}{L{0.18\textwidth}X X X}
+\toprule
+Dimensión & Train-time augmentation & Test-time retrieval & Test-time RL thinking \\
+\midrule
+Costo principal & Generación, validación y reentrenamiento fuera de línea & Índice, recuperación y contexto adicional & Rollout de RL y más tokens por generación \\
+Latencia de inferencia & Baja, las conclusiones ya están en los parámetros & Medio-alta, depende de la recuperación y el contexto largo & Medio-alta, depende de la longitud del razonamiento \\
+Alcance & Limitado por la familia de problemas previamente aumentados & Limitado por la recuperación de memoria y la calidad del episodio & Limitado por el procedimiento aprendido y el espacio de búsqueda \\
+Rastreabilidad & Requiere guardar el origen de las muestras aumentadas & Puede citar el episodio original & El CoT interno no siempre es fiel o verificable \\
+Fallo típico & alucinación, deriva, omisión de objetivos futuros & Memoria relevante no recuperada o conflictiva & Búsqueda extensa, sobreajuste de recompensa, enumeración de reversal \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+El costo total se puede expresar aproximadamente como:
+$$
+C_{\text{total}}=
+C_{\text{base-train}}+C_{\text{augment}}+C_{\text{RL}}
++N_{\text{query}}\left(C_{\text{retrieve}}+C_{\text{reason}}\right).
+$$
+Donde $C_{\text{augment}}$ y $C_{\text{RL}}$ son costos únicos del lado de entrenamiento, mientras que $C_{\text{retrieve}}$ y $C_{\text{reason}}$ se pagan repetidamente según el volumen de consultas $N_{\text{query}}$. Al seleccionar un esquema, es obligatorio calcular junto con el volumen futuro de llamadas, los SLO de latencia y el costo del error.
+
+\subsection{Preguntas y respuestas: contexto largo, escala del modelo y capacidad de recuperación}
+
+En las preguntas y respuestas, Lampinen explica que la estabilidad del ICL depende del modelo y del contenido. Un hecho individual suele ser fácil; incluso en un contexto de cientos de miles de tokens puede tener éxito, pero los entes reales son más fáciles de recuperar que los tokens sin sentido (\texttt{nonsense}), porque el preentrenamiento ya enseña al modelo cómo manejar estos primeros. Por lo tanto, la longitud del contexto y "qué tan familiar está el modelo con las formas de recuperación de este tipo de información" no deben confundirse en una sola variable.
+
+\teachervoice{00:46:14--00:48:05, la advertencia clave que dio el docente es: para datos de la misma longitud, reemplazar nombres reales con palabras sin sentido hace que el rendimiento del contexto disminuya significativamente. La \texttt{tokenización} puede contribuir en parte, pero un factor mayor es la habilidad de recuperación formada durante el preentrenamiento.}
+
+\begin{warningbox}{No prediga la capacidad del ICL basándose en una sola longitud de ventana de contexto}
+La ventana permite colocar datos, lo que solo indica que la capacidad de almacenamiento es suficiente; el rendimiento real también está influenciado por la posición, la forma del ente, interferencias de atención, redacción de la consulta, distribución del contexto de duración del entrenamiento y habilidades de recuperación del modelo. Las evaluaciones de despliegue deben utilizar tipos de contenido reales, en lugar de medir solo una plantilla única tipo aguja en un heno.
+\end{warningbox}
+
+Sobre los parámetros y la dispersión (\texttt{sparsity}), la clase no ofreció una conclusión clara. Un modelo más grande podría mejorar simultáneamente el rendimiento paramétrico y contextual; la dispersión MoE también podría cambiar la capacidad y las rutas, pero los experimentos presentados no aislaron estas variables. Una conclusión razonable es la necesidad de un estudio de escalado controlado, en lugar de afirmar que la escala eliminaría automáticamente la brecha.
+
+\subsection{Preguntas y respuestas: costos ocultos del augmentation}
+
+El docente estima que el \texttt{offline augmentation} podría ser al menos un orden de magnitud más costoso que un pequeño ajuste fino (\texttt{fine-tuning}) con datos, ya que primero se requiere múltiples rondas de inferencia/generación y luego entrenamiento en un conjunto de datos más grande. Esto es una estimación empírica y no un benchmark de publicación, pero sugiere que los equipos no deben escribir "gratuito en tiempo de inferencia" en sus propuestas e ignorar los costos de GPU fuera de línea, validación e iteración.
+
+\teachervoice{01:08:09--01:09:43, el docente enumera tres tipos de costo: la generación y el entrenamiento hacen que el \texttt{augmentation} sea muy costoso; las muestras generadas pueden alucinar; los datos de ajuste fino más grandes también podrían distorsionar el conocimiento original. La regularización puede mitigar la deriva (\texttt{drift}), pero el compromiso específico depende de la configuración de entrenamiento.}
+
+\begin{knowledgebox}{Plano de control a registrar antes de lanzar Augmentation}
+\begin{enumerate}
+  \item Modelo de generación, prompt, temperatura y número de muestras;
+  \item Documentación fuente y cadena de razonamiento verificable para cada nueva conclusión;
+  \item Tasas de filtrado de alucinaciones, duplicados y conflictos;
+  \item Comparación antes y después del tarea original, la nueva tarea latente y la capacidad no relacionada;
+  \item Tokens adicionales generados, tokens de entrenamiento, FLOPs, tiempo cronometrado y horas de GPU;
+  \item Estrategias de KL, decay de pesos, reprodución (\texttt{replay}) o datos híbridos para prevenir deriva de parámetros.
+\end{enumerate}
+\end{knowledgebox}
+
+\subsection{Preguntas y respuestas: el diseño del prompt es tanto un algoritmo como un riesgo de fuga}
+
+El artículo reutilizó el mismo conjunto de prompts en tareas de relación factual, donde el impacto del ablitación fue menor al esperado; sin embargo, el conferencista aclaró explícitamente que estos prompts vinculan hechos y relaciones de entes, y no necesariamente se trasladan al razonamiento matemático. Si un prompt pide directamente generar la forma objetivo de prueba, esto se acerca a "decirle la respuesta al modelo"; si es demasiado general, podría no ser capaz de desarrollar la relación latente necesaria.
+
+\teachervoice{01:10:03--01:12:08, el docente dice que el prompt pide aproximadamente reescribir el documento y conectar otros entes del corpus, reconociendo al mismo tiempo que es difícil evitar completamente el conocimiento previo de la tarea (\texttt{task foreknowledge}). Los prompts de \texttt{augmentation} universales para múltiples dominios siguen siendo un problema abierto.}
+
+\begin{warningbox}{Problemas de auditoría por fuga en el prompt}
+Si se evalúa la reversibilidad, pero se escribe directamente "generar todas las relaciones inversas" en el prompt de \texttt{augmentation}, la mejora del modelo prueba que la construcción de datos dirigida es efectiva, no que se descubrió automáticamente cualquier estructura latente. El reporte debe distinguir entre prompts de conexión genéricos, prompts conscientes de la tarea y fugas de objetivos directos.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Los tres esquemas de puente pueden unificarse como construcción de contexto, pero las posiciones del costo difieren: el \texttt{augmentation} avanza la computación hacia adelante, el \texttt{retrieval} externaliza el almacenamiento y la recuperación, y el \texttt{RL} deja la búsqueda dentro del modelo. La elección para producción debe considerar conjuntamente cobertura, latencia, origen (\texttt{provenance}), recall de recuperación, alucinación, deriva y volumen de consultas, en lugar de observar solo un gráfico de barras de precisión.
+\section{De la evidencia del modelo a la inteligencia natural: sistemas de memoria complementarios}
+
+Al final del curso se regresa a la pregunta inicial: si una experiencia contiene más información latente de la que pueden representar los parámetros de largo plazo, ¿requiere también la inteligencia natural guardar por separado el «conocimiento integrado lentamente» de las «experiencias específicas detalladas»? El valor aquí es plantear una necesidad computacional, no afirmar que el \textit{hippocampus} sea una base de datos vectorial o que la neocorteza sean los pesos de un Transformer.
+
+\subsection{Comprimir primero las conclusiones del modelo}
+
+La diapositiva 44 reformula cuatro tipos de estructura latente y añade una nota al pie importante: es posible que los parámetros no codifiquen esta información en absoluto, sino que no lo hagan de una manera \textbf{confiable y accesible} durante la prueba. Esta redacción distingue entre «representación ausente» y «fallo de acceso», evitando hacer afirmaciones sobre los mecanismos internos que excedan lo que permiten los experimentos de comportamiento.
+
+\lecturefigure{slide-044.jpg}{Los parámetros podrían no codificar la información latente en una forma confiable y accesible}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 44}
+
+\begin{importantbox}{¿Hasta qué punto puede apoyarse la evidencia de comportamiento?}
+Los experimentos pueden respaldar la afirmación de que «el modelo no utiliza de manera estable la información latente dado una interfaz de prueba». No obstante, el fallo en la salida no basta para distinguir: la información podría no estar codificada en absoluto, estar codificada demasiado débilmente, haber sido sobrescrita por interferencias, carecer de un índice inverso, fallar la estrategia de decodificación o que la recompensa no haya activado el camino computacional correcto.
+\end{importantbox}
+
+\lecturefigure{slide-045.jpg}{¿También enfrenta la inteligencia natural la tensión entre consolidación y reutilización flexible?}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 45}
+
+Al extender el problema a los seres humanos, lo crucial no es comparar la precisión en pruebas estándar, sino preguntarse si un sistema de aprendizaje lento limitado puede saber con antelación cómo se utilizará una experiencia en el futuro. Si no es así, retener los detalles del episodio tiene un valor independiente: tras aparecer un nuevo objetivo, el sistema puede volver a acceder a la experiencia original en lugar de depender de las conclusiones ya extraídas en ese momento.
+
+\subsection{Analogía entre el replay fuera de línea y la recuperación en línea}
+
+La diapositiva 46 vincula el aumento (\textit{augmentation}) con el \textit{replay} de la memoria y la recuperación durante la prueba (\textit{test-time retrieval}) con el recuerdo episódico. El \textit{replay} fuera de línea puede recombinar experiencias durante fases de descanso o sueño, reforzando conclusiones predecibles; el \textit{recuerdo} en línea restaura los detalles cuando surge una tarea concreta. El curso utiliza la expresión «posibles caminos de evidencia» en lugar de identidad mecánica.
+
+\lecturefigure{slide-046.jpg}{Analogía computacional entre el aumento/\textit{replay} fuera de línea y la recuperación en línea}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 46}
+
+\begin{warningbox}{Límites de la analogía}
+El aprendizaje cerebral posee neuroplasticidad, continuidad temporal, bucles de percepción-acción y múltiples sistemas de memoria; el aumento en modelos grandes de lenguaje (\textit{LLM}), la recuperación vectorial y la \textit{Chain of Thought} con refuerzo (\textit{RL CoT}) son componentes de ingeniería. La analogía puede servir para comparar funciones computacionales —integración, retención, reproducción, búsqueda— pero no permite concluir directamente que las áreas cerebrales implementen la misma estructura de datos o algoritmos de entrenamiento.
+\end{warningbox}
+
+\subsection{¿Por qué el \textit{hippocampus} y la neocorteza podrían ser complementarios}
+
+La intuición detrás de los sistemas de aprendizaje complementario es que el aprendizaje neocortical/paramétrico integra lentamente grandes cantidades de experiencia, reduciendo interferencias catastróficas y extrayendo leyes estadísticas; mientras que el aprendizaje hippocampal/episódico guarda rápidamente eventos específicos, conservando detalles que en ese momento no se sabía que serían útiles. Una vez que la búsqueda restaura el episodio a la memoria de trabajo, los objetivos actuales pueden reinterpretarlo.
+
+\lecturefigure{slide-047.jpg}{Relación complementaria entre la integración neocortical y el guardado episódico tipo \textit{hippocampo}}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 47}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Contraste de funciones computacionales en los sistemas de aprendizaje complementarios}
+\begin{tabularx}{\textwidth}{L{0.22\textwidth}X X}
+\toprule
+Función & Sistema de integración lenta & Sistema episódico rápido \\
+\midrule
+Objetivo principal & Extraer estadísticas estables, leyes y habilidades a través de experiencias & Guardar el tiempo, las relaciones y los detalles ricos de una sola experiencia \\
+Velocidad de aprendizaje & Lenta, reduce el riesgo de que muestras nuevas cubran conocimientos antiguos & Rápida, permite escribir eventos importantes en un solo paso \\
+Ventajas principales & Generalización, compresión y reutilización con baja latencia & Reinterpretación bajo objetivos futuros y recuerdo de eventos raros \\
+Desventajas principales & Puede perder detalles no considerados importantes en el momento & Capacidad, búsqueda, interferencias y falsos recuerdos \\
+Correspondencia en ingeniería & Entrenamiento paramétrico y consolidación fuera de línea & Almacenamiento de memoria, recuperación y reconstrucción del contexto \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\teachervoice{00:40:37--00:43:43, el docente describe la complementariedad como un intercambio entre «más experiencias pero más atado a los formatos/tareas originales» y «menos experiencias pero con detalles más ricos». Tanto el aprendizaje paramétrico como la memoria episódica no pueden eliminarse simplemente.}
+
+Otro ejemplo intuitivo surge de las preguntas del curso: un sistema lento necesita aprender a través de muchas experiencias para evitar interferencias mutuas; sin embargo, si acaba de presenciar un evento que casi provocó un accidente, guardar ese episodio rápidamente es muy valioso y no debería esperar múltiples repeticiones para convertirse en conocimiento de largo plazo. Este ejemplo ilustra por qué las experiencias raras pero importantes requieren escalas de tiempo de escritura distintas.
+
+\subsection{Dos componentes computacionales necesarios para la generalización}
+
+La diapositiva 48 resume tanto los sistemas naturales como los artificiales en dos necesidades. Primero, la memoria episódica guarda experiencias con detalles ricos, permitiendo al sistema acceder a información que en ese momento no se sabía sería importante; segundo, la información consolidada actúa como un caché de hechos transversales a las experiencias, hallazgos y procedimientos sobre cómo razonar dentro del contexto. Ambos colaboran mediante una interfaz de contexto.
+
+\lecturefigure{slide-048.jpg}{La generalización requiere la colaboración entre episodios detallados y procedimientos consolidados}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 48}
+
+\begin{importantbox}{Principios de diseño para sistemas de IA}
+No se debe obligar a los parámetros a asumir todas las funciones de memoria, ni tampoco dejar todo al contexto ilimitado. Un sistema más robusto debería contar simultáneamente con: un procedimiento de razonamiento general entrenable, un almacén episódico auditable, un puente que construya el contexto según objetivos y un verificador para la recuperación fallida y la generación de errores.
+\end{importantbox}
+
+\subsection{Página final de resumen: una experiencia, tres formas de reutilización}
+
+Al cerrar la lección, se condensa toda la exposición en un diagrama: la experiencia de entrenamiento contiene contenido explícito e información latente que podría resultar útil en el futuro; el aprendizaje paramétrico quizás no pueda invocar esa segunda parte de manera confiable; las tres puentes permiten reintroducir dicha información en el contexto a través del aumento fuera de línea, la recuperación episódica en línea y la regeneración con refuerzo (\textit{RL}); la analogía con la inteligencia natural sugiere que el \textit{hippocampus} y la neocorteza también podrían aliviar presiones computacionales similares mediante reproducción y búsqueda.
+
+\lecturefigure{slide-049.jpg}{Resumen de la lección: información latente, tres puentes y sistemas de memoria complementarios}{Diapositiva oficial del curso Stanford CS25 V6, lección 06, p. 49}
+
+\teachervoice{00:44:27--00:45:01, incluso en el cierre formal, el docente mantiene la apertura: el cerebro podría poseer reglas de aprendizaje superiores a las de los modelos actuales y las tres puentes no constituyen una respuesta completa. Esta advertencia evita cristalizar prematuramente las diferencias de comportamiento en una única arquitectura.}
+
+\subsection{Resumen de la sección}
+
+La parte sobre inteligencia natural plantea una proposición computacional bajo restricciones de recursos: la integración lenta es hábil con estadísticas y compresión, mientras que la memoria episódica rápida es hábil para preservar detalles cuyo uso futuro aún no se conoce. Los experimentos con modelos ofrecen una analogía controlable para esta complementariedad, pero la evidencia de comportamiento no prueba que las áreas cerebrales y los módulos del modelo sean isomorfos. La implicación más directa para la ingeniería de IA es diseñar parámetros, memoria externa y construcción de contexto como un sistema colaborativo.
+\section{Síntesis y ampliación}
+
+\subsection{Un hilo conductor: la existencia del conocimiento no equivale a su disponibilidad}
+
+El concepto más importante de esta clase no es un solo benchmark de reversal, sino dividir el "aprendizaje" en cuatro capas: la experiencia proporciona contenido explícito; el contenido contiene información latente; el proceso de formación genera representaciones internas; y durante la prueba, la interfaz determina cuánta de ella se convierte en información utilizable. La diferencia entre parámetros y contexto ocurre precisamente en las dos últimas capas.
+
+\begin{importantbox}{Marco final del conocimiento}
+\begin{enumerate}
+  \item El aprendizaje paramétrico y el ICL pueden absorber el mismo hecho, pero generan comportamientos de acceso y generalización distintos.
+  \item Reversal, silogismo y codebook son sondas controladas para probar la relación latente; no son agentes completos de toda inteligencia.
+  \item La coocurrencia puede mejorar el rendimiento real, pero también ocultar la falta de inferencia sistemática.
+  \item El aumento en contexto (in-context augmentation) convierte las implicaciones latentes en supervisión explícita de forma offline.
+  \item La recuperación episódica restaura la experiencia original al contexto cuando aparece el objetivo, aunque la recuperación real sigue siendo un problema difícil.
+  \item El aprendizaje por regeneración RL reconstruye información en tiempo de prueba, permitiendo transferencia de estructura parcial, pero sigue estando limitado por la búsqueda ante true reversal.
+  \item Las tres rutas deben combinarse según costo de entrenamiento, costo de inferencia, cobertura, trazabilidad y recuperación ante fallos.
+  \item La analogía con la inteligencia natural respalda la necesidad computacional de sistemas de memoria complementarios, pero no demuestra una implementación neuronal idéntica.
+\end{enumerate}
+\end{importantbox}
+
+\subsection{De los resultados del aula a la arquitectura del sistema}
+
+Un sistema práctico puede adoptar una estrategia estratificada: realizar aumento offline para relaciones latentes de alta frecuencia, estables y verificables; usar recuperación trazable para hechos de cola larga y experiencias de usuario; emplear razonamiento limitado en tiempo de prueba para tareas que no pueden recuperarse directamente pero tienen estructura general; y activar aclaración, llamadas a herramientas o escalado humano cuando la confianza en la recuperación es baja o la búsqueda de inferencia es excesivamente larga.
+
+\begin{lstlisting}[language=Python,caption={Estrategia de decisión para desplegar tres puentes combinados}]
+def answer(query):
+    direct = parametric_model.answer(query)
+    if verifier.confident(direct):
+        return direct
+
+    memories = retriever.search(query)
+    if retriever.has_high_recall_evidence(memories):
+        return grounded_model.answer(query, context=memories)
+
+    reasoning = reasoning_policy.solve(query, token_budget=budget(query))
+    if verifier.confident(reasoning.answer):
+        return reasoning.answer
+
+    return request_clarification_or_human_review(query)
+\end{lstlisting}
+
+\begin{knowledgebox}{Matriz de evaluación recomendada}
+No se debe medir solo QA explícita. Se deben realizar pruebas cruzadas al menos en forward, reversal, multi-hop, alternative goal, cross-lingual, long-context distractor, retrieval miss, conflicting memory y reasoning limitado por cómputo, reportando por separado accuracy, latencia, tokens, recall, completitud de procedencia y calibración.
+\end{knowledgebox}
+
+\subsection{Preguntas de investigación aún abiertas}
+
+Primero, ¿cómo entrenar representaciones paramétricas para que soporten naturalmente el indexado en múltiples direcciones sin depender de la enumeración? Segundo, ¿es posible enseñar al modelo a decidir "qué escribir en parámetros, qué guardar como episodio o qué solo requiere contexto a corto plazo"? Tercero, ¿cómo entrenar un retriever general para que el recall no dependa de plantillas de tareas conocidas? Cuarto, ¿puede el razonamiento RL aprender operaciones internas basadas en recuperación, al mismo tiempo que limita los tokens y la confianza errónea? Quinto, ¿cómo convertir las fugas de prompt, alucinaciones y deriva del aumento en métricas auditables?
+
+\begin{warningbox}{Tres conclusiones que no se pueden extraer de esta clase}
+No se puede concluir que el ICL siempre es superior al fine-tuning; no se puede concluir que todo el conocimiento paramétrico sea incapaz de realizar razonamiento relacional; no se puede concluir que el hipocampo sea equivalente al RAG. La clase demuestra diferencias en la disponibilidad de información bajo condiciones controladas específicas y propone tres métodos de puente verificables y combinables.
+\end{warningbox}
+
+\subsection{Lecturas adicionales}
+
+Se recomienda leer siguiendo la cadena de evidencia: primero, leer el Reversal Curse de Berglund et al., para comprender el fallo en el acceso direccional; luego, estudiar el estudio controlado sobre ICL/fine-tuning de Lampinen et al., verificando controles de contexto en todo el conjunto de datos, silogismos y desde cero (from-scratch); después, leer Latent Learning, prestando especial atención al oráculo episódico y la memoria complementaria; finalmente, leer Improving Latent Generalization Using Test-time Compute para revisar la transferencia RL y las limitaciones de reversal. Sobre la relación entre ICL y optimización, se pueden contrastar los resultados teóricos limitados de Akyürek et al. con los de Dai et al.
+
+\begin{knowledgebox}{Snapshot de la clase}
+Esta clase tuvo lugar el 2026-05-07. Los apuntes utilizan las versiones arXiv ya públicas en ese momento: controlled study v3, Latent Learning v3, test-time compute v1 y Reversal Curse v4. Las revisiones posteriores pueden servir como nueva evidencia, pero no deben extrapolarse retroactivamente como resultados que se mostraron el día de la clase.
+\end{knowledgebox}
+
+En última instancia, esta clase reformula "cuánto recuerda el modelo" en una pregunta de sistema más precisa: \textbf{¿Puede el modelo reconstruir las experiencias pasadas como información computable actual cuando cambian los objetivos?} Los parámetros, el contexto, la memoria episódica, el aumento y el RL no son cinco módulos aislados, sino divisiones de trabajo diferentes para el mismo ciclo de vida de la información.
+
+\end{document}

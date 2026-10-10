@@ -1,0 +1,676 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+\usepackage{multicol}
+
+\renewcommand{\notetitle}{Lección 04: Ultra-Escala——extender una sola entrenamiento a miles de GPUs}
+\renewcommand{\noteauthors}{Basado en la conferencia oficial de Nouamane Tazi, el deck oficial de 106 diapositivas y subtítulos en inglés creados manualmente}
+\renewcommand{\notedate}{Apuntes CS25 V6 · 2026 source-first}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{Clase del 2026-04-23; subida el 2026-05-11}
+\renewcommand{\videoduration}{1:01:48 (incluyendo Q\&A en clase)}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=I5BKi32IEa8}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.97\textwidth,height=0.47\textheight,keepaspectratio]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\let\standardtableofcontents\tableofcontents
+\renewcommand{\tableofcontents}{%
+  \begingroup
+  \footnotesize
+  \setlength{\parskip}{0pt}
+  \standardtableofcontents
+  \endgroup
+}
+
+\begin{document}
+
+\makecscover
+
+\section{La escalabilidad del entrenamiento comienza siendo un problema de flujo de recursos}
+
+"Diez mil GPUs" no significa copiar el programa de una sola tarjeta diez mil veces. Los parámetros del modelo, los gradientes, los estados del optimizador, las activaciones, los datos de entrada y los \textbf{checkpoint}s se mueven entre diferentes capas de almacenamiento y dispositivos; si cualquier flujo supera la capacidad del enlace, todo el entrenamiento se detendrá esperando. Por lo tanto, el hilo conductor de esta clase no es memorizar cinco nombres de \textit{parallelism}, sino preguntar repetidamente a cada estrategia: ¿qué se divide?, ¿qué se replica?, ¿cuál es el \textbf{comunicación colectiva} que restaura la equivalencia computacional y puede ocultarse con cómputo?
+
+\subsection{¿Por qué los modelos grandes siguen creciendo en tamaño}
+
+Las primeras tres diapositivas desglosan "escalabilidad" en tres ejes: modelo, datos y contexto. La primera página es un mapa reciente de modelos; la segunda alinea las tendencias de parámetros contra capacidad; y la tercera proporciona una orden de magnitud basada en la clase: billones de parámetros, unos $15$T tokens de entrenamiento y contextos de millones de tokens. No son una receta única, pero indican que la capacidad, el ancho de banda y el tiempo de iteración de una sola GPU están sujetos a presión simultánea.
+
+\lecturefigure{slide-004.jpg}{Tendencias de lanzamiento de modelos: la escala del entrenamiento sigue expandiéndose}{CS25 V6 deck oficial, p.~4}
+
+\lecturefigure{slide-005.jpg}{Contraste entre tendencias públicas de escala de modelos y cómputo de entrenamiento}{CS25 V6 deck oficial, p.~5}
+
+\lecturefigure{slide-006.jpg}{Instantánea de orden de magnitud en clase: parámetros, tokens de entrenamiento y longitud de contexto}{CS25 V6 deck oficial, p.~6}
+
+\begin{knowledgebox}{Lectura de la figura: los tres ejes de escala no son intercambiables}
+El número de parámetros determina el estado base del modelo persistente y las operaciones matriciales por capa; el número de tokens de entrenamiento define el presupuesto total de iteraciones y la presión en la tubería de entrada; la longitud del contexto determina la activación por muestra, el conjunto de trabajo de atención y los micro-lotes disponibles. Aumentar DP solo permite consumir más lotes más rápido, no puede hacer que una secuencia excesivamente larga se ajuste automáticamente; aumentar CP puede dividir secuencias largas, pero no reduce el estado completo del modelo. ZeRO (\textit{Zero Redundancy Optimizer}, optimizador de redundancia cero) puede particionar el estado del optimizador, los gradientes y los parámetros por etapa, sin cambiar el número total de tokens de entrenamiento. Al analizar cada estrategia de \textit{parallelism} subsiguiente, primero devuélvala a estos tres ejes para determinar qué restricción realmente alivia y hacia dónde traslada los costos.
+\end{knowledgebox}
+
+\teachervoice{00:00:48--00:03:02, Tazi explica que esta clase se basa en el Ultra-Scale Playbook, pero incluye prácticas actualizadas de escalado MoE. Atribuye la presión simultáneamente a la lectura de datos, cada iteración, memoria y escritura del \textit{checkpoint}, en lugar de hablar solo del número de parámetros.}
+
+\begin{warningbox}{La escala está relacionada con la inteligencia, pero no significa que la escala por sí sola cause inteligencia}
+La clase usa modelos recientes para ilustrar que "entrenar más grande" sigue siendo una tendencia industrial, pero la correlación no aísla la calidad de los datos, la arquitectura, el entrenamiento posterior, el uso de herramientas y la contaminación de las evaluaciones. Lo verdaderamente necesario heredar del sistema son las órdenes de magnitud de recursos y las restricciones de ingeniería, no convertir alguna escala de parámetros en una ley de capacidad.
+\end{warningbox}
+
+\subsection{¿Qué se transporta realmente en una iteración de entrenamiento}
+
+La infraestructura de entrenamiento debe leer continuamente el flujo de tokens, colocar los modelos y estados en la memoria del acelerador, mantener las activaciones entre forward/backward, ejecutar actualizaciones del optimizador y escribir periódicamente estados recuperables hacia el almacenamiento. Las magnitudes ilustradas en la figura a continuación—"~15T tokens read", "~1s iteration", "~80GB per GPU" y "~1TB checkpoint"—son solo ilustrativas; al interpretar la figura, considérelas como cuatro cuellos de botella independientes, no como una configuración precisa del mismo modelo.
+
+\lecturefigure{slide-009.jpg}{Presión combinada del entrenamiento de LLM sobre datos, cómputo, memoria y E/S de \textit{checkpoint}}{CS25 V6 deck oficial, p.~9}
+
+\begin{knowledgebox}{Lectura de la figura: considere un paso como una tubería multinivel}
+Antes del paso de entrenamiento, el \textit{data loader} debe preparar muestras desde el almacenamiento y la memoria principal; luego la GPU lee parámetros y activaciones, ejecuta kernels y sincroniza mediante interconexión; al final del paso, el optimizador escribe los parámetros de vuelta, mientras que el ciclo del \textit{checkpoint} envía estados de recuperación más grandes al almacenamiento persistente. Cualquier segmento con insuficiencia de rendimiento generará un bloqueo (\textit{stall}) de forma diferente: la entrada insuficiente se manifiesta como tiempo libre antes del inicio de la GPU; la comunicación colectiva lenta se manifiesta como espera entre backward/forward; el \textit{checkpoint} lento se manifiesta como pausas largas periódicas. Al localizar el problema, primero determine a qué nivel pertenece el bloqueo, en lugar de atribuirlo uniformemente a "las GPUs no son lo suficientemente rápidas".
+\end{knowledgebox}
+
+\begin{knowledgebox}{Términos clave: primer grupo de objetos de recursos}
+\textbf{HBM (High Bandwidth Memory, memoria de alto ancho de banda)} es DRAM de alto ancho de banda ubicada cerca de la GPU; a menudo se llama coloquialmente "memoria de video"; tiene capacidad limitada pero ofrece un ancho de banda muy alto para los kernels. \textbf{Optimizer state (estado del optimizador)} son estadísticas de actualización como el momento de primer orden $m$ y el de segundo orden $v$ que algoritmos como Adam/AdamW mantienen para cada parámetro; a menudo ocupan más bytes que los propios parámetros. \textbf{Activation (activación)} son resultados intermedios del forward, necesarios en backward para calcular gradientes. Los tres deben llevarse por separado.
+\end{knowledgebox}
+
+\subsection{Supuestos ocultos del baseline de una sola tarjeta y la acumulación de gradientes}
+
+La lógica secuencial del entrenamiento en una sola tarjeta es clara: tome un lote, realice forward, calcule pérdida, backward para obtener gradientes, el optimizador lee parámetros y estado y escribe el modelo actualizado. Cuando el tamaño global del lote (GBS) es mucho mayor que el micro-lote que cabe en una sola tarjeta, se puede acumular gradientes mediante múltiples forward/backward antes de ejecutar una actualización.
+
+\lecturefigure{slide-010.jpg}{Baseline forward--backward--optimizer de una sola GPU}{CS25 V6 deck oficial, p.~10}
+
+\lecturefigure{slide-011.jpg}{Construcción de un lote global más grande mediante acumulación de gradientes}{CS25 V6 deck oficial, p.~11}
+
+Sin embargo, la acumulación de gradientes solo resuelve "de cuántas muestras consta una actualización", no resuelve automáticamente si el modelo cabe o hace que los micro-lotes secuenciales sean más rápidos. La página siguiente escribe explícitamente estos dos pre-requisitos: el estado del entrenamiento debe poder residir primero en una sola tarjeta; si se espera a que todos los micro-lotes completen secuencialmente, tener más dispositivos no los aprovecha.
+
+\lecturefigure{slide-012.jpg}{Dos pre-requisitos de acumulación en una sola tarjeta: el estado cabe y la espera secuencial es aceptable}{CS25 V6 deck oficial, p.~12}
+
+Suponga que una actualización contiene $M$ micro-lotes, con pérdida $\ell_j(\theta)$ para cada micro-lote; entonces la acumulación de gradientes común se escribe como
+\[
+g=\frac{1}{M}\sum_{j=1}^{M}\nabla_\theta \ell_j(\theta),
+\qquad
+\theta' = \operatorname{Opt}(\theta,g,s).
+\]
+Donde $M$ es el número de pasos de acumulación, $\theta$ son los parámetros, $g$ es el gradiente promedio usado en esta actualización, $s$ es el estado del optimizador, $\operatorname{Opt}$ es la regla de actualización y $\theta'$ son los nuevos parámetros. Esta fórmula no prescribe que los $M$ gradientes deban generarse en el mismo dispositivo; el entrenamiento distribuido reorganiza exactamente la propiedad de todos estos cómputos y estados.
+
+\subsection{Cinco ejes de división y marco unificado de evaluación}
+
+El curso clasifica las estrategias en cinco categorías: Data, Tensor/Sequence, Pipeline, Context y Expert. Estas dividen a lo largo de los ejes batch, dimensión oculta, capa, secuencia y expert, respectivamente. El \textit{agenda} e introducción iniciales también enfatizan que estos mecanismos pueden usarse en GPUs o TPUs y no están limitados al pre-entrenamiento; desde dos dispositivos, la división de recursos puede tener sentido.
+
+\lecturefigure{slide-013.jpg}{Ruta del curso: desde DP/ZeRO hasta TP, PP, CP y EP}{CS25 V6 deck oficial, p.~13}
+
+Aquí aparece por primera vez el \term{ZeRO (\textit{Zero Redundancy Optimizer}, optimizador de redundancia cero)}, que no es un nuevo optimizador, sino un método de gestión de estados que particiona gradualmente el estado del optimizador, los gradientes y los parámetros, que originalmente se replicaban en los ranks de \textit{data-parallel}, por etapas. ZeRO-1/2/3 aumentan la variedad de estados particionados; los momentos de primer orden $m$ y segundo orden $v$ de Adam/AdamW siguen actualizándose según las fórmulas originales, cambiando solo la propiedad y el momento de recopilación.
+
+\lecturefigure{slide-014.jpg}{Límites de aplicabilidad: múltiples aceleradores, etapas de entrenamiento y escala de dispositivos}{CS25 V6 deck oficial, p.~14}
+
+El llamado \term{sharding (particionamiento)} consiste en cortar un objeto que originalmente se replicaba completamente en cada dispositivo en varios fragmentos (\textit{shards}), permitiendo que diferentes ranks posean solo una parte. Se debe explicar simultáneamente "qué se corta" y "cómo se corta a lo largo de qué grupo de dispositivos": la partición de parámetros, gradientes, lotes o secuencias no es lo mismo.
+
+\lecturefigure{slide-015.jpg}{Objetivo uno: particionar modelo, gradientes y estado del optimizador}{CS25 V6 deck oficial, p.~15}
+
+\lecturefigure{slide-016.jpg}{Objetivo dos: particionar datos y procesar micro-lotes en paralelo}{CS25 V6 deck oficial, p.~16}
+
+\begin{importantbox}{Cuatro preguntas unificadas}
+Al analizar cualquier estrategia de \textit{parallelism}, responda secuencialmente: primero, ¿qué dimensión de tensor o estado de entrenamiento se divide?; segundo, ¿qué objetos siguen siendo replicados?; tercero, ¿qué comunicación colectiva hace que los resultados sean matemáticamente equivalentes a un solo dispositivo?; cuarto, ¿esta comunicación está en la ruta crítica o puede superponerse con el cómputo? Si no puede aclarar estas cuatro preguntas, el llamado "ahorro de memoria" usualmente solo traslada costos a la red o al programador.
+\end{importantbox}
+
+\begin{knowledgebox}{Conceptos previos: el costo de comunicación no es solo el número de bytes}
+El tiempo de una comunicación colectiva se puede escribir aproximadamente como $T\approx \alpha n_{\mathrm{steps}}+\beta V$: $\alpha$ representa la latencia de inicio y sincronización por ronda; $n_{\mathrm{steps}}$ depende de algoritmos como ring/tree y el número de ranks; $\beta$ es el tiempo de transmisión por byte y $V$ es el tráfico real. Los mensajes pequeños suelen dominarse por $\alpha$, mientras que los grandes son más sensibles al ancho de banda y la congestión topológica; los mensajes entre nodos también pasan por diferentes NICs, conmutadores y enrutadores. Por lo tanto, el mismo total de bytes, dividido en muchos \textit{all-gather} pequeños, puede ser más lento que pocos mensajes grandes; por el contrario, si un mensaje grande se inicia demasiado tarde, no se puede superponer. El diseño paralelo necesita optimizar simultáneamente tamaño del mensaje, frecuencia, grupos participantes y momento de inicio.
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+La entrada para la escalabilidad del entrenamiento no es "número de GPUs", sino un conjunto de restricciones de recursos: capacidad de estado, capacidad de activación, lote global, longitud de secuencia, estructura del modelo, topología de enlace y ancho de banda de almacenamiento. Las cinco estrategias de \textit{parallelism} reordenan la propiedad de estos recursos; los capítulos subsiguientes comenzarán con el más intuitivo \textit{data parallelism}, aumentando gradualmente la complejidad de comunicación y programación.
+
+
+\section{Paralelismo de datos: de la copia del modelo a ZeRO/FSDP}
+
+El paralelismo de datos (DP, data parallelism) mantiene el cálculo del modelo idéntico en cada rank, permitiendo que distintos ranks procesen diferentes shards de datos. Es el más fácil de implementar y el mejor para construir intuiciones básicas sobre colectividad, superposición y contabilidad de memoria; ZeRO continúa fragmentando el estado del optimizador, los gradientes y los parámetros dentro del marco DP.
+
+\subsection{Copia del modelo, división del batch}
+
+El capítulo anterior ya separó la contabilidad del estado de entrenamiento y del flujo de datos; esta sección selecciona primero la transformación espacial más conservadora: el grafo de cómputo del modelo se mantiene completamente inalterado, solo distribuyendo el batch entre varios ranks. De esta manera, todas las diferencias pueden concentrarse en la propiedad de los gradientes y el momento de sincronización, estableciendo además una línea base clara para la fragmentación de estados posterior en ZeRO. El primer grupo de animaciones compara primero la acumulación secuencial con el micro-batch paralelo: al procesar múltiples batches sucesivamente en una sola tarjeta gráfica, el estado del modelo se almacena en una sola copia pero la línea temporal se alarga; al añadir más GPUs, cada rank replica el modelo, el estado del optimizador y los parámetros iniciales, aunque cada uno procese un batch distinto.
+
+\lecturefigure{slide-019.jpg}{Acumulación de gradientes en serie: múltiples batches colados en una GPU}{CS25 V6 official deck, p.~19}
+
+\lecturefigure{slide-020.jpg}{Primer paso del DP: replicar el modelo entre GPUs y dividir el batch}{CS25 V6 official deck, p.~20}
+
+Los forward/backward de cada rank se ejecutan de forma independiente, por lo que generarán gradientes locales distintos. Si cada uno actualizara sus parámetros directamente, estos se bifurcarían inmediatamente; el DP debe primero agregar esos gradientes en un único gradiente global.
+
+\lecturefigure{slide-021.jpg}{Cada rank de paralelismo de datos genera un gradiente local distinto}{CS25 V6 official deck, p.~21}
+
+Las \term{Colectividades (colectivos)} son primitivas de comunicación en las que participan varios ranks conjuntamente. \textbf{All-reduce} suma o promedia la entrada de cada rank y devuelve el resultado a todos los ranks; \textbf{reduce-scatter} reduce primero y luego distribuye el resultado fragmentado; \textbf{all-gather} ensambla los shards de cada rank en un objeto completo; \textbf{broadcast} replica desde un rank hacia los demás.
+
+\lecturefigure{slide-022.jpg}{All-reduce: reduce gradientes y envía el mismo resultado a cada rank}{CS25 V6 official deck, p.~22}
+
+\[
+g_r=\nabla_\theta \ell_r(\theta),
+\qquad
+\bar g=\frac{1}{P}\sum_{r=1}^{P}g_r,
+\qquad
+\theta'_r=\operatorname{Opt}(\theta_r,\bar g,s_r).
+\]
+Donde $P$ es el número de ranks de DP, $g_r$ es el gradiente local del rank $r$, $\bar g$ es el gradiente promedio tras all-reduce, y $\theta_r$ con $s_r$ son los parámetros y el estado del optimizador de ese rank. Siempre que el estado inicial sea idéntico y las actualizaciones estén determinadas, todos los ranks se mantendrán sincronizados.
+
+\lecturefigure{slide-023.jpg}{Actualización completa del DP: fragmentación de datos, all-reduce de gradientes y paso de optimizador idéntico}{CS25 V6 official deck, p.~23}
+
+\begin{knowledgebox}{Lectura de la figura: la corrección del DP proviene de la "reunión antes de actualizar"}
+Lo más digno de comparar en el diagrama no es el número de GPUs, sino cuándo se bifurca cada color y cuándo se vuelven a reunir. Los datos se fragmentan al inicio del paso; por tanto, forward/backward son independientes. Los gradientes locales pueden diferir antes del all-reduce, pero el optimizador debe convertirlos en un $\bar g$ idéntico antes de leerlos. En el DP vanilla, los parámetros y el estado del optimizador siempre se replican, por lo que tras ejecutar la misma actualización, cada rank mantiene la consistencia. Si se usa acumulación de gradientes, también hay que precisar si el colectivo se activa por cada micro-batch o si se retrasa con `no\_sync` hasta el final de la acumulación; la primera opción genera más comunicaciones y la segunda requiere conservar gradientes locales durante más tiempo.
+\end{knowledgebox}
+
+\subsection{El código DDP no es una conclusión sobre el rendimiento}
+
+PyTorch DistributedDataParallel (DDP), al envolver el modelo, registra backward hooks e inicia colectivos cuando el bucket de gradientes está listo. Aunque la superficie del código es breve, el rendimiento depende de la división del bucket, la red, los niveles del modelo y si realmente se genera superposición.
+
+\lecturefigure{slide-024.jpg}{Interfaz mínima del DistributedDataParallel}{CS25 V6 official deck, p.~24}
+
+\begin{lstlisting}[language=Python,caption={Esquema de propiedad y semántica de actualización de DDP}]
+model = DistributedDataParallel(model, device_ids=[local_rank])
+optimizer.zero_grad(set_to_none=True)
+loss = model(batch).loss
+loss.backward()            # hooks lanzan colectivos de gradientes
+optimizer.step()           # cada rank aplica el gradiente reducido idéntico
+\end{lstlisting}
+
+En la página siguiente se añade un punto fácil de omitir: antes de que termine el all-reduce, el gradiente correspondiente no puede usarse de forma segura por el optimizador; si backward ha finalizado pero la red aún transmite datos, la GPU esperará.
+
+\lecturefigure{slide-025.jpg}{Límites de sincronización del DP: el optimizador debe esperar a que estén listos los gradientes globales}{CS25 V6 official deck, p.~25}
+
+\subsection{Profiler, buckets y superposición de comunicación}
+
+La línea temporal de torch.profiler coloca operadores, kernels y colectivos NCCL en el mismo eje. Al leer este tipo de gráficos, primero busque tres tipos de huecos: ¿está libre el flujo de cómputo?, ¿hay cola en el flujo de comunicación?, ¿se retrasa el siguiente forward por la incompletitud del colectivo anterior? Sin evidencia de línea temporal, no se puede afirmar que la superposición haya sido exitosa basándose únicamente en la configuración.
+
+\lecturefigure{slide-026.jpg}{torch.profiler: colocar cómputo GPU y colectivos en la misma línea temporal}{CS25 V6 official deck, p.~26}
+
+El DP ingenuo espera a que todos los backward terminen antes de comunicar uniformemente; en este caso, la comunicación cae completamente en la ruta crítica. El valor de los buckets de gradientes es permitir que los gradientes de las capas posteriores se completen primero y inicien el all-reduce, mientras las capas anteriores siguen en backward.
+
+\lecturefigure{slide-028.jpg}{DP ingenuo: sincronización centralizada tras backward causa espera}{CS25 V6 official deck, p.~28}
+
+\lecturefigure{slide-029.jpg}{Superposición de buckets: comunicación inicia apenas los gradientes están listos}{CS25 V6 official deck, p.~29}
+
+Cuando el bucket es lo suficientemente grande, el colectivo alcanza un ancho de banda efectivo; cuando es demasiado pequeño, comienza más temprano pero la latencia de lanzamiento y la eficiencia de los mensajes pequeños se degradan. El objetivo final de la línea temporal no es que "desaparezca la comunicación", sino que la comunicación violeta se oculte lo máximo posible bajo el backward naranja, dejando solo la cola que no puede ser cubierta.
+
+\lecturefigure{slide-030.jpg}{Objetivo de superposición del DP: ocultar la mayor parte del all-reduce bajo backward}{CS25 V6 official deck, p.~30}
+
+\begin{knowledgebox}{Lectura de la figura: la línea temporal debe comparar las colas, no solo el área de superposición}
+Las tres líneas temporales tienen un eje horizontal de tiempo real (wall-clock time) y separan verticalmente los flujos de cómputo GPU y comunicación. En la versión ingenua, la comunicación violeta queda completamente después del backward; en la versión con buckets, las capas cercanas a la salida se comunican primero; en la versión final, el optimizador o la siguiente fase esperan solo la cola final no oculta. Lo que realmente afecta el tiempo del paso es el extremo derecho de la ruta crítica, no cuánto área violeta cae bajo el bloque naranja. Si la superposición hace que los kernels de cómputo se alarguen por competencia de ancho de banda, visualmente hay más superposición, pero el tiempo end-to-end podría ser peor.
+\end{knowledgebox}
+
+\teachervoice{00:07:28--00:11:37, el docente descompone all-reduce en reduce-scatter y all-gather, y usa repetidamente los huecos del profiler para juzgar la superposición. Nota de clase: la API DDP es simple, pero si la comunicación se oculta realmente debe verificarse con líneas temporales.}
+
+\lecturefigure{slide-032.jpg}{Ventajas y desventajas del DP vanilla: implementación sencilla pero replicación completa del estado del modelo}{CS25 V6 official deck, p.~32}
+
+\begin{warningbox}{La superposición no es paralelismo gratuito}
+Comunicación y cómputo comparten ancho de banda de HBM, recursos PCIe/NVLink y planificación de kernels; demasiados buckets pequeños aumentan el costo de lanzamiento, mientras que un bucket demasiado grande retrasa su inicio. Lo llamado "superposición al 100\%" podría incluso ralentizar los propios kernels de cómputo; por tanto, se debe comparar el tiempo del paso end-to-end en lugar de observar solo el área de superposición en la línea temporal.
+\end{warningbox}
+
+\subsection{ZeRO-1: fragmentación inicial del estado del optimizador}
+
+Tomando como ejemplo Adam con precisión mixta, cada parámetro puede corresponder a un parámetro de entrenamiento de baja precisión, un peso maestro de alta precisión, el momento primero $m$, el momento segundo $v$ y los gradientes. El DP vanilla replica todo el estado en cada rank; ZeRO-1 hace que cada rank posea solo una parte del estado del optimizador y actualice solo el shard de parámetros asignado a sí mismo, sincronizando finalmente los parámetros actualizados con otros ranks.
+
+\lecturefigure{slide-033.jpg}{Motivo de ZeRO-1: DP guarda repetidamente el estado completo del optimizador}{CS25 V6 official deck, p.~33}
+
+Si el número de parámetros es $N$ y los bytes por elemento de parámetros y gradientes son $b_p,b_g$, mientras que los bytes por elemento del estado del optimizador son $b_o$, entonces la memoria de estado aproximada por tarjeta es
+\[
+M_{\mathrm{DP}}\approx N(b_p+b_g+b_o),
+\qquad
+M_{\mathrm{Z1}}\approx N(b_p+b_g)+\frac{Nb_o}{P}.
+\]
+Donde $P$ es el número de ranks de DP. La fórmula solo describe el estado persistente, sin incluir activaciones, buffers temporales, fragmentación y memoria de staging de comunicación; el pico real debe verificarse con profiler o contador de asignadores.
+
+\lecturefigure{slide-034.jpg}{ZeRO-1: cada rank posee solo una parte del estado del optimizador}{CS25 V6 official deck, p.~34}
+
+\lecturefigure{slide-035.jpg}{Ruta de actualización ZeRO-1: procesa solo el estado y el shard de parámetros asignados a su rank}{CS25 V6 official deck, p.~35}
+
+El all-reduce puede descomponerse naturalmente en reduce-scatter y all-gather. ZeRO-1 aprovecha esta equivalencia enviando directamente el gradiente reducido fragmentado al rank responsable de actualizarlo; tras completar la actualización local, el optimizador realiza un all-gather de los nuevos parámetros.
+
+\lecturefigure{slide-036.jpg}{ZeRO-1 no añade comunicación de la nada: descompone y reordena el all-reduce}{CS25 V6 official deck, p.~36}
+
+\subsection{ZeRO-2: conservar solo los gradientes que usará este rank}
+
+Aunque ZeRO-1 actualiza solo una parte de los parámetros, aún podría guardar gradientes completos. Dado que reduce-scatter ya fragmenta el resultado reducido según la propiedad, otros shards de gradientes no tienen utilidad en este rank; ZeRO-2 va más allá y los descarta.
+
+\lecturefigure{slide-037.jpg}{De ZeRO-1 a ZeRO-2: ¿sigue siendo necesario un gradiente completo?}{CS25 V6 official deck, p.~37}
+
+\lecturefigure{slide-038.jpg}{ZeRO-2: estado del optimizador y gradientes fragmentados según los ranks de DP}{CS25 V6 official deck, p.~38}
+
+La memoria aproximada se convierte en
+\[
+M_{\mathrm{Z2}}\approx Nb_p+\frac{N(b_g+b_o)}{P}.
+\]
+Donde los parámetros siguen replicándose en cada rank, mientras gradientes y estado del optimizador se fragmentan. En clase también se enfatizó la propiedad preservadora de tensores: ciertos optimizadores necesitan ver la estructura completa de la matriz, no pueden aplanar todos los parámetros en bytes arbitrarios continuos antes de cortar; la estrategia de fragmentación debe preservar los límites de tensor necesarios por el algoritmo.
+
+\teachervoice{00:11:37--00:15:12, en clase se usa la pequeña diferencia entre ZeRO-1 y ZeRO-2 para explicar la propiedad del estado, complementando con requisitos como Muon sobre la estructura completa de tensores. Esta restricción de implementación es más importante que memorizar nombres de etapas.}
+
+\subsection{ZeRO-3 / FSDP: los parámetros se materializan solo cuando son necesarios}
+
+ZeRO-1 y ZeRO-2 siguen haciendo que cada rank mantenga permanentemente los parámetros completos; por tanto, cuando los pesos del modelo exceden la capacidad de una sola tarjeta, ya no sirven. Esta sección continúa avanzando con la misma lógica de propiedad hacia los parámetros, pero a diferencia del estado del optimizador, los parámetros están en la ruta crítica de forward/backward y no pueden accederse solo al final del paso. La dificultad de ZeRO-3 es precisamente que el forward de una capa necesita pesos completos; la solución no es all-gather todo el modelo permanentemente, sino recolectarlo justo antes de calcular un FSDP unit específico, liberarlo inmediatamente después del cálculo y predecir el siguiente unit.
+
+\lecturefigure{slide-039.jpg}{Problema de ZeRO-3: ¿cómo obtener una capa completa tras fragmentar los parámetros?}{CS25 V6 official deck, p.~39}
+
+\lecturefigure{slide-040.jpg}{Forward de ZeRO-3: all-gather por unit, cómputo, liberación y predeción}{CS25 V6 official deck, p.~40}
+
+El backward también necesita los parámetros de esa capa para calcular gradientes de entrada/peso, por lo que se repite la materialización y liberación en orden inverso. La memoria pico ya no es el modelo completo, sino que se aproxima con shards permanentes, unit actual, unit predecida y buffers de comunicación.
+
+\lecturefigure{slide-041.jpg}{Backward de ZeRO-3: materializar parámetros a demanda y reduce-scatter gradientes}{CS25 V6 official deck, p.~41}
+
+\lecturefigure{slide-042.jpg}{Línea temporal de ZeRO-3: superponer all-gather fragmentado con cómputo de capas adyacentes}{CS25 V6 official deck, p.~42}
+
+Si el unit FSDP es demasiado grande, la memoria pico es alta y el lanzamiento del all-gather se retrasa; si es demasiado pequeño, aumentan mensajes pequeños, metadatos y sobrecarga de lanzamiento. FSDP1 se centra en wrapper/parámetros aplanados, mientras que \texttt{fully\_shard} de FSDP2 y DTensor enfatizan más la estructura nativa de tensores y combinaciones de mallas de dispositivos multidimensionales.
+
+\lecturefigure{slide-043.jpg}{Interfaz de código de PyTorch FSDP1 y FSDP2}{CS25 V6 official deck, p.~43}
+
+\begin{lstlisting}[language=Python,caption={Esquema de fully\_shard por capa de FSDP2}]
+mesh = init_device_mesh("cuda", (dp_size,), mesh_dim_names=("dp",))
+for block in model.blocks:
+    fully_shard(block, mesh=mesh)
+fully_shard(model, mesh=mesh)
+
+loss = model(batch).loss
+loss.backward()
+optimizer.step()
+\end{lstlisting}
+
+La clave de la página comparativa final no está en que "ZeRO-3 sea más avanzado", sino en la ubicación de la comunicación: ZeRO-2 realiza all-gather de parámetros relativamente concentrado cerca del optimizador; ZeRO-3 lo descompone en el forward/backward de cada unit e intenta superponerlo con el cómputo.
+
+\lecturefigure{slide-045.jpg}{ZeRO-2 vs ZeRO-3: mismo objetivo de estado, diferentes líneas temporales de comunicación}{CS25 V6 official deck, p.~45}
+
+\lecturefigure{slide-046.jpg}{Compromiso final de ZeRO/FSDP: cambiar memoria por comunicación}{CS25 V6 official deck, p.~46}
+
+\begin{knowledgebox}{Lectura de la figura: la diferencia entre ZeRO-2 y ZeRO-3 es "cuándo los parámetros están completos"}
+En el diagrama superior, ZeRO-2 posee el modelo completo durante forward/backward, por lo que la sincronización principal de parámetros se acerca al límite del optimizador; en el inferior, ZeRO-3 guarda solo shards de parámetros y debe all-gather cada vez que llega a un FSDP unit, luego reshards tras usarlos. Los fragmentos de optimizador/gradiente pueden ser similares; lo que decide la diferencia de throughput es en cuántas piezas se corta el all-gather de parámetros, cuánto puede ocultarse y qué tan grandes son los grupos de enlaces rápidos. Si el modelo ya cabe con ZeRO-2, las colectivas adicionales a nivel de unit de ZeRO-3 no mejoran mágicamente la eficiencia de muestras; solo compran más capacidad.
+\end{knowledgebox}
+
+\teachervoice{00:20:10--00:23:42, el docente ofrece reglas prácticas directas: si ZeRO-1 ya cabe, no suba automáticamente a ZeRO-3; este último añade comunicación solo para ahorrar memoria extra. En escalas masivas también se puede hacer FSDP dentro de grupos pequeños de enlaces rápidos y DP vanilla entre grupos, formando fragmentación híbrida.}
+
+\begin{importantbox}{Mnemotecnia más corta para las etapas de ZeRO}
+ZeRO-1 fragmenta el estado del optimizador; ZeRO-2 añade la fragmentación de gradientes; ZeRO-3 añade la fragmentación de parámetros. A mayor etapa, menos estado permanente por tarjeta, pero se requiere restaurar objetos necesarios con más frecuencia en forward/backward. El principio de selección es usar \textbf{la etapa mínima que cumpla exactamente las restricciones de memoria}, no perseguir el número más alto.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+DP expande el throughput a lo largo del eje del batch, con equivalencia matemática garantizada por colectivos de gradientes. La superposición de buckets resuelve la línea temporal; ZeRO/FSDP resuelven la replicación de estado; ambos están sujetos a restricciones de red y límite global del batch. Cuando el batch ya no puede crecer más o las matrices de parámetros requieren cómputo entre dispositivos, hay que pasar a Tensor Parallelism.
+
+
+\section{Paralelismo de tensor y paralelismo de secuencia: descomposición del cálculo matricial}
+
+El paralelismo de tensor (TP, Tensor Parallelism) permite que múltiples ranks procesen conjuntamente una misma capa sobre el mismo \textbf{lote}. No depende de aumentar el batch global; por ello puede superar los límites impuestos por DP en el eje de muestras. El costo es que las operaciones colectivas ingresan al camino crítico de cada bloque Transformer y, habitualmente, deben ejecutarse dentro de dominios topológicos de alta velocidad como NVLink o NVSwitch.
+
+\subsection{Motivación: misma entrada, división de la dimensión oculta}
+
+La escalabilidad de DP finalmente se ve limitada por el límite superior del batch global: seguir aumentando los ranks haría que cada micro-batch por tarjeta fuera demasiado pequeño o alteraría las estadísticas del batch necesarias para la optimización. Por ello, en esta sección se cambia a usar la dimensión oculta interna del modelo como nuevo eje de división, permitiendo completar el cálculo de la misma capa conjuntamente sin aumentar el número de muestras. Mientras que DP hace que cada tarjeta vea un lote diferente, TP hace que cada tarjeta vea la misma entrada, pero solo guarda y calcula una parte de los pesos, los gradientes y el estado del optimizador. La activación completa se replica o no dependiendo de si se usa TP puro o TP más paralelismo de secuencia.
+
+\lecturefigure{slide-049.jpg}{Motivación de TP: mantener el batch constante, dividir el modelo a lo largo de la dimensión oculta}{CS25 V6 official deck, p.~49}
+
+\subsection{De un producto matricial a dos productos matriciales}
+
+La corrección de TP no debe entenderse basándose en "el marco lo manejará", sino derivándola desde el GEMM mínimo. Primero se ve dónde puede cortarse un producto matricial y luego cómo dos productos matriciales adyacentes permiten que el sharding de la primera operación se convierta directamente en la entrada de la segunda, posponiendo así una costosa agregación. Para $Y=XW$, se puede dividir a lo largo de las columnas de salida de $W$: $W=[W_1,\ldots,W_P]$, donde cada rank calcula $Y_r=XW_r$ y finalmente se concatenan las columnas para formar $Y$. Esto es column-parallel; si los pesos de la siguiente capa están divididos a lo largo de las filas de entrada, cada rank calcula una suma parcial local y luego se realiza un all-reduce para obtener el resultado completo.
+
+\[
+H_r=XW^{(1)}_r,
+\qquad
+Z=\sum_{r=1}^{P} H_rW^{(2)}_r.
+\]
+Donde $X$ es la entrada idéntica en los ranks de TP, $W^{(1)}_r$ es el sharding de columnas de la primera matriz, $H_r$ es el sharding local de la dimensión oculta, $W^{(2)}_r$ es el sharding de filas correspondiente a la segunda matriz y $Z$ es el resultado completo tras el all-reduce. No es necesario hacer un all-gather primero para las activaciones intermedias; la comunicación se retrasa hasta después de los dos productos matriciales.
+
+\lecturefigure{slide-052.jpg}{Dos productos matriciales: column-parallel seguido de row-parallel, requiriendo solo un all-reduce}{CS25 V6 official deck, p.~52}
+
+El paso hacia atrás (backward) es la misma descomposición aplicada a los productos matriciales transpuestos. La clase conserva específicamente la suposición de "gradiente del mismo origen": si los gradientes de salida no son consistentes entre ranks, la multiplicación local no puede recuperar resultados equivalentes en una sola tarjeta; el paralelismo de secuencia posterior eliminaría esta sincronización implícil y frágil mediante colectivas explícitas.
+
+\lecturefigure{slide-053.jpg}{TP backward: multiplicación matricial transpuesta y suposición de sincronización de gradientes upstream}{CS25 V6 official deck, p.~53}
+
+\subsection{MLP y Attention son instancias de descomposición matricial}
+
+La proyección up del MLP Transformer puede realizarse en column-parallel; la función de activación se ejecuta sobre el sharding local de la dimensión oculta; la proyección down realiza row-parallel; y al final se hace un all-reduce. De este modo, cada rank solo guarda una parte de las dimensiones anchas intermedias y asume aproximadamente $1/P$ del cómputo principal de GEMM.
+
+\lecturefigure{slide-056.jpg}{TP de MLP: división por columnas en la proyección up y por filas en la proyección down}{CS25 V6 official deck, p.~56}
+
+En Attention, las cabezas Q/K/V pueden dividirse a lo largo de las cabezas o la dimensión oculta; se completa la atención localmente y luego se reduce la suma parcial de la proyección de salida. Si es necesaria comunicación adicional interna en la atención depende del layout de las cabezas, la combinación GQA/MQA, las combinaciones de paralelismo de secuencia/contexto y la implementación específica.
+
+\lecturefigure{slide-059.jpg}{TP de Attention: división de QKV y proyección de salida}{CS25 V6 official deck, p.~59}
+
+\lecturefigure{slide-060.jpg}{Ventajas y desventajas de TP: ahorra memoria del modelo y cómputo, pero las colectivas entran en el camino crítico de cada capa}{CS25 V6 official deck, p.~60}
+
+\begin{knowledgebox}{Lectura de la figura: los cortes horizontales y verticales en los diagramas de TP corresponden a diferentes colectivas}
+El column-parallel distribuye las características de salida entre los ranks; las activaciones intermedias mantienen naturalmente los shardings de la dimensión oculta. El row-parallel empareja las características de entrada con las filas de pesos; cada rank obtiene una parte de la misma suma del espacio de salida y debe realizar un all-reduce. El diagrama de MLP utiliza este par de cortes para envolver la no linealidad; el diagrama de Attention mapea las cabezas Q/K/V y la proyección de salida al mismo patrón. Al leer las figuras, primero busque "qué columna o fila posee cada rank" y luego decida si los resultados requieren concat, sum o mantenerse fragmentados; si se memoriza el número de all-reduce antes que nada, es muy fácil equivocarse al implementar bloques personalizados como GQA o MoE.
+\end{knowledgebox}
+
+\teachervoice{00:23:42--00:30:38, en clase primero se deduce TP mediante dos productos matriciales y luego se mapea a MLP y attention; el punto clave no es memorizar las figuras, sino identificar la combinación de column-parallel, row-parallel y all-reduce, así como los requisitos del backward respecto a los gradientes upstream.}
+
+\subsection{¿Por qué aún se necesita Paralelismo de Secuencia?}
+
+El TP puro suele recuperar activaciones completas en regiones como residual, dropout y layer norm, asumiendo que todos los ranks ejecutan el mismo trabajo. Estas activaciones replicadas consumirían mucha HBM bajo secuencias largas o micro-batches grandes. El paralelismo de secuencia (SP) divide estas activaciones a lo largo de la dimensión de secuencia, permitiendo que cada rank maneje posiciones de token diferentes en las regiones no TP.
+
+\lecturefigure{slide-062.jpg}{Motivación de TP+SP: evitar la replicación de grandes activaciones en regiones residual/layer-norm}{CS25 V6 official deck, p.~62}
+
+La álgebra clave es
+\[
+\operatorname{AllReduce}(x)
+=\operatorname{AllGather}(\operatorname{ReduceScatter}(x)).
+\]
+Donde $x$ es la suma parcial local de cada rank; reduce-scatter completa la suma y deja el sharding de secuencia en diferentes ranks, mientras que all-gather restaura el layout antes de ingresar a las regiones TP que requieren entrada dividida por dimensión oculta. El volumen total de comunicación es del mismo orden que el original all-reduce, pero ya no hay réplica completa de las activaciones intermedias.
+
+\lecturefigure{slide-065.jpg}{TP+SP: alternancia entre layouts de hidden-shard y sequence-shard}{CS25 V6 official deck, p.~65}
+
+En el paso hacia atrás (backward), los roles de all-gather y reduce-scatter se invierten. Por lo tanto, la sincronización de gradientes en regiones como layer norm ya no depende de una identidad implícita donde "todos los ranks hagan exactamente el mismo trabajo"; las colectivas asumen directamente la corrección.
+
+\lecturefigure{slide-066.jpg}{TP+SP backward: emparejamiento de all-gather y reduce-scatter}{CS25 V6 official deck, p.~66}
+
+\lecturefigure{slide-067.jpg}{Compromiso final de TP+SP: activaciones más eficientes, pero la comunicación sigue estando en el camino crítico del bloque}{CS25 V6 official deck, p.~67}
+
+\begin{warningbox}{El paralelismo de secuencia (SP) es diferente al paralelismo de contexto (CP)}
+En esta sección, SP suele ir emparejado con TP, alternando los layouts hidden/sequence en diferentes regiones dentro de una capa con el objetivo de evitar activaciones replicadas. El CP posterior divide la propia secuencia de atención a través de grupos de dispositivos más grandes para contextos ultra largos y requiere intercambio de K/V entre ranks. Ambos nombres contienen "secuencia", pero su alcance y los patrones de comunicación son distintos.
+\end{warningbox}
+
+\subsection{Escribir el eje de paralelismo como una malla de dispositivos}
+
+Se han discutido por separado los grupos DP y TP, pero en un entrenamiento real, un mismo rank pertenece simultáneamente a múltiples grupos. En esta sección se escribe explícitamente "a lo largo de qué eje comunicar" usando una malla de dispositivos (device mesh), evitando que las colectivas globales con world-size rompan la semántica de otros fragmentos. DP y TP pueden verse como una malla bidimensional: el sharding de datos varía a lo largo del eje DP y se replica a lo largo del eje TP; el sharding del modelo varía a lo largo del eje TP y se replica a lo largo del eje DP. Las colectivas deben ejecutarse en el grupo de procesos correcto; un grupo incorrecto mezclaría dimensiones que deberían ser independientes.
+
+\lecturefigure{slide-068.jpg}{Combinación de DP y TP: los ejes de datos y modelo son mutuamente ortogonales}{CS25 V6 official deck, p.~68}
+
+\lecturefigure{slide-069.jpg}{Interfaz de código: selección del eje de colectiva sobre una malla de dispositivos}{CS25 V6 official deck, p.~69}
+
+\begin{lstlisting}[language=Python,caption={Selección del grupo de procesos DP/TP sobre una malla de dispositivos bidimensional}]
+mesh = init_device_mesh(
+    "cuda", (dp_size, tp_size), mesh_dim_names=("dp", "tp")
+)
+dp_group = mesh.get_group("dp")
+tp_group = mesh.get_group("tp")
+
+all_reduce(gradients, group=dp_group)   # combinar sharding de datos
+all_reduce(partial_outputs, group=tp_group)  # combinar sharding del modelo
+\end{lstlisting}
+
+\teachervoice{00:37:52--00:41:22, en clase se sugiere limitar TP a un solo nodo o dominio de enlaces rápidos y expresar las relaciones combinadas mediante grupos de procesos/malla de dispositivos. El layout de paralelismo no es un problema puramente matemático; desplegar el mismo fragmento en una red lenta carecería totalmente de sentido.}
+
+\subsection{Resumen de la sección}
+
+TP descompone el cálculo matricial entre múltiples ranks y SP fragmenta aún más las activaciones fuera de las regiones TP. Superan los límites del batch global impuestos por DP, pero introducen comunicaciones en el camino crítico de cada capa. La siguiente categoría, Paralelismo de Pipeline (Pipeline Parallelism), no corta matrices sino que asigna capas a lo largo de la profundidad de la red y transforma el problema en un cronograma de micro-batch.
+
+
+\section{Parallelismo en pipeline: división de capas, programación temporal}
+
+El parallelismo en pipeline (PP) coloca las etapas sucesivas o entrelazadas de las capas en diferentes ranks. Sus objetos de comunicación son únicamente las activaciones y gradientes entre etapas; los mensajes son relativamente baratos. El verdadero desafío es asegurar que todas las etapas tengan algo que hacer y gestionar el ciclo de vida de las activaciones de múltiples micro-lotes.
+
+\subsection{De la colocación de capas al burbujeo del pipeline}
+
+TP colabora dentro de cada capa, provocando frecuentemente colectivos; PP cambia esto asignando etapas completas de capas a diferentes ranks, transmitiendo solo activaciones/gradientes en los límites de las etapas. Los objetos de comunicación se hacen más pequeños, pero la cadena de dependencias se alarga: una etapa posterior debe esperar el resultado de una anterior, y el *backward* depende a su vez de manera inversa. Si un lote recorre secuencialmente todas las etapas, los ranks posteriores esperan al inicio y los anteriores al final. Aumentar los micro-lotes puede rellenar el pipeline; el programador decide el orden de entrada del *forward* y el *backward*.
+
+\lecturefigure{slide-071.jpg}{Intuición del PP: división del modelo a lo largo de la dimensión de las capas}{CS25 V6 oficial, p.~71}
+
+All-Forward-All-Backward (AFAB) envía primero todos los *forward* de múltiples micro-lotes al pipeline y luego realiza el *backward* en dirección inversa. Es sencillo, pero requiere guardar muchas activaciones de *forward* y deja burbujas en ambos extremos del pipeline.
+
+\lecturefigure{slide-072.jpg}{Programación AFAB: primero todo el forward, luego todo el backward}{CS25 V6 oficial, p.~72}
+
+\lecturefigure{slide-073.jpg}{Burbujeo del pipeline: áreas inactivas cuando una etapa no tiene trabajo ejecutable}{CS25 V6 oficial, p.~73}
+
+\subsection{1F1B y DualPipe}
+
+AFAB ya mostró la contradicción entre el burbujeo y el ciclo de vida de las activaciones; esta sección compara dos programaciones más proactivas que optimizan "cuántas activaciones almacenar simultáneamente" y "desde cuántos extremos inyectar trabajo". One-Forward-One-Backward (1F1B), después del calentamiento, prioriza el entrelazado de *forward* y *backward*, reduciendo la cantidad de activaciones vivas simultáneamente. Mejora la memoria, pero no elimina automáticamente las burbujas causadas por la profundidad del pipeline y el número de micro-lotes.
+
+\lecturefigure{slide-074.jpg}{1F1B: entrelazado de forward y backward en estado estable}{CS25 V6 oficial, p.~74}
+
+Si se puede inyectar trabajo simultáneamente desde ambos extremos del pipeline, teóricamente se podría rellenar aún más el vacío. La clase toma como ejemplo DeepSeek DualPipe: las capas utilizan un mapeo bidireccional/entrelazado y los *forward* y *backward* de ambas direcciones están finamente programados.
+
+\lecturefigure{slide-075.jpg}{Motivo para continuar comprimiendo el burbujeo: iniciar el forward desde el otro extremo}{CS25 V6 oficial, p.~75}
+
+\lecturefigure{slide-076.jpg}{DualPipe: inyección bidireccional y programación de dependencias más compleja}{CS25 V6 oficial, p.~76}
+
+\begin{knowledgebox}{Lectura de la figura: qué optimiza cada programación}
+Los bloques de color de AFAB se despliegan primero en su totalidad para el *forward* y luego para el *backward*, lo que lo hace más fácil de implementar, pero las activaciones viven más tiempo; 1F1B alterna hacia adelante y hacia atrás para la misma etapa después del calentamiento, acortando el ciclo de vida de las activaciones, aunque aún requiere rellenar y vaciar el pipeline; el flujo bidireccional de DualPipe intenta rellenar los huecos con trabajo del otro extremo, a costa de que la colocación de capas, la identidad del micro-lote, el orden de envío/recepción y la evitación de bloqueos sean más complejos. Al comparar programaciones, se debe observar simultáneamente las burbujas, las activaciones pico, los conflictos de comunicación y la fiabilidad de la implementación, no solo si los bloques de color están "más llenos".
+\end{knowledgebox}
+
+\teachervoice{00:41:22--00:44:18, el docente distingue claramente el beneficio de memoria del 1F1B y el problema del burbujeo, y describe DualPipe como una programación "efectiva pero con una implementación muy compleja"; es necesario rastrear correctamente las activaciones y gradientes de cada micro-lote, no solo unirlas siguiendo la imagen de colores.}
+
+\subsection{Memoria de activación, *checkpointing* y número de micro-lotes}
+
+Cada etapa del PP guarda solo parte de los parámetros, pero debe retener las activaciones de múltiples micro-lotes antes de que llegue el *backward*. El \term{Activation checkpointing (recomputación de activaciones)} no es un *checkpoint* del modelo: guarda menos activaciones intermedias durante el *forward* y vuelve a ejecutar parte del *forward* durante el *backward*, intercambiando FLOPs adicionales por memoria HBM. La descarga al CPU, por su parte, almacena temporalmente las activaciones en la memoria del host, intercambiando tráfico PCIe/interconexión.
+
+\lecturefigure{slide-077.jpg}{Ventajas y desventajas del PP: comunicación barata, particionamiento efectivo de parámetros y programaciones complejas}{CS25 V6 oficial, p.~77}
+
+Sea $S$ el número de etapas y $M$ el número de micro-lotes; la fracción de burbujeo en AFAB simple se aproxima comúnmente por
+\[
+\beta\approx\frac{S-1}{M+S-1}.
+\]
+Donde $\beta$ es la proporción de inactividad bajo etapas isocrónicas ideales: a mayor profundidad $S$, mayores son los costos de rellenar/vaciar; a mayor $M$, las burbujas relativas se hacen más pequeñas, pero aumentan el gasto en activaciones y programación. Los sistemas reales también están afectados por desequilibrio de etapas, comunicación y recomputación.
+
+\begin{importantbox}{La esencia del PP es la programación}
+"Cuántas capas poner por tarjeta" solo define la división espacial; AFAB, 1F1B, 1F1B entrelazado y DualPipe definen la división temporal. Al evaluar el PP, se deben reportar simultáneamente el balance de etapas, el número de micro-lotes, la política de activaciones, las burbujas y el rendimiento final por extremo a extremo.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+El PP intercambia una programación compleja y gestión de activaciones por comunicación punto a punto barata de activaciones/gradientes. Es adecuado para escenarios con estructuras de capas claras donde el modelo se puede dividir en etapas; cuando el problema principal no es la profundidad del modelo sino las activaciones de secuencias extremadamente largas, el Context Parallelism es un eje de división más directo.
+
+
+\section{Paralelismo contextual: partición de atención para secuencias ultra largas}
+
+El paralelismo contextual (CP, por sus siglas en inglés) divide una misma muestra a lo largo del eje de longitud de la secuencia. No se utiliza para incrementar el batch, sino para que las activaciones, Q/K/V y la atención de un único contexto ultra largo puedan distribuirse entre varios dispositivos.
+
+\subsection{Por qué DP, TP y PP aún pueden no soportar contextos largos}
+
+A medida que crece la longitud de la secuencia, las activaciones y el conjunto de trabajo (working set) de la atención aumentan rápidamente. Incluso si los parámetros ya están particionados mediante ZeRO, TP o PP, cada rank puede seguir conservando una dimensión de token excesivamente larga; por ello se requiere una partición especializada a lo largo del eje de la secuencia.
+
+\lecturefigure{slide-079.jpg}{Motivación de CP: el crecimiento de la longitud de la secuencia provoca una explosión de memoria en las activaciones}{CS25 V6 oficial, p.~79}
+
+DP distribuye las muestras a diferentes ranks a lo largo del eje del batch; una misma secuencia no se fragmenta. El propósito de revisar DP es establecer un punto de comparación: CP divide los $S$ posiciones de una única muestra en $S_1,\ldots,S_P$, asignando cada rango solo un segmento.
+
+\lecturefigure{slide-081.jpg}{Revisión de DP: particiona el batch, no la secuencia individual}{CS25 V6 oficial, p.~81}
+
+\lecturefigure{slide-083.jpg}{CP: una misma secuencia se fragmenta según las posiciones de los tokens}{CS25 V6 oficial, p.~83}
+
+\subsection{Ring Attention y online softmax}
+
+Cada shard de consulta (query) aún necesita ver todos los K/V de la secuencia completa. Ring Attention hace que los bloques de K/V se transmitan a lo largo de un anillo de dispositivos; cada rank calcula una puntuación local para el bloque actual y combina múltiples bloques utilizando el máximo en ejecución (running maximum) y el normalizador en ejecución del online softmax, sin necesidad de materializar la matriz completa de atención.
+
+\lecturefigure{slide-085.jpg}{Ring Attention: intercambio circular de bloques K/V y actualización en línea del softmax}{CS25 V6 oficial, p.~85}
+
+\begin{knowledgebox}{Lectura de la figura: las consultas permanecen locales mientras los K/V circulan por el anillo}
+Cada rank guarda fijo su propio shard de consulta y recibe secuencialmente los bloques de K/V procedentes de otros ranks; al finalizar una ronda, cada consulta ha interactuado con todas las claves de la secuencia completa. El anillo representado no sirve para promediar, sino para controlar el tamaño de los bloques de K/V que aparecen en la memoria HBM en cada paso. Los máximos y denominadores en ejecución del online softmax permiten combinar las puntuaciones de distintos bloques de manera numéricamente estable. Además, la atención causal debe aplicar una máscara combinada con la posición del bloque; si la comunicación y el cómputo por bloque no pueden solaparse, cada salto del anillo alargará directamente la latencia de la capa.
+\end{knowledgebox}
+
+Para la $i$-ésima consulta, el softmax en bloques puede mantener
+\[
+m_i^{(t)}=\max\bigl(m_i^{(t-1)},\max_j s_{ij}^{(t)}\bigr),
+\]
+\[
+\ell_i^{(t)}=e^{m_i^{(t-1)}-m_i^{(t)}}\ell_i^{(t-1)}
++\sum_j e^{s_{ij}^{(t)}-m_i^{(t)}}.
+\]
+Donde, $s_{ij}^{(t)}$ es la puntuación de atención del $t$-ésimo bloque K/V, $m_i^{(t)}$ es el máximo en ejecución hasta ese bloque y $\ell_i^{(t)}$ es el denominador del softmax estabilizado. El numerador de salida también se actualiza mediante una recursión con reescalado idéntico, obteniendo así resultados equivalentes al softmax completo mientras los bloques fluyen.
+
+\lecturefigure{slide-086.jpg}{Límites de CP: único eje de partición directo para secuencias largas, pero cada capa debe intercambiar K/V}{CS25 V6 oficial, p.~86}
+
+\teachervoice{00:46:02--00:49:14，el docente delimita CP como una herramienta especializada para el cuello de botella de contextos largos: se comunica dentro de cada bloque de atención y no ofrece gran ayuda para secuencias cortas; si el problema no es la memoria de la secuencia, no debe activarse CP solo por "soportarlo".}
+
+\subsection{Resumen de la sección}
+
+CP distribuye las posiciones de los tokens de un único contexto largo entre varios ranks; Ring Attention mantiene la semántica global de atención mediante online softmax y rotación de K/V. Resuelve directamente la memoria de secuencias largas, pero incrementa la comunicación en el camino crítico de atención; la siguiente sección aborda EP exclusivamente para capas de expertos dispersos en Mixture-of-Experts.
+
+
+\section{Paralelismo experto: enrutamiento de tokens y all-to-all en MoE}
+
+La mezcla de expertos (Mixture-of-Experts, MoE) permite activar solo una minoría de expertos por cada token, lo que expande los parámetros totales sin incrementar desproporcionadamente las FLOPs por token. El paralelismo experto (EP, expert parallelism) coloca a los expertos en diferentes rangos; el resultado del enrutamiento determina hacia dónde debe enviarse cada token, de modo que la comunicación y la forma de los mensajes dependen de los datos.
+
+\subsection{Dividir expertos, no atención}
+
+El bloque MoE sigue conteniendo atención compartida, router, dispatch, MLP experto y combine. EP solo divide a los expertos; si cada rango EP aún procesara exactamente los mismos datos, la atención compartida repetiría cálculos, por lo que en la práctica los grupos de EP suelen fragmentar también los datos.
+
+\lecturefigure{slide-088.jpg}{Motivación de EP: qué partes de MoE pueden dividirse entre dispositivos}{CS25 V6 oficial, p.~88}
+
+\lecturefigure{slide-089.jpg}{Paso 1: distribuir expertos a diferentes GPUs}{CS25 V6 oficial, p.~89}
+
+\lecturefigure{slide-090.jpg}{Problema de enrutamiento: cómo llegan los tokens al experto remoto}{CS25 V6 oficial, p.~90}
+
+\subsection{All-to-all, dispatch y combine}
+
+All-to-all permite que cada rango envíe mensajes distintos a cada otro rango. A diferencia de all-reduce, donde «todos reciben el mismo resultado reducido», el objetivo de all-to-all es reordenar: antes de la comunicación se empaquetan los tokens por experto de destino; después de la comunicación, cada rango recibe los tokens que corresponden a sus expertos locales.
+
+\lecturefigure{slide-091.jpg}{All-to-all: cada proceso envía mensajes distintos a cada otro proceso}{CS25 V6 oficial, p.~91}
+
+\lecturefigure{slide-092.jpg}{Dispatch de MoE: agrupar los tokens enrutados al mismo experto en el rango donde reside}{CS25 V6 oficial, p.~92}
+
+Tras el cálculo del experto se debe ejecutar un all-to-all inverso para devolver los resultados al orden original de los tokens; este paso se llama combine. La semántica mínima de forward puede escribirse como
+\[
+y_i=\sum_{e\in\operatorname{TopK}(r(x_i))}p_{i,e}E_e(x_i).
+\]
+Donde, $x_i$ es la representación del token, $r$ es el router, $p_{i,e}$ es el peso con el que el token $i$ se asigna al experto $e$, y $E_e$ es el MLP experto; TopK determina los pocos expertos realmente activados. El dispatch/combine cambia la ubicación de los datos, pero no altera este resultado ponderado.
+
+\lecturefigure{slide-094.jpg}{Flujo de datos completo de EP: atención compartida, dispatch, experto, combine}{CS25 V6 oficial, p.~94}
+
+\subsection{El verdadero desafío: tamaños de mensaje dinámicos y sincronización CPU--GPU}
+
+Cada experto recibe un número variable de tokens que solo se conoce tras calcular el router. Si la biblioteca de comunicación requiere que la CPU lea primero los conteos, asigne buffers y luego inicie la operación colectiva, la GPU esperará en la ruta crítica. Implementaciones como DeepEP y HybridEP utilizan InfiniBand, RDMA, SM dedicados y buffers preasignados para reducir este tipo de sincronización. Esto también implica que el rendimiento del algoritmo depende del hardware y las capacidades de red concretas.
+
+\lecturefigure{slide-095.jpg}{Dificultad de EP: el router decide buffers dinámicos; la sincronización CPU--GPU entra en la ruta crítica}{CS25 V6 oficial, p.~95}
+
+\begin{knowledgebox}{Lectura de la figura: los cuellos de botella de EP ocurren antes que el GEMM}
+El router verde asigna expertos rápidamente, pero el número de tokens por destino es dinámico. El remitente debe reordenar los tokens por experto; el receptor debe conocer el desplazamiento del buffer; y la biblioteca de comunicación debe elegir entre NVLink/NVSwitch dentro del nodo e InfiniBand entre nodos. Los intervalos en que la CPU espera contajes de GPU hacen que incluso un GEMM de expertos posterior más rápido no pueda recuperar ese retraso. Por ello, EP de alto rendimiento requiere simultáneamente metadatos del lado de la GPU, memoria preasignada o simétrica, RDMA, enrutamiento sensible a la topología y equilibrio de carga; «el cálculo experto es disperso» no equivale a «la comunicación del sistema es dispersa».
+\end{knowledgebox}
+
+\lecturefigure{slide-096.jpg}{Ventajas y desventajas de EP: un eje de división necesario para MoE, pero también una all-to-all de alta intensidad}{CS25 V6 oficial, p.~96}
+
+\teachervoice{00:51:42--00:53:56, el docente señala que mucha lentitud en el entrenamiento de MoE proviene del preprocesamiento de dispatch y del soporte hardware, no solo del GEMM de expertos. Sin soporte adecuado de InfiniBand/RDMA o bibliotecas, la throughput reportada en papers públicos de EP no siempre es reproducible.}
+
+\begin{warningbox}{El número promedio de tokens no representa al rango más lento}
+Si el router envía muchos tokens al mismo experto, ese rango se convierte en un straggler (atrasado), y su cómputo y comunicación frenan a todos los demás; otros rangos, aunque estén libres, deben esperar. Factores como capacity factor, dropping de tokens, pérdida auxiliar de equilibrio de carga o sesgo libre de pérdida auxiliar implican compensaciones entre calidad, equilibrio y determinismo; no basta con mirar el promedio de expertos por token.
+\end{warningbox}
+
+\subsection{Ocultar la comunicación de EP dentro del cronograma de PP}
+
+En la sección anterior se confirmó que la all-to-all de EP es difícil de eliminar desde un solo bloque MoE; el siguiente paso es buscar cálculos independientes de ella. Este apartado regresa a la línea de tiempo de múltiples micro-lotes de PP, entrelazando tareas de diferentes batches y stages, para que esperar comunicaciones no signifique dispositivos inactivos. Las soluciones prácticas combinan EP con PP/1F1B: cuando un micro-lote azul realiza dispatch/combine, la GPU puede ejecutar forward/backward de otro stage para un micro-lote verde. Así no se reducen los bytes de all-to-all, sino que se llenan las esperas con trabajo independiente.
+
+\lecturefigure{slide-097.jpg}{EP+PP: usar cómputo de otro micro-lote para ocultar dispatch/combine}{CS25 V6 oficial, p.~97}
+
+\begin{lstlisting}[language=Python,caption={Cronograma conceptual de superposición entre comunicación EP y cómputo de otro micro-lote}]
+dispatch_blue = all_to_all_async(route(tokens_blue))
+backward_green = pipeline_stage.backward(microbatch_green)
+tokens_blue_local = dispatch_blue.wait()
+expert_blue = local_experts(tokens_blue_local)
+combine_blue = all_to_all_async(expert_blue)
+forward_green = pipeline_stage.forward(next_green)
+output_blue = combine_blue.wait()
+\end{lstlisting}
+
+\teachervoice{00:53:56--00:55:42, la clase resume la solución práctica como «usar el cómputo de pipeline de un batch para ocultar la comunicación de expertos de otro batch». Esto indica que el núcleo del paralelismo 5D es una planificación conjunta transversal a los ejes, no activar interruptores de configuración uno por uno.}
+
+\subsection{Resumen de la sección}
+
+EP sirve solo a la capa de expertos MoE mediante all-to-all para dispatch/combine de tokens. Sus dificultades son enrutamiento dinámico, desequilibrio de carga, redes de ruta crítica y sincronización CPU--GPU; combinado con PP puede ocultar parte de la comunicación, pero no elimina las restricciones del hardware y del rango más lento.
+
+
+\section{Combinación de cinco dimensiones: del "qué paralelismos soportar" al "qué tipo de distribución elegir"}
+
+Los cinco capítulos anteriores dividieron el problema a lo largo de los ejes batch, hidden/sequence, layer, context y expert. Un verdadero *ultra-scale run* utilizará múltiples ejes simultáneamente en el *device mesh*: un eje se encarga de la capacidad, otro del throughput, algunos cubren únicamente atención o MoE, y otros están restringidos al dominio de interconexión rápida (fast fabric).
+
+\subsection{Cómo combinarse los cinco ejes}
+
+El tamaño mundial total (*world size*) puede expresarse como el producto de varios grados de paralelismo:
+\[
+P_{\mathrm{world}}
+=P_{\mathrm{DP}}P_{\mathrm{TP}}P_{\mathrm{PP}}P_{\mathrm{CP}}P_{\mathrm{EP}}.
+\]
+Donde cada $P$ corresponde al tamaño de paralelismo de datos (data), tensor, pipeline, contexto y expert, respectivamente. Este producto solo describe el espacio de numeración de rangos (*ranks*); si la operación es eficiente también depende del mapeo de cada eje a la topología física, las colectivas por eje, los *micro-batches* y la estructura del modelo.
+
+\lecturefigure{slide-099.jpg}{Five-D parallelism: combinación de cinco ejes de corte en un mismo gráfico de entrenamiento}{CS25 V6 official deck, p.~99}
+
+\lecturefigure{slide-100.jpg}{Repaso general: DP, TP/SP, PP, CP, EP}{CS25 V6 official deck, p.~100}
+
+\begin{knowledgebox}{Lectura de la figura: los cinco ejes no se distribuyen equitativamente en las GPUs}
+En el gráfico de combinación, cada color cubre una región de la red diferente: DP/ZeRO atraviesa todo el estado del entrenamiento; TP/SP actúa principalmente dentro de cada bloque denso (dense block); PP cruza etapas de capas (*layer stages*); CP solo modifica la distribución de datos de atención para secuencias largas; EP entra únicamente en los bloques MoE. Por ello, la descomposición multiplicativa del *world size* no arroja una respuesta única. El principio común es colocar las colectivas TP más frecuentes y sensibles a latencia dentro del dominio del nodo más rápido, mapear DP/PP a dominios más grandes y decidir CP/EP según la presencia de secuencias largas o MoE. Cualquier cambio en el tamaño de un eje afecta inversamente al tamaño del *micro-batch*, las activaciones, el tamaño de los mensajes de comunicación y el equilibrio de carga.
+\end{knowledgebox}
+
+El *device mesh* lógico también debe aterrizar en máquinas físicas. Asumiendo que cada nodo tiene ocho GPUs, interconectadas internamente por NVSwitch (totalmente conectadas) y entre nodos mediante InfiniBand más lento, entonces TP=8 suele ser más natural que distribuir TP=16 a través de dos nodos, porque las colectivas de cada bloque Transformer se mantienen dentro del dominio rápido. DP puede cruzar más nodos porque los *buckets* de gradientes son grandes y es fácil superponerlos con el paso hacia atrás (*backward*). Las etapas de PP tienen una frecuencia menor de mensajes en los límites de etapa y también pueden cruzar nodos, aunque debe evitarse asignar capas altamente desbalanceadas a diferentes etapas. Si EP cruza nodos dependerá del tejido *all-to-all*, el número de expertos y la carga de enrutamiento. Este mapeo no tiene reglas absolutas, pero sí un objetivo estable: colocar las comunicaciones más frecuentes, sincronizadas y difíciles de ocultar en la capa de topología de menor latencia, y empujar comunicaciones más dispersas o pipelinizables a rangos más grandes.
+
+Por tanto, antes de aumentar el *world size*, se deben dibujar dos gráficos: uno del *mesh* lógico marcando cada objeto de corte por eje y las colectivas; otro de la topología física marcando nodos, interconexión rápida, NIC y sobrecarga (*oversubscription*). Solo cuando los lados frecuentes de ambos gráficos coinciden es probable que aumentar los rangos mejore el throughput en lugar de amplificar esperas de sincronización.
+
+Esta es también la razón por la cual el curso enfatiza la topología al final de las preguntas y respuestas: los algoritmos de paralelismo ofrecen cálculos factibles, pero la red física determina si vale la pena ejecutarlos.
+
+\begin{knowledgebox}{Tabla de decisiones de paralelismo en cinco dimensiones}
+\begin{tabularx}{\linewidth}{L{0.12\linewidth} L{0.16\linewidth} L{0.18\linewidth} X}
+\toprule
+Eje & Corte principal & Comunicación/cronograma clave & Uso exclusivo para ciertos problemas \\
+\midrule
+DP/ZeRO & batch y estado de entrenamiento & all-reduce, reduce-scatter, all-gather & Necesario throughput o partición de estado, y global batch extensible \\
+TP/SP & hidden y distribución de activaciones & all-reduce por capa / RS / AG & Matriz por capa o activación requiere cómputo en dispositivos de interconexión rápida \\
+PP & profundidad de capas & P2P activation/gradient, 1F1B & Modelo divisible en etapas y micro-batch suficiente para llenar la pipeline \\
+CP & longitud de secuencia & intercambio anular K/V por capa & La memoria de secuencia de un solo contexto ultra-largo es el cuello de botella \\
+EP & expertos / tokens enrutados & all-to-all, balanceo de carga & Modelo con MoE; parámetros de experto y enrutamiento de tokens requieren dispositivos cruzados \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{De la hoja de trucos a un flujo de selección ejecutable}
+
+La sección anterior dio el reparto lógico de los cinco ejes, pero los equipos de ingeniería aún deben convertirlo en una secuencia de depuración y búsqueda ejecutable. Esta sección comienza con las restricciones de capacidad más duras e incorpora gradualmente muestras, topología y condiciones estructurales, con el objetivo de eliminar ejes innecesarios lo antes posible, en lugar de buscar todas las combinaciones de paralelismo a la vez. El valor de la hoja de trucos oficial no es dar respuestas fijas, sino obligar al ingeniero a reducir el espacio secuencialmente: primero preguntar si el modelo y el estado del optimizador caben, luego si el global batch permite DP, después meter TP en el dominio de interconexión rápida, usar PP para profundidad y activar CP solo para contextos largos y EP solo para MoE.
+
+\lecturefigure{slide-101.jpg}{Hoja de trucos Ultra-Playbook: elegir estrategia de paralelismo según restricciones}{CS25 V6 official deck, p.~101}
+
+\begin{importantbox}{Orden de selección recomendado}
+Primero, establecer un libro mayor de picos para parámetros, optimizador, gradientes y activaciones. Segundo, seleccionar el ZeRO stage mínimo que cumpla la capacidad. Tercero, usar DP para aprovechar al máximo el global batch permitido. Cuarto, aumentar TP/SP dentro del nodo. Quinto, añadir PP si la profundidad del modelo aún excede los límites. Sexto, introducir CP o EP solo por contextos largos o MoE respectivamente. Finalmente, buscar el tamaño de cada eje con topología real y profiler, en lugar de copiar configuraciones de papers.
+\end{importantbox}
+
+El sistema de entrenamiento incluye también *data loader*, gestor de checkpoints, orquestador, tolerancia a fallos, tejido de red (*network fabric*) y almacenamiento. Si las diapositivas solo dibujan colectivas de capas del modelo, ignorarán problemas comunes en ejecuciones reales como hambre de entrada, pausas de guardado, fallos de nodos y tiempos de recuperación.
+
+\lecturefigure{slide-102.jpg}{Visión general de la infraestructura de entrenamiento: más allá del gráfico computacional hay datos, almacenamiento y orquestación}{CS25 V6 official deck, p.~102}
+
+\begin{knowledgebox}{Lectura de la figura: baja utilización de GPUs no siempre indica problema de paralelismo del modelo}
+El gráfico de infraestructura coloca la tarea de entrenamiento entre ingestión de datos, preprocesamiento en anfitrión (*host*), runtime distribuido, checkpoint/almacenamiento y orquestación. Si el *data loader* es insuficiente, cambiar el tamaño de TP no arregla la hambre de entrada; si los ciclos de checkpoint bloquean a todos los rangos, aumentar los micro-batches de pipeline solo acumulará más estado antes de pausar; si un nodo falla repetidamente, incluso el throughput instantáneo máximo puede perder frente a una configuración más estable y con recuperación más rápida. Para validar una ejecución *ultra-scale*, se debe registrar simultáneamente tokens/s, utilización de FLOPs del modelo, throughput de red, pausa en checkpoint, tiempo de reinicio, espera de datos y tasa de fallos, para distinguir entre "el gráfico del modelo no está lleno" y "el sistema periférico ahoga al gráfico del modelo".
+\end{knowledgebox}
+
+\begin{warningbox}{Mantener un marco de comparación fijo al buscar distribuciones de paralelismo}
+Diferentes distribuciones pueden cambiar el tamaño del micro-batch, acumulación de gradientes, *activation checkpointing*, forma del núcleo (*kernel shape*) y precisión numérica; si estas variables cambian simultáneamente, las diferencias en throughput no son atribuibles. Los experimentos confiables deben fijar el global batch efectivo, longitud de secuencia, optimizador y objetivo de entrenamiento, medir primero cambios por eje individual y luego buscar combinaciones conjuntas; al reportar resultados se debe dar tanto la HBM pico como el tiempo por paso, porcentaje de comunicación e indicadores de convergencia, en lugar de solo una "velocidad de aceleración".
+\end{warningbox}
+
+\subsection{Preguntas y respuestas: equilibrio de carga, equivalencia matemática y distribución automática}
+
+Las preguntas y respuestas de clase añadieron tres reglas que no se escribieron completamente en la diapositiva. Primero, el router MoE debe suprimir desequilibrios extremos; se puede usar pérdida auxiliar o sesgo sin pérdida auxiliar (*auxiliary-loss-free bias*); el objetivo no es promediar cada token, sino evitar que pocos rangos sean los *stragglers* globales. Segundo, el paralelismo correcto solo reordena la operación forward/backward equivalente; teóricamente no debería cambiar la ley de escalado; si la convergencia es claramente diferente, se debe verificar primero precisión numérica, orden de colectivas, números aleatorios, *loss scaling* o errores de programación. Tercero, no existe una "distribución óptima automática" independiente del hardware.
+
+\teachervoice{00:57:18--00:59:34，Q\&A explica que loss de balanceo de carga y router bias pueden mejorar distribución de tokens; si la estrategia de paralelismo se implementa correctamente, debe mantener el significado matemático por tarjeta individual y no tratar cambios de convergencia como efectos inevitables del paralelismo mismo.}
+
+\teachervoice{00:59:34--01:01:34，El preprocesamiento de datos en CPU puede ocultarse con workers paralelos; el paralelismo automático aún requiere ingresar tamaño del modelo, GBS, longitud de secuencia y dominios de red/NVLink/NVSwitch. La respuesta final de clase es dependiente de la topología, no una proporción 5D fija.}
+
+\begin{warningbox}{La "equivalencia matemática" aún no garantiza identidad bit a bit}
+La suma de punto flotante no cumple la ley conmutativa; diferentes árboles de colectivas, orden de buckets, precisión mixta y corte de números aleatorios causan diferencias numéricas; superposición asíncrona también puede exponer carreras (*race*) o buffers obsoletos (*stale buffer*). En ingeniería se debe exigir equivalencia estadística en la curva de pérdida, norma del gradiente e indicadores finales, no esperar consistencia bit a bit entre distribuciones.
+\end{warningbox}
+
+\subsection{Responsabilidad energética en el entrenamiento escalado}
+
+Las reglas de selección anteriores optimizan tiempo, memoria y red, pero el libro mayor de recursos tiene una dimensión que no se puede omitir al final: los acelerador-horas reales consumidos y la energía ineficiente causada por fallos, inactividad o baja utilización. Esta sección reinterpreta la eficiencia del sistema como un límite de responsabilidad, en lugar de dejar el problema energético fuera del centro de datos. La página final devuelve el impacto energético al diseño del sistema: mejorar MFU, reducir ejecuciones fallidas, evitar etapas altas innecesarias, elegir escala adecuada de modelo/datos y aumentar eficiencia de checkpoint y recuperación son tanto optimización de costos como reducción de consumo energético ineficiente. La responsabilidad no significa detener la escalabilidad, sino hacer que cada GPU-hour sea responsable de objetivos de aprendizaje claros.
+
+\lecturefigure{slide-105.jpg}{Aviso final: al escalar a miles de GPUs se debe incluir el impacto energético}{CS25 V6 official deck, p.~105}
+
+\subsection{Resumen de la sección}
+
+El paralelismo en cinco dimensiones no son cinco arquitecturas mutuamente excluyentes, sino una descomposición de recursos en el mismo *device mesh*. Una distribución correcta parte de capacidad y equivalencia matemática, se cierra mediante mapeo de topología, cronograma de colectivas y validación con profiler; una distribución incorrecta transformará un problema de memoria en uno más costoso de red, burbujeo (*bubble*) o *straggler*.
+\section{Síntesis y ampliación}
+
+\subsection{Una cadena de razonamiento que atraviesa toda la clase}
+
+Esta lección se puede resumir en seis pasos. Primero, lleva un registro por separado para los parámetros, el estado del optimizador, las gradientes, las activaciones y los flujos de datos. Segundo, realiza el particionamiento (sharding) a lo largo del eje lógico más coherente. Tercero, escribe las dependencias colectivas o punto a punto necesarias para restaurar la semántica de un solo dispositivo. Cuarto, determina si la comunicación se encuentra en la ruta crítica o puede superponerse. Quinto, mapea los ejes lógicos a la topología física real: NVLink, NVSwitch, InfiniBand, PCIe y almacenamiento. Sexto, valida mediante el profiler, el rendimiento por unidad de tiempo (throughput), la memoria pico, la utilización de red y las curvas de convergencia, en lugar de aceptar basándose únicamente en los nombres de configuración.
+
+\begin{importantbox}{El núcleo de Ultra-scale no son más GPUs, sino menos esperas innecesarias}
+Aumentar el número de dispositivos incrementa solo la paralelidad potencial. La paralelidad potencial solo se convierte en rendimiento efectivo de entrenamiento cuando el estado está correctamente particionado, los colectivos están correctamente agrupados, el micro-lote (micro-batch) llena el cronograma (schedule), la carga de ruta se equilibra y los datos y los puntos de control (checkpoint) no provocan que el cómputo quede sin trabajo.
+\end{importantbox}
+
+\subsection{Lista de verificación práctica}
+
+\begin{enumerate}
+  \item Registra el tipo de dato (dtype), la forma (shape), el factor de replicación y el ciclo de vida para cada categoría de estado.
+  \item Marca para cada eje paralelo el grupo de procesos, el enlace físico y los colectivos críticos.
+  \item Mide por separado el tiempo del paso solo computacional, solo comunicacional y de extremo a extremo.
+  \item Verifica si la superposición reduce el tiempo total, en lugar de solo hacer que las líneas de tiempo se solapen.
+  \item Registra los retrasados (stragglers), el desequilibrio del router, las burbujas del pipeline y las paradas por entrada o checkpoint.
+  \item Replica la pérdida (loss) con una sola tarjeta a la escala mínima, luego incrementa la paralelidad eje por eje y compara los valores numéricos y el rendimiento.
+  \item Guarda un punto de control (checkpoint) recuperable y realiza una prueba real del tiempo de recuperación tras un fallo de nodo.
+\end{enumerate}
+
+\subsection{Lecturas adicionales}
+
+\begin{itemize}
+  \item Hugging Face, \href{https://huggingface.co/spaces/nanotron/ultrascale-playbook}{Ultra-Scale Playbook}: el diagrama de sistema principal y el marco de toma de decisiones de esta lección.
+  \item Rajbhandari et al., \href{https://arxiv.org/abs/1910.02054}{ZeRO}; PyTorch, \href{https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html}{documentación de FSDP2 fully\_shard}.
+  \item Liu et al., \href{https://arxiv.org/abs/2310.01889}{Ring Attention con Transformers por bloques}.
+  \item DeepSeek-AI, \href{https://arxiv.org/abs/2412.19437}{Informe técnico de DeepSeek-V3} y \href{https://github.com/deepseek-ai/DeepEP}{DeepEP}.
+  \item \href{https://github.com/pytorch/torchtitan}{TorchTitan}, \href{https://github.com/huggingface/nanotron}{Nanotron}, \href{https://github.com/NVIDIA/Megatron-LM}{Megatron-LM}: implementaciones ejecutables de paralelismo multidimensional.
+  \item Hugging Face, \href{https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook}{Smol Training Playbook}; \href{https://jax-ml.github.io/scaling-book/tpus/}{JAX Scaling Book}: infraestructura de entrenamiento y perspectiva desde TPU.
+\end{itemize}
+
+\end{document}

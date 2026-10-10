@@ -1,0 +1,691 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+\usepackage{multicol}
+
+\renewcommand{\notetitle}{Lecture 03: El compromiso entre SSM y Transformer — Compresión de estado, tokens efectivos y H-Net}
+\renewcommand{\noteauthors}{Basado en la conferencia oficial de Albert Gu, organizado a partir de la restauración visual de 33 videos y los subtítulos originales en inglés}
+\renewcommand{\notedate}{CS25 V6 · Apuntes source-first del año 2026}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{Clase el 2026-04-16; subida el 2026-04-27}
+\renewcommand{\videoduration}{1:17:07 (palestrante y Q\&A hasta aproximadamente 1:06:35)}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=OyimE74UMF8}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.97\textwidth,height=0.49\textheight,keepaspectratio]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\let\standardtableofcontents\tableofcontents
+\renewcommand{\tableofcontents}{%
+  \begingroup
+  \small
+  \setlength{\parskip}{0pt}
+  \standardtableofcontents
+  \endgroup
+}
+
+\begin{document}
+
+\makecscover
+
+\section{¿Por qué regresan los modelos recurrentes/lineales}
+
+En esta clase, aunque superficialmente se discute la compensación entre eficiencia de State Space Model (SSM, modelo de espacio de estados) y Transformer, la pregunta fundamental que realmente hay que responder es: \textbf{¿en qué forma guarda el pasado un modelo autoregresivo?} Si el pasado se almacena como una caché direccionable por token, el modelo excela en búsquedas precisas; si el pasado se comprime en un estado fijo, el modelo resulta más adecuado para actualizaciones en línea y abstracción. Las diferencias de complejidad entre ambos son simplemente el resultado externo de esa interfaz de memoria, no toda su esencia.
+
+\subsection{De las corrientes de investigación a los sistemas de producción}
+
+Primero, veamos por qué el ponente llama a esto «renacimiento». Tras Mamba surgieron múltiples rutas como xLSTM, DeltaNet, Gated DeltaNet y Test-Time Training; lo más importante es que ya han entrado en grandes modelos híbridos escalables: Jamba, Zamba, Samba, Hunyuan, Qwen, Kimi Linear, OLMo Hybrid y Megatron--NeMo. Al leer la figura, no hay que apresurarse a comparar nombres, sino identificar dos capas de información: a la izquierda están las familias de mecanismos; a la derecha, cómo entran esos mecanismos en modelos híbridos a escala de producción.
+
+\lecturefigure{slide-002.jpg}{Familia de modelos recurrentes/lineales modernos y su adopción en grandes modelos híbridos}{Grabación oficial de Stanford, 00:03:20--00:04:09}
+
+\teachervoice{00:01:28--00:03:55, el docente enfatiza que estos métodos ya han penetrado ampliamente en modelos a gran escala; por eso esta clase no presenta cada artículo individualmente, sino que asciende a características comunes, cuellos de botella compartidos y las diferencias fundamentales con Transformer.}
+
+Un mismo mecanismo puede llamarse SSM, atención lineal, RNN moderno o modelo recurrente moderno según el comunidad. La siguiente figura coloca todos estos términos en una misma página; no significa que todas las fórmulas sean idénticas, sino que esta clase solo se preocupa por la interfaz compartida de \textbf{estado recurrente finito + cálculo secuencial lineal/cuadrático}. Por su parte, un modelo híbrido intercala capas de este tipo con capas de atención cuadrática en la dirección de profundidad de la red.
+
+\lecturefigure{slide-003.jpg}{Taxonomía paraguas adoptada en esta clase: SSM, atención lineal y modelos recurrentes modernos}{Grabación oficial de Stanford, 00:04:10--00:05:09}
+
+\begin{knowledgebox}{Términos clave: nombres distintos, ejes de comparación iguales}
+\begin{tabularx}{\textwidth}{L{0.20\textwidth}X X}
+\toprule
+Término & Punto de partida habitual & Interfaz común de interés para esta clase \\
+\midrule
+SSM & Espacio de estados continuo/discreto, transición estructurada & Compresión de historia mediante recurrencia con estado finito \\
+Atención lineal & Escribir el núcleo de atención como estadística recursiva & No guardar la matriz completa de atención $L\times L$ \\
+RNN lineal & Actualización recurrente lineal y entrenamiento paralelo & Actualización de estado combinable y escaneable \\
+Modelo recurrente moderno & Nueva generación de recurrencia respecto a LSTM/GRU & Ampliación del estado, fortalecimiento del gating y adaptación a aceleradores \\
+Modelo híbrido & Intercalar diferentes tipos de capas desde la perspectiva de ingeniería & Capas recurrentes encargadas de la mayor parte del procesamiento, capas de atención para recuperación precisa \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\begin{warningbox}{No confundir la etiqueta paraguas con equivalencia matemática}
+El formato de estado, las fórmulas de actualización, los algoritmos de entrenamiento y los kernels de Mamba, Gated DeltaNet, xLSTM y TTT son diferentes. Esta clase los agrupa en una sola categoría solo para comparar el eje principal entre «estado comprimido finito» y «caché a resolución de token»; cualquier conclusión sobre una implementación concreta debe volver a los artículos correspondientes y al hardware.
+\end{warningbox}
+
+\subsection{¿Por qué usar modelado autoregresivo como microscopio}
+
+La generación autoregresiva descompone la distribución conjunta en probabilidades condicionales secuenciales: durante el entrenamiento se predice el siguiente token de forma paralela, pero en la inferencia hay que devolver el token recién generado al modelo. Por ello, lo que se deja «entre pasos» durante el proceso de decodificación expone el contrato de memoria real de la arquitectura.
+
+\[
+p(x_{1:L})=\prod_{t=1}^{L}p(x_t\mid x_{<t}),
+\qquad
+x_{t+1}\sim p_\theta(\cdot\mid x_{\le t}).
+\]
+Donde, $L$ es la longitud de la secuencia, $x_t$ es el $t$-ésimo token, $x_{<t}$ es el contexto previo y $p_\theta$ es el modelo con parámetros $\theta$. El entrenamiento puede procesar toda una secuencia a la vez; la generación debe avanzar en orden secuencial: $t=1,2,\ldots$.
+
+\lecturefigure{slide-004.jpg}{Modelado autoregresivo: predicción paralela del siguiente token durante el entrenamiento, muestreo secuencial e inyección de retroalimentación durante la inferencia}{Grabación oficial de Stanford, 00:05:10--00:06:09}
+
+\teachervoice{00:05:10--00:05:49, el ponente eligió el modelado autoregresivo por dos razones: es tanto el paradigma central de los modelos de lenguaje actuales como el que más fácilmente expone el estado y la complejidad de diferentes modelos secuenciales.}
+
+\begin{importantbox}{La unidad de comparación de esta clase no es la capa, sino el estado de generación}
+Al comparar dos arquitecturas, primero pregunte: después de completar el paso $t$ de generación, ¿qué debe conservar el modelo para generar el paso $t+1$? Ese objeto persistente entre pasos es el estado autoregresivo. Todas las discusiones posteriores sobre recuperación (recall), compresión, procesamiento en línea y resolución de token se desarrollan a partir de aquí.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+El valor de los modelos recurrentes/lineales modernos ya no reside solo en reformular la complejidad en los artículos académicos, sino en el espacio de diseño real de los modelos de producción. Para atravesar la niebla de nombres de modelos, esta clase fija una lente de comparación: observar el estado que se preserva entre pasos durante la generación autoregresiva. En el capítulo siguiente se verá que Transformer guarda el pasado en una caché a resolución de token, mientras que el SSM lo comprime en un estado recurrente finito; ambas interfaces determinan simultáneamente las capacidades, los sesgos inductivos y los costos.
+\section{Dos interfaces de memoria: token cache y estado comprimido}
+
+El capítulo anterior definió el enfoque por comparación; este lo aplica a una decodificación real. La clave no es rederivar la atención multi-head, sino llevar al lector al bucle de servicio: ¿qué historia debe leer el sistema tras generar cada token, qué estado escribir y cómo cambia el costo del siguiente paso? Solo estableciendo primero este libro de cuentas de recursos se comprende por qué "cuadrático versus lineal" es importante pero insuficiente.
+
+\subsection{Inferencia de atención: por qué el KV cache crece con el contexto}
+
+Durante la decodificación del Transformer, cada nueva consulta debe interactuar con todas las representaciones clave/valor históricas. Los sistemas prácticos no recalculan los estados ocultos pasados en cada paso, sino que almacenan en caché las claves y valores de cada capa; esto es el KV cache (caché de claves-valor). Las curvas del gráfico se alargan progresivamente, lo que indica que la consulta de los tokens subsiguientes debe acceder a un número creciente de posiciones históricas.
+
+\lecturefigure{slide-005.jpg}{Inferencia de atención: la caché por token hace que la memoria y las lecturas por paso crezcan con el contexto}{Grabación oficial de Stanford, 00:06:40--00:07:49}
+
+Si el modelo tiene $n_\ell$ capas, cada token guarda $n_{kv}$ cabezas KV por capa y cada cabeza tiene dimensión $d_h$, siendo $b$ el número de bytes por elemento, entonces la caché KV para una secuencia se aproxima como
+\[
+M_{\mathrm{KV}}\approx 2L\,n_\ell n_{kv}d_h b.
+\]
+El factor $2$ proviene de las claves y los valores; $L$ es el número de tokens almacenados en caché. La atención del paso $t$ lee $O(t)$ posiciones históricas; el trabajo total de atención para una decodificación ingenua se acumula en $O(L^2)$; sin embargo, esto no implica que toda la latencia cronológica crezca estrictamente según la misma constante, ya que los kernels, el empaquetado por lotes (batching), la banda ancha de memoria y el paralelismo modifican la curva real.
+
+\begin{knowledgebox}{Primera aparición: KV cache y MQA / GQA}
+El KV cache guarda las representaciones de claves/valores para los tokens históricos de cada capa, no el texto original. La atención Multi-Query (MQA) permite que varias cabezas de consulta compartan un conjunto de cabezas clave/valor; la atención Grouped-Query (GQA) permite que un grupo de cabezas de consulta comparta un grupo de cabezas clave/valor; ambas reducen el caché disminuyendo $n_{kv}$, pero mantienen un estado con resolución por token que crece linealmente con $L$.
+\end{knowledgebox}
+
+\teachervoice{00:07:07--00:08:03，Gu advierte que "KV cache" es solo el nombre generado por la fórmula del Transformer; el hecho de mayor nivel es que el modelo mantiene una base de datos de tokens en expansión, y es esta base de datos la que define sus características de memoria/cómputo.}
+
+\subsection{Inferencia SSM: doblar toda la historia en un estado finito}
+
+El SSM no guarda registros independientes para cada token, sino que actualiza el estado $h_t$ a medida que llega cada entrada. Al leer el gráfico, compare las dos filas superiores e inferiores: en la fila superior de atención, los tokens históricos pueden ser direccionados individualmente; en la fila inferior del modelo recurrente, solo queda la esfera de estado azul; los tokens tempranos ya han sido "escritos" en el estado y sus posiciones originales se descartan. La compresión no es una optimización secundaria, sino la definición misma del estado.
+
+\lecturefigure{slide-006.jpg}{Compromisos de alto nivel: atención guarda tokens históricos, SSM actualiza y conserva un estado comprimido}{Grabación oficial de Stanford, 00:07:50--00:08:49}
+
+Un tipo de SSM estructurado puede escribirse como
+\[
+h_t=A_t h_{t-1}+B_t x_t,
+\qquad
+y_t=C_t^{\top}h_t.
+\]
+Donde $x_t\in\mathbb{R}$ representa un canal de entrada, $h_t\in\mathbb{R}^{N}$ es el estado, $A_t\in\mathbb{R}^{N\times N}$ controla cómo se conserva el estado antiguo, $B_t\in\mathbb{R}^{N}$ controla cómo se escribe la nueva entrada y $C_t\in\mathbb{R}^{N}$ lee la salida $y_t$ desde el estado. Los modelos específicos suelen aprovechar estructuras diagonales, por bloques, de rango bajo o por cabeza; no se debe tomar directamente esta matriz densa como el costo de implementación.
+
+\begin{lstlisting}[caption={Comparación de interfaces de decodificación entre caché de atención y estado recurrente}]
+def attention_decode(prompt, steps, model):
+    kv_cache = model.prefill(prompt)
+    token = prompt[-1]
+    for _ in range(steps):
+        logits, kv_cache = model.decode_one(token, kv_cache)
+        token = sample(logits)
+        yield token
+
+def recurrent_decode(prompt, steps, model):
+    state = model.scan_prompt(prompt)
+    token = prompt[-1]
+    for _ in range(steps):
+        logits, state = model.step(token, state)
+        token = sample(logits)
+        yield token
+\end{lstlisting}
+
+\begin{importantbox}{La complejidad proviene de la interfaz de memoria}
+La ventaja de la atención es que cualquier posición histórica sigue siendo accesible con precisión; el costo es que el estado crece con el contexto. La ventaja del SSM es que el tamaño del estado se desacopla de la longitud del contexto; el costo es que el pasado debe compartir una capacidad finita. Lo que se llama cuadrático versus lineal no son etiquetas Big-O aisladas, sino las consecuencias computacionales de "preservar detalles por token" versus "comprimir continuamente la historia".
+\end{importantbox}
+
+\begin{warningbox}{Tiempo lineal no significa siempre más rápido}
+Una recurrencia lineal sin un kernel eficiente podría perder en GPUs reales frente a una atención altamente optimizada. Por el contrario, kernels fusionados como FlashAttention (que combinan múltiples operaciones de GPU en un solo kernel para reducir las lecturas/escrituras de HBM y la sobrecarga de lanzamiento) pueden mejorar significativamente la constante de la atención. Las notas siguientes comparan interfaces de modelado; las conclusiones de despliegue deben incluir siempre benchmarks de hardware.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El estado de generación del Transformer es una caché KV con resolución por token que crece con el contexto; el estado de generación del SSM es un estado recurrente comprimido de tamaño fijo. Lo primero escribe en la interfaz el recall preciso; lo segundo escribe en la interfaz las actualizaciones en línea y la compresión. Próximamente debe responderse: ¿cómo puede un estado finito caber, escribir con precisión y calcular rápido durante el entrenamiento? Esto son exactamente los tres diseños centrales del SSM moderno.
+\section{Tres pilares centrales de los SSM modernos: capacidad, selectividad y entrenabilidad}
+
+Describir el recurrence en dos fórmulas es aún insuficiente. Los RNN tradicionales ya tenían un estado oculto (hidden state), y las primeras versiones de linear attention también podían ser recursivas; lo que hace verdaderamente efectivos a los SSM modernos es que resuelven simultáneamente tres problemas interdependientes: si la capacidad del estado es suficiente, si la actualización puede seleccionar qué memorizar y si el entrenamiento puede evitar la ejecución secuencial paso a paso. Las tres diapositivas de reemplazo deben leerse por separado, ya que no corresponden a una misma página acumulada.
+
+\subsection{Ingrediente 1: expansión del estado para superar el cuello de botella de memoria}
+
+Si cada canal de entrada utiliza un solo estado escalar, el modelo pronto se encuentra con un límite de capacidad. La expansión del estado (state expansion) hace que cada canal de entrada corresponda a un estado de $N$ dimensiones, permitiendo al modelo mantener múltiples características de decaimiento, frecuencia o memoria en la misma escala temporal. La pregunta mostrada en la figura derecha ("¿cuánto mide el estado y cuánto puede recordar?") es un problema arquitectónico; no equivale a aumentar ciegamente el ancho (model width) de toda la capa.
+
+\lecturefigure{slide-007.jpg}{Ingrediente 1 del SSM: tamaño del estado vs. expansión del estado}{Video oficial de Stanford, 00:09:49--00:10:56}
+
+Para una entrada con tamaño de lote (batch size) $B$, longitud de secuencia $L$ y número de canales $D$, el tensor de estados conceptualmente puede verse como $B\times D\times N$. Durante el entrenamiento, generalmente no se puede materializar completamente el estado en cada paso temporal en la memoria de alta velocidad (HBM), lo que de otro modo haría que la memoria de activaciones creciera aproximadamente con $BLDN$; por ello, las implementaciones posteriores mediante escaneo (scan), recomputación o fusión forman parte del mismo paquete de diseño que la expansión del estado.
+
+\begin{knowledgebox}{El tamaño del estado no significa "poder recordar $N$ tokens"}
+$N$ es la dimensión del estado, no un contador de slots discretos. El estado representa información superpuesta mediante valores distribuidos; un $N$ mayor aumenta la capacidad de representación, pero no garantiza la preservación exacta de los $N$ últimos hechos históricos. La capacidad de recordar también depende de la actualización, las señales de entrenamiento, la estabilidad numérica y la estructura de la tarea.
+\end{knowledgebox}
+
+\subsection{Ingrediente 2: la selectividad determina qué escribir y qué olvidar}
+
+Una vez que hay suficiente capacidad, el modelo debe controlar el flujo de información. Los sistemas lineales invariantes en el tiempo (LTI) con $A$ y $B$ fijos aplican la misma regla de actualización a cada token; esto es adecuado para señales estacionarias y comprimibles, pero resulta difícil manejar las altas tasas de variación de información presentes en el lenguaje. Las SSM selectivas hacen que los parámetros dependan de la entrada, permitiendo al token actual decidir cuánto conservar del estado anterior y cuánto escribir de nueva información.
+
+\lecturefigure{slide-008.jpg}{Ingrediente 2 del SSM: transición dependiente de la entrada aporta selectividad / puertas (gating)}{Video oficial de Stanford, 00:10:57--00:12:22}
+
+Abstrayendo la actualización como
+\[
+h_t=f_\theta(h_{t-1},x_t)
+=A(x_t)h_{t-1}+B(x_t)x_t.
+\]
+Si en alguna dimensión $A(x_t)\approx 1$ y $B(x_t)\approx 0$, el modelo se comporta aproximadamente como "mantener el recuerdo antiguo e ignorar la entrada actual"; si $A(x_t)\approx 0$ y $B(x_t)$ es grande, entonces se comporta como "borrar el contenido antiguo y escribir la entrada actual". Los modelos reales utilizan puertas (gating) continuas en lugar de interruptores duros, pero estos dos extremos proporcionan la intuición pedagógica para la selectividad.
+
+\begin{lstlisting}[caption={Pseudocódigo didáctico de la actualización recurrente selectiva}]
+def selective_step(x_t, state, parameters):
+    keep = sigmoid(parameters.keep_projection(x_t))
+    write = parameters.write_projection(x_t)
+    candidate = parameters.input_projection(x_t)
+    next_state = keep * state + write * candidate
+    output = parameters.readout(next_state, x_t)
+    return output, next_state
+\end{lstlisting}
+
+\begin{warningbox}{La selectividad no implica memoria lógica gratuita}
+Aunque la transición dependiente de la entrada mejora la expresividad para decidir "cuándo escribir y cuándo olvidar", no aprenderá automáticamente variables simbólicas, pila o índices de base de datos. Si la supervisión no requiere guardar cierta información, las puertas aún podrían olvidarla; si la capacidad del estado o las condiciones numéricas son insuficientes, ninguna puerta por inteligente tendrá dónde almacenar la información.
+\end{warningbox}
+
+\subsection{Escaneo paralelo: reescribir el significado secuencial para un entrenamiento paralelo}
+
+La definición de recurrence es serial en el tiempo, pero el entrenamiento no necesariamente lo ejecuta token a token. Para las actualizaciones lineales, se pueden representar los intervalos adyacentes como transformaciones afines y utilizar la propiedad asociativa para realizar una reducción en árbol (tree reduction) o escaneo asociativo (associative scan). Esto preserva el significado recurrente mientras reduce la profundidad de entrenamiento de $O(L)$ a un nivel paralelo de $O(\log L)$; modelos como Mamba-2 y Gated DeltaNet incluso reescriben esto aún más mediante multiplicaciones matriciales en bloques (chunked matrix multiplication).
+
+\lecturefigure{slide-009.jpg}{Ingrediente 3 del SSM: escaneo asociativo y reescritura de matmul resuelven la eficiencia del entrenamiento}{Video oficial de Stanford, 00:12:23--00:13:39}
+
+Definimos la transformación de un solo paso como $T_t(h)=A_t h+b_t$, donde $b_t=B_t x_t$. La combinación de dos transformaciones es
+\[
+(A_2,b_2)\circ(A_1,b_1)
+=\left(A_2A_1,\;A_2b_1+b_2\right).
+\]
+Esta combinación satisface la propiedad asociativa, por lo que se puede realizar un escaneo paralelo. El punto clave aquí no es convertir el recurrence en atención, sino encontrar un resumen asociativo que permita comprimir varios intervalos de manera independiente antes de combinarlos en una transformación de estado para un prefijo más largo.
+
+\begin{lstlisting}[caption={Composición asociativa del recurrence afín}]
+def compose(right, left):
+    A_right, b_right = right
+    A_left, b_left = left
+    return A_right @ A_left, A_right @ b_left + b_right
+
+# parallel_prefix_scan aplica compose en un orden de árbol.
+prefix_transforms = parallel_prefix_scan(compose, step_transforms)
+\end{lstlisting}
+
+\teachervoice{00:12:23--00:13:29, el orador enfatiza que aumentar el estado y mejorar la actualización haría que el modelo fuera más difícil de calcular; uno de los objetivos centrales del trabajo moderno es aprovechar la estructura lineal, el escaneo y la reescritura de matmul en bloques para completar el entrenamiento sin materializar grandes estados paso a paso según el tiempo.}
+
+\subsection{Mamba: la innovación está en la combinación, no en tres invenciones aisladas}
+
+La expansión del estado existía en SSM tempranos/atención lineal, las puertas (gating) provienen de RNN clásicos y el escaneo paralelo también tenía precedentes. La contribución clave de Mamba es combinar los tres en un sistema realmente competitivo para lenguajes densos en información. Al leer la figura, se deben considerar los tres puntos como condiciones necesarias conjuntas: si falta uno, el modelo podría tener capacidad insuficiente, actualizaciones demasiado rígidas o un entrenamiento insoportable.
+
+\lecturefigure{slide-010.jpg}{Mamba como SSM selectivo: combinación de tamaño del estado, actualización del estado y eficiencia}{Video oficial de Stanford, 00:14:20--00:14:59}
+
+\begin{importantbox}{Posicionamiento didáctico de Mamba}
+Esta clase no presenta a Mamba como una "alternativa lineal al Transformer", sino como una integración sistémica: usar un estado más grande para proporcionar capacidad, la selectividad para controlar la información y el escaneo/matmul reescrito ejecutable en hardware para mantener la eficiencia del entrenamiento. Juntos, los tres modificaron el límite de usabilidad de los modelos recurrentes.
+\end{importantbox}
+
+\subsection{Tabla de modelos modernos: las similitudes merecen estudiarse antes que las diferencias en las fórmulas}
+
+La siguiente tabla resume (como diapositiva) el recurrence y la lectura (readout) de modelos como Atención Lineal, DeltaNet, S4, Mamba, GLA, RWKV, mLSTM, Mamba-2, entre otros. En la primera pasada, no se deben memorizar las fórmulas línea por línea, sino buscar primero las similitudes horizontales: todos deciden cómo decae el estado, cómo escribe productos externos o vectores y cómo lee una salida dependiente de la consulta (query). Solo cuando se haya determinado claramente la necesidad de la tarea vale la pena profundizar en la parametrización de una línea específica.
+
+\lecturefigure{slide-011.jpg}{Comparación del recurrence y problemas comunes en modelos recurrentes/atención lineales modernos}{Video oficial de Stanford, 00:15:00--00:16:19}
+
+\begin{knowledgebox}{Juicio de ingeniería de clase: congelado el 2026-04-16}
+En ese momento, el orador denominó a Mamba-2 y Gated DeltaNet como opciones más "probadas y verdaderas" para grandes escalas: estas últimas suelen ser más potentes pero también más lentas. Mamba-3 fue lanzado recientemente el 2026-03-16 y aún no ha sido validado ampliamente a gran escala. Este juicio es un fotograma de clase y no debe escribirse como un ranking permanente.
+\end{knowledgebox}
+
+\begin{warningbox}{La paridad en perplexidad no implica paridad en capacidad}
+La perplexidad es la exponencial de la entropía cruzada, $\exp(H)$, que puede entenderse intuitivamente como el "número efectivo de opciones" con las que se enfrenta el modelo para cada token; cuanto menor sea, mejor suele ser. Sin embargo, depende fuertemente del tokenizer y la distribución de datos, por lo que no puede demostrar por sí sola la equivalencia en recuperación, razonamiento, seguimiento de estado o tareas posteriores (downstream). Gu también afirma explícitamente que "los modelos recurrentes pueden competir" es primero una conclusión a gran escala (coarse-grained) sobre la perplexidad.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La usabilidad de los SSM modernos proviene de tres capacidades coordinadas: un estado suficientemente grande para proporcionar capacidad, actualizaciones dependientes de la entrada para ofrecer selectividad y escaneo asociativo/reescritura de matmul para garantizar la entrenabilidad. Mamba combina estos componentes históricos en un sistema efectivo; los modelos posteriores continúan optimizando principalmente la parametrización del estado y las rutas de cálculo. Una vez comprendido este marco común, el próximo capítulo puede dejar las fórmulas específicas de lado temporalmente para comparar directamente los límites de capacidad de los dos tipos de estados autoregresivos.
+
+
+\section{Estado autoregresivo: base de datos, cerebro e híbrido}
+
+La capítulo anterior explicó cómo se construye el estado recurrente; en este capítulo se orienta hacia cómo cambia el comportamiento del modelo. La postura de Gu es que cualquier modelo autoregresivo lleva consigo un estado de paso a paso (stepwise state), y las diferencias arquitectónicas pueden reducirse primero a «qué se guarda en el estado y cómo se accede a él». Esta abstracción coloca a los transformadores y a los SSM en el mismo sistema de coordenadas, haciendo que el recall, el seguimiento de estado (state tracking), la interacción en línea (online interaction) y el diseño híbrido sean simplemente diferentes facetas del mismo problema.
+
+\subsection{Cada modelo autoregresivo tiene un estado}
+
+Para generadores genéricos, se puede escribir el paso $t$ como:
+\[
+s_t=U_\theta(s_{t-1},x_t),
+\qquad
+p(x_{t+1}\mid x_{\le t})=R_\theta(s_t).
+\]
+Donde, $s_t$ es el estado autoregresivo, $U_\theta$ es la actualización y $R_\theta$ es la lectura. El $s_t$ de los SSM es un estado recurrente de forma fija; el $s_t$ de los transformadores incluye además el caché KV de todas las capas. Ambos cumplen con la descripción de una máquina de estados, aunque su espacio de estados y formas de acceso son radicalmente diferentes.
+
+\lecturefigure{slide-012.jpg}{Abstracción clave: todos los modelos autoregresivos pueden verse como portadores de un estado de paso a paso}{Grabación oficial de Stanford, 00:16:20--00:17:19}
+
+\begin{importantbox}{El estado es «lo que queda en la memoria entre pasos»}
+Esta definición es más amplia que si el modelo tiene o no una capa recurrente. Un transformador no es un RNN tradicional en su grafo de red, pero en el bucle de decodificación autoregresivo sigue pasando el caché KV de un paso al siguiente, por lo que también tiene estado. Comparar modelos usando esta definición evita confundir las etiquetas del grafo de cómputo con la esencia de las capacidades.
+\end{importantbox}
+
+\subsection{Base de datos versus cerebro: una analogía útil pero peligrosa}
+
+El caché del transformador funciona como una base de datos: cada token histórico tiene su propia entrada y una nueva consulta puede realizar búsqueda por contenido sobre cualquier registro. El estado comprimido fijo de los SSM se parece más a la memoria de trabajo humana: la nueva experiencia reescribe continuamente el mismo estado; algunos detalles pueden perderse, pero el sistema puede operar en línea constantemente. En las imágenes, «base de datos» y «cerebro» no son juicios de valor, sino una comparación entre indexación precisa y compresión distribuida.
+
+\lecturefigure{slide-013.jpg}{Analogía a gran escala: los transformadores son como bases de datos, los SSM como estados cerebrales comprimidos}{Grabación oficial de Stanford, 00:17:20--00:18:39}
+
+\teachervoice{En la Q\&A entre 01:01:22 y 01:03:31, Gu advierte activamente que estas analogías cerebrales son «muy, muy gruesas»; él mismo no es neurocientífico. El cerebro humano se usa solo como una heurística existencial para demostrar que un estado en línea limitado puede soportar inteligencia; no se puede usar para probar la plausibilidad biológica de los SSM.}
+
+\begin{warningbox}{Alcance de la analogía}
+«Base de datos» no significa que los transformadores ejecuten realmente SQL; «cerebro» tampoco implica que los SSM repliquen circuitos neuronales. Esta analogía solo describe la interfaz de memoria: uno conserva registros por posición y soporta acceso preciso, mientras que el otro escribe la historia en un estado distribuido limitado. No hay evidencia para inferencias biológicas, sobre la conciencia o la AGI que vayan más allá de esta interfaz.
+\end{warningbox}
+
+\subsection{Las dos caras del SSM: procesamiento en línea y pérdida de recuperación}
+
+El estado fijo permite que la recurrencia reciba flujos de datos continuamente mediante una interfaz constante, lo cual es adecuado para el habla, control, series temporales y agentes interactivos. Sin embargo, esa misma compresión debilita la evidencia a granularidad fina para citas exactas, recall asociativo, aguja en un heno (needle-in-a-haystack) y preguntas generales (general QA). Al leer las figuras, se debe considerar los puntos verdes de ventaja y los grises de desventaja como dos caras del mismo mecanismo, no como fenómenos de benchmark mutuamente inconexos.
+
+\lecturefigure{slide-014.jpg}{Resumen temprano de compromisos: conflicto entre procesamiento en línea con estado y recuperación a granularidad fina}{Grabación oficial de Stanford, 00:18:40--00:19:39}
+
+Se puede expresar este conflicto usando la intuición del cuello de botella informativo: si la capacidad de $s_t$ es limitada, mientras que la información relevante para tareas contenida en el pasado $x_{\le t}$ crece constantemente, la actualización $U_\theta$ debe elegir qué estadísticas conservar. Para tareas de control, las dinámicas recientes y un estado suficiente de baja dimensión pueden ser suficientes; para tareas de citas textuales, cualquier compresión irreversible podría borrar la respuesta.
+
+\begin{knowledgebox}{El seguimiento de estado y la recuperación no son la misma capacidad}
+El seguimiento de estado requiere actualizar continuamente «en qué estado se encuentra ahora», por ejemplo contadores, posiciones en juegos o variables latentes de sistemas de control; la recuperación requiere recuperar con precisión algún hecho antiguo a partir de un contexto largo. Un estado limitado puede ser muy hábil en lo primero pero débil en lo segundo. El objetivo principal de Mamba-3 es precisamente mejorar el seguimiento de estados complejos, aunque esto aún no equivale a obtener una base de datos completa de tokens.
+\end{knowledgebox}
+
+\subsection{Híbrido: permitir que el estado comprimido haga el procesamiento principal y que la atención realice búsquedas externas}
+
+Si la compresión interna y la búsqueda externa precisa son complementarias, el sistema más natural es el híbrido. Las figuras listan H3, Jamba, Zamba, Samba y otros que entrelazan capas recurrentes/lineales con capas de atención. El ponente utiliza la intuición de «cerebro + bloc de notas» (scratchpad) para explicar por qué una red podría necesitar muchas capas comprimidas, complementadas luego con pocas capas de atención para realizar búsquedas exactas.
+
+\lecturefigure{slide-015.jpg}{Modelos híbridos: entrelazar SSM y atención, cuestionando la proporción razonable de capas}{Grabación oficial de Stanford, 00:20:00--00:21:39}
+
+\begin{lstlisting}[caption={Pseudocódigo didáctico de un pila híbrida con atención insertada periódicamente}]
+def build_hybrid_stack(depth, attention_period):
+    layers = []
+    for layer_index in range(depth):
+        if (layer_index + 1) % attention_period == 0:
+            layers.append(AttentionBlock())
+        else:
+            layers.append(RecurrentBlock())
+    return layers
+\end{lstlisting}
+
+\teachervoice{Entre 00:20:31 y 00:21:26, los trabajos tempranos obtenían una relación SSM-atención de aproximadamente 10:1 en perplexity. Para 2026, el ponente observa que los nuevos modelos suelen usar al menos 3:1 o 4:1. Este cambio por sí solo indica que la relación no es constante, sino que deriva con el modelo, el entrenamiento y los objetivos de capacidad.}
+
+\begin{warningbox}{No escriba 10:1 como una ley óptima}
+La proporción depende del ancho de la capa, el tamaño del estado, el tipo de atención, los datos de entrenamiento, el tokenizador, el presupuesto de parámetros y la evaluación. Más importante aún, los experimentos antiguos se centraron principalmente en la perplexity; cuando se necesita recuperación, uso de herramientas o alineación multimodal, la frecuencia óptima de atención puede ser completamente diferente. La práctica razonable es tratar la proporción como un punto de partida para ablation.
+\end{warningbox}
+
+\begin{importantbox}{La compresión puede ser una capacidad, no solo un compromiso}
+Varias ablations híbridas prefieren más capas lineales/recurrentes incluso sin considerar la velocidad, lo que debilita la explicación de que el estado limitado sirve solo para ahorrar potencia de cómputo. La compresión obliga al modelo a formar resúmenes relevantes para la tarea, lo cual puede ayudar en el seguimiento de estado y la construcción de abstracciones; las ablations posteriores de la etapa externa de H-Net darán evidencia más directa.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+El estado autoregresivo reduce diferentes arquitecturas a una interfaz unificada. El caché tipo base de datos de los transformadores es hábil para el recall a granularidad fina; el estado comprimido tipo cerebro de los SSM es hábil para actualizaciones en línea, pero sacrifica la recuperación precisa. El híbrido no es un plato combinado de compromisos, sino una división del trabajo entre dos primitivas de memoria. En el capítulo siguiente se indagará más: ¿por qué la atención es tan sensible a la «granularidad y semántica» de los tokens?
+\section{El supuesto oculto de la atención: los datos deben estar en el nivel de abstracción correcto}
+
+Se malinterpreta frecuentemente "Attention is all you need" como que cualquier secuencia cruda cortada por posiciones puede enviarse directamente a un Transformer. Los sistemas reales casi siempre tienen un encoder, un patchifier o un tokenizer que convierten señales crudas de alta resolución en unidades menos numerosas, más estables y con mayor contenido semántico. Este capítulo eleva el \texttt{preprocessing} desde una nota al pie de ingeniería hasta un \textit{architecture contract}: la atención es responsable de los tokens que recibe, pero no tiene libertad para redefinirlos automáticamente.
+
+\subsection{Mito: datos crudos directamente en Transformer}
+
+El siguiente diagrama simplificado está diseñado deliberadamente para ser tentador: la entrada entra al Transformer y la salida aparece naturalmente. Este pipeline parece válido a nivel de API, pero oculta todo el trabajo de representación de los datos. El conferencista lo llama mito no porque el Transformer sea débil, sino porque las aplicaciones exitosas suelen transformar primero los datos crudos en una representación adecuada para comparar token por token.
+
+\lecturefigure{slide-016.jpg}{Mito: entregar cualquier dato crudo directamente al Transformer}{Grabación oficial de Stanford, 00:23:00--00:23:29}
+
+\subsection{Realidad: la atención está entre el encoder y el decoder}
+
+El pipeline real suele ser \texttt{encoder} $\rightarrow$ \texttt{Transformer} $\rightarrow$ \texttt{decoder}. La función del encoder no es solo reducir la resolución, sino mapear señales locales, ruidosas o continuas a un nivel de abstracción con el que la atención puede comparar efectivamente. El texto rojo en el diagrama, "right level of abstraction", es la frase central de la segunda mitad de la clase.
+
+\lecturefigure{slide-017.jpg}{Realidad: la atención generalmente actúa sobre representaciones ya pre-comprimidas}{Grabación oficial de Stanford, 00:23:30--00:23:59}
+
+\begin{importantbox}{La atención es "beholden" a la tokenización}
+La atención \texttt{Softmax} puede remezclar las representaciones de los tokens, pero no puede revocar información perdida por la segmentación inicial, ni puede dividir automáticamente un token en múltiples unidades direccionables sin aumentar la longitud de la secuencia. Por lo tanto, la resolución, los límites y el contenido semántico de las unidades de entrada cambian profundamente la dificultad de aprendizaje del modelo.
+\end{importantbox}
+
+\subsection{Modalidades perceptuales: el patchifier crea tokens visuales primero}
+
+Vision Transformer no aplica atención global a cada píxel, sino que corta la imagen en parches, los proyecta linealmente a tokens y luego los ingresa al Transformer. El \texttt{Patch size} determina el costo computacional y el detalle: un parche más pequeño aumenta la resolución pero alarga la secuencia; un parche más grande reduce el costo de atención pero puede mezclar varios objetos o límites.
+
+\lecturefigure{slide-018.jpg}{Las modalidades perceptuales (imagen, video, audio) pasan primero por un patchifier}{Grabación oficial de Stanford, 00:24:00--00:24:29}
+
+Si la imagen tiene dimensiones $H,W$ y el \texttt{patch size} es $P\times P$, entonces el número de tokens es aproximadamente
+\[
+L_{\mathrm{vision}}=\frac{H}{P}\frac{W}{P}.
+\]
+Reducir $P$ a la mitad duplicaría el número de tokens, aumentando el trabajo par a par de la atención completa en aproximadamente dieciséis veces. El cuello de botella aquí no es que los datos visuales "no puedan usar Transformer", sino que la resolución cruda debe organizarse primero en un flujo de tokens manejable.
+
+\subsection{Modalidades discretas: el tokenizer define las unidades lingüísticas primero}
+
+Aunque el lenguaje y las secuencias genéticas parecen ya discretos, \texttt{character}, \texttt{byte} o \texttt{base pair} a menudo no son las unidades de modelado más útiles. Byte Pair Encoding (BPE, codificación de pares de bytes) combina símbolos de bajo nivel en tokens más largos mediante reglas de fusión frecuentes; esto acorta la secuencia e inyecta un sesgo inductivo de límites y patrones repetitivos.
+
+\lecturefigure{slide-019.jpg}{El lenguaje y la genómica a menudo pasan primero por un tokenizer antes de ir al Transformer}{Grabación oficial de Stanford, 00:24:30--00:24:59}
+
+\begin{knowledgebox}{Primera aparición: Token, Tokenizer y Vocabulario}
+Un \term{Token} es la unidad discreta que el modelo procesa y direcciona en un momento dado; un \term{tokenizer} mapea una cadena cruda a un id de token; un \term{vocabulary} es el conjunto finito de tokens disponibles. Un token BPE no debe ser necesariamente una palabra completa ni posee automáticamente "significado real", pero suele contener estructuras repetitivas como palabras, raíces, prefijos, sufijos y límites de espacio en blanco, por lo que está más cerca de las unidades composables con las que la atención se desempeña bien que un solo carácter.
+\end{knowledgebox}
+
+\subsection{Los problemas de tokenización existen realmente, pero también son prácticos para la ingeniería}
+
+La lista de Karpathy muestra casos límite del tokenizer: ortografía, números, espacios en blanco y cadenas raras. El conferencista no afirma que estos problemas hagan que los LLM actuales sean inutilizables; por el contrario, admite que la ingeniería de datos y los trucos con prompts pueden arreglar muchas de estas manifestaciones. La motivación de investigación es: si un modelo puede aprender las unidades desde los datos crudos de extremo a extremo, no es necesario congelar heurísticas humanas permanentemente en la entrada de datos.
+
+\lecturefigure{slide-020.jpg}{Sin tokenización: la tensión entre usabilidad práctica e ideal extremo-a-extremo}{Grabación oficial de Stanford, 00:25:00--00:26:39}
+
+\teachervoice{00:25:18--00:26:39, Gu explica el problema bajo la lección amarga: la ingeniería de características puede ser efectiva a escala actual, pero los sistemas más generales que aprenden automáticamente desde datos crudos suelen beneficiarse más del escalamiento a largo plazo.}
+
+\begin{warningbox}{"Sin tokenizer" no significa eliminar el preprocessing}
+Un modelo \texttt{Tokenizer-free} aún requiere embedding de bytes, un encoder local, enrutamiento, reducción de resolución y decoder. La diferencia radica en si estos pasos se aprenden conjuntamente con el modelo de lenguaje o pueden cambiar según el contexto, más que en que el sistema carezca por completo de transformaciones de representación.
+\end{warningbox}
+
+\subsection{Evidencia a nivel de carácter/byte: gastar más cómputo de atención no cierra la brecha}
+
+Este diagrama compara MambaByte con LlamaByte. El eje horizontal es el número de bytes entrenados y el eje vertical es la pérdida de validación; los modelos y FLOPs están ajustados lo mejor posible. Primero comparamos MambaByte (azul) con atención por ventana deslizante (morada), luego con la línea base de atención global discontinua: incluso usando más cómputo, la curva de atención global no alcanza a MambaByte, lo que indica que la brecha no es solo "atención demasiado lenta".
+
+\lecturefigure{slide-021.jpg}{Modelado del lenguaje a nivel de carácter/byte: curvas de escalamiento de MambaByte vs línea base de atención}{Grabación oficial de Stanford, 00:26:40--00:28:49}
+
+La métrica común a nivel de byte, bits per byte (BPB, bits por byte), se define como
+\[
+\mathrm{BPB}=-\frac{1}{L\ln 2}\sum_{t=1}^{L}\ln p(x_t\mid x_{<t}).
+\]
+Donde $L$ es el número de bytes y $p(x_t\mid x_{<t})$ es la probabilidad condicional del byte correcto. Cuanto menor sea el BPB, mejor; comparado con la perplexidad a nivel de token, evita problemas de unidades inconsistentes al comparar diferentes tokenizers, aunque sigue estando influenciado por el conjunto de datos, la longitud del contexto y el presupuesto del modelo.
+
+\begin{knowledgebox}{Lectura de la figura: primero las condiciones emparejadas, luego la atención global}
+La primera conclusión es que los modelos recurrentes tienen curvas más bajas bajo condiciones de tamaño y datos iguales; la segunda capa es que incluso con más FLOPs, la atención global no invierte el resultado. La figura no prueba que todas las tareas a nivel de byte estén gobernadas por SSM, pero apoya la idea de que "la resolución de entrada cambia la eficiencia de modelado de la atención".
+\end{knowledgebox}
+
+\subsection{Evidencia del ADN: la brecha es aún más notable sin un tokenizer estilo lenguaje natural}
+
+Las secuencias de ADN tienen solo unos pocos símbolos de base; un solo par de bases generalmente no es una unidad semántica de alto nivel direccionable independientemente. El ajuste de parámetros en el diagrama muestra que, bajo esta configuración autorregresiva del genoma humano, Mamba alcanza resultados similares con aproximadamente un tercio de los parámetros de Transformer++. Aquí se debe leer "eficiencia de parámetros en esta tarea y métrica", no "todas las SSM son tres veces mejores que Transformer en el ADN".
+
+\lecturefigure{slide-022.jpg}{Escalamiento del modelo de lenguaje de ADN: comparación de eficiencia de parámetros entre Mamba y Transformer++}{Grabación oficial de Stanford, 00:28:50--00:29:29}
+
+\begin{warningbox}{Las curvas transversales no pueden extrapolarse directamente}
+El alfabeto, las dependencias de largo alcance y el objetivo de evaluación del preentrenamiento del genoma difieren del lenguaje natural. Que una arquitectura domine la predicción del siguiente par de bases no implica automáticamente que también domine la interpretación de variantes, la regulación génica o las tareas clínicas; las capacidades downstream deben verificarse por separado.
+\end{warningbox}
+
+\subsection{Tokens efectivos: ¿qué unidad merece ser caché?}
+
+El conferencista plantea dos preguntas prácticas. Primero, ¿vale la pena cachear una representación para cada unidad de entrada? Segundo, ¿tiene sentido prestar atención dura a una sola unidad? Las subpalabras suelen ser morfemas composables, mientras que los caracteres y las bases del ADN rara vez son unidades semánticas independientes, y los parches visuales dependen de si contienen objetos, texturas o fondo vacío. Esta lista de verificación es más transferible que "usar siempre cierta arquitectura".
+
+\lecturefigure{slide-023.jpg}{Tokens efectivos para atención: valor de caché, atención dura y granularidad modal}{Grabación oficial de Stanford, 00:29:30--00:32:59}
+
+La atención estándar se puede escribir como
+\[
+\operatorname{Attn}(q,K,V)
+=\sum_{i=1}^{L}\alpha_i v_i,
+\qquad
+\alpha_i=\frac{\exp(q^\top k_i/\sqrt d)}{\sum_j\exp(q^\top k_j/\sqrt d)}.
+\]
+Donde $q$ es la consulta actual, $k_i,v_i$ son la clave y valor del $i$-ésimo token, $d$ es la dimensión de la cabeza y $\alpha_i$ son los pesos de atención suave. La heurística de atención dura se refiere a esto: si una decisión razonable requiere frecuentemente concentrar el peso en pocas unidades, cachear por token es natural; si las propias unidades tienen mucho ruido o poco contenido semántico, puede ser más racional que el modelo comprima primero y luego busque.
+
+\begin{importantbox}{Un diagnóstico arquitectónico accionable}
+En lugar de preguntar "¿Transformer o SSM es más avanzado?", pregunte: \textbf{¿mis unidades de datos actuales merecen ser cachéadas a largo plazo? ¿Merece una unidad individual ser recuperada con precisión?} Si la respuesta suele ser no, priorice compresión aprendida, jerarquía, encoder local o capa recurrente; si la respuesta suele ser sí, la base de datos de tokens de atención tiene gran valor.
+\end{importantbox}
+
+\subsection{Por qué los modelos compresivos son comunes en multimodalidad}
+
+Los anillos del diagrama clasifican las aplicaciones tempranas de Mamba por dominio; visión/imagen ocupan la mayor parte, mientras que lenguaje/NLP es solo una parte. Esta distribución no puede usarse como benchmark de rendimiento porque incluye tendencias de seguimiento y trabajos con distintos niveles de madurez; funciona mejor como señal de demanda: en visión, series temporales, audio y robótica, las personas carecen generalmente de heurísticas de tokenización tan maduras como BPE.
+
+\lecturefigure{slide-024.jpg}{Aplicación modal amplia de los modelos compresivos: no solo lenguaje}{Grabación oficial de Stanford, 00:33:00--00:34:09}
+
+\teachervoice{00:32:59--00:34:12, Gu mantiene explícitamente el escepticismo: algunas aplicaciones de Mamba pueden ser solo seguir la moda; pero dado que audio, series temporales y visión son difíciles de tokenizar bien, la compresión natural se vuelve un sesgo inductivo atractivo.}
+
+\subsection{Resumen de la sección}
+
+El poder de la atención se basa en tokens adecuados. El patchifier y el tokenizer realizan simultáneamente reducción de resolución, adición de límites e introducción de unidades semánticas; cuando faltan estas heurísticas, cachear carácter por carácter, byte por byte, base por base o parche por parche puede desperdiciar capacidad y aumentar distractores. Las curvas de bytes y ADN apoyan la interacción arquitectura-resolución, pero no permiten generalizar un único ganador. El próximo capítulo introduce H-Net: convertir "comprimir primero en tokens efectivos" de una regla offline a un proceso aprendible internamente del modelo.
+
+
+\section{H-Net: convertir la tokenización en una jerarquía aprendible}
+
+El capítulo anterior señaló que el propósito de la tokenización no es solo acortar las secuencias, sino crear unidades sobre las que puede actuar eficazmente la atención. El objetivo de diseño de H-Net no es simplemente cambiar un tokenizer, sino integrar la segmentación, la compresión y el modelado de secuencias en una misma red end-to-end, permitiendo que el modelo aprenda recursivamente múltiples niveles de abstracción. Además, explica cómo Transformer y SSM pueden asumir responsabilidades distintas a diferentes resoluciones dentro de la misma arquitectura.
+
+\subsection{Dynamic chunking: los límites son predicciones dependientes del contexto}
+
+H-Net comienza desde unidades de bajo nivel como el byte; un encoder genera sus representaciones y luego predice en qué posiciones se ubican los límites de los chunks. Los límites verdes/coloridos a la derecha de la figura exploran activamente durante las primeras etapas del entrenamiento, alineándose gradualmente más tarde con espacios, subwords y combinaciones de niveles superiores; no son etiquetas manuales ni garantizan ser equivalentes a tokens lingüísticos, sino que se moldean conjuntamente por el loss de modelado de lenguaje en decisiones de compresión.
+
+\lecturefigure{slide-025.jpg}{H-Net: aprender chunks dinámicos dependientes de los datos desde una secuencia raw}{Grabación oficial de Stanford, 00:34:10--00:37:19}
+
+Sea $z_1,\ldots,z_L$ la salida del encoder y sea el head de enrutamiento responsable de las probabilidades de los límites:
+\[
+r_t=\sigma(w^\top z_t+b),
+\qquad
+m_t\in\{0,1\},\quad m_t\sim\operatorname{Route}(r_t).
+\]
+Donde $r_t$ representa la tendencia de la posición $t$ para ser el final del chunk y $m_t$ es la decisión de enrutamiento. Si el chunk $j$ cubre el intervalo $I_j$, su resumen puede expresarse como
+\[
+c_j=\operatorname{Pool}\{z_t:t\in I_j\}.
+\]
+El H-Net real requiere un enrutamiento diferenciable, suavizado, normalización y optimización consciente de las etapas; la ecuación anterior solo muestra la interfaz para "predecir límites y agregar intervalos".
+
+\teachervoice{00:35:07--00:37:17, el orador describe una animación del entrenamiento: inicialmente el modelo ignora los límites, luego se estabilizan cerca de espacios y subwords con significado; las combinaciones multinivel pueden formar grupos parecidos a frases. Este fenómeno es evidencia de compresión aprendida, no de la verdad de fondo (ground truth) del tokenizer.}
+
+\subsection{Arquitectura completa: chunking, modelo principal y deschunking}
+
+La figura izquierda muestra una jerarquía en forma de ampolla: una secuencia de grano fino pasa primero por un encoder externo y el proceso de chunking para acortarse; el modelo principal opera luego sobre unidades más gruesas y finalmente el deschunking expande las representaciones a la resolución original antes de que el decoder realice predicciones autoregresivas. La figura derecha despliega el módulo de enrutamiento y suavizado. Al observar esta imagen, cabe destacar que el modelo principal puede ser un Transformer; H-Net no implica "deshabilitar la atención en toda la red".
+
+\lecturefigure{slide-026.jpg}{Arquitectura de H-Net: chunking multinivel, modelo principal, deschunking y estabilización de señales}{Grabación oficial de Stanford, 00:37:20--00:40:39}
+
+\begin{lstlisting}[caption={Flujo de datos didáctico para una sola jerarquía de H-Net}]
+def hnet_stage(fine_sequence, outer_encoder, router, main_model, decoder):
+    fine_features = outer_encoder(fine_sequence)
+    boundary_scores = router(fine_features)
+    coarse_features, routing_map = chunk(fine_features, boundary_scores)
+    coarse_outputs = main_model(coarse_features)
+    expanded_outputs = dechunk(coarse_outputs, routing_map)
+    return decoder(fine_features, expanded_outputs)
+\end{lstlisting}
+
+\begin{knowledgebox}{¿Por qué la etapa externa tiende a SSM mientras que la interna puede usar Transformer}
+El encoder externo se enfrenta directamente a unidades de alta resolución y débil semántica como bytes o caracteres, necesitando una compresión en línea para formar chunks; un estado recurrente limitado posee el sesgo inductivo adecuado para esta tarea. El modelo interno recibe ya chunks más escasos y de nivel superior, por lo que la atención por chunk se vuelve razonable. La arquitectura no es una elección binaria, sino hacer que los primitivos coincidan con la resolución.
+\end{knowledgebox}
+
+\begin{warningbox}{El enrutamiento dinámico es un problema de optimización discreta difícil}
+La decisión de los límites altera la longitud de la secuencia y las rutas de cálculo posteriores, lo que hace propenso al entrenamiento a cortes totales, sin cortes, inestabilidad de gradientes o colapso de etapas. El orador afirma explícitamente que el H-Net publicado es "el primer paso funcional", dependiendo del módulo de enrutamiento, suavizado, normalización, proyección y optimización consciente de las etapas; no se debe inferir una implementación sencilla a partir de estas cuatro líneas de pseudocódigo.
+\end{warningbox}
+
+\teachervoice{00:40:00--00:40:43, Gu menciona que esto es una optimización discreta no trivial; en la Q\&A de 00:57:23--00:59:08 se enfatiza nuevamente que H-Net aún no ha sido validado completamente a gran escala, y tanto el mecanismo de chunking como cada etapa tienen mucho margen de mejora.}
+
+\subsection{Resumen de la sección}
+
+H-Net reescribe un pipeline offline de tokenizer--LM--detokenizer como una jerarquía aprendible: los encoders de bajo nivel forman chunks dependientes del contexto, el modelo interno realiza cálculos sobre unidades de grano grueso y luego se expande a la resolución original para predecir. Su aportación sistémica más importante es la división del trabajo por resolución: SSM asume la compresión en los límites finos originales, mientras que la atención asume la combinación precisa sobre chunks de alto nivel. El próximo capítulo utilizará scaling y ablation para verificar si este diseño realmente genera un mejor sesgo inductivo.
+
+
+\section{Evidencia del *chunking* dinámico: cuándo los límites de aprendizaje superan al *token* codificado}
+
+El mecanismo de H-Net parece razonable, pero "aprendible" no equivale automáticamente a "mejor". Este capítulo distingue tres conjuntos de evidencia para diferentes problemas: el primero pregunta si un *learned chunk* supera al BPE tras suficiente datos; el segundo indaga por qué el *outer stage* prefiere Mamba incluso cuando la entrada ya es BPE; y el tercero sitúa los métodos en el ADN, observando si la pendiente de *scaling* cambia sin una *heuristic* del *tokenizer* madura. Al leer la figura se deben considerar simultáneamente el cómputo emparejado (*matched compute*), el punto de cruce (*crossover*) y el límite del dominio.
+
+\subsection{Punto de cruce con cómputo emparejado: "ganar después de perder" es la forma típica de la lección amarga}
+
+En el eje horizontal de la figura siguiente se muestran los bytes totales de entrenamiento; en el vertical, los bits por byte. El modelo FLOPs y la escala aproximada están ajustados. Los Transformers negros utilizan BPE directamente; una capa de H-Net con *byte* es peor al inicio porque debe aprender simultáneamente el lenguaje y los límites; tras suficientes datos, las curvas se cruzan. Dos capas de H-Net aprenden aún más abstracciones multinivel, pero introducen más parámetros y dificultad de optimización.
+
+\lecturefigure{slide-027.jpg}{*Scaling* del *chunking* dinámico: comparación con cómputo emparejado de BPE isobitrópico, H-Net de una sola capa y de múltiples capas}{Video oficial de Stanford, 00:40:40--00:44:09}
+
+\begin{knowledgebox}{Leer la figura: tres pasos para verificar el *crossover*}
+Primero, confirmar si las curvas se comparan bajo presupuestos de FLOP aproximadamente iguales, en lugar de solo coincidir parámetros; segundo, observar la desventaja del modelo con *learned chunk* en la zona de pocos datos, reconociendo que el BPE diseñado manualmente proporciona un sesgo inductivo fuerte; tercero, fijarse en la pendiente y el punto de cruce en la zona de muchos datos para juzgar si el *scaling* adicional compensa el costo de aprender los límites.
+\end{knowledgebox}
+
+Este tipo de experiencia de *scaling* puede escribirse como:
+\[
+\mathcal{L}(C)\approx \mathcal{L}_\infty + aC^{-\alpha},
+\]
+donde $C$ es el cómputo de entrenamiento o un presupuesto de datos aproximadamente equivalente, $\mathcal{L}_\infty$ es la pérdida irreductible, $a$ es una constante y $\alpha$ es el exponente de *scaling*. Cuando se dice en la figura que "escala mejor", no se refiere a un punto más bajo, sino a que, a medida que aumenta $C$, la curva de la jerarquía aprendida mantiene una tendencia descendente más favorable. El ajuste en intervalos finitos aún puede verse afectado por el optimizador, la mezcla de datos y el dimensionamiento del modelo.
+
+\teachervoice{00:42:37--00:44:21, Gu explica el *crossover* con la lección amarga: las características manuales ayudan mucho en un régimen limitado por datos; el *learned chunk* necesita gastar datos primero para aprender a segmentar, pero una vez que aprende unidades más adecuadas a la tarea que el BPE, puede seguir beneficiándose del *scaling*.}
+
+\begin{warningbox}{Aprender "tokens" no garantiza extrapolación infinita}
+Las curvas actuales solo cubren intervalos limitados de escala y datos. Jerarquías más profundas pueden saturarse prematuramente por colapso de enrutamiento, asignación de parámetros, inestabilidad de optimización o eficiencia del sistema. Para juzgar si el siguiente orden de magnitud seguirá siendo dominante, es necesario escalar verdaderamente los modelos y los datos, no prolongar la línea recta fuera del gráfico.
+\end{warningbox}
+
+\subsection{Ablación más crítica: incluso cuando la entrada ya es BPE, el *outer Mamba* sigue siendo importante}
+
+Si la ventaja de los SSM proviene solo de que "la secuencia de bytes es demasiado larga", entonces tras cambiar la entrada a tokens BPE, debería ser suficiente usar un Transformer como codificador externo. Sin embargo, la figura muestra que: incluso cuando todo el sistema opera con BPE, añadir Mamba en las etapas externas mejora notablemente los BPB. Aquí, la tarea del *outer stage* no es simplemente leer la entrada, sino crear representaciones comprimibles para el enrutamiento; por ello, el sesgo inductivo de estado finito puede ayudar directamente a la formación de abstracciones.
+
+\lecturefigure{slide-028.jpg}{Ablación del *outer stage* de H-Net con Mamba sigue mostrando un sesgo inductivo comprimido sobre entrada BPE}{Video oficial de Stanford, 00:44:10--00:46:09}
+
+\begin{importantbox}{La evidencia más fuerte de esta clase de "la compresión es una característica"}
+Cuando la unidad de entrada ya es BPE, la explicación por resolución no basta para justificar el beneficio del *outer Mamba*. La hipótesis más razonable es que el codificador previo al enrutamiento necesita integrar la historia local en representaciones aptas para el *chunking*, y el estado recurrente finito fuerza a la red a formar un resumen. Este resultado sigue siendo una ablación específica de H-Net, pero apoya más directamente "la compresión como sesgo inductivo" que los simples benchmarks de bytes.
+\end{importantbox}
+
+\begin{warningbox}{La ablación no prueba por sí sola el mecanismo causal único}
+El *outer stage* con Mamba y Transformer pueden diferir en parametrización, normalización, optimización, kernel o profundidad efectiva. Los resultados indican que "los sistemas que usan Mamba son mejores", pero no prueban por sí solos que todo el beneficio provenga de la compresión de estado finito. Una verificación más estricta del mecanismo requiere arquitectura emparejada y *probe* de representación.
+\end{warningbox}
+
+\subsection{dnaHNet: cuando no hay un *tokenizer* semántico, la jerarquía cambia la pendiente de *scaling*}
+
+El ADN no cuenta con una *heuristic* de segmentación madura como los espacios en blanco, raíces y frecuencias de palabras del inglés. Cada punto en la figura corresponde a un presupuesto diferente de FLOP y, bajo ese presupuesto, se varía (*sweep*) la asignación modelo/datos. La curva de H-Net no solo se traslada verticalmente, sino que muestra pendientes diferentes; el orador concluye que la jerarquía aprendida encuentra patrones que los *tokenizers* comerciales no pueden ofrecer.
+
+\lecturefigure{slide-029.jpg}{Leyes de *scaling* dnaHNet: tendencia de crecimiento del *chunking* dinámico sin una *heuristic* madura de tokenización}{Video oficial de Stanford, 00:47:20--00:49:19}
+
+Esta clase utiliza la versión v3 del artículo arXiv de `dnaHNet` (2026-04-09) según la fecha del curso, ya que es la última versión disponible antes del 2026-04-16. La figura cita el preentrenamiento autoregresivo genómico; no se debe traducir directamente una pérdida menor a comprensión causal biológica. El valor real en tareas downstream también depende de la validación en elementos reguladores, efectos variantes y contexto de tipo celular.
+
+\begin{knowledgebox}{Por qué el ADN es una prueba más fuerte que el inglés basado en caracteres}
+Aunque el inglés permite modelar bytes, ya cuenta con un BPE maduro; los investigadores siempre pueden preguntar "¿por qué no usar un *tokenizer*?". La secuencia de bases unitarias del ADN carece de límites universales de palabras similares; definir tokens diseñados manualmente es más difícil. Si el *learned chunking* cambia el *scaling* aquí, se acerca más al problema original de datos que pretendía resolver.
+\end{knowledgebox}
+
+\teachervoice{00:47:17--00:49:18, el orador llama al inglés basado en caracteres un a largo plazo con carácter académico, mientras considera el ADN como el escenario donde la tokenización realmente no puede ser semantizada; esto también es la razón por la que cree que el *chunking* dinámico tiene más relevancia práctica.}
+
+\subsection{Resumen de la sección}
+
+Las evidencias de H-Net forman una cadena progresiva: los *chunks* aprendidos a nivel de byte superan al BPE tras suficientes datos; las ablaciones en etapas externas sobre entrada BPE aún prefieren Mamba, apuntando a un sesgo inductivo por compresión; y el ADN muestra diferencias más fuertes en *scaling* cuando falta un *tokenizer* semántico. La cadena apoya "la compresión puede ayudar a formar abstracciones", pero sigue limitada por escala finita, coincidencia de arquitectura y transferencia de dominio.
+\section{Elecciones finales: la eficiencia es una apariencia, las interfaces de estado son la esencia}
+
+Los ejemplos anteriores de modelos, tokens y H-Net sirven para una corrección final: los SSM no son solo "más rápidos pero más débiles", y la atención no es solo "más fuerte pero cuadrática". Sus ventajas y desventajas surgen conjuntamente de la forma del autoregressive state. Las últimas cuatro figuras primero reiteran las resoluciones adecuadas para la atención, luego reescriben por separado el tradeoff entre SSM y atención, y finalmente comprimen la investigación arquitectónica en un problema de FLOPs a capacidades.
+
+\subsection{Lo que realmente hace fuerte a la atención es la pre-compresión de abstracción}
+
+Esta sección regresa al problema de abstracción que ha aparecido repetidamente en toda la clase. El cómic dibuja la vergüenza del Transformer sobre raw high-resolution input como un malentendido: el modelo no entiende nativamente ninguna granularidad; es más fuerte en unidades significativas, combinables y direccionables individualmente. El texto rojo a la derecha de la figura no niega la atención, sino que le asigna una ubicación: primero compresione los datos hasta el nivel adecuado y luego utilice el direccionamiento global del contenido.
+
+\lecturefigure{slide-030.jpg}{Área más efectiva de la atención: datos pre-comprimidos y nivel de abstracción correcto}{Grabación oficial de Stanford, 00:49:20--00:50:09}
+
+\begin{importantbox}{La selección arquitectónica debe ser consciente de la resolución}
+Una misma modalidad puede utilizar diferentes primitivos en distintas capas: las capas de píxeles/bytes realizan primero compresión local o recurrente, las capas de objetos/palabras/tramos realizan luego atención, y finalmente las capas de decisión pueden conectarse a memoria externa. Forzar todo el pipeline a ser un único tipo de capa suele estar haciendo que la arquitectura se adapte a unidades incorrectas.
+\end{importantbox}
+
+\subsection{SSM: tache "eficiencia", conserve statefulness y compresión}
+
+En la figura, primero se escribe "escalado lineal tiempo, inferencia tiempo constante", luego se tacha efficiency y se reemplaza por model stateful / compressive, etiquetando brain-like state. El orador no dice que la eficiencia no sea importante, sino que es insuficiente para explicar por qué este tipo de modelos pueden ser más adecuados en state tracking, interacción online y construcción de abstracción; estas capacidades y las debilidades de retrieval provienen del estado finito.
+
+\lecturefigure{slide-031.jpg}{Elección final SSM: compresión stateful, tracking de estado y pérdida de retrieval granular}{Grabación oficial de Stanford, 00:50:10--00:51:19}
+
+\teachervoice{00:50:05--00:51:27, Gu dice que efficiency es un red herring: los pros y contras de los SSM son dos caras de la misma moneda, es decir, brain-like autoregressive state. El estado finito pierde detalles precisos y crea presión para el seguimiento y la abstracción.}
+
+\subsection{Atención: tache "cuadrático", conserve dependencia de resolución}
+
+La fortaleza de la atención es el acceso granular al context pasado, especialmente adecuado para recall y retrieval. En la figura se tacha "escalado cuadrático", no para cancelar la complejidad, sino para señalar una limitación más profunda: el modelo es altamente sensible a la resolución semántica de los tokens de entrada; un cache tipo database guardaría fielmente las unidades que se le dan, pero no decidiría por el diseñador si esas unidades valen la pena ser guardadas.
+
+\lecturefigure{slide-032.jpg}{Elección final atención: cache tipo database, acceso preciso y dependencia token-resolución}{Grabación oficial de Stanford, 00:51:20--00:53:09}
+
+\begin{warningbox}{La atención cuadrática no es "desperdicio" cuando se requiere memoria precisa}
+Si la tarea realmente exige conservar ítem por ítem cláusulas contractuales, tokens de código, párrafos de evidencia o retornos de herramientas externas, un cache $O(L)$ y lectura por paso $O(L)$ pueden ser el costo informativo necesario para completar la tarea. La pregunta correcta no es "¿podemos eliminar lo cuadrático?", sino "qué capas, qué tokens y qué escalas temporales merecen pagar este costo".
+\end{warningbox}
+
+\begin{table}[H]
+\centering
+\caption{Elección simétrica entre dos tipos de autoregressive state}
+\begin{tabularx}{\textwidth}{L{0.18\textwidth}>{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+Eje de comparación & Atención token-resolución & Estado recurrente comprimido \\
+\midrule
+Estado entre pasos & KV cache que crece con $L$ & Estado finito desacoplado de $L$ \\
+Acceso preciso & Fuerte; posiciones históricas direccionables individualmente & Débil; detalles mezclados en estado compartido \\
+Actualización online & Lectura de cache histórico por paso & Actualización recursiva mediante interfaz fija \\
+Inducción sesgo & database, retrieval, copy & tracking, smoothing, compresión \\
+Factores sensibles & resolución token y unidad semántica & capacidad estado y expresividad actualización \\
+Remedio típico & MQA/GQA, compresión KV, enrutamiento retrieval & Ampliar estado, selectividad, inserción atención \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Pregunta central de la investigación arquitectónica: ¿cada FLOP se gasta en estructura significativa?}
+
+La última figura dibuja el sistema de entrenamiento como una caja negra: a la izquierda se inyectan FLOPs y datos, a la derecha se obtienen capacidades. El objetivo real no es minimizar FLOPs ni maximizar el modelo, sino mejorar la eficiencia de conversión de cómputo a capacidades. Si el Transformer cacheara cada carácter en un flujo de caracteres pero rara vez necesitara direccionamiento de carácter individual, esos FLOPs no coinciden con la estructura de la tarea; si la tarea requiere recordar con precisión cada detalle, pagar el costo de atención sería razonable.
+
+\lecturefigure{slide-033.jpg}{FLOPs $\rightarrow$ modelo $\rightarrow$ capacidades: ¿usa el modelo sabiamente el cómputo?}{Grabación oficial de Stanford, 00:53:10--00:54:34}
+
+\[
+\text{system efficiency}
+=\frac{\text{useful capabilities}}{\text{training dollars}}
+=\frac{\text{FLOPs}}{\text{dollars}}
+\times
+\frac{\text{capabilities}}{\text{FLOPs}}.
+\]
+El primer término está influenciado por hardware, kernel, paralelismo y utilización; el segundo término está influenciado por arquitectura, datos, objetivo y representación. Gu estudia principalmente el segundo término, pero los sistemas de despliegue deben optimizar ambos simultáneamente. Un FLOP es matemáticamente idéntico, pero estructuralmente puede ser completamente diferente: puede usarse para comparar chunks significativos o para procesar repetidamente unidades de alta resolución sin sentido.
+
+\begin{importantbox}{Principio de diseño final}
+No seleccione primero la arquitectura y fuerce a los datos a adaptarse, sino dibuje primero la estructura de la información en diferentes escalas temporales: qué detalles deben conservarse, cuáles pueden comprimirse, cuáles requieren acceso aleatorio y cuáles solo necesitan seguimiento de estado. Luego coloque atención, SSM, convolución, codificador local y memoria externa en las capas más coincidentes.
+\end{importantbox}
+
+\subsection{Q\&A: backprop, hardware y "óptimo local"}
+
+Un estudiante cuestiona que los SSM modernos sacrifican expresividad recurrente para permitir backprop-through-time y paralelismo GPU, mientras que el cerebro humano no guarda muchas copias para realizar propagación hacia atrás. La respuesta de Gu es cautelosa: cree que la arquitectura actual, backprop y hardware podrían estar en un óptimo local común; la memoria de activación del backprop imponería una limitación física a la longitud de dependencias aprendibles, pero no está seguro si las tareas reales ya pueden sortear esto mediante medios de ingeniería.
+
+\teachervoice{00:55:10--00:57:22, Gu cree que replantear el algoritmo de aprendizaje y la restricción de hardware podría producir modelos fundamentalmente mejores; al mismo tiempo admite no haber ofrecido una solución madura alternativa al backprop.}
+
+\begin{warningbox}{Preguntas abiertas no son defectos confirmados}
+El hecho de que "el cerebro humano no use backprop" no implica que el backprop sea inútil para el aprendizaje automático; el hecho de que "la memoria no quepa secuencias ultra largas" tampoco significa que los modelos no puedan aprender absolutamente dependencias largas, ya que currículum, tareas sintéticas, retrieval y entrenamiento recurrente pueden ofrecer rutas indirectas. Las ideas de la clase deben servir como hipótesis de investigación, no como conclusiones.
+\end{warningbox}
+
+\subsection{Q\&A: límites de H-Net, memoria y modelos diminutos}
+
+Sobre H-Net, el orador afirma claramente que la versión actual es solo un primer paso funcional, sin validación en la escala máxima. Los chunks dinámicos no tienen vocabulario infinito: los bytes iniciales entran en embeddings limitados, mientras que lo subsiguiente selecciona boundaries y representa chunks agrupados en el espacio latente. Para contextos largos, imagina una compresión recursiva hacia niveles de memoria cada vez más altos, permitiendo que la atención del modelo interno se enfoque en entradas menos numerosas pero más significativas, aunque aún no hay validación posterior.
+
+\teachervoice{00:59:09--01:03:31, la representación de chunk no pasa por lookup de vocabulario, sino que preserva posiciones seleccionadas o resúmenes agrupados en el espacio latente del codificador; la memoria jerárquica es una dirección futura coherente con la filosofía de H-Net, no un resultado actual.}
+
+Para data-constrained / modelos diminutos, Gu responde directamente "no sé cuál es la regla general". Solo menciona que un pequeño experimento Mamba-3 realizado en ese momento aún descubrió que poca atención es muy importante. Esta incertidumbre en sí misma merece ser conservada: los inductivos sesgos pueden cambiar en diferentes regímenes de escalado y no se puede retroinferir desde una curva de mil millones de parámetros a un modelo diminuto.
+
+\subsection{Q\&A: ¿pueden los SSM explicarse como un mapa de atención?}
+
+Algunas formas de SSM / atención lineal pueden expandirse en un mapa de dependencia token-a-token, visualmente similar a un mapa de atención. La observación de Gu es que la atención softmax a veces se manifiesta como una atención aproximadamente dura, concentrándose en pocos tokens; la dependencia del SSM suele ser más difusa, coincidiendo con la intuición de "mezclar información dentro del estado". Pero esto es solo un proxy; la interpretabilidad mecánica aún está en curso.
+
+\teachervoice{01:04:52--01:06:29, el orador dice que la visualización tipo atención puede revelar diferencias de comportamiento entre dos tipos de modelos, pero no es la única herramienta de explicación; la interpretabilidad mecánica completa del SSM sigue siendo trabajo abierto.}
+
+\subsection{Resumen de la sección}
+
+La comparación final ya no es "modelo cuadrático versus modelo lineal", sino cache tipo database versus estado comprimido tipo cerebro. La atención cambia acceso preciso a cambio de costo por token, el SSM cambia estado online y presión de abstracción a cambio de compresión irreversible; híbridos y jerarquías permiten que ambos se especialicen por resolución. Lo que la investigación arquitectónica debe optimizar al final es el grado de coincidencia entre cada FLOP y la estructura informativa de la tarea.
+\section{Síntesis y ampliación}
+
+\subsection{Un hilo conductor que atraviesa toda la clase: diseñar primero la interfaz de memoria}
+
+Esta clase puede resumirse en cuatro pasos de razonamiento. Primero, cada modelo autoregresivo tiene un estado interpasos. Segundo, la forma del estado determina la interfaz de acceso: una base de datos de tokens permite recuperación exacta, mientras que un autómata finito soporta compresión continua. Tercero, la resolución de las unidades de datos determina qué interfaz es natural; la atención requiere tokens efectivos y los SSM manejan mejor flujos de alta resolución que requieren compresión previa. Cuarto, H-Net demuestra una combinación: capas bajas aprenden chunks y las capas altas realizan modelado de relaciones más fuertes sobre los chunks.
+
+\begin{importantbox}{Cuatro frases para recordar}
+\begin{enumerate}
+  \item El núcleo de Mamba es la combinación sistemática de expansión de estado, selectividad y escaneo eficiente.
+  \item La verdadera ventaja de la atención es el acceso aleatorio con resolución de tokens, no solo una fórmula $QK^\top$.
+  \item La tokenización/patchificación cambia el problema de modelado, no solo acorta las secuencias.
+  \item Los sistemas más prometedores suelen ser híbridos conscientes de la resolución, no un primitivo único que domine todas las capas.
+\end{enumerate}
+\end{importantbox}
+
+\subsection{Tres límites de evidencia}
+
+Primero, perplexidad, BPB y pérdida de preentrenamiento son métricas locales que no pueden reemplazar directamente recuperación, razonamiento, control y ciencia downstream. Segundo, los resultados con bytes/DNA muestran la interacción entre arquitectura y resolución de tokens, pero no se puede concluir que todas las modalidades originales sean ganadas por SSM. Tercero, los límites aprendidos de H-Net y el ablation de etapas externas apoyan la hipótesis de compresión, pero no identifican de manera única que el "estado finito" sea la causa causal del beneficio.
+
+\subsection{Lista de verificación para diseño de sistemas}
+
+\begin{enumerate}
+  \item \textbf{Definir estado:} ¿Qué se guarda después de cada paso generativo? ¿El estado crece con el contexto?
+  \item \textbf{Definir recuperación:} ¿La tarea requiere mirar atrás exactamente en alguna unidad histórica o basta con un resumen suficiente?
+  \item \textbf{Revisar granularidad:} ¿Tienen los tokens/patches/eventos actuales significado independiente? ¿Las fronteras deberían ser dependientes del contexto?
+  \item \textbf{Ajustar a la capacidad de cómputo:} ¿La complejidad teórica, el tráfico HBM, la utilización del kernel y el comportamiento por lote son consistentes?
+  \item \textbf{Realizar ablaciones:} Comparar tipos de estado y proporción de capas solo después de ajustar parámetros, FLOPs, datos y receta de entrenamiento.
+  \item \textbf{Mantener límites:} No exagerar una curva de preentrenamiento como conclusión universal sobre inteligencia.
+\end{enumerate}
+
+\subsection{Preguntas abiertas}
+
+Futuras preguntas valiosas para seguir incluyen: ¿puede el chunking dinámico escalar hasta la frontera; ¿puede la memoria jerárquica conservar simultáneamente un resumen grueso y detalles recuperables; ¿cómo hacer trazado causal de la dependencia difusa de los SSM; ¿puede el algoritmo de aprendizaje liberarse de las limitaciones de memoria de backprop para dependencias ultra largas; ¿proveerá el hardware óptimos distintos para la verdadera recurrencia; y en los híbridos, si la capa de atención debe activarse por ciclo fijo, enrutamiento dinámico o condiciones de tarea.
+
+\subsection{Lecturas adicionales}
+
+\begin{itemize}
+  \item Albert Gu, \href{https://goombalab.github.io/blog/2025/tradeoffs/}{On the Tradeoffs of SSMs and Transformers}: origen conceptual de larga duración de esta clase.
+  \item Gu y Dao, \href{https://arxiv.org/abs/2312.00752}{Mamba}; Dao y Gu, \href{https://arxiv.org/abs/2405.21060}{Mamba-2 / Duality de espacios de estado estructurados}.
+  \item Lahoti et al., \href{https://arxiv.org/abs/2603.15569v1}{Mamba-3 v1}: actualización de SSM orientada a inferencia publicada un mes antes de la clase.
+  \item Hwang, Wang y Gu, \href{https://arxiv.org/abs/2507.07955v2}{H-Net v2}: método completo de chunking dinámico y resultados de escalado.
+  \item Wang et al., \href{https://arxiv.org/abs/2401.13660}{MambaByte}: SSM selectivo a nivel de byte; Shah et al., \href{https://arxiv.org/abs/2602.10603v3}{dnaHNet v3}: jerarquía genómica en el snapshot de la clase.
+\end{itemize}
+
+\end{document}

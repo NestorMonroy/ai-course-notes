@@ -1,0 +1,826 @@
+\documentclass[a4paper]{article}
+\input{../cs25-preamble.es-mx.tex}
+\usepackage{multicol}
+
+\renewcommand{\notetitle}{Lecture 02: Modelos mundiales JEPA — interacción de objetos, colapso inverso y planificación en el espacio latente}
+\renewcommand{\noteauthors}{Basado en las conferencias oficiales de Heejeong ``Hazel'' Nam y Lucas Maes, un deck de 55 diapositivas y subtítulos generados por IA}
+\renewcommand{\notedate}{Apuntes CS25 V6 · 2026 source-first}
+\renewcommand{\videochannel}{Stanford Online}
+\renewcommand{\videopublishdate}{Clase 2026-04-09; subida 2026-04-22}
+\renewcommand{\videoduration}{1:11:03}
+\renewcommand{\videourl}{https://www.youtube.com/watch?v=GBd7iuJkW08}
+\renewcommand{\videocoverpath}{cover.jpg}
+
+\newcommand{\lecturefigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.97\textwidth,height=0.49\textheight,keepaspectratio]{slides-images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\newcommand{\videofigure}[3]{%
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.97\textwidth,height=0.49\textheight,keepaspectratio]{images/#1}
+  \caption{#2}
+  \figsource{#3}
+\end{figure}
+}
+
+\let\standardtableofcontents\tableofcontents
+\renewcommand{\tableofcontents}{%
+  \begingroup
+  \small
+  \setlength{\parskip}{0pt}
+  \standardtableofcontents
+  \endgroup
+}
+
+\begin{document}
+
+\makecscover
+
+\section{El contrato del modelo de mundo: estado, acción y futuro predecible}
+
+Esta clase no trata el ``world model'' como un generador de video más grande, sino que primero establece qué contrato debe cumplir: dado el estado actual y las acciones ejecutables, el modelo debe predecir cómo evoluciona el entorno, permitiendo que la predicción sea suficiente para razonar, planificar y controlar. Los dos ponentes responden a este contrato por dos rutas complementarias: Causal-JEPA añade sesgos estructurales de interacción de objetos a las tareas de predicción, mientras que LeWorldModel comprime el entrenamiento extremo a extremo en un objetivo estable y conciso.
+
+\subsection{De la predicción de un paso a la transferencia de estado controlada}
+
+La predicción autoregresiva estándar se escribe simplemente como $x_t\mapsto x_{t+1}$, pero el futuro en entornos reales también depende de las acciones tomadas por el agente y los participantes externos. Por ello, el modelo de mundo mínimo adoptado en esta clase es la transferencia de estado controlada: el modelo debe saber no solo ``qué hay ahora'', sino también ``qué cambiará tras aplicar una acción''. Al leer la primera figura, se deben entender las tres columnas como tres criterios de aceptación independientes, no como una propiedad que una red satisfaga automáticamente simultáneamente.
+
+\lecturefigure{slide-003.jpg}{Los tres contratos del modelo de mundo: representación de estado, leyes de transferencia y respuesta a acciones}{CS25 V6 oficial deck, p.~3}
+
+\[
+f_\theta:\mathcal{S}\times\mathcal{A}\rightarrow\mathcal{S},
+\qquad
+\hat{s}_{t+1}=f_\theta(s_t,a_t).
+\]
+Donde $\mathcal{S}$ es el espacio de estados, $\mathcal{A}$ es el espacio de acciones, $s_t$ es el estado en el tiempo $t$, $a_t$ es la acción aplicada en ese momento, $f_\theta$ es el modelo de transferencia parametrizado por $\theta$, y $\hat{s}_{t+1}$ es el siguiente estado predicho por el modelo. Si el entorno contiene aleatoriedad no observable, una escritura más honesta sería la distribución condicional $p_\theta(s_{t+1}\mid s_{\le t},a_{\le t})$, en lugar de asumir un futuro único y determinado.
+
+\teachervoice{00:01:52--00:03:41，Hazel denomina intuitivamente al world model como simulator y pide a los lectores que recuerden siempre tres preguntas de diseño: ¿la representación conserva la información importante actual?, ¿el modelo de transferencia ha aprendido las reglas del entorno?, y ¿las acciones cambian el futuro de la manera correcta?}
+
+\begin{importantbox}{Un modelo de mundo no es un solo nombre de red}
+Un modelo de mundo funcional contiene al menos tres capas de interfaz: el \textbf{observation encoder} convierte píxeles en estados, el \textbf{dynamics predictor} proyecta el futuro y el \textbf{decision interface} conecta las predicciones con la búsqueda de acciones o el aprendizaje de políticas. Solo mostrar un video realista demuestra que el generador produce alguna secuencia visual, pero no prueba que su estado sea controlable, que las acciones tengan significado semántico correcto o que sus predicciones sean suficientes para planificar.
+\end{importantbox}
+
+\subsection{Por qué esta clase no busca por ahora reconstruir cada píxel}
+
+Los modelos de mundo generativos pueden producir futuros altamente realistas, pero el requisito de verosimilitud a nivel de píxel exige que el modelo explique simultáneamente la estructura relevante para la tarea y una gran cantidad de detalles impredecibles, como texturas, ruido de iluminación o movimiento aleatorio en el fondo. Los ponentes no niegan Sora, GAIA, Genie ni la generación interactiva en 3D; más bien, estrechan el problema a: si el objetivo es el control y la inferencia, ¿se puede aprender directamente un \textit{latent state} que retenga solo los factores predecibles y decidibles?
+
+\lecturefigure{slide-004.jpg}{Modelos de mundo generativos fuera del alcance de esta clase: video, conducción y entornos interactivos}{CS25 V6 oficial deck, p.~4}
+
+En la siguiente página, las diferencias se dibujan en la ubicación de la señal de supervisión. Las arquitecturas generativas envían el resultado de la predicción al espacio de píxeles para compararlo directamente con el futuro real $y$; las arquitecturas \textit{joint-embedding} codifican también el objetivo como $s_y$, requiriendo solo que el \textit{latent} predicho sea compatible con el \textit{latent} objetivo. El núcleo no es simplemente eliminar el decodificador, sino permitir que el espacio de representación ignore los detalles que no afectan a la tarea entre múltiples futuros posibles.
+
+\lecturefigure{slide-005.jpg}{Las ubicaciones de supervisión difieren entre predicción generativa y predicción \textit{joint-embedding}}{CS25 V6 oficial deck, p.~5}
+
+\[
+\mathcal{L}_{\text{pixel}}=\ell\!\left(D(P(E(x),a)),y\right),
+\qquad
+\mathcal{L}_{\text{latent}}=\ell\!\left(P(E(x),a),\operatorname{sg}(E(y))\right).
+\]
+Donde $E$ es el codificador, $P$ es el predictor y $D$ es el decodificador; $x$ es el contexto, $a$ es la acción o condición auxiliar, $y$ es la observación futura, $\ell$ es una distancia o verosimilitud logarítmica negativa, y $\operatorname{sg}$ indica stop-gradient. La primera ecuación debe reconstruir el dominio objetivo; la segunda solo requiere alineamiento en el espacio de representación, por lo que se pueden retener selectivamente los factores predecibles.
+
+\begin{warningbox}{\textit{latent} no es automáticamente igual a \textit{semantic}}
+Mover el \textit{loss} al espacio \textit{latent} solo cambia la interfaz de optimización; si el codificador aprende constantes, texturas de fondo o atajos del conjunto de entrenamiento, el \textit{latent} aún puede ser inútil. El \textit{object masking} posterior y SIGReg resuelven respectivamente ``¿de qué depende la predicción?'' y ``¿cómo evitar que la representación colapse?'', y no pueden sustituirse mutuamente.
+\end{warningbox}
+
+\subsection{Perspectiva basada en energía de JEPA y colapso de representación}
+
+JEPA se puede entender mediante un \textit{energy-based model} (modelo de energía): las combinaciones contexto--futuro compatibles deben obtener baja energía, mientras que las incompatibles deben obtener alta energía. Esta perspectiva permite que un contexto corresponda a múltiples futuros razonables sin requerir promediarlos en píxeles borrosos. Sin embargo, si el codificador mapea todas las entradas al mismo vector, cualquier predicción será ``igual'' al objetivo, resultando en una pérdida de cero sin haber aprendido nada del mundo.
+
+\lecturefigure{slide-006.jpg}{JEPA: aprendiendo compatibilidad y terreno energético en el espacio de representación}{CS25 V6 oficial deck, p.~6}
+
+\[
+\mathcal{E}_\theta(x,y)=\left\|P_\theta(E_\theta(x))-E_\theta(y)\right\|_2^2,
+\qquad
+\mathcal{E}_\theta(x,y^+) < \mathcal{E}_\theta(x,y^-).
+\]
+Donde $\mathcal{E}_\theta$ es la energía de compatibilidad, $y^+$ es el futuro compatible con $x$, $y^-$ es el futuro incompatible, y $E_\theta$ con $P_\theta$ son respectivamente el representador y el predictor. Baja energía significa ``puede ser un futuro razonable'', lo cual no es equivalente a una normalización de probabilidades de píxeles.
+
+\teachervoice{00:06:13--00:08:16，el docente enfatiza que \textit{anti-collapse} se divide aproximadamente en dos familias: contrastiva y regularización. V-JEPA usa un codificador objetivo con EMA, stop-gradient y enmascaramiento de tareas; su propósito no es decorar el flujo de entrenamiento, sino excluir soluciones triviales como representaciones constantes.}
+
+\lecturefigure{slide-007.jpg}{V-JEPA: enmascaramiento espacio-temporal, context encoder, target encoder y predictor}{CS25 V6 oficial deck, p.~7}
+
+\begin{knowledgebox}{Uso por primera vez: EMA y stop-gradient}
+El \textbf{EMA (Exponential Moving Average) target encoder} actualiza la rama objetivo con el promedio móvil exponencial de los parámetros del codificador en línea, haciendo que los cambios en el objetivo sean más lentos; el \textbf{stop-gradient} impide que la rama objetivo sea arrastrada directamente por el error de predicción actual. Ambos suelen estabilizar juntos el entrenamiento auto-supervisado, pero son heurísticas de optimización y no equivalen a explicar por qué la representación necesariamente no colapsa.
+\end{knowledgebox}
+
+\subsection{De aprendizaje de representación a modelos de mundo condicionados a acción}
+
+V-JEPA 2 separa el aprendizaje de representaciones de video a gran escala del post-entrenamiento \textit{action-conditioned} con datos de interacción limitados: primero se aprende un estado visual de las observaciones, luego se congela o reutiliza la representación para entrenar el predictor condicionado a acción. DINO-WM pregunta aún más: dado que DINOv2 ya puede proporcionar características visuales fuertes, ¿es necesario volver a aprender el codificador, bastando con entrenar la dinámica sobre estas características?
+
+\lecturefigure{slide-008.jpg}{V-JEPA 2: de pre-entrenamiento con video enmascarado a post-entrenamiento condicionado a acción}{CS25 V6 oficial deck, p.~8}
+
+\lecturefigure{slide-009.jpg}{DINO-WM: congelar DINOv2 y predecir autoregresivamente el futuro sobre patch latent}{CS25 V6 oficial deck, p.~9}
+
+\teachervoice{00:08:16--00:10:17，Hazel pide a los lectores distinguir dos fases: el pre-entrenamiento a gran escala libre de acción de V-JEPA 2 aprende primero la representación, mientras que V-JEPA 2-AC y DINO-WM conectan la acción y la propiocepción al predictor. La clase cuestiona posteriormente si la \textit{patch representation} es adecuada para expresar interacciones entre objetos, sin negar la capacidad de planificación de estas líneas base.}
+
+\begin{knowledgebox}{Términos clave: cuatro conceptos fáciles de confundir}
+\begin{tabularx}{\textwidth}{L{0.20\textwidth} X}
+\toprule
+Término & Significado en esta clase \\
+\midrule
+representation model & Comprime las observaciones en un estado útil para la tarea; no necesariamente sabe las consecuencias de las acciones. \\
+dynamics model & Predice la evolución del estado dado el estado y la acción; puede construirse sobre representaciones congeladas. \\
+world model & Combinación de representación, dinámica e interfaz de decisión; la capacidad de planificación depende de la calidad conjunta de los tres. \\
+JEPA & Marco de entrenamiento que realiza predicciones en el espacio de representación; tanto el codificador como el predictor pueden implementarse completamente con Transformers. \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{Resumen de la sección}
+
+El contrato mínimo del modelo de mundo es la transferencia de estado controlada; el valor de JEPA es mover el objetivo de predicción al espacio de representación, evitando que el modelo reconstruya todos los píxeles; su riesgo fundamental es que el \textit{latent} pueda colapsar o aprender atajos incorrectos. V-JEPA, V-JEPA 2 y DINO-WM ofrecen tres combinaciones estables de representación y dinámica, mientras que la pregunta del próximo capítulo es: ¿estas composiciones deben consistir en parches o en objetos interactivos?
+\section{De patch a objeto: la estructura de representación determina qué preguntas puede hacer el modelo}
+
+Si un modelo del mundo solo ve parches en una cuadrícula regular, puede ajustar movimientos locales, pero no necesariamente representa «empujar una pelota roja contra un bloque T verde» como relaciones entre entidades. El punto de entrada de Causal-JEPA no es inventar primero un controlador más complejo, sino cambiar la unidad de predicción a ranura de objeto (object slot) y usar ocultamiento para impedir que el modelo extrapole solo siguiendo la trayectoria de cada objeto por separado.
+
+\subsection{Tres benchmarks que corresponden a tres capacidades}
+
+Estos tres benchmarks no son demos seleccionadas al azar; evalúan capacidades distintas. Push-T prueba la planificación condicional de acciones; CLEVRER prueba descripción, predicción, explicación y preguntas contrafactuales; PHYRE verifica si los rollout son físicamente creíbles mediante interacciones multiojoctales y gravedad. Al analizar esta figura, primero se debe observar la salida del tarea: el éxito en la tasa, la precisión de las respuestas y la plausibilidad del rollout miden capacidades diferentes y no pueden sustituirse mutuamente.
+
+\lecturefigure{slide-012.jpg}{Tres entornos de validación para Causal-JEPA: Push-T, CLEVRER y PHYRE}{CS25 V6 oficial deck, p.~12}
+
+\begin{knowledgebox}{Mapeo de benchmark a capacidad}
+El objetivo de imagen en Push-T obliga al modelo a conectar una secuencia de acciones con un resultado espacial; las preguntas contrafactuales en CLEVRER requieren determinar qué sucede si se elimina un objeto; las interacciones de cadena larga en PHYRE exponen el fallo de «recordar solo correlaciones». Si un modelo sobresale en solo uno de estos aspectos, no puede afirmar que posee una comprensión física general.
+\end{knowledgebox}
+
+\subsection{Por qué los tokens de parche pasan por alto fácilmente las unidades de interacción}
+
+En Push-T, el bloque T gris, el objetivo verde, los puntos de control azules y los obstáculos poseen semántica estable. Una cuadrícula de parches cortaría un mismo objeto en múltiples tokens y haría que el contenido de un token cambie conforme el objeto se mueve; una representación centrada en objetos intenta mantener cada ranura apuntando continuamente a la misma entidad. Esto reduce el número de tokens y convierte «quién afecta a quién» en relaciones de variables consultables directamente.
+
+\lecturefigure{slide-013.jpg}{Diferente descomposición para Push-T entre parches de píxeles y estado a nivel de objeto}{CS25 V6 oficial deck, p.~13}
+
+En la página siguiente se mantiene el predictor e interfaz de entrenamiento de DINO-WM, pero se reemplaza la representación de parche por una representación de objeto para construir OC-DINO-WM. Este línea base es importante porque aísla el efecto propio de la «representación de objetos»; si C-JEPA resulta más fuerte posteriormente, aún debe demostrarse que las ganancias provienen del ocultamiento y no simplemente de tener menos tokens.
+
+\lecturefigure{slide-014.jpg}{Contraste entre DINO-WM y OC-DINO-WM: reemplazo exclusivo de la representación del estado}{CS25 V6 oficial deck, p.~14}
+
+\[
+X_t\in\mathbb{R}^{H\times W\times C}
+\xrightarrow{g}
+S_t=\{s_t^1,\ldots,s_t^N\},
+\qquad s_t^i\in\mathbb{R}^{d}.
+\]
+Donde, $X_t$ son las observaciones de píxeles, $g$ es el codificador centrado en objetos, $S_t$ es un conjunto que contiene $N$ ranuras y $s_t^i$ es la representación de $d$ dimensiones para el candidato de objeto $i$. El símbolo de conjunto implica que el orden de las ranuras carece de semántica; la identidad a través del tiempo debe mantenerse mediante un codificador de video o anclas adicionales.
+
+\begin{warningbox}{La ranura de objeto no es un objeto de verdad preexistente}
+Una ranura puede dividir una entidad en múltiples slots, fusionar varias entidades, intercambiar identidades durante el seguimiento o tratar sombras y fondo como objetos. Por ello, lo centrado en objetos ofrece solo una hipótesis estructural aprendible; las conclusiones posteriores sobre interacción y causalidad dependen de que la representación sea suficientemente fiel.
+\end{warningbox}
+
+\subsection{Slot Attention: agrupamiento competitivo frente a verdad de recuadros de detección}
+
+Slot Attention inicializa varias consultas de ranura (slot query) desde un mapa de características, permitiendo que cada característica de entrada compita entre slots, y luego actualiza iterativamente la ranura mediante una suma ponderada y GRU. No requiere etiquetas de recuadros de detección, por lo que es adecuada para descomposición de objetos auto-supervisada; el costo es que las ranuras son equivalentes solo bajo permutación, sin reglas naturales como «la ranura 1 siempre es la pelota roja».
+
+\lecturefigure{slide-015.jpg}{Estructura encoder--slot--decoder de Slot Attention}{CS25 V6 oficial deck, p.~15}
+
+\lecturefigure{slide-016.jpg}{Iteración de Slot Attention: normalización competitiva, agregación y actualización GRU}{CS25 V6 oficial deck, p.~16}
+
+\[
+\alpha_{ij}=\frac{\exp(q_i^\top k_j/\sqrt d)}{\sum_{i'=1}^{N}\exp(q_{i'}^\top k_j/\sqrt d)},
+\qquad
+u_i=\frac{\sum_j \alpha_{ij}v_j}{\sum_j\alpha_{ij}},
+\qquad
+s_i\leftarrow\operatorname{GRU}(s_i,u_i).
+\]
+Donde, $q_i$ es la consulta de la $i$-ésima ranura, $k_j,v_j$ son la clave y el valor de la $j$-ésima característica de entrada, $\alpha_{ij}$ son los pesos competitivos asignados por la característica $j$ a la ranura $i$, $u_i$ es la actualización agregada y $s_i$ es el estado de la ranura. La normalización sigue el eje de las ranuras para permitir que distintas ranuras compitan por explicar la misma característica.
+
+\begin{lstlisting}[language=Python,caption={Pseudocódigo del mecanismo mínimo de Slot Attention}]
+slots = init_slots(batch_size, num_slots, dim)
+for _ in range(num_iterations):
+    queries = to_queries(layer_norm(slots))
+    keys, values = encode_features(features)
+    weights = softmax(queries @ keys.T / sqrt(dim), axis="slots")
+    updates = normalized_weighted_sum(weights, values)
+    slots = gru(slots, updates)
+return slots
+\end{lstlisting}
+
+\teachervoice{00:12:20--00:14:23, el docente define Slot Attention como un mecanismo de agrupamiento iterativo entre el encoder y el decoder, y recuerda que la versión de video debe mantener además consistencia temporal. No se trata de insertar directamente las salidas del detector en el Transformer.}
+
+\subsection{Resumen de la sección}
+
+La representación de objetos convierte entidades móviles en tokens más estables y numerosos, facilitando la expresión de estructuras de interacción; sin embargo, introduce simultáneamente desorden de ranuras, deriva de identidad y errores de descomposición. La pregunta clave de Causal-JEPA se vuelve entonces: ¿cómo diseñar el ocultamiento para que el predictor deba utilizar otros objetos y acciones, en lugar de seguir dependiendo de la historia del propio objeto predicho?
+
+
+\section{Causal-JEPA: creando necesidad de interacción mediante object masking}
+
+Causal-JEPA no estima primero un causal graph fijo y luego realiza mensajes pasados sobre él. Durante el entrenamiento elimina parte de las histories de los objects, exponiendo al modelo a una tarea de finalización similar a counterfactuals: ¿cuáles objetos vecinos, acciones e historias son suficientes para recuperar un objeto cuya información propia es invisible? Esta tarea convierte el reasoning de interacción de algo ``posiblemente útil'' en algo ``necesario para reducir la pérdida''.
+
+\subsection{El contraejemplo del plátano: por qué ocultar solo un instante no basta}
+
+Si solo se oculta un frame futuro del plátano, el modelo puede seguir extrapolando la velocidad a lo largo de su propia historia, ignorando completamente si fue mordido por otro objeto. Un cómic de tres paneles ilustra este atajo de manera exagerada: el problema real no es ``cómo se verá en el siguiente frame'', sino ``quién decide sus cambios cuando se le quita su propia trayectoria''.
+
+\lecturefigure{slide-017.jpg}{Contraejemplo del plátano: la historia propia del objeto permite al predictor saltarse el razonamiento de interacción}{CS25 V6 official deck, p.~17}
+
+\teachervoice{00:14:23--00:16:30, en clase se explicó con un cómic la motivación del object masking: si el objeto objetivo es siempre visible en la historia, el modelo puede aprender solo self-dynamics; al ocultar el estado del objeto a través del tiempo, se fuerza al modelo a leer las entidades externas que ejercen influencia sobre él.}
+
+\begin{importantbox}{¿qué papel juega el masking aquí?}
+El data augmentation ordinario se preocupa por la robustez; el masking en C-JEPA funciona más como una intervención de observabilidad: durante el entrenamiento se retira parte de la latent history del objeto objetivo, pero se conservan otros objetos, acciones y un mínimo ancla de identidad. Si el modelo quiere recuperar el objetivo, debe buscar contextos relevantes para la interacción.
+\end{importantbox}
+
+\subsection{Por qué el predictor utiliza atención bidireccional}
+
+El causal Transformer en DINO-WM predice hacia el futuro desde el pasado a lo largo del tiempo, lo cual es adecuado para un rollout autoregresivo convencional; C-JEPA, sin embargo, durante el entrenamiento también debe completar los objetos que están ocultos dentro de la ventana histórica, por lo que permite que los tokens históricos no ocultos interactúen entre sí de manera bidireccional. Esta bidireccionalidad solo actúa sobre la latent completion dentro de la ventana de entrenamiento y no implica que la inferencia esté mirando el futuro real.
+
+\lecturefigure{slide-018.jpg}{Flujo de información en Causal Transformer versus masked Transformer bidireccional}{CS25 V6 official deck, p.~18}
+
+\begin{warningbox}{bidireccional no significa fuga de datos}
+Durante el entrenamiento, los tokens del futuro también se reemplazan por tokens de mask; el predictor solo puede ver su posición y pistas de identidad, pero no la latent real del objetivo. Durante la inferencia, toda la historia es completamente visible y el futuro sigue oculto, por lo que el modelo solo puede hacer rollout desde el pasado y las acciones. Para juzgar si hay fuga, hay que ver si el target value entra en la entrada, no solo si la atención es bidireccional.
+\end{warningbox}
+
+\subsection{De una sola trayectoria de objeto a múltiples objetos ocultos}
+
+La construcción más directa consiste en seleccionar un objeto y ocultar todos sus slots tanto en la ventana histórica como en las posiciones futuras. Así, el predictor sigue sabiendo la posición temporal, pero pierde la autotraectoria del objeto. Ocultando aún más varios objetos se incrementa la dificultad de la tarea, pero si también se eliminan las pistas de identidad, el modelo ni siquiera sabrá a qué objeto corresponde cada token de mask; el objetivo de entrenamiento se convertiría en un emparejamiento de conjuntos mal planteado.
+
+\lecturefigure{slide-019.jpg}{Paso 1: ocultando la historia y el futuro de un objeto a lo largo del eje temporal}{CS25 V6 official deck, p.~19}
+
+\lecturefigure{slide-020.jpg}{Paso 2: ocultando simultáneamente múltiples objetos, exponiendo ambigüedad en la identidad}{CS25 V6 official deck, p.~20}
+
+\lecturefigure{slide-021.jpg}{Solo el encoding posicional temporal no puede responder qué objeto ocupa cada slot}{CS25 V6 official deck, p.~21}
+
+\[
+M_\tau\subseteq\{1,\ldots,N\},
+\qquad
+S_\tau^m=\{s_\tau^i\mid i\in M_\tau\},
+\qquad
+S_\tau^c=\{s_\tau^j\mid j\notin M_\tau\}.
+\]
+Donde, $M_\tau$ es el conjunto de índices de slots ocultos en el instante $\tau$, $S_\tau^m$ son los estados del objeto maskiado y $S_\tau^c$ es el contexto visible. $N$ es el número de slots; un mismo objeto puede entrar en el conjunto de mask a través de múltiples pasos temporales para suprimir el atajo de self-dynamics.
+
+\begin{lstlisting}[language=Python,caption={Pseudocódigo mínimo para object masking a través del tiempo}]
+masked = slots.clone()
+for object_id in sampled_objects:
+    identity = project(slots[first_time, object_id])
+    for time_id in history_and_future:
+        masked[time_id, object_id] = identity + mask_token[time_id]
+predicted = predictor(masked, actions)
+loss = mse(predicted[mask_positions], slots[mask_positions])
+\end{lstlisting}
+
+\subsection{Los slots son un conjunto: cómo elimina la ancla de identidad el permutación entre videos}
+
+El slot 2 en Video A podría rastrear un objeto verde, mientras que el slot 2 en Video B podría rastrear un objeto azul; el índice del slot no puede usarse como ID de clase a través de muestras. C-JEPA conserva el estado del objeto del instante inicial $t_0$ como ancla de identidad y luego lo proyecta sumándolo al embedding de mask temporalmente dependiente. Así, cada token de mask expresa ``el estado desconocido que continúa desde ese objeto inicial dentro de este video, ubicado en el instante $\tau$''.
+
+\lecturefigure{slide-022.jpg}{El orden de los slots puede permutarse arbitrariamente entre diferentes videos}{CS25 V6 official deck, p.~22}
+
+\lecturefigure{slide-023.jpg}{Ancla de identidad más embedding de mask temporal define la identidad del objeto predecible}{CS25 V6 official deck, p.~23}
+
+\[
+\tilde z_\tau^i=\phi(z_{t_0}^i)+e_\tau.
+\]
+Donde, $\tilde z_\tau^i$ es el token de mask que reemplaza el estado real del objeto, $z_{t_0}^i$ es la ancla de identidad del instante inicial más visible, $\phi$ es una proyección lineal, $e_\tau$ es la combinación del embedding de mask aprendible y el encoding posicional temporal, e $i$ representa la trayectoria del objeto dentro del mismo video.
+
+\teachervoice{00:16:30--00:20:36, el docente enfatiza que la representación object-centric es un set y no una lista. Conservar el primer paso temporal no es para revelar movimiento, sino para dar a los tokens de mask una identidad estable dentro del video; aún así, no se asume consistencia en el orden de los slots entre videos.}
+
+\subsection{Por qué las acciones deberían ser nodos independientes}
+
+Copiar y concatenar el mismo vector de acción a cada token de objeto es sencillo de implementar, pero oculta ``quiénes son afectados directamente por la acción'' dentro de características de alta dimensión. C-JEPA trata la acción como un token/nodo independiente que interactúa con los objetos en el gráfico de atención: el predictor puede aprender que la acción afecta primero a los puntos de control, y estos empujan luego al objeto objetivo, sin requerir que cada objeto lleve una copia idéntica de la acción.
+
+\lecturefigure{slide-024.jpg}{Condición de acción: ¿copiada y concatenada a todos los slots o como nodo independiente?}{CS25 V6 official deck, p.~24}
+
+\lecturefigure{slide-025.jpg}{El token de acción entra en el gráfico de interacción de objetos a lo largo del tiempo}{CS25 V6 official deck, p.~25}
+
+\begin{knowledgebox}{Uso por primera vez: variable auxiliar}
+En esta clase, la auxiliary variable se refiere a una condición observable que no pertenece al estado visual del objeto, como la acción $a_t$ y la propiocepción $p_t$. Afectan la transición de estados pero no deberían ser malinterpretadas como parte de la apariencia del objeto. Como token independiente permiten que la atención aprenda relaciones condicionales y facilitan el análisis de qué objetos dependen realmente de la acción.
+\end{knowledgebox}
+
+\subsection{Objetivo de entrenamiento completo: fusión de finalización histórica y predicción futura}
+
+Causal-JEPA completo primero extrae los slots objetivo en la historia y el futuro usando un object-centric encoder congelado, luego reemplaza a los objetos históricos seleccionados y todas las posiciones futuras, y finalmente hace que el predictor bidireccional recupere simultáneamente la historia oculta y prediga el futuro. El primer término suprime self-dynamics; el segundo mantiene el verdadero modelado de mundo hacia adelante; durante la inferencia no se oculta la historia, solo se hace rollout del futuro.
+
+\lecturefigure{slide-026.jpg}{Estructura completa de Causal-JEPA: ocultación de objetos, condición de acción y predicción conjunta latente}{CS25 V6 official deck, p.~26}
+
+\[
+\hat Z_{\mathcal T}=f_\theta(\bar Z_{\mathcal T},U_{\mathcal T}),
+\qquad
+\mathcal{L}_{\text{mask}}
+=\mathbb{E}\!\left[
+\sum_{\tau\in\mathcal T}\sum_{i=1}^{N}
+\mathbf{1}[\bar z_\tau^i\neq z_\tau^i]
+\left\|\hat z_\tau^i-z_\tau^i\right\|_2^2
+\right].
+\]
+Donde, $\mathcal T$ cubre la ventana histórica y el horizonte futuro, $\bar Z_{\mathcal T}$ es la secuencia de entrada reemplazada, $U_{\mathcal T}$ son variables auxiliares como las acciones, $f_\theta$ es el predictor, $\hat z_\tau^i$ es el slot predicho y $z_\tau^i$ es el objetivo dado por el encoder congelado; el indicador selecciona solo las posiciones ocultas.
+
+\[
+\mathcal{L}_{\text{mask}}
+=\underbrace{\mathbb{E}\!\left[\|\hat z_\tau^i-z_\tau^i\|_2^2\mid i\in M,\tau\le t\right]}_{\mathcal{L}_{\text{history}}}
++\underbrace{\mathbb{E}\!\left[\|\hat Z_\tau-Z_\tau\|_2^2\mid\tau>t\right]}_{\mathcal{L}_{\text{future}}}.
+\]
+Donde, $\mathcal{L}_{\text{history}}$ es el error de finalización del objeto histórico, $\mathcal{L}_{\text{future}}$ es el error de predicción del estado futuro, $M$ es el conjunto de objetos seleccionados y $t$ es el instante actual. Ambos términos comparten el predictor, por lo que las pistas de interacción deben soportar simultáneamente la finalización y el rollout.
+
+\teachervoice{00:20:36--00:22:38, Hazel dice explícitamente que C-JEPA no recupera el causal graph verdadero; el propósito del nodo de acción y del object masking es hacer que el predictor dependa de variables relevantes para la interacción bajo el objetivo de entrenamiento.}
+
+\subsection{Tres problemas de evaluación corresponden a tres patrones de fallo}
+
+Antes de entrar en los resultados, el orador divide primero los experimentos en reasoning, planning/control y physical plausibility. Este orden es importante: VQA puede verificar relaciones counterfactuals pero no prueba que el controlador sea eficiente; la tasa de éxito en Push-T puede verificar la interfaz de decisión pero no prueba que el rollout sea físicamente razonable; las trayectorias cualitativas de PHYRE pueden exponer atajos de correlación, pero no necesariamente dan un rendimiento general en tareas.
+
+\lecturefigure{slide-027.jpg}{Las tres evaluaciones de Causal-JEPA: razonamiento, planificación y credibilidad física}{CS25 V6 official deck, p.~27}
+
+\begin{importantbox}{Triángulo de evidencia}
+Una conclusión fuerte sobre un modelo del mundo debería responder simultáneamente: \textbf{¿se pueden leer las relaciones?} (reasoning), \textbf{¿se puede usar la predicción para seleccionar acciones?} (control) y \textbf{¿sigue obedeciendo a la dinámica después de intervenciones fuera de distribución?} (plausibility). Los tres conjuntos de experimentos en esta clase proporcionan evidencia local; no pueden fusionarse en el juicio incondicional ``el modelo ha comprendido el mundo''.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Causal-JEPA usa slots de objetos como unidades de estado, elimina la self-history del objeto objetivo mediante ocultación a través del tiempo y resuelve el problema de permutación en conjuntos de slots mediante una ancla de identidad. Su loss incluye simultáneamente la finalización histórica y la predicción futura, haciendo que el reasoning de interacción sea necesario para reducir el error de entrenamiento. El capítulo siguiente verificará si este sesgo estructural realmente mejora el reasoning counterfactual, la eficiencia de planificación y la plausibilidad del rollout.
+\section{Evidencia de Causal-JEPA: ¿de dónde proviene la ganancia y qué no se puede inferir?}
+
+La parte de resultados es la más susceptible de resumirse como ``mejor rendimiento al agregar masking''. Una lectura de alta calidad debe descomponer esto en tres capas: si una representación centrada en objetos (object-centric representation) es útil, si el predictor y la interfaz de acción son apropiados, y si el masking de historial genera beneficios adicionales dentro de la misma arquitectura. Solo el contraste estructural entre OC-JEPA y C-JEPA puede responder con mayor precisión a la contribución inherente del masking.
+
+\subsection{CLEVRER: los problemas contrafactuales exponen mejor las atajos de interacción}
+
+La tabla de CLEVRER reporta simultáneamente la precisión promedio en preguntas y métricas contrafactuales. Al leerla, primero se debe fijar el encoder y la arquitectura, luego comparar a lo largo del número de objetos ocultos $|M|$ (número de objetos enmascarados). Bajo la representación VideoSAUR, conforme aumenta moderadamente el masking, la ganancia en precisión contrafactual por pregunta supera claramente a la ganancia en precisión general, alineándose con la estructura correspondiente entre ``¿qué pasaría si se removiera un objeto?'' y la intervención latente durante el entrenamiento.
+
+\lecturefigure{slide-028.jpg}{CLEVRER: inferencia y VQA contrafactual bajo diferentes cantidades de máscara de objetos}{Deck oficial CS25 V6, p.~28}
+
+\teachervoice{00:22:38--00:24:39，Hazel enfatiza comparar OC-JEPA sin máscara con C-JEPA de la misma arquitectura: una representación centrada en objetos no es una explicación suficiente; el masking es la variable clave para el incremento adicional en las métricas contrafactuales.}
+
+\begin{knowledgebox}{Lectura de la figura: ¿por qué no mirar solo el número máximo?}
+En la tabla, VideoSAUR y SAVi son dos encoders centrados en objetos, y $|M|$ es el número de objetos ocultos. El masking moderado mejora la razonamiento contrafactual, pero bajo SAVi, un exceso de ocultamiento reduce el rendimiento, indicando que cuando se eliminan demasiadas informaciones, la tarea misma se vuelve indistinguible. La conclusión correcta es que existe un punto óptimo (sweet spot) relacionado con los mecanismos, no que ``más máscara implica más causalidad''.
+\end{knowledgebox}
+
+\begin{warningbox}{El VQA contrafactual no equivale a identificación causal}
+El aumento en la tasa de aciertos de las preguntas indica que las trayectorias de objetos generadas por el modelo apoyan mejor respuestas contrafactuales específicas; esto no prueba que el modelo haya recuperado el gráfico generador de datos, ni garantiza imparcialidad bajo distribuciones de intervención reales. El alcance de las conclusiones está limitado conjuntamente por los escenarios del benchmark, las plantillas de preguntas, la descomposición de objetos y la cabeza de razonamiento.
+\end{warningbox}
+
+\subsection{Push-T: eficiencia de tokens, arquitectura y masking deben separarse}
+
+La tabla de Push-T revela una ventaja sistémica en los tokens de objeto: el baseline basado en parches (patch) utiliza un input latente de $196\times384$, mientras que las variantes centradas en objetos requieren aproximadamente $6\times128$. Sin embargo, al reemplazar directamente la representación con OC-DINO-WM, la tasa de éxito cae drásticamente, lo que indica que tener menos tokens no es automáticamente mejor; los slots estáticos de objetos pueden no codificar explícitamente la velocidad, y el predictor causal original junto con la concatenación de acciones podrían no estar adaptados.
+
+\lecturefigure{slide-029.jpg}{Push-T: escala de entrada entre patch y token de objeto, y tasa de éxito en planificación}{Deck oficial CS25 V6, p.~29}
+
+\[
+C_{\text{latent}}\propto KdH,
+\qquad
+\frac{C_{\text{object}}}{C_{\text{patch}}}
+\approx\frac{6\times128}{196\times384}\approx1.0\%.
+\]
+Donde $K$ es el número de tokens por paso temporal, $d$ es la dimensión del token y $H$ es el horizonte de despliegue (rollout horizon). $C_{\text{latent}}$ representa la cantidad aproximada de cómputo y almacenamiento para una rollout latente. El $1\%$ es una comparación de orden de magnitud en la escala de características de entrada, no equivalente a una aceleración end-to-end precisa de cien veces en tiempo real (wall-clock).
+
+En la página siguiente se añaden progresivamente la condición de acción y el masking. Al tratar la acción como un nodo independiente y cambiar a un predictor enmascarado bidireccional, OC-JEPA recupera significativamente su rendimiento frente al baseline de objetos inadaptado; además, agregar masking de objetos sobre la misma arquitectura de OC-JEPA proporciona una mejora adicional. Por tanto, los resultados completos provienen de la combinación de tres factores, no de una única operación de ``objetivización''.
+
+\lecturefigure{slide-030.jpg}{Ablación en Push-T: contribución independiente del nodo de acción, predictor y masking de objetos}{Deck oficial CS25 V6, p.~30}
+
+\teachervoice{00:24:39--00:26:43，el docente explica que un solo slot de objeto puede no contener velocidad o aceleración por frame; mantener el predictor causal de DINO-WM reduce el rendimiento. El nodo de acción y el predictor bidireccional aportan inicialmente unos 15 puntos porcentuales, mientras que el masking relativo al baseline de objetos aporta otros aproximadamente 28 puntos porcentuales.}
+
+\begin{importantbox}{Lenguaje causal correcto para ablation}
+Dentro del contexto experimental dado, se puede afirmar: \textbf{en la misma arquitectura OC-JEPA}, el masking de historial está correlacionado con una mayor tasa de éxito, y eliminarlo degrada significativamente los resultados. No se puede decir que agregar masking a cualquier modelo mundo centrado en objetos elevará el rendimiento en 28 puntos; el encoder, la representación de acción, el horizonte, el solver y la distribución de datos participan en el resultado.
+\end{importantbox}
+
+\subsection{¿Por qué PHYRE parece predecir aunque solo muestre correlación?}
+
+Esta sección utiliza el contraejemplo del pértiga flotante de PHYRE para traducir las diferencias de tasa de éxito en la tabla a errores de mecanismo observables. OC-JEPA podría haber aprendido que ``cuando dos barras se acercan, suelen mantenerse adyacentes'', sin aprender la relación de soporte; al remover el soporte crítico, sigue extrayendo predicciones basadas en correlaciones de entrenamiento. C-JEPA, al ser repetidamente interrogado durante el entrenamiento sobre ``qué objetos son suficientes para explicar el futuro si falta esta información del objeto'','' tiende a prestar más atención a las entidades vecinas que realmente imponen restricciones.
+
+\lecturefigure{slide-031.jpg}{PHYRE: aprender correlación versus aprendizaje dinámico produce rollouts distintos}{Deck oficial CS25 V6, p.~31}
+
+En la página siguiente se presentan lado a lado el rollout y la sondeado de atención (attention probing). Primero se debe observar el fallo físico en el cuadro rojo, luego verificar quién depende según la tabla o los mapas de calor: OC-JEPA se enfoca en contenedores u objetos acompañantes no relacionados con el objetivo, mientras que C-JEPA presta más atención a la barra de soporte. La atención solo sirve como pista de dependencia, no puede tomarse directamente como una arista causal, pero puede formar una cadena de evidencia coherente con los fallos cualitativos.
+
+\lecturefigure{slide-032.jpg}{Rollout en PHYRE y sondeo de atención: dependencia en objetos erróneos causa incumplimiento físico}{Deck oficial CS25 V6, p.~32}
+
+\teachervoice{00:26:43--00:28:45，en clase se explica la predicción flotante como un atajo de correlación: el modelo ve que dos objetos aparecen frecuentemente juntos y predice que continuarán así, sin identificar la relación de soporte. El probe de atención muestra que los modelos fallidos dependen de objetos irrelevantes, aunque el docente no declara directamente los pesos de atención como un gráfico causal verdadero.}
+
+\begin{warningbox}{Versión de esta clase: la atención no es explicación}
+Los pesos de atención indican qué tokens participan en una agregación durante un cálculo hacia adelante, pero no pueden probar por sí solos la necesidad, suficiencia o el rol causal real. Una validación más fuerte requiere que el masking/intervención, el rendimiento contrafactual y los cambios en el rollout los apoyen conjuntamente; esta clase combina恰好 estas tres clases de evidencia, aunque sigue limitada por el encoder de objetos y el benchmark.
+\end{warningbox}
+
+\subsection{Definición operativa de ``causal''}
+
+El conferenciante收窄 activamente el término a dependencias predictivas dirigidas temporalmente: las variables históricas tienen una contribución de predicción estable para el estado futuro de los objetos, con dirección dada por el tiempo. Esto difiere de la identificación de gráficos en los modelos causales estructurales clásicos y no requiere que cada slot latente sea una variable real intervenible. Esta limitación es clave para entender el contenido sin ser engañado por el título.
+
+\lecturefigure{slide-033.jpg}{Limitación de causal en esta clase: dependencia predictiva dirigida temporalmente}{Deck oficial CS25 V6, p.~33}
+
+\[
+\mathcal{N}_t^{(i)}
+=\arg\min_{\mathcal{N}\subseteq\mathcal{C}_t}
+|\mathcal{N}|
+\quad\text{s.t.}\quad
+p(z_{t+1}^i\mid\mathcal{N})
+=p(z_{t+1}^i\mid\mathcal{C}_t).
+\]
+Donde $z_{t+1}^i$ es el siguiente estado del objeto objetivo, $\mathcal{C}_t$ son todas las variables de contexto visibles y $\mathcal{N}_t^{(i)}$ es el conjunto predictivamente suficiente mínimo. Se puede llamar vecindad de influencia (influence neighborhood), pero no garantiza ser igual a los padres causales reales; confusores ocultos, variables correlacionadas aguas abajo y parcialidad observabilidad pueden alterar este conjunto.
+
+\subsection{Cuatro hipótesis y dos hipótesis deliberadamente excluidas}
+
+La diapositiva 34 especifica claramente los puntos de apoyo para las afirmaciones teóricas: no hay causalidad instantánea en el mismo instante; diferentes muestras comparten un mecanismo de transición; los slots y objetos están suficientemente alineados; y un historial limitado es suficiente para predecir el futuro. Al mismo tiempo, el método no requiere una propiedad de Markov de primer orden ni la ausencia de confusores. Las primeras cuatro hacen que la predicción enmascarada sea interpretable; las últimas dos permiten al método enfrentar estados latentes más realistas, pero renuncian a la identificación del gráfico causal verdadero.
+
+\lecturefigure{slide-034.jpg}{Vecindad de influencia: condiciones de validez e hipótesis ideales no requeridas}{Deck oficial CS25 V6, p.~34}
+
+\begin{knowledgebox}{Traducción ítem por ítem de las cuatro hipótesis}
+\begin{enumerate}
+  \item \textbf{No causalidad instantánea}: la acción se expresa mediante retrasos temporales, sin analizar causalidad circular en el mismo paso temporal;
+  \item \textbf{Mecanismo compartido}: los videos de entrenamiento obedecen reglas dinámicas relativamente estables, por ejemplo, la gravedad no cambia arbitrariamente entre muestras;
+  \item \textbf{Alineación de objetos}: los slots son estados coherentes de objetos, no intercambios frecuentes, divisiones o mezclas;
+  \item \textbf{Suficiencia del historial}: dado que la ventana contiene la información necesaria para predecir, las memorias a largo plazo omitidas no dominarán el futuro.
+\end{enumerate}
+\end{knowledgebox}
+
+\subsection{Tarjeta de preguntas en vivo: representación infiel y gráfico causal irrecoverable}
+
+Una tarjeta de preguntas oficial aparece aquí en la grabación completa que no está incluida en la diapositiva. Plantea una pregunta más fundamental que la tabla de resultados: ¿qué pasa si la representación centrada en objetos no es fiel? ¿Se puede recuperar el gráfico causal verdadero? La respuesta de Hazel es que pequeños errores aún pueden mantener un sesgo inductivo útil, pero errores graves de descomposición harían que el método fallara; el método actual no puede recuperar el gráfico causal verdadero porque los confusores y la representación latente hacen que la identificabilidad no sea válida.
+
+\videofigure{frame-00-31-25.jpg}{Pregunta en vivo: ¿qué pasa si la representación de objetos es distorsionada? ¿Se puede recuperar el gráfico causal verdadero?}{Grabación oficial de Stanford, 00:31:25}
+
+\teachervoice{00:30:48--00:32:50，el docente ofrece la limitación más importante de esta clase: errores leves en los slots pueden seguir funcionando, pero errores graves no; C-JEPA no recupera el gráfico causal verdadero, solo aprende influencias predictivas útiles bajo masking.}
+
+\begin{importantbox}{Por qué vale la pena registrar el cambio de nombre en publicaciones futuras}
+Durante la clase se usó el lenguaje de ``Intervenciones Latentes a Nivel de Objeto'' y sesgo inductivo causal; la revisión posterior a mayo de 2026 cambió el título a ``Masking Latente a Nivel de Objeto'' y distinguió con más cuidado entre el sesgo de observabilidad y la identificación causal. Estas apuntes siguen la captura de clase del 9 de abril, pero usan esta revisión para recordar a los lectores que los términos fuertes deben actualizarse con las fronteras teóricas.
+\end{importantbox}
+
+\subsection{De vuelta a los tres contratos de modelos mundo}
+
+Al final de la primera parte, volvemos a las tres columnas iniciales: la representación de objetos responde ``¿qué es importante ahora?''; el masking permite que el predictor aprenda un contexto predictivamente suficiente, respondiendo ``¿cómo evoluciona el mundo?''; y la acción como nodo auxiliar responde ``¿cómo responde el mundo a ti?''. El valor de este gráfico de resumen es comprimir una arquitectura de artículo en principios de diseño transferibles, en lugar de memorizar un diagrama de red específico.
+
+\lecturefigure{slide-035.jpg}{Respuestas de Causal-JEPA a los tres contratos de modelos mundo}{Deck oficial CS25 V6, p.~35}
+
+\teachervoice{00:32:50--00:34:51，Hazel cierra la primera mitad con representación de objetos, suficiencia predictiva y acción como variable auxiliar, indicando claramente que declaración, transferencia y respuesta a la acción son tres componentes que pueden fallar por separado.}
+
+\subsection{Resumen de la sección}
+
+La evidencia más fuerte de Causal-JEPA proviene de cambios consistentes en ablation sin máscara de la misma arquitectura, métricas contrafactuales y fallos de interacción. Su advertencia más fuerte es igualmente clara: la alineación de objetos y la suficiencia del historial son premisas; la vecindad de influencia es solo un conjunto predictivamente suficiente bajo masking, y el método no identifica el gráfico causal verdadero. Mantener tanto las ganancias como los límites es la única manera de reconstruir fielmente este contenido de clase.
+\section{LeWorldModel: Usando una regularización interpretable para detener el colapso end-to-end}
+
+En la segunda mitad de su clase, Lucas planteó otra pregunta: incluso sin discutir la estructura de objetos, JEPA colapsa cuando se entrena de extremo a extremo sobre píxeles crudos. Los métodos existentes evitan este problema usando EMA, stop-gradient, un encoder preentrenado, proprioception o varias pérdidas de covarianza/varianza; LeWorldModel intenta lograr el mismo objetivo con dos términos de pérdida, un peso ajustable y aproximadamente 15M parámetros.
+
+\subsection{El concepto de modelo del mundo data de antes que la nomenclatura de 2018}
+
+Aquí redefinimos el modelo del mundo, no para repetir lo dicho al inicio, sino para enfatizar su continuidad histórica: la idea de identificación de sistemas, control predictivo basado en modelos y simulación interna data mucho antes que los modelos generativos profundos. Ha y Schmidhuber popularizaron la terminología moderna en 2018, pero el núcleo matemático sigue siendo un mapeo de evolución del estado influenciado por variables de control.
+
+\lecturefigure{slide-037.jpg}{Modelo del mundo: Mapeo de evolución del estado influenciado por variables de control y su contexto histórico}{Diapositivas oficiales CS25 V6, p.~37}
+
+\[
+s_{t+1}=f(s_t,a_t)+\varepsilon_t.
+\]
+Donde $s_t$ es el estado del sistema, $a_t$ es la variable de control, $f$ son las dinámicas desconocidas y $\varepsilon_t$ representa perturbaciones no modeladas o aleatoriedad. El objetivo de aprender un modelo del mundo es obtener un $\hat f$ lo suficientemente preciso para que el rollout soporte la planificación, sin necesidad de reconstruir cada detalle visual del entorno.
+
+\teachervoice{00:34:51--00:36:53, Lucas distingue entre concepto y terminología: la idea de simulación de un mundo interno se remonta al menos a Craik y las primeras teorías de control; fue el papel de 2018 lo que popularizó el nombre moderno ``World Models''.}
+
+\subsection{¿Por qué JEPA rechaza pagar por detalles irrelevantes}
+
+La diapositiva 38 ilustra con un cómic la carga del objetivo generativo: un futuro que contiene muchos detalles igualmente plausibles obliga a la verosimilitud de píxeles a ser responsable de toda la distribución; JEPA solo requiere consistencia en la estructura predecible dentro de las representaciones abstractas. Para el control, la posición y velocidad de la pelota suelen ser más importantes que cada hoja en una textura. El costo es que el encoder debe decidir por sí mismo qué descartar, y un error de descartado dañaría directamente la planificación.
+
+\lecturefigure{slide-038.jpg}{JEPA: Prediciendo en representaciones abstractas, evitando detalles generativos innecesarios}{Diapositivas oficiales CS25 V6, p.~38}
+
+\begin{importantbox}{El verdadero significado de Reconstruction-free}
+No significa ``es más avanzado porque no tiene decoder'', sino que la señal de entrenamiento no requiere restaurar la distribución completa de entrada. El modelo puede concentrar su capacidad en los factores relevantes para las dinámicas; pero si el objetivo downstream depende de detalles descartados, una representación libre de reconstrucción también fallará. Si la representación es lo suficientemente buena debe evaluarse por la tarea y la intervención, no por eslóganes arquitectónicos.
+\end{importantbox}
+
+\subsection{¿Por qué las representaciones constantes son un atajo global para la pérdida de predicción}
+
+Si $E(o)=c$ devuelve una constante para todas las observaciones, el predictor solo necesita devolver $c$, y el MSE del siguiente embedding puede ser cero. Este colapso no es que la optimización no converja, sino que la función objetivo tiene una solución excelente pero sin información. Por lo tanto, cualquier JEPA end-to-end debe introducir restricciones adicionales para mantener suficiente variación entre muestras y dimensiones de características dentro del lote (batch).
+
+\lecturefigure{slide-039.jpg}{Colapso de representación: Todas las entradas codificadas en el mismo punto}{Diapositivas oficiales CS25 V6, p.~39}
+
+\[
+E_\theta(o_t)=c,\quad
+P_\phi(c,a_t)=c
+\quad\Longrightarrow\quad
+\|P_\phi(E_\theta(o_t),a_t)-E_\theta(o_{t+1})\|_2^2=0.
+\]
+Donde $c$ es un vector constante, $E_\theta$ es el encoder y $P_\phi$ es el predictor condicionado a la acción. La ecuación muestra que solo con la pérdida de predicción no se puede distinguir entre ``predicción perfecta del estado real'' y ``todos los estados son idénticos''.
+
+\subsection{El costo de las recetas anti-colapso existentes}
+
+V-JEPA depende de masking, EMA y stop-gradient; DINO-WM congela el encoder preentrenado y deja el problema del colapso a la representación upstream; PLDM entrena end-to-end pero requiere varias pérdidas temporales/espaciales VCReg. Cada uno de los tres enfoques sacrifica interpretabilidad del objetivo, libertad de adaptación de la representación o simplicidad en el ajuste de hiperparámetros. La tesis de LeWorldModel no es que esos métodos sean inválidos, sino si se puede reemplazar una receta compleja con una restricción de distribución explícita.
+
+\lecturefigure{slide-040.jpg}{Recetas JEPA existentes: EMA, encoder congelado y múltiples regularizadores}{Diapositivas oficiales CS25 V6, p.~40}
+
+\teachervoice{00:36:53--00:38:54, Lucas resume las recetas previas en tres puntos: V-JEPA usa actualización de objetivo heurística, DINO-WM está limitado por el conocimiento preentrenado y PLDM mantiene varianza y covarianza con seis pérdidas aproximadamente. El objetivo de LeWM es end-to-end, entrada de píxeles y pocos hiperparámetros, no negar el valor de línea base de estos métodos.}
+
+\begin{knowledgebox}{Matriz de métodos anti-colapso}
+\begin{tabularx}{\textwidth}{L{0.19\textwidth} L{0.24\textwidth} X}
+\toprule
+Familia de método & Cómo evitar el colapso & Costo principal \\
+\midrule
+EMA/stop-gradient & Crear un objetivo estable con una rama lenta de objetivos & Explicación de optimización débil, incluye reglas de actualización adicionales \\
+Encoder congelado & Heredar diversidad de la representación preentrenada & No puede adaptarse completamente a las dinámicas actuales \\
+Pérdidas de varianza y covarianza & Mantener explícitamente la varianza dimensional y la decorrelación & Costo de múltiples pesos, estabilidad y escalabilidad \\
+Alineación de distribución & Restringir la distribución del embedding por lote & Necesita selección de pruebas estadísticas y aproximaciones de muestreo \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{El contrato mínimo de entrenamiento de LeWorldModel}
+
+La diapositiva 41 escribe los objetivos de diseño como una lista de ``No'' y ``Full'': no depende de EMA, masking, stop-gradient o un encoder preentrenado; entrena end-to-end sobre píxeles crudos en un solo GPU, manteniendo solo un peso de regularización. Lo que realmente necesita validación no es si la lista se ve bien, sino si el código de la diapositiva 42 corresponde efectivamente a un objetivo completo y optimizable.
+
+\lecturefigure{slide-041.jpg}{Objetivos de diseño de LeWorldModel: End-to-end, pocas heurísticas y un solo hiperparámetro}{Diapositivas oficiales CS25 V6, p.~41}
+
+\lecturefigure{slide-042.jpg}{LeWorldModel: encoder, predictor condicionado a la acción, MSE y SIGReg}{Diapositivas oficiales CS25 V6, p.~42}
+
+\[
+\hat z_{t+1}=P_\phi(z_t,a_t),
+\qquad z_t=E_\theta(o_t),
+\qquad
+\mathcal{L}_{\text{pred}}=\|\hat z_{t+1}-z_{t+1}\|_2^2.
+\]
+Donde $o_t$ es la observación de píxeles originales, $E_\theta$ es el encoder ViT, $z_t$ es el estado latente compacto, $a_t$ es la acción, $P_\phi$ es el predictor Transformer y $\hat z_{t+1}$ es la predicción del siguiente latente. La pérdida de predicción permite que la representación mantenga dinámicas predecibles, pero su uso aislado provoca colapso.
+
+\begin{lstlisting}[language=Python,caption={Pseudocódigo de entrenamiento con dos pérdidas de LeWorldModel}]
+def train_step(observations, actions, weight):
+    embeddings = encoder(observations)
+    predicted = predictor(embeddings[:, :-1], actions[:, :-1])
+    prediction_loss = mse(predicted, embeddings[:, 1:])
+    anti_collapse = mean(sigreg(step) for step in embeddings.transpose(0, 1))
+    loss = prediction_loss + weight * anti_collapse
+    loss.backward()
+    optimizer.step()
+\end{lstlisting}
+
+\teachervoice{00:38:54--00:40:59, el docente enfatiza ``lo que ves es lo que obtienes'': el código real son cuatro pasos: encode, predict, MSE y SIGReg; el único peso de pérdida que necesita búsqueda conjunta es $\lambda$, cuyo rango se puede reducir con un estilo logarítmico/bisectriz.}
+
+\subsection{SIGReg: Descomponiendo la normalidad multidimensional en pruebas unidimensionales aleatorias}
+
+El Sketched Isotropic Gaussian Regularizer (SIGReg) requiere que los embeddings latentes dentro del lote sean aproximadamente gaussianos isótropos. Verificar la distribución directamente en alta dimensión es difícil, por lo que muestra varias direcciones unitarias, proyecta el embedding a una dimensión y usa una estadística de normalidad en cada dirección, promediando luego esas estadísticas. La intuición detrás de Cramér--Wold es: si todas las proyecciones unidimensionales coinciden con la distribución objetivo, también se restringe la distribución conjunta.
+
+\lecturefigure{slide-043.jpg}{SIGReg: Proyección aleatoria, prueba de normalidad unidimensional y restricción de distribución conjunta}{Diapositivas oficiales CS25 V6, p.~43}
+
+\[
+Z\in\mathbb{R}^{NB\times d},
+\qquad
+h^{(m)}=Zu^{(m)},\quad u^{(m)}\in\mathbb{S}^{d-1},
+\qquad
+\operatorname{SIGReg}(Z)=\frac{1}{M}\sum_{m=1}^{M}T\!\left(h^{(m)}\right).
+\]
+Donde $N$ es la longitud de historial, $B$ es el tamaño del lote, $d$ es la dimensión del embedding, $Z$ resume todos los latentes, $u^{(m)}$ es la $m$-ésima dirección unitaria aleatoria, $h^{(m)}$ es la proyección unidimensional, $T$ son estadísticas de normalidad como Epps--Pulley y $M$ es el número de proyecciones.
+
+\[
+\mathcal{L}_{\text{LeWM}}
+=\mathcal{L}_{\text{pred}}+\lambda\operatorname{SIGReg}(Z).
+\]
+Donde $\lambda$ equilibra la predicción de dinámicas y el anti-colapso. Si $\lambda$ es demasiado pequeño, se acerca a una solución constante trivial; si es demasiado grande, podría sacrificar predicciones relevantes para la tarea solo para coincidir con la gaussiana; un único hiperparámetro solo significa un espacio de búsqueda más pequeño, no que no sea necesario validar.
+
+\teachervoice{00:40:59--00:42:59, Lucas explica SIGReg con flechas aleatorias: cada vez se proyecta el latente de alta dimensión a una dimensión y se optimiza la normalidad de la distribución proyectada; muchas direcciones conjuntamente restringen la distribución conjunta. La clase deja los detalles matemáticos para el artículo, pero señala claramente que esto es anti-colapso y no modelado generativo.}
+
+\begin{warningbox}{La regularización gaussiana no implica independencia de factores latentes}
+La restricción gaussiana isótropa fomenta la varianza total y la cobertura direccional, pero no garantiza que cada dimensión corresponda a una cantidad física interpretable, ni excluye enredos no lineales. Resuelve ``no todos iguales'' y degeneración de distribución, pero no aborda directamente la estructura de objetos, identificación causal o controlabilidad downstream.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+LeWorldModel escribe JEPA end-to-end como MSE de predicción más SIGReg: el primero aprende estados predecibles y el segundo elimina representaciones constantes. Las pruebas de normalidad unidimensionales aleatorias proporcionan una restricción de distribución escalable, haciendo que el modelo no dependa de un encoder congelado ni de regularizadores complejos con múltiples términos. Lo que debe verificarse a continuación es si estos latentes compactos pueden usarse realmente para planificación en línea y de dónde proviene su ventaja de velocidad.
+\section{Planificación en el espacio latente: cómo las predicciones del modelo se convierten en acciones}
+
+El propio modelo del mundo solo responde a la pregunta ``¿qué sucede si realizo esta secuencia de acciones?''; el controller debe buscar a la inversa ``¿qué acción debo tomar para llegar al objetivo?''. LeWorldModel utiliza control predictivo basado en modelos (MPC): realiza rollout repetidos de acciones candidatas en el espacio latente, calcula la distancia entre el punto final y el objetivo, hace que el solver actualice la secuencia de acciones y luego ejecuta solo los primeros pasos antes de volver a observar el entorno.
+
+\subsection{Bucle cerrado de predicción-optimización del Latent MPC}
+
+La diapositiva 45 debe leerse de izquierda a derecha y luego desde abajo derecha hacia las acciones: primero, la imagen actual y la imagen objetivo se mapean al mismo encoder en $z_1, z_g$; luego, el predictor genera $\hat z_2, \ldots, \hat z_H$ basándose en la secuencia de acciones; el costo compara el punto final con el objetivo; finalmente, el solver actualiza las acciones y repite el ciclo. Dado que el encoder no genera píxeles, cada rollout candidato solo se ejecuta sobre un pequeño espacio latente.
+
+\lecturefigure{slide-045.jpg}{Bucle cerrado de control predictivo basado en modelos (model-predictive control) en el espacio latente de LeWorldModel}{CS25 V6 official deck, p.~45}
+
+\[
+\hat z_{h+1}=P_\phi(\hat z_h,a_h),\quad \hat z_1=E_\theta(o_1),
+\qquad
+J(a_{1:H})=\|\hat z_{H+1}-E_\theta(o_g)\|_2^2+\beta R(a_{1:H}).
+\]
+
+En esta ecuación, $H$ es el horizonte de planificación, $o_1$ es la observación actual, $o_g$ es la imagen objetivo, $a_{1:H}$ es la secuencia candidata de acciones, $J$ es el costo de planificación, $R$ representa una penalización por suavidad de acción, amplitud o límites, y $\beta$ es el peso de restricción. En la práctica, el MPC real re-codifica la observación tras ejecutar el primer paso para reducir los errores acumulados en bucle abierto (open-loop).
+
+\begin{lstlisting}[language=Python,caption={Ciclo mínimo de predicción-optimización del Latent MPC}]
+actions = initialize_action_sequence(horizon)
+for _ in range(num_solver_steps):
+    state = encoder(current_observation)
+    for action in actions:
+        state = predictor(state, action)
+    cost = latent_distance(state, encoder(goal_observation))
+    cost += action_constraint_penalty(actions)
+    actions = solver.update(actions, cost)
+execute(actions[0])
+\end{lstlisting}
+
+\teachervoice{00:42:59--00:47:04, Lucas divide la evaluación en control online y física intuitiva. Al planificar, primero se muestran o inicializan trayectorias de acciones, luego se realizan rollout en el espacio latente y finalmente se actualizan las acciones usando la distancia del goal embedding; esto constituye exactamente la interfaz entre el modelo del mundo y el controller.}
+
+\begin{knowledgebox}{Uso por primera vez: Control Predictivo Basado en Modelos (Model Predictive Control)}
+El MPC compromete cada vez solo un horizonte corto: predice el futuro, optimiza las acciones, ejecuta el primer paso, obtiene una nueva observación y vuelve a planificar. La diferencia con un plan abierto (open-loop) de una sola vez es la corrección de errores en bucle cerrado continua; la diferencia con una política directa es que, en tiempo de prueba, aún se llama explícitamente al modelo del mundo y al optimizador, por lo que es más lento pero maneja mejor los objetivos nuevos.
+\end{knowledgebox}
+
+\subsection{No basta comparar el éxito promedio en los cuatro entornos}
+
+La diapositiva 46 abarca Two-Room, Reacher, Push-T y OGBench-Cube, con dificultades y geometrías de acción diferentes. LeWM supera a PLDM end-to-end en ciertas tareas complejas y compite con DINO-WM que utiliza DINOv2; sin embargo, no es óptimo en todos los entornos más simples. Se deben examinar por separado el éxito final, la varianza, si se utiliza propiocepción (proprioception) y la carga computacional de cada planificación.
+
+\lecturefigure{slide-046.jpg}{Resultados de control en múltiples entornos: tasas de éxito y diferencias entre tareas de los diferentes baselines}{CS25 V6 official deck, p.~46}
+
+\begin{knowledgebox}{Lectura de la figura: cuatro preguntas para comparar los baselines de control}
+En primer lugar, ¿la entrada es solo píxeles o incluye también propiocepción? En segundo lugar, ¿el encoder congela un modelo fundamental (foundation model) o se entrena end-to-end? En tercer lugar, ¿el solver, el horizonte y el número de candidatos son consistentes? En cuarto lugar, ¿las diferencias en la tasa de éxito superan a los márgenes de error? Solo controlando estas condiciones es posible interpretar velocidad y tasa de éxito en un mismo gráfico de Pareto.
+\end{knowledgebox}
+
+\subsection{La aceleración de planificación 48 veces proviene del modelo compacto, no es una solución mágica}
+
+La diapositiva 47 coloca el tiempo total de planificación junto a la tasa de éxito. Con aproximadamente 15M de parámetros, un espacio latente compacto y menos tokens, LeWM permite que un ciclo de búsqueda de acciones en una sola GPU dure menos de un segundo, logrando así un aumento de velocidad (speedup) máximo de aproximadamente $48\times$ frente a los modelos del mundo basados en modelos fundamentales. Este número depende de la configuración fija de planificación; cambiar el solver, el tamaño del lote (batch size), el horizonte o el hardware alterará esta proporción.
+
+\lecturefigure{slide-047.jpg}{Velocidad de planificación y tasa de éxito: compensación a nivel de sistema de LeWorldModel}{CS25 V6 official deck, p.~47}
+
+\teachervoice{00:47:04--00:49:08, el docente atribuye la ventaja a una representación end-to-end compacta: los muchos tokens generados por el encoder del modelo fundamental hacen que cada imaginación sea más costosa. Simultáneamente, en clase se reconoce que LeWM es competitivo pero no lidera de manera absoluta en todas las tareas.}
+
+\begin{warningbox}{La velocidad de planificación no puede separarse de la configuración del controller}
+Que el ``modelo sea más pequeño'' solo reduce el costo de cada rollout; el retraso total también se multiplica por el número de trayectorias candidatas, las iteraciones del solver, el horizonte y la frecuencia de replaneamiento. Si para compensar errores del modelo se requieren más muestras, los beneficios end-to-end podrían reducirse. Los informes de ingeniería deben proporcionar simultáneamente los FLOPs del modelo, el presupuesto del solver, el tiempo real (wall-clock) y la tasa de éxito.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El Latent MPC convierte el modelo del mundo en un controller ejecutable: el encoder define el estado y el objetivo, el predictor realiza rollout de las consecuencias de las acciones, y el costo junto con el solver buscan a la inversa las acciones. Las principales ventajas sistémicas de LeWM provienen del espacio latente compacto y del modelo pequeño, lo que abarata los numerosos rollout candidatos; su evidencia es un Pareto velocidad-tasa de éxito bajo entornos específicos y un presupuesto fijo del controller, no una garantía incondicional de control en tiempo real.
+
+
+\section{¿Aprendió el modelo la estructura física: probe, surprise y rollout}
+
+El control exitoso puede provenir de atajos específicos de la tarea; por ello, la clase introduce tres diagnósticos de representación: \textit{probe} para verificar si las magnitudes físicas son decodificables, \textit{surprise} para detectar si el error de predicción aumenta cuando el entorno cambia súbitamente y \textit{latent geometry} para comprobar si las trayectorias del estado forman una estructura continua. Estos métodos aumentan conjuntamente la interpretabilidad, pero no pueden sustituir a un robot real ni a una validación con horizonte largo.
+
+\subsection{Latent probing: lo decodificable no implica que sea usado explícitamente}
+
+En la diapositiva 49 se utilizan un \textit{linear probe} y un \textit{MLP probe} para predecir cantidades de verdad terrestre (\textit{ground-truth quantities}) como masa, posición y velocidad a partir de un \textit{latent} congelado. Si un \textit{probe} lineal simple ya puede recuperar las variables, indica que existe una codificación geométrica más directa en la representación; si solo el MLP logra recuperarla, la información probablemente está entrelazada de manera no lineal. Los resultados del \textit{probe} no garantizan que el \textit{predictor} realmente dependa de esa variable al planificar.
+
+\lecturefigure{slide-049.jpg}{Probing de magnitudes físicas: decodificabilidad de linear y MLP probe}{Pantallas oficiales de CS25 V6, p.~49}
+
+\[
+\hat y=Wz+b,
+\qquad
+R^2=1-\frac{\sum_n(y_n-\hat y_n)^2}{\sum_n(y_n-\bar y)^2}.
+\]
+Donde $z$ es el \textit{latent} del modelo del mundo congelado, $y$ es la magnitud física real, $W,b$ son los parámetros del \textit{probe} y $R^2$ mide la varianza explicable. Al entrenar el \textit{probe}, no se debe actualizar el codificador (\textit{encoder}); de lo contrario, se estaría evaluando la capacidad de aprender una nueva tarea supervisada en lugar de la información ya presente en la representación original.
+
+\begin{warningbox}{Lo decodificable no significa causal}
+Que una variable pueda decodificarse desde el \textit{latent} puede significar solo que está correlacionada con los factores verdaderamente decisivos; para demostrar que el modelo la utiliza, se deben realizar intervenciones en el \textit{latent}, la entrada o el entorno y observar cómo cambian las predicciones y las acciones. El \textit{probe} constituye la primera capa de evidencia de representación, no el punto final del mecanismo.
+\end{warningbox}
+
+\subsection{Violación del modelo del mundo: midiendo surprise con mutaciones controladas}
+
+En la diapositiva 50, durante un \textit{rollout}, se cambia súbitamente el color del cubo o se realiza un teletransporte del mismo, para luego observar el error de predicción. Si el cambio de color no afecta la dinámica, una representación de estado ideal no debería sorprenderse en exceso; por otro lado, un teletransporte de posición rompe la dinámica continua y debería generar un pico de error notable. Este diseño traduce ``entender la física'' en un perfil de sensibilidad medible.
+
+\lecturefigure{slide-050.jpg}{Mutaciones controladas del entorno: cambio de color, teletransporte y sorpresa en predicciones latentes}{Pantallas oficiales de CS25 V6, p.~50}
+
+\[
+\operatorname{Surprise}_t
+=\left\|P_\phi(E(o_{t-1}),a_{t-1})-E(o_t^{\text{intervened}})\right\|_2^2.
+\]
+Donde $o_t^{\text{intervened}}$ es la observación modificada mediante intervención, $E$ es el codificador y $P$ es el predictor. Si la intervención altera un estado relevante para la dinámica, la sorpresa debe aumentar; si solo cambia un factor molesto (\textit{nuisance factor}) que la representación ignora, la sorpresa podría ser menor.
+
+\teachervoice{00:49:08--00:53:13，Lucas primero pregunta al latent usando un probe si codifica magnitudes físicas y luego pregunta si el modelo se siente ``sorprendido'' ante eventos irracionales mediante un cambio ambiental súbito. Ambos tests miden respectivamente la decodificabilidad y la consistencia de predicción.}
+
+\begin{importantbox}{Una prueba de intervención adecuada debe tener un control}
+Observar solo el pico de error por teletransporte no es suficiente; también debe compararse con sin perturbación, cambios visuales pero no dinámicos e intervenciones de diferentes amplitudes. De lo contrario, el modelo podría ser simplemente sensible a cambios en la distribución de píxeles. Al poner el cambio de color y el teletransporte en paralelo en la diapositiva 50, se busca distinguir entre un desplazamiento de apariencia (\textit{appearance shift}) y una violación del estado.
+\end{importantbox}
+
+\subsection{Geometría latente: ¿se mantiene la relación de vecindad entre estados?}
+
+En la diapositiva 51 se compara la cuadrícula de estados físicos de Push-T con la geometría latente proyectada en dos dimensiones. Si los estados físicos similares también son similares en el \textit{latent}, solo entonces la distancia al objetivo (\textit{goal distance}) es más probable que constituya un costo de planificación significativo. La proyección a dos dimensiones pierde información, por lo que se debe prestar atención a la continuidad global, las dobles curvaturas locales y las roturas evidentes, en lugar de tomar una forma bonita como prueba cuantitativa.
+
+\lecturefigure{slide-051.jpg}{Distancias relativas entre la cuadrícula de estados físicos y la geometría latente aprendida}{Pantallas oficiales de CS25 V6, p.~51}
+
+\begin{knowledgebox}{Lectura de la figura: ¿qué conclusiones apoya el mapa latente?}
+Lo que puede apoyar: que la representación conserva aproximadamente cierta estructura de vecindad entre estados y dirección. Lo que no puede apoyar: que cada eje tenga un significado físico fijo, que todas las tareas compartan esa geometría o que la distancia euclidiana sea necesariamente igual al costo de control. Una verificación más confiable debe combinar preservación de vecindad, \textit{probe}, éxito en planificación y sensibilidad a intervenciones.
+\end{knowledgebox}
+
+\subsection{Rollout en bucle abierto: ¿cómo se acumula el error con horizonte largo?}
+
+La última gráfica analítica compara la entrada del contexto con la predicción en bucle abierto (\textit{open-loop}). Los primeros pasos suelen mantener los objetos y las direcciones, pero luego el error va acumulándose gradualmente, especialmente después de contactos, colisiones e interacciones multibody. Este fenómeno explica por qué los métodos actuales son más adecuados para MPC de horizonte corto: la reobservación en bucle cerrado puede reiniciar constantemente el \textit{latent}, mientras que una simulación del mundo puramente en bucle abierto se desviaría de la distribución de entrenamiento.
+
+\lecturefigure{slide-052.jpg}{Comportamiento a largo plazo entre context-conditioned y rollout latente en bucle abierto}{Pantallas oficiales de CS25 V6, p.~52}
+
+\teachervoice{00:53:13--00:55:14，En clase se analizó la estructura de representación usando distancia latente y rollout en bucle abierto, al mismo tiempo que no se evitó el error acumulativo. Mantener una trayectoria razonable a corto plazo no equivale a haber resuelto la planificación jerárquica a largo plazo.}
+
+\subsection{Resumen de la sección}
+
+El \textit{probe}, el \textit{surprise} y la geometría revisan el \textit{latent} desde la información decodificable, la respuesta a intervenciones y la estructura del espacio de estados, respectivamente. Estos tres aspectos son complementarios a los resultados de control: un modelo capaz de planificar puede tener una representación difícil de interpretar, y un modelo con alto puntaje en \textit{probe} podría no utilizar esa información. El juicio más confiable proviene de la validación cruzada entre el éxito de la tarea, las intervenciones mecánicas, los diagnósticos de representación y los casos de fallo.
+\section{Restricciones, herramientas y Q\&A de clase: conectar prototipos de investigación con sistemas reales}
+
+La clase no terminó cerrando con cifras SOTA, sino que se centró en discutir qué interfaces aún no están resueltas: horizonte corto, único nivel temporal, entornos juguete (toy environments), imagen objetivo (image goal), robots reales, arquitectura de agente y destilación de políticas. El Q\&A también reiteró constantemente que JEPA es un marco de entrenamiento, no un nuevo tipo de red neuronal, y que el modelo del mundo (world model) puede combinarse con difusión, Transformer, política RL y control clásico.
+
+\subsection{Cuatro limitaciones públicas corresponden a cuatro líneas de investigación}
+
+La diapositiva 53 convierte la limitación en oportunidad de investigación. El horizonte corto exige un rollout más estable o corrección en bucle cerrado; el único nivel temporal requiere estado jerárquico; el montaje juguete (toy setup) exige percepción real y cambio de dominio (domain shift); una imagen objetivo irrealista requiere codificador de lenguaje/tarea o interfaz de recompensa. Ninguna de ellas se resuelve simplemente ``ampliando el modelo''.
+
+\lecturefigure{slide-053.jpg}{Limitaciones de LeWorldModel: horizonte corto, escala única, entorno juguete e interfaz de objetivo}{CS25 V6 oficial, p.~53}
+
+\begin{knowledgebox}{De la limitación al módulo de sistema}
+\begin{tabularx}{\textwidth}{L{0.24\textwidth} X}
+\toprule
+Limitación & Capacidad del sistema a añadir \\
+\midrule
+planeación a corto plazo & rollout consciente de incertidumbre, replaneación, híbrido política/modelo-mundo \\
+nivel temporal único & latente jerárquico, abstracción de eventos, memoria a largo plazo \\
+entornos juguete & percepción robusta, simulación-a-realidad, observabilidad parcial, restricciones de seguridad \\
+imagen objetivo irrealista & codificador de lenguaje/tarea, modelo de recompensa, especificación de restricciones \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\teachervoice{00:55:14--00:57:15, Lucas identificó explícitamente estos proyectos como limitaciones u oportunidades de investigación: los planificadores actuales son principalmente a corto plazo y con representación temporal de un solo nivel, y las interfaces de entorno y objetivo siguen estando lejos de la robótica abierta.}
+
+\subsection{stable-worldmodel: la comparabilidad reproducible también es contribución metodológica}
+
+La diapositiva 54 muestra una librería unificada que coloca LeWM, PLDM, DINO-WM y otras líneas base (baselines), junto con solvers como CEM, MPPI y Adam, y entornos como Push-T, TwoRoom, OG-Bench y DMC en una misma interfaz. Su valor científico radica en reducir la incomparabilidad que causan el preprocesamiento de datos y las implementaciones de planificadores distintas en cada artículo.
+
+\lecturefigure{slide-054.jpg}{stable-worldmodel: capa experimental unificada de baselines, solvers y entornos}{CS25 V6 oficial, p.~54}
+
+\teachervoice{00:57:15--00:59:16, el docente invitó a los estudiantes a usar y contribuir con ``stable-worldmodel'', enfatizando que las baselines, solvers, entornos, pruebas y documentación ya están unificados. El punto clave aquí es la reproducibilidad, no convertir una librería en el único estándar.}
+
+\begin{importantbox}{Una API unificada no sustituye a un protocolo unificado}
+La misma librería aún requiere fijar resolución de observación, normalización de acciones, división del conjunto de datos (dataset split), presupuesto del planificador, semillas aleatorias y definición de éxito. La API resuelve la interfaz de código, pero el protocolo de benchmark es lo que garantiza la comparabilidad científica; ambos son indispensables.
+\end{importantbox}
+
+\subsection{Physical AI: por qué la predicción de consecuencias de acción es un objetivo de entrenamiento independiente}
+
+En el Q\&A, Lucas expresó escepticismo sobre si los VLA actuales poseen una comprensión del mundo confiable: si el modelo no se entrenó para predecir las consecuencias de sus propias acciones, puede funcionar bien en tareas de imitación familiares, pero carecería de verificación explícita para nuevas interacciones. Hazel añadió que el modelo del mundo también puede servir como evaluador de políticas. Esta perspectiva debe considerarse como un juicio del orador, no como una conclusión empírica universal para todos los VLA.
+
+\teachervoice{00:59:16--01:01:17, Lucas opinó que si el agente físico no puede predecir las consecuencias de la acción, difícilmente podrá interactuar de manera confiable; Hazel complementó que el modelo del mundo puede evaluar una política candidata. Las notas recuerdan que esto es un juicio prospectivo que requiere validación con experimentos en robots reales.}
+
+\begin{warningbox}{VLA y modelo del mundo no son categorías mutuamente excluyentes}
+Un VLA puede contener internamente un objetivo predictivo, un simulador latente o un valor/modelo del mundo; el modelo del mundo también puede implementarse con Transformers de lenguaje y visión. La verdadera diferencia radica en la interfaz de entrenamiento: si el modelo aprende explícitamente $p(s_{t+1}\mid s_t,a_t)$ y si, durante el despliegue, usa esa predicción para verificar o buscar acciones.
+\end{warningbox}
+
+\subsection{¿Es necesaria la máscara? Lo necesario es eliminar atajos (shortcuts)}
+
+Un estudiante preguntó si la pérdida de predicción era insuficiente. La respuesta de Hazel fue prudente: para cualquier modelo del mundo, la máscara no es el único método lógicamente posible; pero en un montaje centrado en objetos (object-centric setup), predecir sin oclusiones facilita aprender las dinámicas propias del objeto y no garantiza las dinámicas basadas en interacción. La máscara es un medio para sacar los atajos fuera del espacio de soluciones factibles, no una ley universal.
+
+\teachervoice{01:01:17--01:03:15, respondiendo a ``¿máscara necesaria?``, el docente aclaró que la pérdida de predicción por sí misma puede aprender ciertos modelos del mundo, pero podría limitarse a aprender solo el movimiento del objeto; la máscara de objetos refuerza las dinámicas de interacción y no debe escribirse como la única receta obligatoria para todos los sistemas.}
+
+\begin{importantbox}{Pregunta general sobre el diseño de objetivos auto-supervisados}
+No se deba preguntar solo ``¿puede bajar la pérdida?``, sino: \textbf{cuál es el atajo más barato?} Si la tarea objetivo requiere relaciones, memoria a largo plazo o consecuencias de acción, el entrenamiento debe eliminar sistemáticamente las vías que pueden completarse solo con estadísticas locales, fuga de identidad o correlaciones estáticas.
+\end{importantbox}
+
+\subsection{Diferencias de interfaz entre agente JEPA-native y agente LLM con herramientas}
+
+Lucas describió al agente JEPA-native como un modelo predictivo condicionado a la acción más control clásico: ingresa el estado actual y la acción, predice el futuro y luego realiza búsqueda sin ejemplos usando MPC. Los agentes LLM aprenden habitualmente a usar herramientas mediante bucles de texto/citación de herramienta, y no necesariamente aprenden explícitamente las transiciones de estado de acciones físicas continuas. Ambos pueden combinarse; por ejemplo, un modelo de lenguaje descompone el objetivo y el modelo del mundo se encarga de las consecuencias de acción de nivel inferior.
+
+\teachervoice{01:03:19--01:05:20, la clase enfatizó que la diferencia del agente JEPA-native radica en ser un modelo predictivo condicionado a la acción, no en usar algún backbone nuevo. Una vez aprendido el comportamiento dinámico (dynamics), se puede conectar directamente con MPC sin necesidad de post-entrenar cada objetivo como una política primero.}
+
+\begin{knowledgebox}{Capas combinables del stack de agente}
+El modelo de lenguaje puede encargarse de la explicación de tareas y subobjetivos de alto nivel; el modelo del mundo predice el estado continuo del entorno; el planificador/solver busca acciones; la política ejecuta rápido; el verificador y escudo de seguridad gestionan las restricciones. Separando estas capas, se puede localizar si el fallo proviene de semántica, dinámica, optimización o ejecución.
+\end{knowledgebox}
+
+\subsection{JEPA no es el antónimo del Transformer}
+
+La pregunta ``¿JEPA genera menos alucinaciones que el Transformer?'' mezcla marco y arquitectura. Lucas aclaró explícitamente que los codificadores y predictores de LeWorldModel son en sí mismos Transformers; JEPA describe qué se predice durante el entrenamiento, mientras que Transformer describe cómo interactúan los tokens. El modelo del mundo seguirá generando futuros erróneos debido a falta de datos, insuficiencia de capacidad, error del modelo o acciones fuera de límites detectadas por el controlador.
+
+\teachervoice{01:05:20--01:07:22, Lucas corrigió la confusión de categorías: JEPA no es una nueva arquitectura, sino un marco para aprender modelos del mundo. Incluso usando JEPA, datos malos o modelos malos seguirán alucinando; simplemente los tipos de error no son exactamente los mismos que la generación de texto sin grounding de los LLM.}
+
+\begin{warningbox}{Cuatro fuentes de alucinación en el modelo del mundo}
+\begin{enumerate}
+  \item El codificador pierde estados relevantes para la decisión;
+  \item El predictor acumula errores en horizontes largos;
+  \item La distribución de entrenamiento carece de interacciones clave;
+  \item El planificador propone acciones inválidas o fuera de límites del entorno.
+\end{enumerate}
+Por ello, ``más grounded'' es una hipótesis comprobable, no una propiedad garantizada automáticamente por el nombre JEPA.
+\end{warningbox}
+
+\subsection{Difusión, MPC y destilación de políticas pueden coexistir}
+
+Otra pregunta trataba a los modelos de difusión y al modelo del mundo como productos competidores. El ponente señaló que la difusión puede servir como predictor del modelo del mundo, propuesta de acción o política; el modelo del mundo es un rol funcional, no una familia específica de modelos probabilísticos. Para horizontes largos, el sistema también puede usar MPC costoso para generar comportamientos de alta calidad y luego destilarlos en una política rápida: las situaciones familiares siguen rutas reflejas y las difíciles retroceden a la planificación.
+
+\teachervoice{01:07:22--01:10:59, la clase dio dos respuestas de sistema: la difusión puede integrarse en el pipeline JEPA/modelo del mundo; los futuros agentes podrían funcionar como sistemas rápidos/lentos, usando directamente la política en casos simples y llamando a MPC en casos difíciles, mientras se destila la experiencia de planificación de vuelta a la política.}
+
+\begin{importantbox}{Ciclo cerrado de ingeniería entre política rápida y planificador lento}
+El modelo del mundo offline aprende las dinámicas; el MPC online genera acciones para nuevos objetivos; las trayectorias exitosas entran en el buffer de reproducción (replay buffer); la destilación de políticas aprende un mapeo rápido; estados de baja confianza o fuera de distribución reactivan el planificador. Este ciclo conecta modelo, control y recolección continua de datos, pero introduce problemas de sesgo del modelo, deriva de la política y verificación de seguridad.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Los sistemas reales no elegirán entre JEPA, Transformer, difusión, MPC o políticas en cinco categorías. Cada uno responde a objetivos de entrenamiento, estructura de red, modelado probabilístico, búsqueda online y ejecución rápida. Las principales lagunas en los prototipos de investigación actuales son horizonte largo, jerarquía, entornos reales e interfaces de objetivo; el benchmarking unificado mejora la calidad de la comparación, pero no sustituye al despliegue real ni a las pruebas de seguridad.
+\section{Síntesis y ampliación}
+
+\subsection{Un hilo conductor que atraviesa toda la clase: controlar las atajos que el modelo puede ver}
+
+Dos trabajos parecen tratar temas distintos, uno sobre objetos y otro sobre regularización gaussiana, pero en realidad ambos rediseñan el espacio de soluciones factibles. Causal-JEPA elimina el historial del propio objeto objetivo, haciendo necesaria la información de relaciones fuera de las atajos de interacción; LeWorldModel restringe la distribución de embeddings, impidiendo que una representación constante sea la solución óptima legítima para la pérdida de predicción. El principio común del aprendizaje autosupervisado de alta calidad es hacer difícil satisfacer el objetivo con soluciones ``baratas pero incorrectas''.
+
+\begin{importantbox}{Las ocho preguntas más transferibles de esta clase}
+\begin{enumerate}
+  \item ¿Qué variables relevantes para la decisión conserva la representación del estado?
+  \item ¿Cuál es el atajo más fácil de explotar?
+  \item ¿Qué soluciones triviales excluye la restricción anti-collapse?
+  \item ¿Por qué interfaz ingresa la acción al predictor?
+  \item ¿La información visible durante el entrenamiento coincide con la del momento de inferencia?
+  \item ¿El aumento de resultados proviene de la representación, la arquitectura, la función de pérdida o el controlador?
+  \item ¿Qué no pueden probar por sí solos las sondeadoras (probe), la atención y los despliegues bonitos (rollout)?
+  \item ¿Cómo fallan con horizontes largos, acciones fuera de distribución y entornos reales?
+\end{enumerate}
+\end{importantbox}
+
+\subsection{El sesgo estructural y el sesgo de optimización deben trabajar en conjunto}
+
+Solo con ocultamiento de objetos (object masking) y sin una representación estable, el modelo podría aprender supuestas interacciones sobre latentes degenerados; solo con SIGReg y sin estructura de tarea, el modelo podría mantener una varianza rica pero seguir dependiendo de correlaciones de fondo. Los modelos del mundo de la próxima generación deben diseñar simultáneamente unidades de representación, intervenciones de observabilidad, distribuciones anti-collapse, interfaces de acción y planificadores. Todas ellas deben ser ablatadas individualmente dentro del mismo protocolo de evidencia.
+
+\begin{knowledgebox}{La relación complementaria entre Causal-JEPA y LeWorldModel}
+Causal-JEPA responde principalmente ``¿qué variables debería depender la predicción?''; LeWorldModel responde principalmente ``¿cómo mantiene el encoder información?''. El primero actualmente depende de un encoder centrado en objetos congelado, mientras que el segundo utiliza latentes compactos globales. Una extensión natural sería aprender de manera end-to-end slots de objetos estables, manteniendo al mismo tiempo las máscaras que fuerzan la interacción y regularizadores anti-collapse escalables.
+\end{knowledgebox}
+
+\subsection{Tres límites de evidencia}
+
+Primero, los contramodelos (counterfactual), la planificación y las ganancias por sorpresa en benchmarks controlados no equivalen a una comprensión causal del mundo abierto. Segundo, que un latente sea decodificable y que la atención esté concentrada no significa que el predictor utilice realmente el mecanismo correcto. Tercero, los títulos de los artículos y las formulaciones teóricas en el momento de la clase están sujetos a revisión por pares y análisis posteriores; las apuntes de investigación deben guardar instantáneas históricas y también marcar los límites más prudentes establecidos posteriormente.
+
+\begin{warningbox}{No escribas modelos del mundo como una capa intermedia omnipotente}
+Los modelos del mundo comprimen las observaciones; la compresión implica pérdida de información. Pueden generar despliegues (rollout), lo que acumula errores; pueden ser llamados por un planificador, quien podría explotar el error del modelo. Son una interfaz potente que conecta predicción, control y verificación, no una capa mágica que elimine automáticamente la alucinación, la seguridad y el cambio de distribución.
+\end{warningbox}
+
+\subsection{Preguntas abiertas}
+
+Las direcciones que vale la pena seguir incluyen: cómo descubrir y rastrear objetos de manera estable en videos reales; cómo incorporar múltiples escalas de tiempo y abstracciones de eventos en los latentes; cómo marcar con incertidumbre el futuro que el modelo no conoce; cómo hacer coexistir objetivos de lenguaje, recompensas, restricciones y objetivos de imagen; cómo evitar que el planificador explote el error del modelo; y cómo distinguir correlaciones, suficiencia predictiva y mecanismos causales identificables mediante intervención con robots reales.
+
+\subsection{Lecturas adicionales}
+
+Se sugiere leer Causal-JEPA v1 y LeWorldModel v1 según el momento de la clase, luego contrastarlos con las revisiones posteriores de Causal-JEPA para observar cómo el lenguaje causal se vuelve más cauteloso. El material contextual puede leerse secuencialmente: Atención a Slots (Slot Attention), V-JEPA, V-JEPA 2 y DINO-WM. A nivel de implementación, pueden consultarse los códigos oficiales de ambos trabajos y la librería de experimentos unificada `stable-worldmodel`. Al leer, continúe utilizando las ocho preguntas de esta clase en lugar de comparar solo cifras del leaderboard.
+
+\end{document}
