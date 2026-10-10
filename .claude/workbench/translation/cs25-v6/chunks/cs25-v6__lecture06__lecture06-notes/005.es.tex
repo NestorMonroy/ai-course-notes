@@ -1,0 +1,66 @@
+\section{Puente 3: Aprender a regenerar información durante la prueba mediante RL}
+
+El enfoque de RL asume que los parámetros del modelo aún contienen los "fragmentos" necesarios para completar la tarea, pero no se explicitan automáticamente en el contexto actual. Por lo tanto, se entrena una política de razonamiento (reasoning policy) que permite al modelo recordar, reformular o combinar información relevante dentro de su cadena de pensamiento (chain of thought) antes de generar la respuesta. Esto convierte la recuperación implícita en una acción ejecutada durante la prueba por el propio modelo.
+
+\subsection{Regeneración: Reescribir el conocimiento de los parámetros hacia el propio contexto}
+
+La frase clave de la diapositiva 36 es que el modelo ya conoce los fragmentos (pieces), pero debe aprender a regenerar la información necesaria dentro del CoT sin depender de una recuperación externa. No se debe misticificar el concepto de CoT; simplemente implica un cálculo adicional de tokens. El problema real es si la recompensa (reward) del RL puede incentivar que estos tokens transporten premisas útiles en lugar de generar monólogos redundantes.
+
+\lecturefigure{slide-036.jpg}{Enfoque 3: Regenerar información necesaria dentro del CoT mediante RL}{Diapositiva oficial de Stanford CS25 V6, Clase 06, p. 36}
+
+Se puede formular el objetivo de la estrategia como
+$$
+J(\pi_{\phi})=
+\mathbb{E}_{q\sim Q,\,z\sim\pi_{\phi}(\cdot\mid q)}
+\left[r\!\left(q,z,a(z,q)\right)\right],
+$$
+donde:
+\begin{itemize}
+  \item $q$ es la pregunta;
+  \item $z$ son los tokens intermedios de razonamiento/recuerdo generados por el modelo;
+  \item $a(z,q)$ es la respuesta final derivada de esos tokens;
+  \item $r$ representa la corrección de la respuesta o la recompensa de la tarea;
+  \item $\pi_{\phi}$ es la política de razonamiento actualizada mediante RL.
+\end{itemize}
+
+\begin{lstlisting}[language=Python,caption={Bucle de entrenamiento abstracto para aprender test-time regeneration con RL}]
+for query, answer in rl_dataset_A:
+    reasoning = policy.sample(query)
+    prediction = policy.answer(query, reasoning)
+    reward = task_reward(prediction, answer)
+    policy.update(reasoning, reward)
+
+evaluate(policy, heldout_dataset_B)
+\end{lstlisting}
+
+\subsection{Transferencia A/B: ¿Se aprende la respuesta de la tarea o la política de razonamiento general?}
+
+En el experimento, primero se inyectan dos conjuntos de datos de nuevo conocimiento (A y B) en los parámetros del modelo, y luego solo se realiza RL sobre A. Si la prueba latente con tenues (held-out latent test) de B también mejora, esto indica que la política no está simplemente memorizando respuestas específicas de A, sino aprendiendo un proceso transferible de "cómo reexpresar la información de los parámetros dentro del contexto". La línea base de aumento (Augmentation baseline) solo expande A y sirve para distinguir entre una mayor cobertura de datos y una transferencia de razonamiento.
+
+\lecturefigure{slide-037.jpg}{Realizar RL únicamente en el conjunto de datos A, seguido de pruebas con tenues latentes del conjunto de datos B}{Diapositiva oficial de Stanford CS25 V6, Clase 06, p. 37}
+
+\lecturefigure{slide-038.jpg}{La política de RL transfiere sus mejoras a las tenues silogísticas del conjunto de datos B}{Diapositiva oficial de Stanford CS25 V6, Clase 06, p. 38}
+
+El punto central en la figura es la barra de generalización de razonamiento (reasoning-generalization bar) coloreada en rojo: aumentar solo A no mejora automáticamente a B, pero la política de razonamiento entrenada en A permite transferencias parciales a la estructura de B. Esto respalda la idea de "aprender el proceso" en lugar de simplemente "aumentar muestras", aunque el alcance de la transferencia sigue dependiendo de la similitud estructural y la cobertura de la recompensa.
+
+\begin{knowledgebox}{No confundir los dos tipos de transferencia}
+La \textbf{transferencia de conocimiento} consiste en llevar hechos de A a B; por el contrario, la \textbf{transferencia de política de razonamiento} implica aprender una operación en A y ejecutarla posteriormente sobre diferentes hechos en B. El curso se centra en esta última opción; por lo tanto, los conjuntos de datos deben estar aislados y las tenues latentes objetivo (held-out target) de B no pueden filtrarse durante el entrenamiento con RL.
+\end{knowledgebox}
+
+\subsection{El verdadero reversal sigue siendo difícil}
+
+El RL no resuelve la brecha latente por completo. En el caso del silogismo, el modelo puede aprender un procedimiento general consistente en "escribir primero las proposiciones relevantes y luego combinarlas". Sin embargo, para un verdadero reversal, si la representación de los parámetros no proporciona un índice válido desde los objetos hacia los sujetos, el modelo podría verse obligado a enumerar relaciones candidatas hasta encontrar una coincidencia. La enumeración es viable en espacios sintéticos pequeños, pero resulta inaceptable en espacios de entidades abiertas.
+
+\lecturefigure{slide-039.jpg}{La mejora de RL sobre true reversal depende de estrategias casi exhaustivas}{Diapositiva oficial de Stanford CS25 V6, Clase 06, p. 39}
+
+\lecturefigure{slide-040.jpg}{La regeneración por RL mejora ciertos problemas, pero no es una solución universal}{Diapositiva oficial de Stanford CS25 V6, Clase 06, p. 40}
+
+\teachervoice{00:34:44--00:35:10, el docente aclara que el reversal se beneficia poco de esta estrategia de recuperación en contexto; para resolverlo mediante RL, a menudo es necesario reconstruir todas las relaciones posibles. El curso establece esto como un límite del método, evitando empaquetar una mejora promedio como un éxito integral.}
+
+\begin{warningbox}{Más tokens durante la prueba no garantizan obtener información correcta}
+Si la representación de los parámetros carece de índices accesibles, una cadena de pensamiento (CoT) extensa podría estar simplemente realizando búsquedas repetidas en un espacio mayor. La evaluación debe registrar el número de tokens necesarios para el éxito, la escala de enumeración de candidatos, las trayectorias de error y las condiciones de parada, en lugar de reportar únicamente la precisión final permitida tras un presupuesto infinito.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El RL permite entrenar una política de regeneración durante la prueba que re-explicita parcialmente el conocimiento de los parámetros y facilita su transferencia a estructuras latentes similares en diferentes conjuntos de datos; no obstante, está limitada por la recompensa, la cobertura estructural y el costo de búsqueda. En particular, el reversal revela un problema fundamental: si el conocimiento no está organizado para un acceso inverso, los tokens de razonamiento pueden compensar, pero no pueden crear índices gratuitamente.
