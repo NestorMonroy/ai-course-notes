@@ -1,0 +1,65 @@
+\section{Dos interfaces de memoria: token cache y estado comprimido}
+
+El capítulo anterior definió el enfoque por comparación; este lo aplica a una decodificación real. La clave no es rederivar la atención multi-head, sino llevar al lector al bucle de servicio: ¿qué historia debe leer el sistema tras generar cada token, qué estado escribir y cómo cambia el costo del siguiente paso? Solo estableciendo primero este libro de cuentas de recursos se comprende por qué "cuadrático versus lineal" es importante pero insuficiente.
+
+\subsection{Inferencia de atención: por qué el KV cache crece con el contexto}
+
+Durante la decodificación del Transformer, cada nueva consulta debe interactuar con todas las representaciones clave/valor históricas. Los sistemas prácticos no recalculan los estados ocultos pasados en cada paso, sino que almacenan en caché las claves y valores de cada capa; esto es el KV cache (caché de claves-valor). Las curvas del gráfico se alargan progresivamente, lo que indica que la consulta de los tokens subsiguientes debe acceder a un número creciente de posiciones históricas.
+
+\lecturefigure{slide-005.jpg}{Inferencia de atención: la caché por token hace que la memoria y las lecturas por paso crezcan con el contexto}{Grabación oficial de Stanford, 00:06:40--00:07:49}
+
+Si el modelo tiene $n_\ell$ capas, cada token guarda $n_{kv}$ cabezas KV por capa y cada cabeza tiene dimensión $d_h$, siendo $b$ el número de bytes por elemento, entonces la caché KV para una secuencia se aproxima como
+\[
+M_{\mathrm{KV}}\approx 2L\,n_\ell n_{kv}d_h b.
+\]
+El factor $2$ proviene de las claves y los valores; $L$ es el número de tokens almacenados en caché. La atención del paso $t$ lee $O(t)$ posiciones históricas; el trabajo total de atención para una decodificación ingenua se acumula en $O(L^2)$; sin embargo, esto no implica que toda la latencia cronológica crezca estrictamente según la misma constante, ya que los kernels, el empaquetado por lotes (batching), la banda ancha de memoria y el paralelismo modifican la curva real.
+
+\begin{knowledgebox}{Primera aparición: KV cache y MQA / GQA}
+El KV cache guarda las representaciones de claves/valores para los tokens históricos de cada capa, no el texto original. La atención Multi-Query (MQA) permite que varias cabezas de consulta compartan un conjunto de cabezas clave/valor; la atención Grouped-Query (GQA) permite que un grupo de cabezas de consulta comparta un grupo de cabezas clave/valor; ambas reducen el caché disminuyendo $n_{kv}$, pero mantienen un estado con resolución por token que crece linealmente con $L$.
+\end{knowledgebox}
+
+\teachervoice{00:07:07--00:08:03，Gu advierte que "KV cache" es solo el nombre generado por la fórmula del Transformer; el hecho de mayor nivel es que el modelo mantiene una base de datos de tokens en expansión, y es esta base de datos la que define sus características de memoria/cómputo.}
+
+\subsection{Inferencia SSM: doblar toda la historia en un estado finito}
+
+El SSM no guarda registros independientes para cada token, sino que actualiza el estado $h_t$ a medida que llega cada entrada. Al leer el gráfico, compare las dos filas superiores e inferiores: en la fila superior de atención, los tokens históricos pueden ser direccionados individualmente; en la fila inferior del modelo recurrente, solo queda la esfera de estado azul; los tokens tempranos ya han sido "escritos" en el estado y sus posiciones originales se descartan. La compresión no es una optimización secundaria, sino la definición misma del estado.
+
+\lecturefigure{slide-006.jpg}{Compromisos de alto nivel: atención guarda tokens históricos, SSM actualiza y conserva un estado comprimido}{Grabación oficial de Stanford, 00:07:50--00:08:49}
+
+Un tipo de SSM estructurado puede escribirse como
+\[
+h_t=A_t h_{t-1}+B_t x_t,
+\qquad
+y_t=C_t^{\top}h_t.
+\]
+Donde $x_t\in\mathbb{R}$ representa un canal de entrada, $h_t\in\mathbb{R}^{N}$ es el estado, $A_t\in\mathbb{R}^{N\times N}$ controla cómo se conserva el estado antiguo, $B_t\in\mathbb{R}^{N}$ controla cómo se escribe la nueva entrada y $C_t\in\mathbb{R}^{N}$ lee la salida $y_t$ desde el estado. Los modelos específicos suelen aprovechar estructuras diagonales, por bloques, de rango bajo o por cabeza; no se debe tomar directamente esta matriz densa como el costo de implementación.
+
+\begin{lstlisting}[caption={Comparación de interfaces de decodificación entre caché de atención y estado recurrente}]
+def attention_decode(prompt, steps, model):
+    kv_cache = model.prefill(prompt)
+    token = prompt[-1]
+    for _ in range(steps):
+        logits, kv_cache = model.decode_one(token, kv_cache)
+        token = sample(logits)
+        yield token
+
+def recurrent_decode(prompt, steps, model):
+    state = model.scan_prompt(prompt)
+    token = prompt[-1]
+    for _ in range(steps):
+        logits, state = model.step(token, state)
+        token = sample(logits)
+        yield token
+\end{lstlisting}
+
+\begin{importantbox}{La complejidad proviene de la interfaz de memoria}
+La ventaja de la atención es que cualquier posición histórica sigue siendo accesible con precisión; el costo es que el estado crece con el contexto. La ventaja del SSM es que el tamaño del estado se desacopla de la longitud del contexto; el costo es que el pasado debe compartir una capacidad finita. Lo que se llama cuadrático versus lineal no son etiquetas Big-O aisladas, sino las consecuencias computacionales de "preservar detalles por token" versus "comprimir continuamente la historia".
+\end{importantbox}
+
+\begin{warningbox}{Tiempo lineal no significa siempre más rápido}
+Una recurrencia lineal sin un kernel eficiente podría perder en GPUs reales frente a una atención altamente optimizada. Por el contrario, kernels fusionados como FlashAttention (que combinan múltiples operaciones de GPU en un solo kernel para reducir las lecturas/escrituras de HBM y la sobrecarga de lanzamiento) pueden mejorar significativamente la constante de la atención. Las notas siguientes comparan interfaces de modelado; las conclusiones de despliegue deben incluir siempre benchmarks de hardware.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El estado de generación del Transformer es una caché KV con resolución por token que crece con el contexto; el estado de generación del SSM es un estado recurrente comprimido de tamaño fijo. Lo primero escribe en la interfaz el recall preciso; lo segundo escribe en la interfaz las actualizaciones en línea y la compresión. Próximamente debe responderse: ¿cómo puede un estado finito caber, escribir con precisión y calcular rápido durante el entrenamiento? Esto son exactamente los tres diseños centrales del SSM moderno.

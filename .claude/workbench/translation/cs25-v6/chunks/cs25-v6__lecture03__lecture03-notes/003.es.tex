@@ -1,0 +1,97 @@
+\section{Tres pilares centrales de los SSM modernos: capacidad, selectividad y entrenabilidad}
+
+Describir el recurrence en dos fórmulas es aún insuficiente. Los RNN tradicionales ya tenían un estado oculto (hidden state), y las primeras versiones de linear attention también podían ser recursivas; lo que hace verdaderamente efectivos a los SSM modernos es que resuelven simultáneamente tres problemas interdependientes: si la capacidad del estado es suficiente, si la actualización puede seleccionar qué memorizar y si el entrenamiento puede evitar la ejecución secuencial paso a paso. Las tres diapositivas de reemplazo deben leerse por separado, ya que no corresponden a una misma página acumulada.
+
+\subsection{Ingrediente 1: expansión del estado para superar el cuello de botella de memoria}
+
+Si cada canal de entrada utiliza un solo estado escalar, el modelo pronto se encuentra con un límite de capacidad. La expansión del estado (state expansion) hace que cada canal de entrada corresponda a un estado de $N$ dimensiones, permitiendo al modelo mantener múltiples características de decaimiento, frecuencia o memoria en la misma escala temporal. La pregunta mostrada en la figura derecha ("¿cuánto mide el estado y cuánto puede recordar?") es un problema arquitectónico; no equivale a aumentar ciegamente el ancho (model width) de toda la capa.
+
+\lecturefigure{slide-007.jpg}{Ingrediente 1 del SSM: tamaño del estado vs. expansión del estado}{Video oficial de Stanford, 00:09:49--00:10:56}
+
+Para una entrada con tamaño de lote (batch size) $B$, longitud de secuencia $L$ y número de canales $D$, el tensor de estados conceptualmente puede verse como $B\times D\times N$. Durante el entrenamiento, generalmente no se puede materializar completamente el estado en cada paso temporal en la memoria de alta velocidad (HBM), lo que de otro modo haría que la memoria de activaciones creciera aproximadamente con $BLDN$; por ello, las implementaciones posteriores mediante escaneo (scan), recomputación o fusión forman parte del mismo paquete de diseño que la expansión del estado.
+
+\begin{knowledgebox}{El tamaño del estado no significa "poder recordar $N$ tokens"}
+$N$ es la dimensión del estado, no un contador de slots discretos. El estado representa información superpuesta mediante valores distribuidos; un $N$ mayor aumenta la capacidad de representación, pero no garantiza la preservación exacta de los $N$ últimos hechos históricos. La capacidad de recordar también depende de la actualización, las señales de entrenamiento, la estabilidad numérica y la estructura de la tarea.
+\end{knowledgebox}
+
+\subsection{Ingrediente 2: la selectividad determina qué escribir y qué olvidar}
+
+Una vez que hay suficiente capacidad, el modelo debe controlar el flujo de información. Los sistemas lineales invariantes en el tiempo (LTI) con $A$ y $B$ fijos aplican la misma regla de actualización a cada token; esto es adecuado para señales estacionarias y comprimibles, pero resulta difícil manejar las altas tasas de variación de información presentes en el lenguaje. Las SSM selectivas hacen que los parámetros dependan de la entrada, permitiendo al token actual decidir cuánto conservar del estado anterior y cuánto escribir de nueva información.
+
+\lecturefigure{slide-008.jpg}{Ingrediente 2 del SSM: transición dependiente de la entrada aporta selectividad / puertas (gating)}{Video oficial de Stanford, 00:10:57--00:12:22}
+
+Abstrayendo la actualización como
+\[
+h_t=f_\theta(h_{t-1},x_t)
+=A(x_t)h_{t-1}+B(x_t)x_t.
+\]
+Si en alguna dimensión $A(x_t)\approx 1$ y $B(x_t)\approx 0$, el modelo se comporta aproximadamente como "mantener el recuerdo antiguo e ignorar la entrada actual"; si $A(x_t)\approx 0$ y $B(x_t)$ es grande, entonces se comporta como "borrar el contenido antiguo y escribir la entrada actual". Los modelos reales utilizan puertas (gating) continuas en lugar de interruptores duros, pero estos dos extremos proporcionan la intuición pedagógica para la selectividad.
+
+\begin{lstlisting}[caption={Pseudocódigo didáctico de la actualización recurrente selectiva}]
+def selective_step(x_t, state, parameters):
+    keep = sigmoid(parameters.keep_projection(x_t))
+    write = parameters.write_projection(x_t)
+    candidate = parameters.input_projection(x_t)
+    next_state = keep * state + write * candidate
+    output = parameters.readout(next_state, x_t)
+    return output, next_state
+\end{lstlisting}
+
+\begin{warningbox}{La selectividad no implica memoria lógica gratuita}
+Aunque la transición dependiente de la entrada mejora la expresividad para decidir "cuándo escribir y cuándo olvidar", no aprenderá automáticamente variables simbólicas, pila o índices de base de datos. Si la supervisión no requiere guardar cierta información, las puertas aún podrían olvidarla; si la capacidad del estado o las condiciones numéricas son insuficientes, ninguna puerta por inteligente tendrá dónde almacenar la información.
+\end{warningbox}
+
+\subsection{Escaneo paralelo: reescribir el significado secuencial para un entrenamiento paralelo}
+
+La definición de recurrence es serial en el tiempo, pero el entrenamiento no necesariamente lo ejecuta token a token. Para las actualizaciones lineales, se pueden representar los intervalos adyacentes como transformaciones afines y utilizar la propiedad asociativa para realizar una reducción en árbol (tree reduction) o escaneo asociativo (associative scan). Esto preserva el significado recurrente mientras reduce la profundidad de entrenamiento de $O(L)$ a un nivel paralelo de $O(\log L)$; modelos como Mamba-2 y Gated DeltaNet incluso reescriben esto aún más mediante multiplicaciones matriciales en bloques (chunked matrix multiplication).
+
+\lecturefigure{slide-009.jpg}{Ingrediente 3 del SSM: escaneo asociativo y reescritura de matmul resuelven la eficiencia del entrenamiento}{Video oficial de Stanford, 00:12:23--00:13:39}
+
+Definimos la transformación de un solo paso como $T_t(h)=A_t h+b_t$, donde $b_t=B_t x_t$. La combinación de dos transformaciones es
+\[
+(A_2,b_2)\circ(A_1,b_1)
+=\left(A_2A_1,\;A_2b_1+b_2\right).
+\]
+Esta combinación satisface la propiedad asociativa, por lo que se puede realizar un escaneo paralelo. El punto clave aquí no es convertir el recurrence en atención, sino encontrar un resumen asociativo que permita comprimir varios intervalos de manera independiente antes de combinarlos en una transformación de estado para un prefijo más largo.
+
+\begin{lstlisting}[caption={Composición asociativa del recurrence afín}]
+def compose(right, left):
+    A_right, b_right = right
+    A_left, b_left = left
+    return A_right @ A_left, A_right @ b_left + b_right
+
+# parallel_prefix_scan aplica compose en un orden de árbol.
+prefix_transforms = parallel_prefix_scan(compose, step_transforms)
+\end{lstlisting}
+
+\teachervoice{00:12:23--00:13:29, el orador enfatiza que aumentar el estado y mejorar la actualización haría que el modelo fuera más difícil de calcular; uno de los objetivos centrales del trabajo moderno es aprovechar la estructura lineal, el escaneo y la reescritura de matmul en bloques para completar el entrenamiento sin materializar grandes estados paso a paso según el tiempo.}
+
+\subsection{Mamba: la innovación está en la combinación, no en tres invenciones aisladas}
+
+La expansión del estado existía en SSM tempranos/atención lineal, las puertas (gating) provienen de RNN clásicos y el escaneo paralelo también tenía precedentes. La contribución clave de Mamba es combinar los tres en un sistema realmente competitivo para lenguajes densos en información. Al leer la figura, se deben considerar los tres puntos como condiciones necesarias conjuntas: si falta uno, el modelo podría tener capacidad insuficiente, actualizaciones demasiado rígidas o un entrenamiento insoportable.
+
+\lecturefigure{slide-010.jpg}{Mamba como SSM selectivo: combinación de tamaño del estado, actualización del estado y eficiencia}{Video oficial de Stanford, 00:14:20--00:14:59}
+
+\begin{importantbox}{Posicionamiento didáctico de Mamba}
+Esta clase no presenta a Mamba como una "alternativa lineal al Transformer", sino como una integración sistémica: usar un estado más grande para proporcionar capacidad, la selectividad para controlar la información y el escaneo/matmul reescrito ejecutable en hardware para mantener la eficiencia del entrenamiento. Juntos, los tres modificaron el límite de usabilidad de los modelos recurrentes.
+\end{importantbox}
+
+\subsection{Tabla de modelos modernos: las similitudes merecen estudiarse antes que las diferencias en las fórmulas}
+
+La siguiente tabla resume (como diapositiva) el recurrence y la lectura (readout) de modelos como Atención Lineal, DeltaNet, S4, Mamba, GLA, RWKV, mLSTM, Mamba-2, entre otros. En la primera pasada, no se deben memorizar las fórmulas línea por línea, sino buscar primero las similitudes horizontales: todos deciden cómo decae el estado, cómo escribe productos externos o vectores y cómo lee una salida dependiente de la consulta (query). Solo cuando se haya determinado claramente la necesidad de la tarea vale la pena profundizar en la parametrización de una línea específica.
+
+\lecturefigure{slide-011.jpg}{Comparación del recurrence y problemas comunes en modelos recurrentes/atención lineales modernos}{Video oficial de Stanford, 00:15:00--00:16:19}
+
+\begin{knowledgebox}{Juicio de ingeniería de clase: congelado el 2026-04-16}
+En ese momento, el orador denominó a Mamba-2 y Gated DeltaNet como opciones más "probadas y verdaderas" para grandes escalas: estas últimas suelen ser más potentes pero también más lentas. Mamba-3 fue lanzado recientemente el 2026-03-16 y aún no ha sido validado ampliamente a gran escala. Este juicio es un fotograma de clase y no debe escribirse como un ranking permanente.
+\end{knowledgebox}
+
+\begin{warningbox}{La paridad en perplexidad no implica paridad en capacidad}
+La perplexidad es la exponencial de la entropía cruzada, $\exp(H)$, que puede entenderse intuitivamente como el "número efectivo de opciones" con las que se enfrenta el modelo para cada token; cuanto menor sea, mejor suele ser. Sin embargo, depende fuertemente del tokenizer y la distribución de datos, por lo que no puede demostrar por sí sola la equivalencia en recuperación, razonamiento, seguimiento de estado o tareas posteriores (downstream). Gu también afirma explícitamente que "los modelos recurrentes pueden competir" es primero una conclusión a gran escala (coarse-grained) sobre la perplexidad.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La usabilidad de los SSM modernos proviene de tres capacidades coordinadas: un estado suficientemente grande para proporcionar capacidad, actualizaciones dependientes de la entrada para ofrecer selectividad y escaneo asociativo/reescritura de matmul para garantizar la entrenabilidad. Mamba combina estos componentes históricos en un sistema efectivo; los modelos posteriores continúan optimizando principalmente la parametrización del estado y las rutas de cálculo. Una vez comprendido este marco común, el próximo capítulo puede dejar las fórmulas específicas de lado temporalmente para comparar directamente los límites de capacidad de los dos tipos de estados autoregresivos.
+
+
