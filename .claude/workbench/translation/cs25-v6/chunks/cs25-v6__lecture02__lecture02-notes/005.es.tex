@@ -1,0 +1,121 @@
+\section{LeWorldModel: Usando una regularización interpretable para detener el colapso end-to-end}
+
+En la segunda mitad de su clase, Lucas planteó otra pregunta: incluso sin discutir la estructura de objetos, JEPA colapsa cuando se entrena de extremo a extremo sobre píxeles crudos. Los métodos existentes evitan este problema usando EMA, stop-gradient, un encoder preentrenado, proprioception o varias pérdidas de covarianza/varianza; LeWorldModel intenta lograr el mismo objetivo con dos términos de pérdida, un peso ajustable y aproximadamente 15M parámetros.
+
+\subsection{El concepto de modelo del mundo data de antes que la nomenclatura de 2018}
+
+Aquí redefinimos el modelo del mundo, no para repetir lo dicho al inicio, sino para enfatizar su continuidad histórica: la idea de identificación de sistemas, control predictivo basado en modelos y simulación interna data mucho antes que los modelos generativos profundos. Ha y Schmidhuber popularizaron la terminología moderna en 2018, pero el núcleo matemático sigue siendo un mapeo de evolución del estado influenciado por variables de control.
+
+\lecturefigure{slide-037.jpg}{Modelo del mundo: Mapeo de evolución del estado influenciado por variables de control y su contexto histórico}{Diapositivas oficiales CS25 V6, p.~37}
+
+\[
+s_{t+1}=f(s_t,a_t)+\varepsilon_t.
+\]
+Donde $s_t$ es el estado del sistema, $a_t$ es la variable de control, $f$ son las dinámicas desconocidas y $\varepsilon_t$ representa perturbaciones no modeladas o aleatoriedad. El objetivo de aprender un modelo del mundo es obtener un $\hat f$ lo suficientemente preciso para que el rollout soporte la planificación, sin necesidad de reconstruir cada detalle visual del entorno.
+
+\teachervoice{00:34:51--00:36:53, Lucas distingue entre concepto y terminología: la idea de simulación de un mundo interno se remonta al menos a Craik y las primeras teorías de control; fue el papel de 2018 lo que popularizó el nombre moderno ``World Models''.}
+
+\subsection{¿Por qué JEPA rechaza pagar por detalles irrelevantes}
+
+La diapositiva 38 ilustra con un cómic la carga del objetivo generativo: un futuro que contiene muchos detalles igualmente plausibles obliga a la verosimilitud de píxeles a ser responsable de toda la distribución; JEPA solo requiere consistencia en la estructura predecible dentro de las representaciones abstractas. Para el control, la posición y velocidad de la pelota suelen ser más importantes que cada hoja en una textura. El costo es que el encoder debe decidir por sí mismo qué descartar, y un error de descartado dañaría directamente la planificación.
+
+\lecturefigure{slide-038.jpg}{JEPA: Prediciendo en representaciones abstractas, evitando detalles generativos innecesarios}{Diapositivas oficiales CS25 V6, p.~38}
+
+\begin{importantbox}{El verdadero significado de Reconstruction-free}
+No significa ``es más avanzado porque no tiene decoder'', sino que la señal de entrenamiento no requiere restaurar la distribución completa de entrada. El modelo puede concentrar su capacidad en los factores relevantes para las dinámicas; pero si el objetivo downstream depende de detalles descartados, una representación libre de reconstrucción también fallará. Si la representación es lo suficientemente buena debe evaluarse por la tarea y la intervención, no por eslóganes arquitectónicos.
+\end{importantbox}
+
+\subsection{¿Por qué las representaciones constantes son un atajo global para la pérdida de predicción}
+
+Si $E(o)=c$ devuelve una constante para todas las observaciones, el predictor solo necesita devolver $c$, y el MSE del siguiente embedding puede ser cero. Este colapso no es que la optimización no converja, sino que la función objetivo tiene una solución excelente pero sin información. Por lo tanto, cualquier JEPA end-to-end debe introducir restricciones adicionales para mantener suficiente variación entre muestras y dimensiones de características dentro del lote (batch).
+
+\lecturefigure{slide-039.jpg}{Colapso de representación: Todas las entradas codificadas en el mismo punto}{Diapositivas oficiales CS25 V6, p.~39}
+
+\[
+E_\theta(o_t)=c,\quad
+P_\phi(c,a_t)=c
+\quad\Longrightarrow\quad
+\|P_\phi(E_\theta(o_t),a_t)-E_\theta(o_{t+1})\|_2^2=0.
+\]
+Donde $c$ es un vector constante, $E_\theta$ es el encoder y $P_\phi$ es el predictor condicionado a la acción. La ecuación muestra que solo con la pérdida de predicción no se puede distinguir entre ``predicción perfecta del estado real'' y ``todos los estados son idénticos''.
+
+\subsection{El costo de las recetas anti-colapso existentes}
+
+V-JEPA depende de masking, EMA y stop-gradient; DINO-WM congela el encoder preentrenado y deja el problema del colapso a la representación upstream; PLDM entrena end-to-end pero requiere varias pérdidas temporales/espaciales VCReg. Cada uno de los tres enfoques sacrifica interpretabilidad del objetivo, libertad de adaptación de la representación o simplicidad en el ajuste de hiperparámetros. La tesis de LeWorldModel no es que esos métodos sean inválidos, sino si se puede reemplazar una receta compleja con una restricción de distribución explícita.
+
+\lecturefigure{slide-040.jpg}{Recetas JEPA existentes: EMA, encoder congelado y múltiples regularizadores}{Diapositivas oficiales CS25 V6, p.~40}
+
+\teachervoice{00:36:53--00:38:54, Lucas resume las recetas previas en tres puntos: V-JEPA usa actualización de objetivo heurística, DINO-WM está limitado por el conocimiento preentrenado y PLDM mantiene varianza y covarianza con seis pérdidas aproximadamente. El objetivo de LeWM es end-to-end, entrada de píxeles y pocos hiperparámetros, no negar el valor de línea base de estos métodos.}
+
+\begin{knowledgebox}{Matriz de métodos anti-colapso}
+\begin{tabularx}{\textwidth}{L{0.19\textwidth} L{0.24\textwidth} X}
+\toprule
+Familia de método & Cómo evitar el colapso & Costo principal \\
+\midrule
+EMA/stop-gradient & Crear un objetivo estable con una rama lenta de objetivos & Explicación de optimización débil, incluye reglas de actualización adicionales \\
+Encoder congelado & Heredar diversidad de la representación preentrenada & No puede adaptarse completamente a las dinámicas actuales \\
+Pérdidas de varianza y covarianza & Mantener explícitamente la varianza dimensional y la decorrelación & Costo de múltiples pesos, estabilidad y escalabilidad \\
+Alineación de distribución & Restringir la distribución del embedding por lote & Necesita selección de pruebas estadísticas y aproximaciones de muestreo \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\subsection{El contrato mínimo de entrenamiento de LeWorldModel}
+
+La diapositiva 41 escribe los objetivos de diseño como una lista de ``No'' y ``Full'': no depende de EMA, masking, stop-gradient o un encoder preentrenado; entrena end-to-end sobre píxeles crudos en un solo GPU, manteniendo solo un peso de regularización. Lo que realmente necesita validación no es si la lista se ve bien, sino si el código de la diapositiva 42 corresponde efectivamente a un objetivo completo y optimizable.
+
+\lecturefigure{slide-041.jpg}{Objetivos de diseño de LeWorldModel: End-to-end, pocas heurísticas y un solo hiperparámetro}{Diapositivas oficiales CS25 V6, p.~41}
+
+\lecturefigure{slide-042.jpg}{LeWorldModel: encoder, predictor condicionado a la acción, MSE y SIGReg}{Diapositivas oficiales CS25 V6, p.~42}
+
+\[
+\hat z_{t+1}=P_\phi(z_t,a_t),
+\qquad z_t=E_\theta(o_t),
+\qquad
+\mathcal{L}_{\text{pred}}=\|\hat z_{t+1}-z_{t+1}\|_2^2.
+\]
+Donde $o_t$ es la observación de píxeles originales, $E_\theta$ es el encoder ViT, $z_t$ es el estado latente compacto, $a_t$ es la acción, $P_\phi$ es el predictor Transformer y $\hat z_{t+1}$ es la predicción del siguiente latente. La pérdida de predicción permite que la representación mantenga dinámicas predecibles, pero su uso aislado provoca colapso.
+
+\begin{lstlisting}[language=Python,caption={Pseudocódigo de entrenamiento con dos pérdidas de LeWorldModel}]
+def train_step(observations, actions, weight):
+    embeddings = encoder(observations)
+    predicted = predictor(embeddings[:, :-1], actions[:, :-1])
+    prediction_loss = mse(predicted, embeddings[:, 1:])
+    anti_collapse = mean(sigreg(step) for step in embeddings.transpose(0, 1))
+    loss = prediction_loss + weight * anti_collapse
+    loss.backward()
+    optimizer.step()
+\end{lstlisting}
+
+\teachervoice{00:38:54--00:40:59, el docente enfatiza ``lo que ves es lo que obtienes'': el código real son cuatro pasos: encode, predict, MSE y SIGReg; el único peso de pérdida que necesita búsqueda conjunta es $\lambda$, cuyo rango se puede reducir con un estilo logarítmico/bisectriz.}
+
+\subsection{SIGReg: Descomponiendo la normalidad multidimensional en pruebas unidimensionales aleatorias}
+
+El Sketched Isotropic Gaussian Regularizer (SIGReg) requiere que los embeddings latentes dentro del lote sean aproximadamente gaussianos isótropos. Verificar la distribución directamente en alta dimensión es difícil, por lo que muestra varias direcciones unitarias, proyecta el embedding a una dimensión y usa una estadística de normalidad en cada dirección, promediando luego esas estadísticas. La intuición detrás de Cramér--Wold es: si todas las proyecciones unidimensionales coinciden con la distribución objetivo, también se restringe la distribución conjunta.
+
+\lecturefigure{slide-043.jpg}{SIGReg: Proyección aleatoria, prueba de normalidad unidimensional y restricción de distribución conjunta}{Diapositivas oficiales CS25 V6, p.~43}
+
+\[
+Z\in\mathbb{R}^{NB\times d},
+\qquad
+h^{(m)}=Zu^{(m)},\quad u^{(m)}\in\mathbb{S}^{d-1},
+\qquad
+\operatorname{SIGReg}(Z)=\frac{1}{M}\sum_{m=1}^{M}T\!\left(h^{(m)}\right).
+\]
+Donde $N$ es la longitud de historial, $B$ es el tamaño del lote, $d$ es la dimensión del embedding, $Z$ resume todos los latentes, $u^{(m)}$ es la $m$-ésima dirección unitaria aleatoria, $h^{(m)}$ es la proyección unidimensional, $T$ son estadísticas de normalidad como Epps--Pulley y $M$ es el número de proyecciones.
+
+\[
+\mathcal{L}_{\text{LeWM}}
+=\mathcal{L}_{\text{pred}}+\lambda\operatorname{SIGReg}(Z).
+\]
+Donde $\lambda$ equilibra la predicción de dinámicas y el anti-colapso. Si $\lambda$ es demasiado pequeño, se acerca a una solución constante trivial; si es demasiado grande, podría sacrificar predicciones relevantes para la tarea solo para coincidir con la gaussiana; un único hiperparámetro solo significa un espacio de búsqueda más pequeño, no que no sea necesario validar.
+
+\teachervoice{00:40:59--00:42:59, Lucas explica SIGReg con flechas aleatorias: cada vez se proyecta el latente de alta dimensión a una dimensión y se optimiza la normalidad de la distribución proyectada; muchas direcciones conjuntamente restringen la distribución conjunta. La clase deja los detalles matemáticos para el artículo, pero señala claramente que esto es anti-colapso y no modelado generativo.}
+
+\begin{warningbox}{La regularización gaussiana no implica independencia de factores latentes}
+La restricción gaussiana isótropa fomenta la varianza total y la cobertura direccional, pero no garantiza que cada dimensión corresponda a una cantidad física interpretable, ni excluye enredos no lineales. Resuelve ``no todos iguales'' y degeneración de distribución, pero no aborda directamente la estructura de objetos, identificación causal o controlabilidad downstream.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+LeWorldModel escribe JEPA end-to-end como MSE de predicción más SIGReg: el primero aprende estados predecibles y el segundo elimina representaciones constantes. Las pruebas de normalidad unidimensionales aleatorias proporcionan una restricción de distribución escalable, haciendo que el modelo no dependa de un encoder congelado ni de regularizadores complejos con múltiples términos. Lo que debe verificarse a continuación es si estos latentes compactos pueden usarse realmente para planificación en línea y de dónde proviene su ventaja de velocidad.
