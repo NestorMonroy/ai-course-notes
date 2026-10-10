@@ -151,13 +151,28 @@ def thinking_in_text(content: str) -> int:
     return (end if end >= 0 else len(content)) - start
 
 
-def post(url: str, body: dict, timeout: int) -> dict:
+# llama-server responde 503 mientras carga el modelo (minutos con la caché de
+# páginas fría). Sin esta espera, un relanzamiento del servidor convirtió 30
+# fragmentos de cs25-v6 en errores en un minuto (2026-10-10 09:10Z).
+LOADING_STATUS = 503
+LOADING_WAIT_S = 900
+LOADING_POLL_S = 10
+
+
+def post(url: str, body: dict, timeout: int, loading_wait_s: float = LOADING_WAIT_S) -> dict:
     request = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
                                      headers={"Content-Type": "application/json"})
     # El servidor es local: sin el proxy de salida del entorno.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(request, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
+    deadline = time.monotonic() + loading_wait_s
+    while True:
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            if error.code != LOADING_STATUS or time.monotonic() >= deadline:
+                raise
+            time.sleep(LOADING_POLL_S)
 
 
 def chat(url: str, model: str, message: str, timeout: int, api: str = DEFAULT_API) -> dict:
