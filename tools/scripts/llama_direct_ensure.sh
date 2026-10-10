@@ -72,13 +72,17 @@ elif [[ "$RUNTIME" == llama-server ]]; then
     # se separa a reasoning_content (--reasoning-format deepseek): con «none», un
     # <think> iría al texto y la medida thinking_chars no lo vería. LD_LIBRARY_PATH=/app porque sin él el binario sale 127 (H-THYROX-639);
     # LLAMA_ARG_THINK y no REASONING_FORMAT, que b11277 ignora (H-THYROX-638).
+    # --cache-ram 0: la caché de prompts en RAM del anfitrión (8 GiB por omisión)
+    # crecía con cada fragmento hasta que el cgroup de 9 GiB mató al servidor
+    # (OOM 2026-10-10 09:04Z, anon-rss 9.4 GB). Cada fragmento es otro prompt:
+    # la caché no ahorra nada aquí.
     export LD_LIBRARY_PATH=/app
     port="${URL##*:}"
     (cd "$THYROX" && bash bin/thyrox-bg start "$JOB" --grace 10 --work ai-course-notes:es-mx/llama-server \
         --kind workbench --image "$IMAGE" --network host \
         --mount "$GGUF:/model.gguf:ro" --env LD_LIBRARY_PATH --cpus 4 --memory-mib 9216 -- \
         -m /model.gguf --alias "$MODEL" --host 127.0.0.1 --port "$port" \
-        -c 40960 -np 1 -n 32768 --cache-type-k q8_0 --cache-type-v q8_0 -fa on \
+        -c 40960 -np 1 -n 32768 --cache-ram 0 --cache-type-k q8_0 --cache-type-v q8_0 -fa on \
         --jinja --chat-template-kwargs '{"enable_thinking":false}' --reasoning-format deepseek \
         --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0 --presence-penalty 1.5 --repeat-penalty 1.0)
     # La primera carga lee 5.6 GB del disco: con la caché fría tarda minutos.
