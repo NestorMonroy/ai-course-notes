@@ -130,7 +130,7 @@ Ciega a: de las 142 respuestas del último `translate/`, la mayoría son reutili
 ejecuciones anteriores del mismo carril (`reused_from`); la prueba confirma su
 procedencia llama-direct, no que se hayan generado en esta ejecución.
 
-Lo que destapó al escribirla (H-THYROX-599): tras el reinicio de las 06:22 había siete
+Lo que destapó al escribirla (H-THYROX-642): tras el reinicio de las 06:22 había siete
 contenedores de Ollama de arranques anteriores; `reconcile-orphans` retiró cuatro y
 también el servidor vivo, y dejó dos huérfanos con imagen por etiqueta montando el mismo
 blob. La primera versión de la prueba eligió uno de ellos y falló cerrada.
@@ -147,7 +147,7 @@ en cada sesión o recrearlas con thyrox como segunda fuente.
 La versión de 06:4xZ contaba como respuesta todo `<n>.json` con `runtime: llama-direct`.
 Las 142 «respuestas» de `translate/20261008T062530/` eran errores `Connection refused`:
 el runner falló el lote entero en un segundo cuando `reconcile-orphans` retiró el
-servidor (H-THYROX-599). La prueba ahora sólo cuenta resultados sin `subtype` de error y
+servidor (H-THYROX-642). La prueba ahora sólo cuenta resultados sin `subtype` de error y
 con el fragmento entre marcadores, informa `errors=N`, y elige la última ejecución con al
 menos una respuesta real. Con eso, el lote 26 da `LOCAL_WORKER PROVEN` sobre **3
 traducciones reales** (`outputs/proof-es-a-kaist-cs492d.tsv`), no 142. Ritmo medido en

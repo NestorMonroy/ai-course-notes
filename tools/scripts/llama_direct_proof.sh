@@ -52,7 +52,7 @@ fi
 
 # Runtime: el contenedor vivo del carril (dueño ai-course-notes.es-mx-llama-direct) con
 # la imagen por digest. Un huérfano de un arranque anterior monta el mismo blob con la
-# imagen por etiqueta (H-THYROX-599); elegir por montaje lo confundía con el servidor.
+# imagen por etiqueta (H-THYROX-642); elegir por montaje lo confundía con el servidor.
 containers="$(cd "$THYROX" && timeout 30 bash bin/podman-execution-execute observe containers 2>/dev/null || echo '[]')"
 unit="$(jq -c --arg d "@$IMAGE_DIGEST" '[.[] | select(.running and .labels["thyrox.owner-id"] == "ai-course-notes.es-mx-llama-direct" and (.image | endswith($d)))][0] // empty' <<<"$containers")"
 [[ -n "$unit" ]] || unit="$(jq -c '[.[] | select(.running and .labels["thyrox.owner-id"] == "ai-course-notes.es-mx-llama-direct")][0] // empty' <<<"$containers")"
@@ -76,7 +76,7 @@ served="" responses=0 errors=0 remote=no
 if [[ -n "$run" ]]; then
     # Sólo cuenta una traducción real: sin `subtype` de error y con el fragmento entre
     # marcadores. Un error de conexión también lleva runtime llama-direct; contarlo
-    # dio un PROVEN falso cuando el servidor murió a mitad del lote (H-THYROX-599).
+    # dio un PROVEN falso cuando el servidor murió a mitad del lote (H-THYROX-642).
     # «Real» es lo que el ciclo aceptaría: el mismo `extract_translation` y
     # `structure_problem` del lazo. Mirar sólo `<<<ES` contó 6 respuestas que el
     # lazo rechazaba por cerrar con la cerca en vez de `ES>>>`.
