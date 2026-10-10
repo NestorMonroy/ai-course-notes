@@ -1,0 +1,117 @@
+\section{Interfaz de secuencia unificada: tokenización, autoregresión y objetivo de entrenamiento}
+
+El capítulo anterior explicó por qué se necesitan sistemas multimodales; este capítulo responde "cómo introducir diferentes señales en el Transformer". El error más común es equiparar el \textbf{token} con un ID entero. Los tokens utilizados en la clase funcionan más como una \textbf{unidad de entrada del modelo ordenada temporal o espacialmente}: el texto puede ser un ID de subpalabra discreto, la imagen puede ser un patch embedding o un código VQ, y el audio puede ser un vector a nivel de marco (frame). Lo que se unifica es la interfaz de secuencia, no necesariamente el tipo de representación.
+
+\subsection{Vista global autoregresiva de secuencias híbridas}
+
+Supongamos que una muestra se expande en una secuencia híbrida
+$$
+\mathbf{x}=(x_1,x_2,\ldots,x_T),\qquad m_t\in\{\text{text},\text{vision},\text{audio}\},
+$$
+donde $m_t$ representa la modalidad (modality) en la posición $t$. El modelado autoregresivo global se escribe como
+$$
+p(\mathbf{x})=\prod_{t=1}^{T}p\!\left(x_t\mid x_{<t},m_{\le t}\right).
+$$
+Aquí, $x_t$ puede ser un token discreto o un latente continuo; en este último caso, la "probabilidad" del lado derecho debe implementarse mediante Gaussianas, difusión u otros objetivos continuos, y no se puede aplicar mecánicamente el softmax de vocabulario.
+
+\lecturefigure{slide-010.jpg}{Colocar text, image patch y audio frame en la misma secuencia causal}{Diapositiva 10 del deck oficial; Clase 00:06:31--00:07:26}
+
+\begin{knowledgebox}{Lectura de la figura: lo que se unifica es el orden y las relaciones condicionales}
+Los T, V y A en la figura representan text token, visual patch y audio frame, respectivamente. Primero, observe el orden inferior: diferentes modalidades pueden aparecer intercaladas, y el Transformer las lee dentro de un contexto causal. Luego, observe las dos reglas superiores: \textit{tokenization across the board} se encarga de convertir las señales en unidades apilables, mientras que \textit{globally autoregressive generation} establece la dependencia respecto a todas las posiciones anteriores para la "posición actual". Esto no requiere que las tres modalidades utilicen el mismo decodificador o función de pérdida.
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Empaquetar una muestra multimodal en una secuencia con etiquetas de modalidad}]
+def pack_sequence(text_ids, image_patches, audio_frames):
+    sequence = []
+    sequence += [("text", token) for token in text_ids]
+    sequence += [("vision", patch) for patch in image_patches]
+    sequence += [("audio", frame) for frame in audio_frames]
+    return add_positions_and_boundaries(sequence)
+\end{lstlisting}
+
+\begin{warningbox}{La autoregresión no implica generar todos los píxeles secuencialmente}
+"Globalmente autoregresivo" describe el orden causal entre bloques de modalidades y posiciones dentro de la secuencia. El interior de un bloque de imagen aún puede ser des-enrutado (denoised) en paralelo mediante difusión, y el audio puede usar codecs especializados. Si se malinterpreta esto como "predecir cada píxel de izquierda a derecha tal como se hace con el texto", se perderá el diseño central de Transfusion.
+\end{warningbox}
+
+\subsection{Los tokens no siempre son discretos: cuatro tipos de interfaces de representación}
+
+Dado que las estructuras estadísticas de las diferentes modalidades varían, los objetivos de la tokenización también difieren. El tokenizer de texto busca un vocabulario compacto y reutilización semántica; el patch embedding de imagen preserva características locales continuas; el tokenizer VQ comprime en IDs discretos mediante un libro de códigos (codebook); y los tokens frame/codec de audio buscan un equilibrio entre resolución temporal, calidad de sonido y longitud de la secuencia.
+
+\lecturefigure{slide-011.jpg}{Entradas de tokenización para texto, imagen, video y audio}{Diapositiva 11 del deck oficial; Clase 00:05:19--00:06:20}
+
+\begin{knowledgebox}{Lectura de la figura: primero compare "qué se corta", luego compare "qué se pierde"}
+El texto generalmente se corta en subpalabras (subwords); la imagen se corta en parches espaciales; el video corta tanto espacio como tiempo (además de los patches); el audio se corta en frames o unidades codec. A más granularidad en el corte, mayor será la longitud de la secuencia y más costoso el cómputo; a menor granularidad, más probable es perder detalles locales y cambios temporales. La variable de diseño real no es "tener o no tener un tokenizer", sino la granularidad de la unidad, si es discreta, la tasa de compresión, la reversibilidad y si sirve para comprensión (understanding) o generación.
+\end{knowledgebox}
+
+\lecturefigure{slide-012.jpg}{Espectro de representación: embedding continuo, código discreto y latente generativo}{Diapositiva 12 del deck oficial; Clase 00:06:20--00:07:10}
+
+\begin{knowledgebox}{Términos clave: representación multimodal}
+\begin{longtable}{L{0.20\textwidth}L{0.27\textwidth}L{0.42\textwidth}}
+\toprule
+Término & Problema resuelto & Mecanismo central y relación con la clase \\
+\midrule
+Patch embedding & Convertir imágenes de alta resolución en secuencias finitas & Proyecta linealmente parches de tamaño fijo a vectores continuos, adecuado para comprensión, pero no proporciona directamente una distribución de generación a nivel de píxel. \\
+VQ token & Permitir que la imagen entre en el vocabulario discreto de un LM & Cada patch selecciona la entrada del libro de códigos (codebook) más cercana; la interfaz es uniforme, pero existe pérdida de información por cuantización. \\
+Continuous latent & Reducir la dificultad de generación en espacio de píxeles & Un VAE/encoder comprime la imagen a un espacio continuo; posteriormente se puede usar difusión para predecir, lo cual suele ser más adecuado para generación. \\
+Audio frame / codec token & Representar señales temporales de alta frecuencia & El frame conserva características acústicas continuas; el token codec es más discreto y compacto, pero la calidad del sonido y la granularidad semántica están limitadas por el codec. \\
+Modality boundary & Evitar que el modelo confunda la semántica de la secuencia & Tokens especiales, codificaciones de posición o embeddings de tipo marcan los límites entre modalidades y bloques. \\
+\bottomrule
+\end{longtable}
+\end{knowledgebox}
+
+\teachervoice{00:07:00--00:07:10, el docente advierte especialmente que los vectores densos también pueden llamarse tokens. Los apuntes adoptan esta definición amplia de "unidad de secuencia" para evitar clasificar erróneamente como no tokenizados a los continuos latentes de imagen posteriores.}
+
+\subsection{La entrada multimodal no es lo mismo que la salida multimodal}
+
+Si el modelo calcula la pérdida (loss) solo en las posiciones de texto, puede aprender a responder preguntas basadas en imágenes sin haber sido entrenado para reconstruir la distribución de imágenes o audio. Sea $\mathcal{T}$ el conjunto de posiciones de salida de texto; la entropía cruzada del texto es
+$$
+\mathcal{L}_{\text{text-only}}
+=-\sum_{t\in\mathcal{T}}\log p_\theta(x_t\mid x_{<t}).
+$$
+Aquí, los tokens de imagen y audio actúan como contexto condicional, no como objetivos de predicción.
+
+\lecturefigure{slide-013.jpg}{Objetivo de entrenamiento: entrada multimodal, salida solo de texto}{Diapositiva 13 del deck oficial; Clase 00:07:33--00:07:55}
+
+\begin{knowledgebox}{Lectura de la figura: observe dónde cae la pérdida}
+La secuencia inferior contiene simultáneamente T, V y A, pero el burbuja superior solo apunta a la salida de texto. El modelo puede utilizar información visual y auditiva en su atención automática (self-attention), pero se actualiza únicamente debido al error de predicción del texto. De esta manera es posible adquirir capacidades como captioning, VQA y comprensión de documentos, pero no se obtendrán automáticamente la síntesis de imágenes ni la generación de voz.
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Calcular entropía cruzada solo para las posiciones de salida de texto}]
+def text_only_loss(hidden, targets, modality):
+    logits = text_head(hidden)
+    mask = modality == "text"
+    return cross_entropy(logits[mask], targets[mask])
+\end{lstlisting}
+
+\lecturefigure{slide-014.jpg}{Régimen de modelo multimodal con salida de texto listado en clase}{Diapositiva 14 del deck oficial; Clase 00:07:58--00:08:12}
+
+\begin{warningbox}{El nombre del modelo no equivale a un contrato de capacidades fijo}
+La diapositiva utiliza nombres de productos del año 2026 para ilustrar el patrón común de "entrada multimodal, salida de texto" en entrenamiento e interacción; sin embargo, los productos evolucionan continuamente y las interfaces públicas no equivalen al objetivo de entrenamiento completo. Estos apuntes retienen solo las conclusiones a nivel de régimen: \textbf{la modalidad condicional y la modalidad predicha deben auditararse por separado}.
+\end{warningbox}
+
+\subsection{Objetivo Omni: cada modalidad tiene su propia cabeza de predicción}
+
+Si el modelo debe generar texto, imagen y audio, se requiere que las posiciones no textuales también produzcan un error optimizable. Una notación abstracta es
+$$
+\mathcal{L}_{\text{omni}}
+=\lambda_T\mathcal{L}_{T}
++\lambda_V\mathcal{L}_{V}
++\lambda_A\mathcal{L}_{A},
+$$
+donde $\mathcal{L}_{T}$ suele ser entropía cruzada categórica, $\mathcal{L}_{V}$ puede ser difusión/ajuste de flujo (flow matching), y $\mathcal{L}_{A}$ puede ser CE de token-codec u objetivos acústicos continuos. Los $\lambda_m$ no son solo pesos matemáticos; también determinan el ancho de banda de optimización: si el gradiente de una modalidad ahogará a otras tareas.
+
+\lecturefigure{slide-015.jpg}{Entrenamiento conjunto en salidas de texto, visión y audio para modelos Omni}{Diapositiva 15 del deck oficial; Clase 00:08:12--00:09:16}
+
+\begin{importantbox}{Criterio mínimo para un modelo Omni}
+Un modelo Omni debe considerar al menos múltiples modalidades como objetivos generables, no solo como condiciones de entrada. Puede compartir un backbone o poseer cabezales (heads), funciones de pérdida y parámetros específicos por modalidad; el término "omni" describe la cobertura de capacidades, lo cual no implica que la arquitectura deba ser completamente homogénea.
+\end{importantbox}
+
+\begin{warningbox}{El entrenamiento conjunto no garantiza transferencia positiva}
+Sumar las pérdidas solo asegura que los gradientes existan simultáneamente, pero no garantiza que las tareas se ayuden mutuamente. Diferentes modalidades pueden compartir semántica de alto nivel o entrar en conflicto en estadísticas de bajo nivel, longitud de secuencia y escala de gradiente. Los siguientes conceptos de brecha de modalidades (modality gap), MoT y asimetría comprensión-generación tratan con este problema no resuelto.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+La unificación de secuencias multimodales requiere responder simultáneamente a representación, ordenamiento y objetivo. Los tokens son unidades de secuencia que no deben ser discretos; la autoregresión global establece las relaciones condicionales entre bloques sin excluir la difusión dentro de los bloques; la entrada multimodal y la salida multimodal se distinguen claramente mediante la máscara de pérdida. Hasta aquí, tenemos una interfaz unificada, pero aún no sabemos si podrá escalar como un modelo de lenguaje.
+
+
