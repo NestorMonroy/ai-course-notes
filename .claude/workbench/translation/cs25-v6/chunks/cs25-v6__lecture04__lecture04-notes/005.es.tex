@@ -1,0 +1,45 @@
+\section{Paralelismo contextual: partición de atención para secuencias ultra largas}
+
+El paralelismo contextual (CP, por sus siglas en inglés) divide una misma muestra a lo largo del eje de longitud de la secuencia. No se utiliza para incrementar el batch, sino para que las activaciones, Q/K/V y la atención de un único contexto ultra largo puedan distribuirse entre varios dispositivos.
+
+\subsection{Por qué DP, TP y PP aún pueden no soportar contextos largos}
+
+A medida que crece la longitud de la secuencia, las activaciones y el conjunto de trabajo (working set) de la atención aumentan rápidamente. Incluso si los parámetros ya están particionados mediante ZeRO, TP o PP, cada rank puede seguir conservando una dimensión de token excesivamente larga; por ello se requiere una partición especializada a lo largo del eje de la secuencia.
+
+\lecturefigure{slide-079.jpg}{Motivación de CP: el crecimiento de la longitud de la secuencia provoca una explosión de memoria en las activaciones}{CS25 V6 oficial, p.~79}
+
+DP distribuye las muestras a diferentes ranks a lo largo del eje del batch; una misma secuencia no se fragmenta. El propósito de revisar DP es establecer un punto de comparación: CP divide los $S$ posiciones de una única muestra en $S_1,\ldots,S_P$, asignando cada rango solo un segmento.
+
+\lecturefigure{slide-081.jpg}{Revisión de DP: particiona el batch, no la secuencia individual}{CS25 V6 oficial, p.~81}
+
+\lecturefigure{slide-083.jpg}{CP: una misma secuencia se fragmenta según las posiciones de los tokens}{CS25 V6 oficial, p.~83}
+
+\subsection{Ring Attention y online softmax}
+
+Cada shard de consulta (query) aún necesita ver todos los K/V de la secuencia completa. Ring Attention hace que los bloques de K/V se transmitan a lo largo de un anillo de dispositivos; cada rank calcula una puntuación local para el bloque actual y combina múltiples bloques utilizando el máximo en ejecución (running maximum) y el normalizador en ejecución del online softmax, sin necesidad de materializar la matriz completa de atención.
+
+\lecturefigure{slide-085.jpg}{Ring Attention: intercambio circular de bloques K/V y actualización en línea del softmax}{CS25 V6 oficial, p.~85}
+
+\begin{knowledgebox}{Lectura de la figura: las consultas permanecen locales mientras los K/V circulan por el anillo}
+Cada rank guarda fijo su propio shard de consulta y recibe secuencialmente los bloques de K/V procedentes de otros ranks; al finalizar una ronda, cada consulta ha interactuado con todas las claves de la secuencia completa. El anillo representado no sirve para promediar, sino para controlar el tamaño de los bloques de K/V que aparecen en la memoria HBM en cada paso. Los máximos y denominadores en ejecución del online softmax permiten combinar las puntuaciones de distintos bloques de manera numéricamente estable. Además, la atención causal debe aplicar una máscara combinada con la posición del bloque; si la comunicación y el cómputo por bloque no pueden solaparse, cada salto del anillo alargará directamente la latencia de la capa.
+\end{knowledgebox}
+
+Para la $i$-ésima consulta, el softmax en bloques puede mantener
+\[
+m_i^{(t)}=\max\bigl(m_i^{(t-1)},\max_j s_{ij}^{(t)}\bigr),
+\]
+\[
+\ell_i^{(t)}=e^{m_i^{(t-1)}-m_i^{(t)}}\ell_i^{(t-1)}
++\sum_j e^{s_{ij}^{(t)}-m_i^{(t)}}.
+\]
+Donde, $s_{ij}^{(t)}$ es la puntuación de atención del $t$-ésimo bloque K/V, $m_i^{(t)}$ es el máximo en ejecución hasta ese bloque y $\ell_i^{(t)}$ es el denominador del softmax estabilizado. El numerador de salida también se actualiza mediante una recursión con reescalado idéntico, obteniendo así resultados equivalentes al softmax completo mientras los bloques fluyen.
+
+\lecturefigure{slide-086.jpg}{Límites de CP: único eje de partición directo para secuencias largas, pero cada capa debe intercambiar K/V}{CS25 V6 oficial, p.~86}
+
+\teachervoice{00:46:02--00:49:14，el docente delimita CP como una herramienta especializada para el cuello de botella de contextos largos: se comunica dentro de cada bloque de atención y no ofrece gran ayuda para secuencias cortas; si el problema no es la memoria de la secuencia, no debe activarse CP solo por "soportarlo".}
+
+\subsection{Resumen de la sección}
+
+CP distribuye las posiciones de los tokens de un único contexto largo entre varios ranks; Ring Attention mantiene la semántica global de atención mediante online softmax y rotación de K/V. Resuelve directamente la memoria de secuencias largas, pero incrementa la comunicación en el camino crítico de atención; la siguiente sección aborda EP exclusivamente para capas de expertos dispersos en Mixture-of-Experts.
+
+
