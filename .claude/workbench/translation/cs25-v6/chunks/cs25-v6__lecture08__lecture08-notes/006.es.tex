@@ -1,0 +1,153 @@
+\section{Mixture-of-Transformers: asignación de parámetros y cómputo según la modalidad}
+
+Chameleon unifica los tokens, Transfusion unifica el backbone; MoT reintroduce la especialización sobre una secuencia compartida. La observación clave es que las diferentes modalidades forman estructuras separables en el espacio oculto y tienen demandas distintas en cuanto a capacidad de parámetros, velocidad de optimización y objetivos de salida. En lugar de hacer competir a todos los tokens contra un único conjunto de atención/FFN, se aprovecha la etiqueta de modalidad conocida para realizar una ruta determinista.
+
+\subsection{Línea base de backbone compartido y brecha entre modalidades}
+
+Para determinar si es necesaria la especialización, esta sección establece primero una línea base de backbone compartido denso y luego examina la geometría de las representaciones en diferentes capas. Se deben leer ambas figuras juntas: el diapositiva 031 presenta la hipótesis de parámetros compartidos, mientras que la diapositiva 032 proporciona únicamente señales empíricas que podrían refutarla.
+
+\lecturefigure{slide-031.jpg}{Línea base denso donde todas las modalidades comparten el mismo backbone Transformer}{Diapositiva oficial número 31}
+
+\begin{knowledgebox}{Lectura de la figura: La ventaja de la línea base denso es su simplicidad, pero el costo es activar todo}
+Los tokens de diferentes colores en la parte inferior atraviesan el mismo Transformer amarillo. Cada token activa los mismos parámetros, por lo que la implementación es sencilla y la atención entre modalidades es natural; sin embargo, la cantidad de tokens de imagen/audio podría ser muy superior a la de texto, y los gradientes de diferentes tareas de salida competirían por la misma capacidad. El diseño disperso posterior no elimina las interacciones, sino que cambia qué proyecciones y FFN utiliza cada token en cada capa.
+\end{knowledgebox}
+
+\lecturefigure{slide-032.jpg}{Brecha entre modalidades y agrupación de representaciones en diferentes capas}{Diapositiva oficial número 32; arXiv Mind the Gap 2203.02053v2}
+
+\begin{knowledgebox}{Lectura de la figura: La agrupación es un fenómeno, no una prueba causal}
+Los cuatro paneles muestran cómo las representaciones de imagen y texto en diferentes capas forman gradualmente estructuras distintas en el espacio proyectado. Primero se debe comparar el grado de separación entre las capas 1, 5, 17 y 32, y luego preguntarse si dicha brecha proviene de las estadísticas de entrada, el objetivo contrastivo, la codificación de posición o los datos de entrenamiento. La figura apoya que «las modalidades tienen diferencias estructurales explotables», pero no puede demostrar por sí sola que «separar los parámetros es necesariamente mejor».
+\end{knowledgebox}
+
+\begin{warningbox}{Malentendidos comunes sobre la brecha entre modalidades}
+Que las representaciones sean separables no significa que sus significados no puedan alinearse; de hecho, la recuperación multimodal a menudo requiere comparar distribuciones distintas en ciertas direcciones. El uso de etiquetas de modalidad para realizar la ruta en MoT es una elección de ingeniería. Para demostrar su eficacia, también se deben examinar la pérdida de cómputo emparejado, las métricas aguas abajo y la estabilidad, en lugar de limitarse a gráficos de dispersión bidimensionales.
+\end{warningbox}
+
+\subsection{¿Qué es la ruta determinista?}
+
+Supongamos que la capa $\ell$ tiene parámetros $\theta_{\ell,m}$ para la modalidad $m$. Para un token $h_i^\ell$, conocida su modalidad $m_i$, entonces
+$$
+h_i^{\ell+1}
+=h_i^\ell+F_{\theta_{\ell,m_i}}
+\left(h_i^\ell,\operatorname{Attn}_{\theta_{\ell,m_i}}(H^\ell)\right).
+$$
+La ruta está determinada por $m_i$ y no requiere aprender una puerta adicional. Aunque las proyecciones de query/key/value pueden distinguirse según la modalidad, la atención sigue calculándose sobre toda la secuencia mezclada; por tanto, los tokens de texto e imagen siguen intercambiando información.
+
+\lecturefigure{slide-033.jpg}{Estado inicial de MoT: parámetros independientes por modalidad y ruta determinista}{Diapositiva oficial número 33; arXiv Mixture-of-Transformers 2411.04996v2}
+
+\begin{knowledgebox}{Lectura de la figura: Negro, naranja y verde indican «quién usa qué parámetros»}
+Dado que la modalidad del token de entrada es conocida, no se necesita una puerta top-$k$ para la ruta. Los dos burbujas a la derecha son clave: parámetros independientes del Transformer para cada modalidad y ruta determinista. En la figura los tokens siguen dispuestos en la misma secuencia; la diferencia radica únicamente en que, al pasar por atención/FFN, se selecciona la trayectoria de parámetros del color correspondiente.
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Ruta determinista de modalidad en MoT}]
+def mot_layer(hidden, modality_ids, experts):
+    output = zeros_like(hidden)
+    for modality, transformer_block in experts.items():
+        mask = modality_ids == modality
+        output[mask] = transformer_block(hidden, query_mask=mask)
+    return output
+\end{lstlisting}
+
+\lecturefigure{slide-039.jpg}{Arquitectura completa de MoT: múltiples trayectorias de parámetros por modalidad y sus respectivos objetivos de entrenamiento}{Diapositiva oficial número 39; Clase 00:21:48--00:24:30}
+
+\begin{knowledgebox}{Lectura de la figura: Rastrear un token de izquierda a derecha}
+La figura completa a la izquierda alimenta los tokens de texto, imagen y audio hacia la atención y el FFN de sus colores correspondientes; la salida superior regresa a la misma secuencia mezclada. A la derecha se complementa con el objetivo de difusión de imagen y el objetivo de modelado de lenguaje, indicando que tanto la ruta como la pérdida están definidas por modalidad. El punto clave para leer la figura no es el número de colores, sino: la secuencia mantiene la unión, la activación de parámetros es dispersa y los objetivos permanecen especializados.
+\end{knowledgebox}
+
+\teachervoice{La Q\&A del 00:42:42--00:44:08 añadió un punto fácil de omitir: aunque las trayectorias de parámetros estén separadas, los tokens aún ven el contexto de otras modalidades a través de la autoatención. La especialización modifica las proyecciones/FFN, pero no equivale a cortar el flujo de información en submodelos que no se comunican entre sí.}
+
+\subsection{Diferencias entre MoT y Mixture-of-Experts}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabularx}{0.98\textwidth}{L{0.17\textwidth}Y Y}
+\toprule
+Arquitectura & Ruta y problema resuelto & Costo e implicaciones curriculares \\
+\midrule
+Transformer denso & Todos los tokens activan los mismos parámetros; implementación sencilla, compartición suficiente & Cómputo activo alto, las modalidades pueden competir por la capacidad. \\
+MoT & Ruta determinista a parámetros especializados según la modalidad conocida & Ruta estable y controlable; requiere mantener múltiples conjuntos de parámetros y decidir qué capas se comparten. \\
+MoE & Puerta aprendida selecciona top-$k$ expertos según el contenido del token & Puede aprender la división funcional dentro de la misma modalidad, pero con desequilibrio de carga, inestabilidad de ruta y sobrecarga de comunicación. \\
+MoT + MoE & Primero se selecciona una familia de parámetros por modalidad, luego se aprende la ruta de expertos dentro de esa familia & Modela simultáneamente las diferencias entre modalidades y la diversidad dentro de ellas; la complejidad del sistema es la mayor. \\
+\bottomrule
+\end{tabularx}
+\caption{Términos clave: Diferencias de ruta entre denso, MoT y MoE}
+\end{table}
+
+Si los parámetros totales son $P_{\text{total}}$ y un token solo activa su trayectoria de modalidad $P_{m}$, la relación de parámetros activos puede escribirse como
+$$
+\rho_m=\frac{P_m}{P_{\text{total}}}.
+$$
+En las comparaciones de modelos dispersos se debe reportar tanto $P_{\text{total}}$ como $P_{\text{active}}$. Afirmar que un modelo es «mayor» basándose solo en los parámetros totales inflaría el cómputo por paso; confiar únicamente en los parámetros activos ocultaría los costos de almacenamiento y comunicación.
+
+\subsection{Primero las configuraciones experimentales, luego las curvas}
+
+Tras la figura arquitectónica lo más fácil es saltar directamente a curvas bonitas, pero esta sección realiza primero un cálculo de recursos. Solo al confirmar la longitud de secuencia, número de tokens, pasos de entrenamiento y configuración de GPU se puede determinar si las ventajas de la diapositiva 041 provienen de la ruta o de un presupuesto de entrenamiento adicional; además, hay que distinguir entre parámetros totales y parámetros activos para no malinterpretar el tamaño del modelo disperso.
+
+\lecturefigure{slide-040.jpg}{Configuración de entrenamiento emparejado de MoT desde 163M hasta 7B}{Diapositiva oficial número 40; arXiv Mixture-of-Transformers 2411.04996v2}
+
+\begin{knowledgebox}{Lectura de la tabla: La definición de recursos determina si las conclusiones son creíbles}
+Las cuatro escalas utilizan longitud de secuencia 4096, aproximadamente 2.10M tokens/paso, 250k pasos y un volumen total de entrenamiento de unos 0.524T tokens; los modelos más grandes aumentan las GPU y reducen el lote por GPU. Al comparar, primero se confirma que el presupuesto de tokens y los pasos son consistentes, y luego se examinan la dimensión oculta, capas, cabezas y número de GPU. Solo así se puede atribuir principalmente las diferencias en las curvas a la arquitectura, en lugar de un mayor entrenamiento con datos.
+\end{knowledgebox}
+
+\begin{importantbox}{Ítems mínimos para reportar cómputo emparejado}
+Un modelo disperso multimodal debe reportar al menos: proporción de tokens por modalidad, parámetros totales/activos, FLOPs por paso, tokens de entrenamiento, pasos de muestreo de difusión, número de GPU, sobrecarga de comunicación y tiempo cronológico. El emparejamiento del presupuesto de tokens en la tabla es una base importante, pero no garantiza automáticamente el emparejamiento de todos los costos del sistema.
+\end{importantbox}
+
+\lecturefigure{slide-041.jpg}{Pérdida, eficiencia de muestreo y métricas aguas abajo de MoT + Transfusion 7B}{Diapositiva oficial número 41; Clase 00:24:30--00:26:58}
+
+\begin{knowledgebox}{Lectura de la figura: Los cinco paneles responden preguntas distintas}
+La curva roja de MoT en la esquina superior izquierda alcanza una pérdida de imagen más baja al mismo paso de entrenamiento; la superior derecha dibuja los pasos necesarios para que MoE/MoT alcancen la pérdida denso, donde una pendiente roja menor indica mayor eficiencia de muestreo. Las métricas inferiores CLIP son mejores cuanto mayor es el valor, FID mejor cuanto menor es y CIDEr mejor cuanto mayor es; la diapositiva reporta que MoT supera a Dense en los tres aspectos. Esto apoya mejoras en generación y descripción, pero aún se deben verificar los datos, el muestreo y la varianza estadística.
+\end{knowledgebox}
+
+\begin{warningbox}{Que la pérdida baje no significa que todas las capacidades mejoren}
+La pérdida de difusión de imagen, CLIP, FID y CIDEr miden respectivamente el objetivo de optimización, la alineación semántica, la calidad de la distribución y la superposición en descripciones. No pueden sustituir la precisión de comprensión de imagen, razonamiento espacial, seguridad o preferencia humana. En particular, se indicó explícitamente posteriormente en clase que la separación entre modalidades no mejoró la ruta de comprensión de imagen discutida.
+\end{warningbox}
+
+\lecturefigure{slide-042.jpg}{Contraste cualitativo de generación de imagen entre denso y MoT}{Diapositiva oficial número 42; arXiv Mixture-of-Transformers 2411.04996v2}
+
+\begin{knowledgebox}{Lectura de la figura: Observar la composición del prompt, no solo la estética}
+Los cuatro conjuntos de prompts requieren combinaciones de objetos poco comunes, como silla inspirada en lichi, ciudad de sushi, personaje con quesoburger e interacción cromática entre pato y tortuga. Al comparar las dos filas, primero se verifica si el número de objetos, relaciones y materiales cumplen los requisitos, y luego la estabilidad de las formas. Las muestras de MoT son más cercanas a las restricciones textuales, pero esto sigue siendo evidencia cualitativa seleccionada que debe leerse junto con las métricas cuantitativas de la diapositiva 041.
+\end{knowledgebox}
+
+\subsection{Capacidad de modalidad y expertos aprendidos pueden superponerse}
+
+La sección anterior comparó denso y MoT; esta pregunta si también se necesita división funcional dentro de la misma modalidad. Por ello, la diapositiva 043 no es una figura dispersa repetida, sino que combina la ruta determinista de modalidad con la ruta aprendida de expertos en una estructura de dos niveles.
+
+\lecturefigure{slide-043.jpg}{Combinación adicional de Mixture-of-Experts dentro de la ruta de modalidades}{Diapositiva oficial número 43; Clase 00:26:58--00:28:20}
+
+\begin{knowledgebox}{Lectura de la figura: La dispersión de dos niveles resuelve dos tipos de heterogeneidad}
+La primera capa realiza una ruta determinista según la modalidad, tratando las diferencias estadísticas entre texto/imagen/audio; la segunda capa, puerta MoE, selecciona expertos dentro de una modalidad específica para manejar diferencias en tarea, estilo o función semántica. Ambos niveles aumentan los parámetros totales, pero la trayectoria activa puede mantenerse dispersa. En ingeniería también hay que gestionar la paralelización de expertos, equilibrio de carga y comunicación all-to-all entre dispositivos.
+\end{knowledgebox}
+
+\teachervoice{Del 00:27:55--00:28:20, el docente ofrece una observación práctica: aumentar los expertos ayuda más rápido al rendimiento del texto, mientras que la generación de imagen no necesariamente escala a la misma velocidad. Por tanto, las modalidades no deben asignar mecánicamente la misma cantidad de expertos; la propia asignación de capacidad es un hiperparámetro ajustable.}
+
+\subsection{Congelar la ruta de lenguaje y expandir nuevas modalidades asíncronamente}
+
+La dispersión de dos niveles resuelve la asignación de capacidad durante el entrenamiento; esta sección se centra en la evolución del modelo: cuando ya existe un modelo de lenguaje fuerte, ¿cómo añadir generación de imagen/audio sin reentrenar todos los parámetros? Al leer la diapositiva 044, se debe entender estabilidad y controlabilidad como beneficios para el flujo de trabajo de entrenamiento.
+
+\lecturefigure{slide-044.jpg}{Cuatro conclusiones de ingeniería de MoT y seguimiento consciente de modalidades}{Diapositiva oficial número 44; Clase 00:28:20--00:29:57}
+
+\begin{knowledgebox}{Lectura de la figura: El tercer punto convierte la arquitectura en flujo de trabajo de entrenamiento}
+Los dos primeros puntos resumen la ruta determinista y las mejoras en generación no textual; el tercero enfatiza eficiencia, estabilidad, controlabilidad y el entrenamiento asíncrono de diferentes modalidades entre etapas. Si la ruta de texto ya es fuerte, se puede congelar, entrenando solo la ruta de imagen/audio, reduciendo así el olvido catastrófico y los costos de preentrenamiento continuo completo. El cuarto punto indica que este enfoque ya se ha extendido a una clase de arquitecturas conscientes de modalidades.
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Congelar la ruta de lenguaje existente, expandir nueva modalidad de generación}]
+def extend_with_new_modality(model, new_loader):
+    freeze(model.text_parameters)
+    trainable = model.image_parameters + model.cross_modal_adapters
+    for batch in new_loader:
+        loss = model.image_generation_loss(batch)
+        update(trainable, loss)
+\end{lstlisting}
+
+\begin{warningbox}{Condiciones implícitas del entrenamiento asíncrono}
+Congelar la ruta antigua solo es válido si la nueva modalidad puede aprender el alineamiento necesario a través de una interfaz multimodal limitada. Si la tarea requiere remodelar la atención compartida, significados léxicos o comportamientos de razonamiento, un congelamiento total limitará la transferencia. Lo que se llama controlabilidad es un medio de ingeniería para reducir interferencias, no algo obtenido gratis con el óptimo conjunto.
+\end{warningbox}
+
+\teachervoice{La Q\&A del 00:29:57--00:31:36 en clase dio resultados negativos: la separación entre modalidades de MoT ayuda a la generación de imagen, pero no se observó mejora en la comprensión de imagen. Si la salida es texto, los inputs de texto e imagen podrían ser más adecuados tras pasar por parámetros compartidos. Este límite debe conservarse junto con las curvas positivas.}
+
+\subsection{Resumen de la sección}
+
+MoT reescribe «compartir un modelo» como «compartir una secuencia y un gráfico de interacciones, pero activar diferentes parámetros según la modalidad». Mejora la pérdida de generación de imagen, CLIP/FID y métricas de descripción bajo un presupuesto de tokens emparejado, y apoya una extensión de modalidades más controlable; sin embargo, no prueba que tanto la comprensión como la generación se beneficien. En el próximo capítulo se verá cómo esta especialización entra en sistemas de preentrenamiento unificado y robóticos más complejos.
+
+
