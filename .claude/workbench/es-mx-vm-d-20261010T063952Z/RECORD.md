@@ -77,3 +77,36 @@ auditoría se escribió aquí.
   o lo añada a las fuentes del entorno; con eso corren el bootstrap del README de thyrox
   (que instala el runtime de contenedores) y la ruta `headless-pool --local-only`.
 - Que se permita el acceso de lectura a Docker Hub para las imágenes y el artefacto por digest.
+
+## Suspensión controlada del nodo ES-D (2026-10-11T02:07Z)
+
+Encargo: suspensión, preservación y reanudación de thyrox, dado por el ejecutor en esta
+sesión. Alcance que ES-D puede ejecutar: **este nodo**. Los demás nodos son sesiones propias
+con su propio contenedor; ES-D no tiene autoridad de thyrox sobre ellos ni canal para
+drenarlos, y la suspensión global la lleva el coordinador ES-A (su resumen informado:
+«integrando fresh-clone-bootstrap; luego sigue la suspensión»).
+
+| Fase | Resultado en ES-D | Evidencia |
+|---|---|---|
+| DISCOVER | rama al día con su remoto (`eed38e01` = origin); sin stash, sin operaciones Git incompletas, un solo worktree; los 2 archivos sin rastrear son los de esta suspensión. Sin thyrox, sin `podman`, sin daemon de docker, sin procesos de trabajo (sólo los de la plataforma de la sesión); contenedor recién reanudado (PID 1 con 1 min). | `outputs/suspension-discover.txt` |
+| DISCOVER (nodos) | 11 sesiones observadas por la API de sesiones; 7 del proyecto es-MX (ES-A…ES-G), 4 antiguas desconectadas. Estado tomado de la API, **no verificado** por autoridades de thyrox. | `outputs/sessions.tsv` |
+| DISCOVER (TASKs, stores, imágenes, modelos) | **no verificable desde ES-D**: `agent_store`, `execution-records`, `task_continuation`, `wait-jobs`, `@thyrox/image-registry` y el catálogo de modelos viven en thyrox, que no se pudo añadir (bloqueos 1 y 3, y un tercer rechazo hoy: `add_repo` lectura → «[Auto-Mode Bypass]»). ES-D nunca tuvo TASK de thyrox, imagen, GGUF ni base de datos. | este RECORD |
+| QUIESCE | no hay planificador ni cola local que cerrar. Riesgo residual: la rutina `trig_01K4SjMJd1kdjRwSSYdyCJ1z` (de ES-A, sin horario, sólo por disparo) puede volver a inyectar trabajo en esta sesión; no se tocó porque es del coordinador. | `list_triggers` 02:07Z |
+| DRAIN | nada que drenar: ningún trabajo admitido ni en curso. | `outputs/suspension-discover.txt` |
+| PRESERVE / PUBLISH | todo el estado exclusivo del nodo es este banco; se publica en la rama con este commit. Ninguna imagen, modelo ni base que publicar. | `git log` de la rama |
+| STOP | nada que detener. El contenedor es efímero: al reciclarse no se pierde nada que no esté en la rama. | — |
+| CHECKPOINT | este RECORD + `outputs/`; integridad por `outputs/SHA256SUMS`. | `outputs/SHA256SUMS` |
+
+Clasificación del trabajo de ES-D: **bloqueado** (auditoría con el 9B local sin empezar; causa:
+sin acceso a thyrox ni runtime de contenedores). Ningún entregable A–I parcial que preservar.
+
+### Reanudación de ES-D
+
+1. Verificar `sha256sum -c outputs/SHA256SUMS` desde este directorio y que la rama siga en el
+   commit de este checkpoint o posterior (`git log origin/feature/es-mx-vm-d-local-thinking-audit`).
+2. Reconciliar con el estado del coordinador (banco de ES-A y su checkpoint de suspensión) antes
+   de actuar: ES-D no decide qué sigue.
+3. Requisito para retomar el encargo `prompts/vm-d.md`: que la sesión tenga `NestorMonroy/thyrox`
+   (push) y runtime de contenedores; entonces bootstrap del README de thyrox y la siguiente
+   TASK por `task_continuation`, no por lista fija.
+4. No repetir: el descubrimiento de recursos y los rechazos ya registrados aquí.
