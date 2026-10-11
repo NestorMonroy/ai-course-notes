@@ -107,6 +107,15 @@ Cada una con su autoridad; ninguna es recomendación nueva.
 - **Modelos sin copia durable**: `qwen2.5-coder-7b` y `phi-4-mini` no tienen GGUF
   local ni ubicación OCI (`outputs/models.tsv`).
 
+## Riesgo residual de la barrera
+
+`tools/scripts/llama_direct_ensure.sh` levanta llama-server **antes** de leer
+la marca `settled`: la marca impide relanzar el lazo, no el servidor. Durante
+la suspensión nada lo invoca (Monitor de auto-reparación detenido, rutinas de
+revisión de ES-A, ES-F y ES-G borradas, la de ES-D deshabilitada). Quien lo
+ejecute a mano con la barrera puesta tendrá un servidor ocioso sin lazo; se
+detiene con `bin/thyrox-bg register llama-server-es-mx` y `bin/wait-jobs kill`.
+
 ## Cómo se reanuda
 
 En este orden; ningún paso ejecuta una TASK antes del 9.
