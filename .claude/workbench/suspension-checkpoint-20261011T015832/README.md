@@ -90,9 +90,20 @@ Cada una con su autoridad; ninguna es recomendación nueva.
   segundo digest del espejo de llama.cpp: no hay autoridad de solo lectura
   para consultarlo (`outputs/oci-remote-verification.tsv`). El espejo de
   llama.cpp y el artefacto del 9B sí: ES-F y ES-G los bajaron en frío.
-- **Publicación OCI bloqueada**: `THYROX_REGISTRY_PUBLISHER_TOKEN` ausente. Las
-  10 imágenes `permanent` y la `thyrox-transformers-runtime:dev` local quedan
-  conservadas en el almacenamiento de Podman de este nodo, no en remoto.
+- **Publicación OCI bloqueada por falta de autoridad, no de credencial**
+  (2026-10-11 ~02:20Z, a pedido del ejecutor). `THYROX_REGISTRY_READER_WRITE_TOKEN`
+  está presente y puede mapearse a `THYROX_REGISTRY_PUBLISHER_USERNAME`/`_TOKEN`
+  sólo en el entorno del proceso que publica. Pero ningún binario publica una
+  imagen propia ya construida: `promoteCandidate`/`publishPromotedImage`
+  (`image-registry/promotion.ts`) no tienen consumidor. Es el alcance de
+  **TASK-THYROX-1108** («Publish thyrox images through a production binary
+  instead of a hand-written digest») y **TASK-THYROX-0915** («Preserve local OCI
+  states through ImageRegistry without promoting them»), las dos `pending`.
+  `image-registry-mirror-runtime-image` sólo cubre las cinco imágenes de
+  runtime, que ya declaran su espejo en `th3rox` (`runtime-images.json`);
+  volver a copiarlas sería una publicación duplicada. Las 10 imágenes
+  `permanent` y `thyrox-transformers-runtime:dev` quedan conservadas sólo en
+  el Podman de este nodo.
 - **PostgreSQL**: el volumen `thyrox-postgres-data` (46 MB) está detenido y es
   consistente ante caída; no hay autoridad de respaldo (`pg_dump`) en thyrox.
   Queda con su manifiesto por archivo (`outputs/volume-thyrox-postgres-data.sha256`),
