@@ -1,0 +1,67 @@
+\section{Benchmarks de un solo réplica: trazando la frontera latencia--rendimiento}
+
+Una vez que el workload es medible, el siguiente paso debe ser aislar un único réplica, en lugar de ejecutar directamente un número opaco de picos sobre todo el clúster. El objetivo del benchmark de un solo réplica es identificar dos extremos y una región intermedia factible: el extremo de latencia mínima nos indica qué tan rápido opera con recursos exclusivos; el extremo de máximo rendimiento (throughput) nos muestra cuánta carga puede manejar exponiendo toda la paralelidad; y el barrido entre ambos define el espacio real para seleccionar puntos del SLO.
+
+\subsection{Serial, estallido (burst) y barrido de tasa}
+
+En esta sección dividimos primero el proceso de medición de la frontera en tres experimentos reproducibles. La prueba de latencia mínima envía una sola solicitud a la vez, esperando su finalización antes de enviar la siguiente; la prueba de máximo rendimiento submite simultáneamente $N$ solicitudes para que el programador (scheduler) pueda formar lotes (batch) lo más grande posible. La primera casi no genera colas, mientras que la segunda aprovecha al máximo la paralelidad, aunque la espera por solicitud suele ser mayor. Posteriormente, aumentamos gradualmente la tasa de llegada entre ambos extremos, registrando los percentiles de latencia, el rendimiento y la tasa de errores.
+
+\lecturefigure{slide-013.jpg}{Tres pasos para benchmarkear un réplica}{Diapositiva 13 del deck oficial; clase 00:20:02--00:20:49}
+
+\begin{lstlisting}[caption={Pseudocódigo para el barrido latencia--rendimiento de un solo réplica}]
+for offered_qps in rates_between(serial_qps, burst_qps):
+    results = replay_requests(
+        replica=engine,
+        arrival_rate=offered_qps,
+        token_distribution=production_sample,
+        duration="long-enough-for-steady-state",
+    )
+    record(
+        throughput=results.completed_qps,
+        ttft=percentiles(results.ttft, [50, 95, 99]),
+        tpot=percentiles(results.tpot, [50, 95, 99]),
+        queue=percentiles(results.queue_time, [95, 99]),
+        errors=results.error_rate,
+    )
+\end{lstlisting}
+
+\lecturefigure{slide-014.jpg}{La latencia mínima y el máximo rendimiento son dos extremos de la misma frontera}{Diapositiva 14 del deck oficial; clase 00:20:49--00:21:30}
+
+\begin{knowledgebox}{Lectura de la figura: ¿qué representan la línea horizontal y la vertical?}
+En la línea de tiempo serial superior, las solicitudes apenas se superponen, por lo que cada una termina lo antes posible, aunque queda mucho espacio libre en el hardware; en la inferior, el estallido (burst) apila las solicitudes en la misma ventana temporal, permitiendo al programador formar lotes más grandes y reduciendo el tiempo total de finalización, pero distribuyendo la latencia de cola entre cada solicitud. En un despliegue real, usualmente se opera entre ambos extremos, y las restricciones del SLO pueden marcar una parte de la frontera como no disponible.
+\end{knowledgebox}
+
+Si un solo réplica puede completar $c$ solicitudes por segundo (QPS) de forma estable bajo el SLO objetivo, y la tasa pico de llegada total es $\lambda_{\mathrm{peak}}$, el límite inferior más grueso para el número de réplicas es:
+\[
+N_{\mathrm{réplica}}\geq \left\lceil\frac{\lambda_{\mathrm{pico}}}{c\rho_{\mathrm{objetivo}}}\right\rceil,
+\]
+donde $\rho_{\mathrm{objetivo}}<1$ es la utilización objetivo reservada para variabilidad, fallos y latencia de escalado. Esta fórmula no reemplaza la simulación de colas; simplemente obliga al equipo a escribir explícitamente el margen de maniobra (headroom).
+
+\subsection{Por qué la latencia de tokens p95/p99 se vuelve visible a simple vista}
+
+La sección anterior delineó los límites entre una solicitud individual y el rendimiento agregado; esta explica cómo los percentiles se convierten en experiencia real. La diapositiva 15 apunta a un simulador de tiempos de token. El orador mantiene la mediana rápida mientras eleva solo la latencia de la cola, y la salida muestra inmediatamente un entrecortamiento ("rápido, pausado"). Esto ocurre porque una respuesta contiene muchos tokens; el usuario experimenta múltiples eventos de latencia independientes o correlacionados en lugar de una sola muestra del percentil.
+
+\lecturefigure{slide-015.jpg}{Entrada de métricas del simulador de tiempos de token}{Diapositiva 15 del deck oficial; clase 00:21:30--00:22:55}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.97\textwidth,height=0.46\textheight,keepaspectratio]{images/token-timing-demo-002207.jpg}
+  \caption{Demo en vivo: los tokens de la mediana son rápidos, pero la latencia de la cola causa pausas en la salida en flujo}
+  \figsource{Video oficial 00:22:07; única demo educativa fuera del deck durante una auditoría visual de cinco segundos de muestreo completo}
+\end{figure}
+
+\begin{knowledgebox}{Lectura de la figura: el usuario ve una secuencia, no un percentil aislado}
+Observe primero el flujo de tokens en la página, no un número individual como p50. Si cada token tiene una probabilidad $p$ de caer en un intervalo de "entrecortamiento notable", la probabilidad aproximada de que una respuesta de longitud $T$ experimente al menos un entrecortamiento es:
+\[
+1-(1-p)^T.
+\]
+Por ejemplo, con $p=0.01$ y $T=200$, esta probabilidad es aproximadamente del 86.6\%. Los eventos de latencia reales suelen estar relacionados con colas, lotes (batch) o bloqueos del GC/host, por lo que el supuesto de independencia suele ser demasiado optimista.
+\end{knowledgebox}
+
+\begin{warningbox}{Los benchmarks deben reproducir la distribución de tokens y el proceso de llegada de producción}
+Las pruebas sintéticas con prompts cortos fijos, salidas cortas fijas y sin reutilización de prefijos pueden omitir completamente contextos largos, intercambio de caché (cache churn), llamadas a herramientas y estallidos (burst) presentes en producción. Las pruebas de extremo sirven para entender los límites; las decisiones de implementación deben basarse en la reproducción de trazas reales o anonimizadas con marcas de tiempo, reportando p50/p95/p99 y resultados por réplica.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+Un benchmark confiable debe proporcionar el workload, el modelo y su precisión, la versión del motor (engine), el hardware, el proceso de llegada, la distribución de tokens, el calentamiento (warmup), la ventana de medición, los percentiles y la tasa de errores. La latencia mínima y el máximo rendimiento no son "puntuaciones finales" en competencia, sino dos fronteras que nos ayudan a comprender al programador (scheduler) y al hardware.
