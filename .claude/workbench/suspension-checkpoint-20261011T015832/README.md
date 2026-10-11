@@ -90,20 +90,16 @@ Cada una con su autoridad; ninguna es recomendación nueva.
   segundo digest del espejo de llama.cpp: no hay autoridad de solo lectura
   para consultarlo (`outputs/oci-remote-verification.tsv`). El espejo de
   llama.cpp y el artefacto del 9B sí: ES-F y ES-G los bajaron en frío.
-- **Publicación OCI bloqueada por falta de autoridad, no de credencial**
-  (2026-10-11 ~02:20Z, a pedido del ejecutor). `THYROX_REGISTRY_READER_WRITE_TOKEN`
-  está presente y puede mapearse a `THYROX_REGISTRY_PUBLISHER_USERNAME`/`_TOKEN`
-  sólo en el entorno del proceso que publica. Pero ningún binario publica una
-  imagen propia ya construida: `promoteCandidate`/`publishPromotedImage`
-  (`image-registry/promotion.ts`) no tienen consumidor. Es el alcance de
-  **TASK-THYROX-1108** («Publish thyrox images through a production binary
-  instead of a hand-written digest») y **TASK-THYROX-0915** («Preserve local OCI
-  states through ImageRegistry without promoting them»), las dos `pending`.
-  `image-registry-mirror-runtime-image` sólo cubre las cinco imágenes de
-  runtime, que ya declaran su espejo en `th3rox` (`runtime-images.json`);
-  volver a copiarlas sería una publicación duplicada. Las 10 imágenes
-  `permanent` y `thyrox-transformers-runtime:dev` quedan conservadas sólo en
-  el Podman de este nodo.
+- **Publicación OCI** (actualizado 2026-10-11 ~02:40Z). La autoridad que faltaba existe:
+  `image-registry-publish-permanent-image` (TASK-THYROX-1108, thyrox banco
+  `permanent-image-publish-binary-20261011T021947`), con
+  `THYROX_REGISTRY_READER_USERNAME` y `THYROX_REGISTRY_READER_WRITE_TOKEN` mapeadas al
+  publisher sólo en el proceso. Con ella `ai-course-notes-runner` quedó **publicada y
+  verificada por digest** (`th3rox/ai-course-notes-runner@sha256:cb8dabb8…`). Lo demás no es
+  promovible por contrato y queda sólo en el Podman de este nodo:
+  `thyrox-transformers-runtime:dev` (sin validación aprobada, etiqueta `:dev`) y las 6
+  construcciones `permanent` sin etiqueta, que son el alcance de TASK-THYROX-0915; una de
+  ellas, `3b0945ac`, graba `HTTPS_PROXY` y el guardián la rechazó el 2026-10-05.
 - **PostgreSQL**: el volumen `thyrox-postgres-data` (46 MB) está detenido y es
   consistente ante caída; no hay autoridad de respaldo (`pg_dump`) en thyrox.
   Queda con su manifiesto por archivo (`outputs/volume-thyrox-postgres-data.sha256`),
@@ -158,7 +154,7 @@ En este orden; ningún paso ejecuta una TASK antes del 9.
 |---|---|
 | A Descubrimiento | cumplido; lo desconocido está nombrado arriba |
 | B Preservación | cumplido en git para código, progreso, evidencia y decisiones; Postgres sólo local |
-| C Imágenes OCI | **parcial**: publicación bloqueada por credencial; imágenes conservadas, nada se borró |
+| C Imágenes OCI | **parcial**: la imagen del consumidor publicada y verificada; las no promovibles conservadas en local con su causa; nada se borró |
 | D Modelos | cumplido para el 9B (local y OCI verificado); 2 modelos del catálogo sin copia durable |
 | E Integridad | `SHA256SUMS` verificado tras escribirlo |
 | F Detención | ES-A: lazo y servidor detenidos con `wait-jobs`; ES-G detenido; ES-F en espera de su commit final de detención; `thyrox-ollama` de ES-G sin comando de parada en thyrox |
