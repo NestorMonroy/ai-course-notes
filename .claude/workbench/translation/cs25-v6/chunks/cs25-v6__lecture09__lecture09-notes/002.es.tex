@@ -1,0 +1,109 @@
+\section{Traducir aplicaciones a workload y SLO}
+
+La ingeniería de sistemas no debe comenzar con "vamos a desplegar un modelo", porque el mismo modelo puede servir productos completamente distintos. Un punto de partida más robusto es identificar quién inicia la solicitud, quién espera el resultado, cuánto dura la entrada/salida, cuán bursteadas están las solicitudes, qué tan lento se permite ser y cómo se juzga la calidad. El ponente primero presenta tres tipos de archetype, no para etiquetar productos, sino para mostrar tres conjuntos de funciones objetivo completamente diferentes.
+
+\subsection{Tres arquitectos de aplicación}
+
+Los asistentes interactivos (Chatbot+) mantienen a los usuarios en un ciclo de interacción continuo; los agentes de fondo (background agent) ejecutan tareas de minutos a horas; los procesadores de datos (data processor) convierten entradas no estructuradas en resultados almacenables y consultables. Pueden llamar al mismo Transformer, pero sus prioridades sobre latencia de cola, throughput, caché y elasticidad son radicalmente diferentes.
+
+\lecturefigure{slide-007.jpg}{Tres tipos de aplicaciones LLM orientadas a la infraestructura}{Diapositiva 7 del deck oficial; clase 00:08:13--00:11:12}
+
+\begin{knowledgebox}{Lectura de la figura: busque primero al downstream consumer}
+Al determinar la categoría, no mires primero el nombre del producto, sino pregunta "¿quién consume el resultado?". Si cada token afecta directamente la percepción de espera del usuario, es interactiva; si el valor se entrega con el último token o el artifact final, es un agente de fondo; si el resultado se escribe en una base de datos o índice para consumo futuro, es un data processor. Esta determinación decidirá directamente las estrategias de batching, autoscaling y retry.
+\end{knowledgebox}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{L{2.5cm}YYY}
+\toprule
+Tipo & Consumidor típico y ciclo & Restricción dominante & Figure of merit razonable \\
+\midrule
+Chatbot+ & Humanos viendo token por token, interacción multi-turno frecuente & TTFT, TPOT/ITL, jitter p95/p99 & output tokens/s/user \\
+Background agent & Personas esperando PR final, reportes, imágenes o acciones & TTLT, llamadas a herramientas, recuperación de fallos, costo & task completion time / éxito \\
+Data processor & Bases de datos, almacenamiento objeto o pipelines posteriores & Throughput total, elasticidad pico-valle, costo por unidad & megatokens por dólar \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\teachervoice{00:10:52--00:11:12, el docente recuerda especialmente que el tráfico de los data processors puede estar muy disperso durante largos periodos y luego concentrarse súbitamente en escrituras; el "throughput promedio" oculta los bursts que realmente determinan la capacidad y la elasticidad.}
+
+\subsection{El SLO es la interfaz entre producto y sistema}
+
+El siguiente paso no es elegir GPUs de inmediato, sino escribir las necesidades de la aplicación como una definición de workload y un service-level objective (SLO, objetivo de nivel de servicio). El SLO es un objetivo de ingeniería interno; el SLA (service-level agreement) suele ser una promesa externa con consecuencias comerciales o contractuales. Ambos deben definir claramente ventanas de medición, percentiles, definiciones de error y tráfico aplicable; de lo contrario, "rápido", "estable" y "barato" carecen de significado operativo.
+
+\lecturefigure{slide-009.jpg}{Workload y SLO definen el espacio de diseño del sistema}{Diapositiva 9 del deck oficial; clase 00:11:17--00:12:11}
+
+\begin{importantbox}{Contrato de workload}
+El contrato mínimo para un despliegue se puede escribir como
+\[
+W=(M,\lambda,L_{\mathrm{in}},L_{\mathrm{out}},r_{\mathrm{prefix}},B_{\mathrm{lat}},Q,C),
+\]
+donde $M$ es el modelo y precisión, $\lambda$ es la tasa de llegada de solicitudes/cueries, $L_{\mathrm{in}}$ y $L_{\mathrm{out}}$ son las distribuciones de tokens de entrada y salida, $r_{\mathrm{prefix}}$ es la proporción de prefijos reutilizables, $B_{\mathrm{lat}}$ es el presupuesto de latencia, $Q$ son las restricciones de calidad/evaluación, y $C$ es el límite de costo. Nota que cada magnitud debe ser una distribución o percentil, no solo un promedio.
+\end{importantbox}
+
+\lecturefigure{slide-010.jpg}{Usar un advisor para reescribir necesidades ambiguas en workloads medibles}{Diapositiva 10 del deck oficial; clase 00:12:11--00:13:15}
+
+\begin{knowledgebox}{Lectura de la figura: el valor de los formularios es obligar al equipo a exponer sus suposiciones}
+Los modelos, longitudes de token, throughput y opciones de latencia en la figura no dan automáticamente el despliegue óptimo; ponen las suposiciones implícitas del product manager, desarrollador de aplicaciones e infra engineer en una sola tabla. Si el equipo no puede decir las longitudes de entrada/salida, tráfico pico y degradación de calidad aceptable, aún no tiene suficiente información para compras de hardware o benchmarking de motores.
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Estructura máquina-legible mínima para la definición de workload}]
+workload = {
+    "model": "candidate-and-precision",
+    "qps": {"avg": 18, "p95": 42, "peak": 90},
+    "input_tokens": {"p50": 1200, "p95": 8000},
+    "output_tokens": {"p50": 180, "p95": 1200},
+    "prefix_reuse": 0.55,
+    "slo": {"ttft_p95_ms": 450, "tpot_p95_ms": 40},
+    "quality_gate": "application_eval_v12",
+}
+\end{lstlisting}
+
+\subsection{QPS, TPQ, prefix reuse y presupuesto de latencia}
+
+Con el marco de contrato, ahora se pueden definir los métricas una por una. QPS (queries per second) describe las cueries que realmente recibe el modelo; RPS (requests per second) está más cerca de las solicitudes externas a la API, ya que una solicitud de agent puede desencadenar múltiples cueries al modelo. TPQ (tokens per query) debe dividirse en tokens de entrada del prefill y tokens de salida del decode. El prefix reuse indica el grado en que diferentes solicitudes comparten contexto inicial, lo cual determina si la caché KV puede ser reutilizada.
+
+\lecturefigure{slide-011.jpg}{Métricas clave para definir LLM workload}{Diapositiva 11 del deck oficial; clase 00:13:20--00:19:10}
+
+\begin{knowledgebox}{Vademécum de términos de sistema}
+\begin{tabularx}{\textwidth}{L{2.5cm}YY}
+Término & Definición & Impacto en diseño \\
+\midrule
+QPS / RPS & Tasa de cueries internas al modelo / tasa de solicitudes externas & El ciclo de herramienta del Agent hace que QPS sea mayor que RPS \\
+TPQ & Número de tokens de entrada y salida por query & Determina prefill, decode, caché KV y costo \\
+Prefix reuse & Múltiples solicitudes compartiendo el mismo prefijo de token & Alto hit rate puede saltarse el prefill repetido, pero paga con costo de almacenamiento y enrutamiento \\
+TTFT & time to first token, tiempo hasta el primer token & Afectado por cola, prefill, red y tiempo de arranque \\
+TPOT / ITL & time per output token / latencia inter-token & Determina si la salida streaming es suave \\
+TTLT & time to last token & Aproximadamente determinado conjuntamente por TTFT, longitud de salida y TPOT \\
+Replica & Unidad de recursos engine/worker que puede recibir solicitudes independientemente & Mida capacidad de un solo réplica primero, luego escale horizontalmente \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+Para la generación streaming sin llamadas a herramientas complejas, se puede usar una aproximación:
+\[
+T_{\mathrm{last}}\approx T_{\mathrm{first}}+(L_{\mathrm{out}}-1)T_{\mathrm{pot}}.
+\]
+Donde $T_{\mathrm{first}}$ es TTFT, $L_{\mathrm{out}}$ es el número de tokens generados y $T_{\mathrm{pot}}$ es el TPOT promedio o objetivo en un percentil. Al entrar al agent loop, hay que añadir también la latencia por ronda de herramientas, espera de red, retries y nuevos prefills; por eso el TTLT end-to-end a menudo solo se puede estimar con trazas reales.
+
+\begin{warningbox}{El QPS promedio y la longitud de token promedio generan una falsa sensación de seguridad}
+La planificación de capacidad debe reservar al menos para pico/estacionalidad, distribuciones de longitud de entrada/salida y correlación de solicitudes. Si las solicitudes de contexto largo aparecen justo en el pico, aumentan simultáneamente el prefill, caché KV y presión de cola; multiplicar los tres promedios por separado a menudo subestima la verdadera cola.
+\end{warningbox}
+
+\teachervoice{00:17:55--00:19:10, el docente sugiere primero entender en un solo réplica "cuántas solicitudes pueden ser servidas dentro del objetivo de latencia", luego usar el número de réplicas para emparejar el QPS total. Las solicitudes de inferencia usualmente se pueden asignar independientemente entre réplicas, a diferencia de los problemas de escalado de bases de datos que requieren mantener estado fuertemente consistente.}
+
+\subsection{Cada aplicación optimiza diferentes escalares}
+
+La diapositiva 12 vuelve a poner los tres tipos de aplicaciones juntos para evitar que el equipo evalúe todos los productos con las mismas métricas del dashboard. Los sistemas interactivos pueden sacrificar el throughput total por fluidez individual; los agentes de fondo pueden aceptar tokens más lentos siempre que la tarea final sea más rápida y confiable; los procesadores de datos incluso pueden esperar batches más grandes para completar todo el trabajo a menor costo.
+
+\lecturefigure{slide-012.jpg}{Figure of merit para cada tipo de aplicación}{Diapositiva 12 del deck oficial; clase 00:19:10--00:20:02}
+
+\begin{importantbox}{Los objetivos de optimización deben alinearse con la entrega de valor}
+Un mismo cambio puede aumentar los aggregate tokens/s, pero empeorar el TPOT por usuario; o puede bajar el TTFT por solicitud, pero duplicar el costo por baja utilización de GPU. Solo declarando primero el figure of merit y las puertas de calidad/SLO intransigibles, lo que llamamos "más rápido" tiene dirección.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+Workload y SLO son los inputs para todas las elecciones de ingeniería posteriores. Lo más importante no es memorizar siglas, sino conectarlas en una cadena causal: el consumidor de la aplicación decide el objetivo de latencia/costo, la distribución de tokens y tráfico decide la demanda de recursos, el prefix y el agent loop deciden la caché y estructura de consulta, y las mediciones en un solo réplica deciden la unidad de escalado.
+
+
