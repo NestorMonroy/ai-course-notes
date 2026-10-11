@@ -1,0 +1,120 @@
+\section{Modelos y motor de inferencia: primero el problema, luego la implementación}
+
+Una vez definido el método de benchmarking, los modelos y el motor de inferencia pueden integrarse en un mismo marco de decisión. Los modelos determinan el límite superior de calidad, la escala de parámetros, el tokenizer y la estructura KV; el motor decide cómo se colorean las solicitudes, el batcheo, el almacenamiento en caché y el uso de la GPU. El error más común en producción es quedar atraído por algún leaderboard o framework, y luego deducir un workload para justificar esa elección.
+
+\subsection{Límite de eficiencia vs. límite de capacidad}
+
+El ponente divide la selección de modelos en dos regímenes. En el régimen **eficiencia-bound**, ya existen múltiples modelos que pasan las evaluaciones del aplicativo; el conflicto principal se vuelve costo versus rendimiento. En el régimen **capability-bound**, incluso el modelo más fuerte podría no ser suficiente, priorizando la calidad sobre el costo. Ambos tipos de sistemas tenderán naturalmente hacia diferentes escalas de parámetros, cantidad de GPUs, métodos de aprovisionamiento y frecuencia de reemplazo.
+
+\lecturefigure{slide-017.jpg}{Diferentes restricciones conducen a diferentes selecciones de modelos}{Diapositiva 17 del deck oficial; clase 00:23:00--00:25:58}
+
+\begin{knowledgebox}{Lectura de la figura: bound se refiere a la restricción más apremiante actual, no es una etiqueta permanente del modelo}
+Un mismo modelo podría tener capacidad suficiente para tareas de extracción de documentos, entrando en **eficiencia-bound**; pero en un orchestrator para agentes de código complejos, podría carecer de calidad suficiente, entrando en **capability-bound**. El criterio de juicio no es el número de parámetros, sino ejecutar primero la evaluación del aplicativo: si varios candidatos superan la línea, luego se optimiza el costo; si ningún candidato supera la línea, seguir presionando los precios no tiene sentido.
+\end{knowledgebox}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{L{3cm}YY}
+\toprule
+Dimensión & Límite de eficiencia & Límite de capacidad \\
+\midrule
+Objetivo principal & Reducir costo/latencia por encima del umbral de calidad & Maximizar la tasa de éxito de la tarea o el límite superior de inteligencia \\
+Selección de modelos & Múltiples familias de modelos abiertos, escalas y modalidades disponibles & Pocos modelos grandes/recientes, a menudo se usa primero una API propietaria \\
+Replica típica & Una GPU; múltiples GPUs en casos de baja latencia & Múltiples GPUs, y varios nodos si es necesario \\
+Ubicación del aplicativo & Procesador de datos, subagente de fondo & Chatbot+, orchestrator de agentes de fondo \\
+Estrategia de migración & Benchmarking frecuente y reemplazo & Alto costo tras fine-tuning; requiere regresión eval más fuerte \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Límite de eficiencia: una sola GPU no significa que no se necesite paralelismo}
+
+En tareas donde la capacidad ya es suficiente, los modelos comunes caben en la HBM (High Bandwidth Memory, memoria DRAM de alto ancho de banda) de una sola GPU. El objetivo de ingeniería es alcanzar un rendimiento suficiente con el mínimo de recursos posibles. Sin embargo, si un voice agent requiere una respuesta del orden de unos milisegundos, aunque el modelo quepa en capacidad en una sola tarjeta, se podría usar **tensor parallelism** para distribuir la lectura de pesos a múltiples canales de HBM, intercambiando dinero por latencia.
+
+\lecturefigure{slide-018.jpg}{Una vez alcanzada la capacidad suficiente, el costo se convierte en el principal impulsor}{Diapositiva 18 del deck oficial; clase 00:25:58--00:28:47}
+
+\begin{knowledgebox}{Términos: dos motivos completamente diferentes para usar múltiples GPUs}
+El **Capacity parallelism** es necesario porque el modelo o el KV cache no caben en una sola tarjeta, por lo que deben dividirse; el **latency parallelism** ocurre cuando el modelo sí cabe, pero se desea leer los pesos o realizar cálculos en paralelo con varias tarjetas para acortar la ruta crítica. Ambos pueden utilizar **tensor parallelism**, pero tienen diferentes racionalizaciones de costo y tolerancia a la comunicación.
+\end{knowledgebox}
+
+\teachervoice{00:27:09--00:27:28, el docente usa un voice agent como ejemplo: la tarea puede no requerir "inteligencia superpoderosa", pero sí una latencia de respuesta extremadamente baja, lo que da lugar a una configuración contraintuitiva de un modelo en eficiencia-bound con múltiples GPUs.}
+
+\subsection{Límite de capacidad: colocar el modelo más fuerte en el orchestrator}
+
+Cuando la capacidad es limitada, los modelos suelen ser tan grandes que deben cruzar varias GPUs o nodos. Los sistemas de Agentes a menudo colocan al modelo más fuerte en el **orchestrator**, encargado de desglosar tareas, asignar permisos e integrar resultados, mientras delega trabajos locales a subagentes más rápidos y económicos. Esta jerarquía también cambia el serving: las llamadas a herramientas generan repetición del mismo prefijo, haciendo que el prefix cache sea más valioso; la latencia de las herramientas varía desde milisegundos hasta horas, siendo la latencia de tokens del modelo solo una parte del TTLT (Total Time to Last Token).
+
+\lecturefigure{slide-019.jpg}{Cuando hay escasez de capacidad, la latencia y las múltiples GPUs se convierten en las principales restricciones}{Diapositiva 19 del deck oficial; clase 00:28:47--00:32:12}
+
+\begin{warningbox}{No trate "orchestrator de grandes modelos + subagentes de pequeños modelos" como una ruta gratuita}
+Los modelos estratificados requieren un desglose de tareas confiable, aislamiento de permisos, transferencia de contexto y escalonamiento de fallos. Si los pequeños modelos ejecutan incorrectamente herramientas de alto riesgo, o si el orchestrator no puede detectar errores, los ahorros en costos de inferencia se convertirán en mayores pérdidas empresariales. La ruta de modelos debe estar respaldada por evaluaciones a nivel de tarea y trazas (trace).
+\end{warningbox}
+
+\subsection{El mercado frontier solo sirve para generación de candidatos}
+
+Herramientas como Artificial Analysis colocan las métricas de capacidad del agente y el precio del proveedor en el mismo gráfico, lo cual es útil para descubrir rápidamente candidatos y determinar la dirección del movimiento del mercado. Sin embargo, el eje Y "inteligencia" es una compresión de múltiples benchmarks, y el eje X (precio) proviene de un proveedor compartido; no incluyen directamente su distribución de prompts, restricciones de salida estructurada, hitos en caché, llamadas a herramientas o utilización auto-alojada.
+
+\lecturefigure{slide-020.jpg}{Captura instantánea del proveedor en el plano capacidad-precio}{Diapositiva 20 del deck oficial; clase 00:32:12--00:33:12}
+
+\begin{knowledgebox}{Lectura de la figura: primero mire la frontera de Pareto, luego las variables faltantes}
+Priorice los puntos que no son dominados simultáneamente en capacidad y precio por otro modelo, y luego lleve esos puntos de vuelta a la evaluación del aplicativo. El gráfico no puede responder si el auto-alojamiento es más barato, porque los costos de auto-alojamiento dependen de la tasa de llenado de GPUs, operaciones de mantenimiento (ops), fallos y picos/valles de tráfico; la experiencia del ponente es que "derrotar el precio del proveedor es difícil pero no imposible", siempre que haya una carga lo suficientemente estable para llenar el hardware.
+\end{knowledgebox}
+
+\subsection{¿Qué incluye exactamente un motor de inferencia?}
+
+El **engine** no es simplemente un alias para un conjunto de kernels CUDA. El servidor exterior (server) maneja HTTP/RPC, streaming, autenticación y métricas; el tokenizer convierte cadenas de texto en IDs de tokens; el scheduler decide qué secuencias ingresan al batch en esta ronda; los workers del modelo ejecutan la operación forward en una o más GPUs; y el detokenizador convierte los IDs de nuevo a texto. La coordinación entre el host de CPU y la ruta de datos de la GPU suele ser el cuello de botella del rendimiento.
+
+\lecturefigure{slide-022.jpg}{Estructura completa de procesos de un motor de inferencia moderno}{Diapositiva 22 del deck oficial; clase 00:33:20--00:35:10}
+
+\begin{knowledgebox}{Lectura de la figura: rastree el límite entre CPU y GPU a lo largo de una solicitud}
+La solicitud entra primero en el proceso de I/O del servidor, luego se tokeniza en paralelo; el scheduler mantiene el estado de las secuencias, los bloques KV y el batch, emitiendo trabajo para esta ronda al worker del modelo. Después de que la GPU complete los logits/muestreo, los IDs de tokens regresan al host, se detokenizan y se envían por streaming. El bucle rojo en el gráfico indica que decode repasa esta ruta de control, por lo que las sobrecargas de Python, IPC y lanzamiento por token pueden acumularse.
+\end{knowledgebox}
+
+\begin{lstlisting}[caption={Bucle de control simplificado del motor de inferencia}]
+while active_requests:
+    arrivals = server.poll()
+    scheduler.add(tokenize_in_parallel(arrivals))
+    batch = scheduler.select_next_step()
+    token_ids = model_workers.forward(batch)
+    scheduler.update_kv_and_finished(token_ids)
+    server.stream(detokenize(token_ids))
+\end{lstlisting}
+
+\begin{importantbox}{Ubicación de Continuous batching y PagedAttention}
+El **Continuous batching** (procesamiento por lotes continuo) permite agregar nuevas solicitudes y eliminar las completadas en cada iteración de decodificación, en lugar de esperar a que termine todo el batch estático. El **PagedAttention** divide el KV cache en bloques y evita reservar grandes bloques contiguos para cada secuencia mediante un mapeo similar a una tabla de páginas. El primero resuelve la granularidad del escalonamiento; el segundo resuelve la fragmentación de memoria KV; son complementarios pero no el mismo mecanismo.
+\end{importantbox}
+
+\subsection{Dimensiones de selección entre TRT-LLM, vLLM y SGLang}
+
+Los tres motores pueden ejecutar Transformers, pero representan diferentes compromisos de ingeniería. El runtime compilado en C++ de **TRT-LLM** puede reducir la sobrecarga del host, pero tiene altos costos de desarrollo y extensión; **vLLM** enfatiza la compatibilidad modelo/API y el ecosistema abierto; **SGLang** enfatiza iteraciones rápidas de rendimiento, RadixAttention y program-aware serving. La selección práctica también debe considerar soporte de modelos, cuantización, especulación, ejecución distribuida, observabilidad y capacidad de mantenimiento del equipo.
+
+\lecturefigure{slide-023.jpg}{Ubicación intuitiva de las tres clases principales de motores de inferencia}{Diapositiva 23 del deck oficial; clase 00:35:10--00:35:55}
+
+\begin{knowledgebox}{Lectura de la figura: el logo no es un benchmark}
+Esta página resume el ecosistema con lenguaje estilizado: TRT-LLM se inclina hacia baja sobrecarga del host y stack NVIDIA, vLLM hacia compatibilidad y despliegues a gran escala, SGLang hacia rendimiento agresivo. No demuestra que ningún motor sea más rápido en todos los workloads. Debe volver a ejecutar la frontera de una sola réplica usando el mismo modelo, precisión, distribución de prompts/salida y SLO.
+\end{knowledgebox}
+
+\lecturefigure{slide-024.jpg}{Diferencias en runtime, cultura, operadores de despliegue y gobernanza del Engine}{Diapositiva 24 del deck oficial; clase 00:35:55--00:38:55}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{L{2.4cm}YYY}
+\toprule
+Dimensión & TRT-LLM & vLLM & SGLang \\
+\midrule
+Ventaja típica & Runtime compilado, baja sobrecarga del host, nuevas características de NVIDIA & Compatibilidad modelo/API, PagedAttention, despliegues amplios & RadixAttention, incorporación rápida de nuevas optimizaciones, cultura de rendimiento \\
+Costo típico & Desarrollo y depuración complejos, atado al stack NVIDIA & La generalidad puede aumentar la ruta y el trabajo del host & Cambios rápidos traen costos de mantenimiento de versiones y compatibilidad \\
+Criterio de idoneidad & Batches pequeños/baja latencia, equipo capaz de manejar el stack de compilación & Necesita amplio soporte de modelos y ecosistema maduro & Prefix-heavy o dispuesto a seguir optimizaciones de alta frecuencia \\
+Método de verificación & Benchmarking de workload real + evaluación de corrección & Igual que arriba & Igual que arriba \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\lecturefigure{slide-025.jpg}{Entender el engine mediante una implementación simplificada y walkthrough del código fuente}{Diapositiva 25 del deck oficial; clase 00:38:55--00:39:45}
+
+\begin{importantbox}{Orden correcto para aprender sobre el engine}
+Primero establezca un modelo mental de server--scheduler--worker--KV usando implementaciones simplificadas como mini-sglang o nano-vllm, luego lea la implementación específica del repositorio de producción; finalmente, use un agente local o profiler con código propio para responder "por qué esta solicitud pasa por estas funciones". Solo mirar diagramas arquitectónicos puede hacer que se ignoren el backpressure, la propiedad de memoria y las rutas de fallo; solo leer el código fuente puede hacer que se pierda el límite del sistema.
+\end{importantbox}
+
+\subsection{Resumen de la sección}
+
+La selección de modelos se divide en capability-bound y efficiency-bound mediante la evaluación del aplicativo; la selección del motor depende del workload, los SLO, las características de soporte y las restricciones del equipo. Métriquelos por separado: primero confirme la calidad del modelo, luego compare motores sobre un modelo fijo; de lo contrario, las diferencias de calidad se confundirán con diferencias de rendimiento de serving.

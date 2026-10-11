@@ -1,0 +1,78 @@
+\section{Prefill, decode y el límite del roof de la GPU}
+
+Una vez determinado el modelo y el motor de inferencia, el problema del hardware no se puede evaluar solo mirando "cuántos TFLOP/s tiene esta tarjeta". El servicio de Transformer incluye tanto prefill como decode: el primero procesa grandes cantidades de tokens de entrada en un solo paso, obteniendo una intensidad aritmética elevada mediante multiplicaciones matriciales; el segundo genera pocos tokens por paso pero lee repetidamente los pesos masivos y el KV cache, siendo a menudo limitado por la ancho de banda de HBM. Por ello, el mismo modelo caerá en dos regiones distintas en el gráfico del roofline.
+
+\subsection{Dos subcargas de trabajo}
+
+El prefill introduce todo el prompt al modelo en paralelo; su carga computacional crece con el número de tokens, pero las matrices son grandes. El decode es un bucle autoregresivo donde se debe ejecutar cada capa del modelo para generar un solo token. Aunque aumentar el batch mejora la utilización matricial durante el decode, también incrementa la cola, el uso del KV cache y la latencia por usuario, por lo que no puede escalar indefinidamente.
+
+\lecturefigure{slide-027.jpg}{Prefill y decode mueven pesos similares, pero ejecutan diferente cantidad de FLOP}{Diapositiva 27 del deck oficial; Clase 00:39:55--00:41:20}
+
+\begin{knowledgebox}{Lectura de la figura: comparar primero los "bytes movidos por token útil"}
+Ambos lados leen los pesos del modelo. El prefill reutiliza los pesos para un lote de tokens de entrada, permitiendo realizar más multiplicaciones-adiiciones por byte, por lo que está más limitado por la computación (compute-bound). En el decode se añade una posición en cada paso; si el batch es pequeño, leer muchos GiB de pesos solo para servir pocos tokens implica estar más limitado por el ancho de banda de memoria. La figura no indica que el prefill esté siempre limitado por la computación: un prompt extremadamente corto, kernels especiales o un batch bajo pueden cambiar esta situación.
+\end{knowledgebox}
+
+\subsection{Intensidad aritmética y roofline}
+
+La intensidad aritmética se define como el número de operaciones completadas por cada byte de datos movidos:
+\[
+I=\frac{F}{B}\quad [\mathrm{FLOP/byte}],
+\]
+donde $F$ es el número de FLOP y $B$ es el número de bytes movidos desde el nivel de memoria objetivo. El límite del roofline se escribe como
+\[
+P\leq \min(P_{\mathrm{peak}},\; BW\cdot I),
+\]
+donde $P$ es el rendimiento alcanzable, $P_{\mathrm{peak}}$ es la potencia computacional máxima y $BW$ es el ancho de banda de memoria. Un valor bajo de $I$ cae en la línea inclinada del límite de ancho de banda, mientras que solo un alto valor de $I$ puede tocar el techo horizontal limitado por la computación.
+
+\lecturefigure{slide-028.jpg}{Usar el roofline para determinar si una carga de trabajo está limitada por el ancho de banda o por la computación}{Diapositiva 28 del deck oficial; Clase 00:41:20--00:42:45}
+
+\begin{knowledgebox}{Lectura de la figura: el punto ridge es la intersección entre hardware y carga de trabajo}
+El eje horizontal representa la intensidad aritmética y el vertical los FLOP/s; la pendiente de la línea inclinada está determinada por el ancho de banda de memoria, mientras que la línea horizontal lo hace la potencia computacional máxima. El punto de intersección $I^*=P_{\mathrm{peak}}/BW$ es el punto ridge. Si el decode cae a la izquierda del punto de intersección, aumentar la potencia máxima de los Tensor Core será casi ineficaz; reducir el tamaño en bytes de los pesos, aumentar el batch o disminuir el tráfico en HBM es más importante.
+\end{knowledgebox}
+
+\begin{warningbox}{El roofline es un modelo de límite superior, no un predictor de rendimiento}
+Generalmente no incluye el lanzamiento del kernel, sincronización, comunicación, fallos de caché, desequilibrio de carga, ineficiencia de forma y paradas del host. Cuando un punto está muy por debajo del roofline, se necesita un profiler para identificar la causa; solo cuando un punto está cerca del roofline se puede afirmar que ese recurso de memoria o computación podría estar acercándose a su límite físico.
+\end{warningbox}
+
+\subsection{HBM, SRAM, SM y Tensor Core}
+
+En las especificaciones de la GPU, los términos más confusos son "capacidad", "ancho de banda" y "potencia". HBM (High Bandwidth Memory, memoria DRAM de alto ancho de banda) es una memoria externa encapsada con alto ancho de banda que se utiliza para almacenar pesos, KV cache y activaciones. SRAM (Static Random-Access Memory, memoria estática de acceso aleatorio) se encuentra dentro del chip y constituye los registros, cachés y la memoria compartida controlada por el programador; tiene poca capacidad pero alta velocidad. SM (Streaming Multiprocessor) es la unidad de cálculo que ejecuta bloques de hilos, mientras que el Tensor Core es una vía de datos especializada para multiplicaciones-adiiciones matriciales dentro del SM.
+
+\lecturefigure{slide-029.jpg}{Por qué la inferencia en producción prefiere GPUs con Tensor Core para centros de datos}{Diapositiva 29 del deck oficial; Clase 00:42:45--00:45:00}
+
+\begin{knowledgebox}{Relación entre términos de hardware y servicio}
+\begin{tabularx}{\textwidth}{L{2.4cm}YY}
+\toprule
+Término & ¿Qué es? & Impacto en la inferencia \\
+\midrule
+HBM & Memoria DRAM de alto ancho de banda & Capacidad de pesos/KV y límite del ancho de banda para decode \\
+SXM & Factor de forma de módulo GPU de alto consumo, no una tarjeta PCIe & Permite un envoltorio de potencia mayor e interconexión cercana \\
+NVLink & Interconexión de alto ancho de banda entre GPUs dentro del nodo & Ruta de comunicación para tensor/pipeline parallel \\
+InfiniBand & Red de bajo latencia y alto ancho de banda entre nodos & Réplicas multi-nodo y desagregación prefill/decode \\
+SM & Unidad que ejecuta warps, memoria compartida y Tensor Core & Ocupancia, programación y paralelismo del kernel \\
+Tensor Core & Hardware especializado para multiplicaciones-adiiciones matriciales & Fuente principal de la potencia máxima para BF16/FP8/FP4 matmul \\
+\bottomrule
+\end{tabularx}
+\end{knowledgebox}
+
+\lecturefigure{slide-030.jpg}{Glosario de GPU y Tensara: establecer una intuición de hardware operativa}{Diapositiva 30 del deck oficial; Clase 00:45:00--00:45:25}
+
+\begin{importantbox}{Orden para leer las especificaciones}
+Primero pregunte si los pesos del modelo y el KV cache caben, luego verifique si el ancho de banda de HBM respeta el SLO de decode, después compruebe si el dtype/shape objetivo puede usar Tensor Core y finalmente revisa la interconexión dentro y fuera del nodo. Comparar solo los TFLOP/s máximos sobreestima sistemáticamente el decode de batch pequeño e ignora la comunicación distribuida.
+\end{importantbox}
+
+\subsection{¿Por qué no usar directamente CPU, TPU o cualquier ASIC de inferencia?}
+
+El ecosistema CPU es maduro y tiene mucha memoria, pero generalmente carece del ancho de banda de nivel HBM y de una memoria compartida programable en el chip, lo que dificulta cumplir con latencias de interacción estrictas. Los TPUs pueden ejecutarse eficientemente, pero la entrega end-to-end, el software y las opciones de programación están más centralizadas. Otros ASICs podrían ser excelentes para modelos específicos, pero tendrían que asumir compiladores, kernels, depuradores y bloqueo del proveedor. La elección de hardware es "potencia multiplicada por operabilidad", no un solo benchmark.
+
+\lecturefigure{slide-031.jpg}{Límites reales entre CPU, TPU y chips de inferencia especializados}{Diapositiva 31 del deck oficial; Clase 00:45:25--00:48:55}
+
+\begin{warningbox}{"La GPU es la única opción" es un juicio ingenieril en el momento de la clase}
+Indica que, dentro del ecosistema de modelos grandes para producción al 28 de mayo de 2026, las GPUs de centros de datos de NVIDIA son las más seguras en términos de programabilidad, soporte de modelos, interconexión y cadena de herramientas, sin lo cual no prueba que otros hardware no tengan ventajas en el futuro o para cargas de trabajo específicas. Las decisiones de compra deben revalidar el software y la disponibilidad entonces disponibles.
+\end{warningbox}
+
+\subsection{Resumen de la sección}
+
+El prefill y el decode comparten el modelo, pero tienen diferente intensidad aritmética; la evaluación del hardware debe considerar simultáneamente la capacidad/ancho de banda de HBM, el dtype de Tensor Core, la utilización de SM, la interconexión y la ruta del host. El roofline primero indica "dónde debería enfocarse la optimización teóricamente", y el profiler responde luego por qué la implementación no se acercó al límite superior.
+
+````
