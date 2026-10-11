@@ -130,8 +130,9 @@ interrumpió ni les envió nada; su cierre corresponde a cada nodo y a ES-A.
 2. El bloqueo que manda sigue siendo el rechazo de ejecutar código de thyrox, y ahora también el
    acceso de lectura a thyrox (ver arriba). Mientras siga, no hay nada que reanudar aquí.
 3. Con eso resuelto, el siguiente paso no lo elige ES-E: lo decide ES-A con `task_continuation`
-   sobre el checkpoint canónico de thyrox. ES-E no debe reabrir el encargo por su cuenta, porque
-   ES-F y ES-G ya cubrieron la auditoría con el 9B local desde thyrox.
+   sobre el checkpoint canónico de thyrox. ES-E no debe reabrir el encargo por su cuenta: por
+   sus títulos, ES-F y ES-G llevan la misma auditoría desde thyrox (sin verificar desde aquí), y
+   hay que conciliar con ellas antes para no duplicar trabajo.
 
 Idempotencia: si se repite, este procedimiento sólo vuelve a medir y agrega una sección fechada;
 no crea TASKs, ramas, imágenes ni rutinas.
