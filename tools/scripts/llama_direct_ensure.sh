@@ -51,6 +51,9 @@ if [[ "$RUNTIME" == llama-server ]]; then
     # HEAD anónimo 200 con el mismo digest, verificado el 2026-10-10.
     IMAGE="${LLAMA_DIRECT_IMAGE:-docker.io/th3rox/cache-ggml-org--llama.cpp@sha256:6d607629e3dd5e85f45c43d1494648126cb3f93f2122c9cd53f43242c94cde14}"
     alive() { curl -sf --noproxy '*' --max-time 5 "$URL/health" > /dev/null; }
+    # Mientras carga el modelo, /health responde 503: el servidor existe y tiene el
+    # puerto. Lanzar otro entonces muere con «HTTP server error» (2026-10-11 00:38Z).
+    loading() { [[ "$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' --max-time 5 "$URL/health")" == 503 ]]; }
 else
     URL="${LLAMA_DIRECT_URL:-http://127.0.0.1:11500}"
     API=ollama
@@ -59,10 +62,15 @@ else
     # mismo digest (runtime-images.json), verificado en Docker Hub el 2026-10-08.
     IMAGE="${LLAMA_DIRECT_IMAGE:-docker.io/ollama/ollama@sha256:2a6e883b917fc543389599dae79918f5cac9e1438890506982f44aa4f5625d01}"
     alive() { curl -sf --noproxy '*' --max-time 5 "$URL/api/version" > /dev/null; }
+    loading() { false; }
 fi
 
 if alive; then
     echo "llama_direct_ensure: servidor ($RUNTIME) ya activo en $URL"
+elif loading; then
+    for _ in $(seq 300); do alive && break; sleep 2; done
+    alive || { echo "llama_direct_ensure: el servidor que cargaba no respondió en $URL" >&2; exit 3; }
+    echo "llama_direct_ensure: servidor ($RUNTIME) terminó de cargar en $URL"
 elif [[ "$RUNTIME" == llama-server ]]; then
     # Perfil de la ficha Qwen3.5-9B «Instruct (non-thinking) for general tasks» fijado
     # en el servidor (propuesta de VM W, qwen35-card-vm-w.md §5): el cliente no lo
