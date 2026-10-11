@@ -79,7 +79,7 @@ Cada una con su autoridad; ninguna es recomendación nueva.
 | Traducción lotes 1–26 | hechos | `outputs/translation-progress.tsv` (pendiente 0) |
 | Traducción lote 27 (cs25-v6) | 100/105; el último fragmento admitido (`lecture09/006`) terminó en el drenaje | commit `94653bd5` |
 | Traducción lotes 28–33 | pendientes (16/258 de articles; 0 en los otros cinco) | `outputs/translation-progress.tsv` |
-| Auditoría de la traducción (ES-F) | A, B, C, D, E, F, H hechos; G e I **interrumpidos** con su prompt y punto de reanudación | thyrox `feature/es-mx-vm-f-local-thinking-audit`, `RECORD.md` sección «Suspensión» (`61bd9be7b`) |
+| Auditoría de la traducción (ES-F) | A, B, C, D, E, F, H hechos; G e I **interrumpidos**: su prompt y punto de reanudación quedaron en `61bd9be7b`; ningún commit posterior | thyrox `feature/es-mx-vm-f-local-thinking-audit`, `RECORD.md` sección «Suspensión» (`61bd9be7b`) |
 | Validación de conformidad del P0 (ES-G) | completa (§20, A–G); veredicto: autonomía **no probada** | thyrox `feature/p0-conformance-validation` (`3bf814298`, `238197bf2`) |
 | Consolidación de A–I en `ai-course-notes/docs` | pendiente: espera G e I de ES-F | — |
 | Merge de `fresh-clone-bootstrap` | hecho, publicado; **suite no ejecutada** sobre el merge | thyrox `a95811683` |
@@ -157,7 +157,7 @@ En este orden; ningún paso ejecuta una TASK antes del 9.
 | C Imágenes OCI | **parcial**: la imagen del consumidor publicada y verificada; las no promovibles conservadas en local con su causa; nada se borró |
 | D Modelos | cumplido para el 9B (local y OCI verificado); 2 modelos del catálogo sin copia durable |
 | E Integridad | `SHA256SUMS` verificado tras escribirlo |
-| F Detención | ES-A: lazo y servidor detenidos con `wait-jobs`; ES-G detenido; ES-F en espera de su commit final de detención; `thyrox-ollama` de ES-G sin comando de parada en thyrox |
+| F Detención | **parcial**: ES-A, lazo y servidor detenidos con `wait-jobs`; ES-G detenido y confirmado (`238197bf2`); ES-F **no verificado**: el límite de uso de la cuenta cortó su turno hacia las 02:34Z, antes de su corte de las 02:50Z, y no dejó el commit «Suspend ES-F» (revisado a las 05:33Z); su contenedor probablemente se reclamó después, sin medir; `thyrox-ollama` de ES-G sin comando de parada en thyrox |
 | G Reanudación | procedimiento de arriba |
 | H Idempotencia | `discover.sh` sólo lee; la barrera es una marca que se sobrescribe igual; ningún paso crea TASKs ni publica |
 
@@ -166,3 +166,9 @@ En este orden; ningún paso ejecuta una TASK antes del 9.
 *Ciega a:* el estado interno de los nodos de otras cuentas, el contenido
 remoto de las imágenes sin verificación en frío y la consistencia lógica de
 Postgres sin abrirlo.
+
+## Después del checkpoint
+
+- 2026-10-11 05:32:43Z: el anfitrión reclamó otra vez el contenedor de ES-A (nuevo
+  `boot_id`). Con la barrera puesta no había nada que relanzar; ningún proceso del
+  carril existía ya.
