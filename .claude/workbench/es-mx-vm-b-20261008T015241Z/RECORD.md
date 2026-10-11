@@ -109,3 +109,48 @@ Escrito por un modelo no local: **nada**.
 - `VM_ES-B_BOOTSTRAP_PRISTINE` ni calificación en `.thyrox/models/qualifications.json`:
   dependen de thyrox.
 - `translation_memory.jsonl`, `batches.tsv`, `.last-bank`: los integra ES-A; ES-B no los modificó.
+
+## Suspensión controlada de este nodo (2026-10-11T02:06Z)
+
+Alcance: sólo el nodo ES-B y su rama de ai-course-notes. ES-B nunca tuvo thyrox
+(`/home/user/thyrox` no existe), así que aquí no hay autoridades de thyrox que consultar:
+ni `agent_store`, ni `execution-records`, ni `task_continuation`, ni `model_coordinator`,
+ni almacenamiento de Podman. El inventario de TASKs, de los demás nodos y de las imágenes
+OCI de thyrox **no se verificó desde este nodo** y corresponde al coordinador que sí tiene
+thyrox.
+
+| Fase | Resultado medido |
+|---|---|
+| DISCOVER | VM reciclada: arranque 2026-10-11T02:05:26Z. Procesos: sólo el entorno de la sesión (sin llama-server, Ollama, pool ni jobs). `docker`: sin daemon (`/var/run/docker.sock` no existe); sin contenedores, imágenes ni volúmenes. Sin `podman`. Disco: 21 GB libres; 15 GB de RAM; 4 vCPU. |
+| QUIESCE | No hay ruta de admisión en este nodo: ningún lazo, trigger ni check-in programado por ES-B sigue activo (ES-B nunca programó `send_later`). |
+| DRAIN | Nada que drenar: ninguna ejecución viva. |
+| PRESERVE / PUBLISH | Worktree limpio (sólo `tools/scripts/__pycache__/`, desechable). Un solo worktree, sin stash ni operaciones Git a medias. `HEAD` = `origin/feature/es-mx-vm-b-local-worker` = `75b59c93` (0 adelante, 0 atrás) antes de este commit. |
+| VERIFY | `75b59c93` es ancestro de `origin/feature/es-mx-translation` (`3997ec5d`): ES-A ya integró la entrega de ES-B. |
+| STOP | Nada que detener. |
+| CHECKPOINT | Esta sección y el commit que la publica. |
+
+### Identidad de lo entregado (árboles Git en `75b59c93`)
+
+| Ruta | Árbol |
+|---|---|
+| `.claude/workbench/translation/articles` | `28e91a88f878f60266c36af58dd3ea946d30a9d0` |
+| `.claude/workbench/translation/talks__berkeley-llm-agents__f25` | `4cce3fc9a389cf37079c1479156adf452f886a4e` |
+| `.claude/workbench/translation/cs231n` | `415a9b6ce4b7d009c1ea963348714f0e2ce3f458` |
+| `.claude/workbench/translation/cs25-v6` | `f97108140918b95a63b70b5377411063bb2ebab8` |
+
+### Estado de cierre
+
+- Clasificación: **trabajo terminado y asentado** (preparación determinista de los lotes 28–30
+  y auditoría), integrado en la rama del coordinador. Ningún trabajo interrumpido ni
+  bloqueado propio salvo `VM_ES-B_LOCAL_WORKER = NOT_PROVEN sin acceso a thyrox`.
+- Al reciclarse la VM no se pierde nada exclusivo: todo lo de ES-B vive en git.
+- No verificado desde aquí: los demás nodos (ramas remotas `feature/es-mx-vm-c-local-worker`,
+  `-vm-d-local-thinking-audit`, `-vm-e-local-thinking-audit` existen, pero una rama no es
+  una VM operativa), TASKs de thyrox, imágenes y modelos.
+
+### Reanudación
+
+ES-B no tiene trabajo pendiente propio. Los lotes 27–30 se reanudan desde
+`feature/es-mx-translation` con su selección vigente (`plan.tsv` y los bancos de lote); no
+repetir `prepare` en 28–30: sus fragmentos ya están en git con los árboles de arriba. Una
+nueva VM trabajadora necesita thyrox entre sus repositorios desde el arranque.
