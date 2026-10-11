@@ -66,3 +66,75 @@ README de thyrox (o agregar una regla de permiso de Bash para `/home/user/thyrox
 secuencia sigue tal cual: bootstrap → podman → imagen de llama.cpp y 9B por digest →
 `llama-server` con el perfil l.280 y `--reasoning-format deepseek` → entregables A–I.
 Un mensaje transmitido por otra VM no lo levanta (mismo hallazgo que ES-D).
+
+## Suspensión controlada del nodo ES-E (2026-10-11T02:10Z)
+
+Encargo: «THYROX — Suspensión controlada, preservación integral y reanudación reproducible»,
+recibido por el operador en esta sesión. Alcance que este nodo puede cumplir: **sólo el propio
+nodo ES-E**. El cierre de thyrox completo y de los demás nodos no se hace desde aquí: ES-E no
+ejecuta autoridades de thyrox (rechazo `[Code from External]`, arriba) y no tiene escritura en
+thyrox. Según `list_sessions`, ES-A ya está haciendo ese cierre («integrando
+fresh-clone-bootstrap; luego sigue la suspensión»). Resultado: **suspensión parcial verificada**,
+limitada a este nodo.
+
+### DISCOVER: este nodo
+
+| Elemento | Estado medido |
+|---|---|
+| contenedor | reiniciado: boot_id `242b6aea…` (antes `ba905d65…`), arranque a las 02:06:06Z; el disco se conservó |
+| ai-course-notes | `feature/es-mx-vm-e-local-thinking-audit` @ `9cd52a30` = `origin` (verificado tras `git fetch`); árbol limpio; sin stash, sin worktrees adicionales, sin operaciones de git a medias |
+| thyrox | clon de lectura sin cambios, `feature/ai-course-notes-l1` @ `90c18d80d`; `git status --porcelain` vacío; no hay evidencia exclusiva |
+| acceso a thyrox ahora | `git ls-remote` falla: «fatal: could not read Username for 'https://github.com': terminal prompts disabled» (la clonación del 07:21Z sí funcionó sin credencial). Sin medir si el repositorio dejó de ser público o si cambió el proxy |
+| procesos | sólo los del entorno (`process_api`, `environment-manager`, `claude`); ningún proceso de thyrox, `llama-server`, `parallel` ni `wait-jobs` |
+| contenedores, imágenes OCI, volúmenes | ninguno: no hay podman y docker no tiene daemon. Nada que publicar ni conservar |
+| modelos y GGUF locales | ninguno: no se materializó ninguno |
+| bases de datos y stores | ninguno local; los de thyrox no se abrieron |
+| TASKs | ES-E no reclamó ni creó ninguna. Ownership que liberar: ninguno |
+| scratchpad de la sesión | vacío |
+| rutinas o `send_later` de ES-E | no se armó ninguna |
+
+### Otros nodos observados (sólo lectura, `list_sessions` 02:08Z; sin verificar desde aquí)
+
+| Sesión | Nodo | Estado que reporta la plataforma | Rama de salida |
+|---|---|---|---|
+| `session_011tfzc28GV3swU7BCpC5uQr` | ES-A (coordinador) | RUNNING: «integrando fresh-clone-bootstrap; luego sigue la suspensión» | ai-course-notes / thyrox |
+| `session_016p3UBXf4mRLCtP2rC41jKy` | ES-B | IDLE, «ES-B suspended and verified; branch pushed at d5ba2591» | `feature/es-mx-vm-b-local-worker` (en el remoto se ve `75b59c93`: hay que conciliarlo) |
+| `session_019WeSB4iBHjpqYB9as4SQBH` | ES-C | RUNNING, «checking what's still running on node» | `feature/es-mx-vm-c-local-worker` |
+| `session_01CX2J5JgpDq2doj9q5vS5H6` | ES-D | RUNNING | `feature/es-mx-vm-d-local-thinking-audit` @ `eed38e01` |
+| `session_01SB3K29Zt3sQHPuFjJ9vjx8` | ES-F | IDLE, «ES-F suspended; G+I awaiting watcher until 02:50Z» | thyrox `feature/es-mx-vm-f-local-thinking-audit` |
+| `session_01Wh4X4vY75qU8Cz7unDgD76` | ES-G | IDLE, «validación suspendida; discrepancias en outputs/ES-G.md» | thyrox `feature/p0-conformance-validation` |
+
+Esto es lo que reporta la plataforma, no el estado verificado de esos nodos. ES-E no los
+interrumpió ni les envió nada; su cierre corresponde a cada nodo y a ES-A.
+
+### QUIESCE / DRAIN / STOP en ES-E
+
+- Barrera: ES-E no admite trabajo nuevo. No tiene trabajos, rutinas ni monitores vivos; el
+  encargo de auditoría (vm-d.md con cambios para ES-E) queda **bloqueado y sin intentos
+  pendientes**, sin consumo de inferencia.
+- Drenaje y detención: no había nada que drenar ni detener. No se envió ninguna señal.
+
+### PRESERVE / PUBLISH / VERIFY
+
+- Todo el estado exclusivo del nodo está en este banco, publicado en
+  `origin/feature/es-mx-vm-e-local-thinking-audit`. El clon de thyrox es reproducible desde su
+  remoto (`90c18d80d`) y no tiene cambios.
+- No hay imágenes, modelos ni bases de datos que preservar: es un hecho medido, no una omisión.
+- No hay credenciales en el banco: las `THYROX_REGISTRY_READER_*` y `HUGGINGFACE_*` se nombran,
+  pero sus valores no se leyeron.
+
+### Reanudación de ES-E
+
+1. Leer este `RECORD.md` y confirmar que `origin/feature/es-mx-vm-e-local-thinking-audit`
+   contiene este commit.
+2. El bloqueo que manda sigue siendo el rechazo de ejecutar código de thyrox, y ahora también el
+   acceso de lectura a thyrox (ver arriba). Mientras siga, no hay nada que reanudar aquí.
+3. Con eso resuelto, el siguiente paso no lo elige ES-E: lo decide ES-A con `task_continuation`
+   sobre el checkpoint canónico de thyrox. ES-E no debe reabrir el encargo por su cuenta, porque
+   ES-F y ES-G ya cubrieron la auditoría con el 9B local desde thyrox.
+
+Idempotencia: si se repite, este procedimiento sólo vuelve a medir y agrega una sección fechada;
+no crea TASKs, ramas, imágenes ni rutinas.
+
+`VM_ES-E_SUSPENSION = SUSPENDED (nodo sin trabajo vivo; estado publicado en git)`
+`THYROX_GLOBAL_SUSPENSION = NOT_VERIFIED desde ES-E (corresponde a ES-A)`
